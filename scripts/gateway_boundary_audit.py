@@ -72,6 +72,24 @@ VALID_GATEWAY_DB_OPEN_IDENTITIES = {
         "let mut gateway_store = GatewayStore::open(&config.database_path)?;",
     ),
 }
+# These three exact sites are a generic caller-role naming debt, not operation-name routing.
+# Exact finding identities prevent a moved or duplicated occurrence from inheriting the deferral.
+DEFERRED_GENERIC_CALLER_ROLE_IDENTITIES = {
+    ("shared-concrete-schema", "crates/gateway/src/traits.rs", 19, "TrustedUser,"),
+    (
+        "shared-concrete-schema",
+        "crates/gateway/src/traits.rs",
+        46,
+        'GatewayCaller::TrustedUser => ("trusted_user", GatewayCallerClass::Trusted),',
+    ),
+    (
+        "shared-concrete-schema",
+        "crates/gateway/src/traits.rs",
+        81,
+        "GatewayCaller::TrustedUser => CallerIdentity::TrustedUser,",
+    ),
+}
+
 VALID_CLASSIFICATIONS = {
     "production-violation",
     "valid-gateway-owned-store",
@@ -592,6 +610,8 @@ def _metadata_for(finding: Finding) -> tuple[str, str, str, str]:
         return "production-violation", "V08", "S5", "remove concrete lifecycle registry after daemon-owned lifecycle is live"
     if "timed_fire" in path or "subtask" in path:
         return "production-violation", "V09", "S3", "replace platform-shaped routing with canonical generic binding/session IDs"
+    if finding.key in DEFERRED_GENERIC_CALLER_ROLE_IDENTITIES:
+        return "production-violation", "V11", "S5/S10", "rename legacy generic caller-role vocabulary after gateway policy ownership moves"
     if finding.rule == "shared-gateway-name-branch" or "ops_projection" in path or "traits.rs" in path:
         return "production-violation", "V10", "S3", "derive routing solely from dynamic declaration metadata"
     if path.startswith("crates/db/"):

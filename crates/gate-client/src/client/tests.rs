@@ -1,5 +1,68 @@
     use super::*;
 
+    #[test]
+    fn s3_invoke_snapshot_rejects_stale_undeclared_metadata_and_guarantee_downgrade() {
+        let operations = serde_json::json!([{
+            "name": "quasar.synthetic-v7",
+            "description": "synthetic",
+            "input_schema": {"type": "object"},
+            "output_schema": null,
+            "callback_schema": null,
+            "authorization": {"allowed_callers": ["owner"]},
+            "dispatch": "background",
+            "sub_engine": "not_exposed",
+            "sharing": "agent_bound",
+            "effect": "state_change"
+        }]);
+        let capabilities = crate::wire::RuntimeCapabilities {
+            final_delivery: crate::wire::FinalDelivery::Automatic,
+            delivery_guarantee: crate::wire::DeliveryGuarantee::ExactlyOnce,
+        };
+        let client = InstanceClient::blank(
+            "instance".into(),
+            "author".into(),
+            SayPolicy::AcceptToLiveQueue,
+            Some(operations.clone()),
+            capabilities,
+            None,
+        );
+        let digest = crate::wire::runtime_declaration_digest_from_value(
+            Some(&operations),
+            capabilities,
+        )
+        .unwrap();
+        assert_eq!(
+            digest,
+            "e7c4edf813fbe34fc420ec1e859e342cc3295b1598983bf3dff9c3580df596db"
+        );
+        let valid = Invoke {
+            id: "call".into(),
+            binding_id: "binding".into(),
+            declaration_digest: digest,
+            operation: "quasar.synthetic-v7".into(),
+            dispatch: "background".into(),
+            effect: "state_change".into(),
+            required_delivery_guarantee: crate::wire::DeliveryGuarantee::ExactlyOnce,
+            continuation_id: None,
+            payload: serde_json::json!({}),
+        };
+        assert_eq!(client.validate_invocation(&valid), Ok(()));
+
+        let mut stale = valid.clone();
+        stale.declaration_digest = "0".repeat(64);
+        assert_eq!(client.validate_invocation(&stale), Err("operation_rejected"));
+        let mut undeclared = valid.clone();
+        undeclared.operation = "other".into();
+        assert_eq!(client.validate_invocation(&undeclared), Err("operation_unknown"));
+        let mut metadata = valid.clone();
+        metadata.dispatch = "inline".into();
+        assert_eq!(client.validate_invocation(&metadata), Err("operation_rejected"));
+        let mut downgrade = valid;
+        downgrade.required_delivery_guarantee =
+            crate::wire::DeliveryGuarantee::AtMostOnceIndeterminate;
+        assert_eq!(client.validate_invocation(&downgrade), Err("operation_rejected"));
+    }
+
     #[tokio::test]
     async fn malformed_present_reply_target_never_reaches_live_delivery() {
         for payload in [

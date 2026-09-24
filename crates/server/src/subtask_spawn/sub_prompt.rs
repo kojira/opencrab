@@ -1,4 +1,4 @@
-/// サブエンジン用の system prompt（旧 Discord 実装の文面をそのまま保つ）。
+/// サブエンジン用の transport-neutral system prompt。
 pub(super) fn sub_system_prompt(
     conn: &rusqlite::Connection,
     agent_id: &str,
@@ -25,11 +25,10 @@ pub(super) fn sub_system_prompt(
          あなたはサブエンジンとして起動されています。\n\
          - subtask_id: {subtask_id}\n\
          - depth: {depth}\n\
-         - Discordへの直接送信は禁止されています\n\
          - 進捗報告は report_progress を使ってください（subtask_id 引数は省略可。省略時はこのサブタスクとして報告されます）\n\
          - 作業予告だけで終了せず、依頼された結果を完成させてください\n\
          - タスク完了時は結果の最終行に NO_REPLY を置いて明示終了してください（NO_REPLY は結果本文から除外されます）\n\
-         - Discord送信はメインエンジンが行います\n\n\
+         - 外部への最終配送は親エンジンが行います\n\n\
          You are a sub-engine executing a delegated task.\
          {instructions_section}"
     )

@@ -42,6 +42,13 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) ->
         operation = %inv.operation,
         "invoke"
     );
+    // Validate the complete hello snapshot before the adapter handler can produce any external
+    // effect. This catches stale/missing digests, undeclared operations, policy drift, and
+    // guarantee downgrade on the receiving side.
+    if let Err(code) = client.validate_invocation(&inv) {
+        let _ = send_frame(client, err_frame(&inv.id, code, None)).await;
+        return false;
+    }
     // handler 未配線（能力ゼロ）なら未宣言 operation として fail-closed で operation_unknown
     // （外部 I/O 0・§5.1）。
     let Some(handler) = &client.invoke_handler else {

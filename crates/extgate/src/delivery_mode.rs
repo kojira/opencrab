@@ -4,6 +4,8 @@
 use opencrab_actions::DeliveryEffect;
 use serde_json::Value;
 
+use crate::operations::FinalDelivery;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryMode {
     Say,
@@ -13,6 +15,13 @@ pub enum DeliveryMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryModeError {
     Invalid,
+}
+
+pub fn delivery_mode_from_final_delivery(final_delivery: FinalDelivery) -> DeliveryMode {
+    match final_delivery {
+        FinalDelivery::Automatic => DeliveryMode::Say,
+        FinalDelivery::OperationDriven => DeliveryMode::ToolDriven,
+    }
 }
 
 /// config bytes を読む。member 欠落は `say`。未知値・非 object は Invalid。

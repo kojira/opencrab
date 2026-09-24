@@ -251,6 +251,22 @@ fn s3_runtime_compatibility_rejects_missing_utterance_and_weak_guarantee() {
 }
 
 #[test]
+fn s3_declaration_requirement_allows_only_exactly_once() {
+    let mut weak = s3_decl("synthetic", "utterance", "utterance");
+    weak["required_delivery_guarantee"] = json!("at_most_once_indeterminate");
+    assert_eq!(
+        validate_operations(&json!([weak]), &no_reserved)
+            .unwrap_err()
+            .code,
+        ErrorCode::OperationDeclarationInvalid
+    );
+
+    let mut exact = s3_decl("synthetic", "utterance", "utterance");
+    exact["required_delivery_guarantee"] = json!("exactly_once");
+    assert!(validate_operations(&json!([exact]), &no_reserved).is_ok());
+}
+
+#[test]
 fn s3_runtime_capabilities_are_digest_covered() {
     let declarations = validate_operations(
         &json!([s3_decl("synthetic", "inline", "read_only")]),

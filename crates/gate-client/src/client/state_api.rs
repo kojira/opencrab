@@ -360,6 +360,47 @@ impl InstanceClient {
         format!("said:{n}")
     }
 
+    /// Validate an invoke against the immutable hello snapshot before calling the adapter handler.
+    pub(super) fn validate_invocation(&self, invoke: &super::wire::Invoke) -> Result<(), &'static str> {
+        let operations = self
+            .operations
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .ok_or("operation_unknown")?;
+        let declaration = operations
+            .iter()
+            .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(&invoke.operation))
+            .ok_or("operation_unknown")?;
+        let digest = super::wire::runtime_declaration_digest_from_value(
+            self.operations.as_ref(),
+            self.runtime_capabilities,
+        )
+        .ok_or("operation_rejected")?;
+        if invoke.declaration_digest != digest
+            || declaration.get("dispatch").and_then(serde_json::Value::as_str)
+                != Some(&invoke.dispatch)
+            || declaration.get("effect").and_then(serde_json::Value::as_str)
+                != Some(&invoke.effect)
+            || invoke.required_delivery_guarantee
+                != self.runtime_capabilities.delivery_guarantee
+        {
+            return Err("operation_rejected");
+        }
+        match declaration
+            .get("required_delivery_guarantee")
+            .and_then(serde_json::Value::as_str)
+        {
+            None => Ok(()),
+            Some("exactly_once")
+                if invoke.required_delivery_guarantee
+                    == super::wire::DeliveryGuarantee::ExactlyOnce =>
+            {
+                Ok(())
+            }
+            Some(_) => Err("operation_rejected"),
+        }
+    }
+
     pub async fn binding_for_address(&self, address: &str) -> Option<String> {
         let inner = self.inner.lock().await;
         if inner.closed {

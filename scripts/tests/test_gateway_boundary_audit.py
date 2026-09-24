@@ -13,13 +13,29 @@ SPEC.loader.exec_module(AUDIT)
 
 
 class GatewayBoundaryMutationTests(unittest.TestCase):
-    def test_s3_reviewed_boundary_burn_down_has_exactly_414_findings(self):
+    def test_s3_named_production_seam_routing_and_continuation_assertions_exist(self):
+        root = pathlib.Path(__file__).parents[2]
+        expected = {
+            "crates/db/src/queries/gate_binding_lookup_tests.rs":
+                "s3_exact_and_global_fan_out_resolves_only_canonical_generic_binding_ids",
+            "crates/extgate/tests/conformance/timed_fire.rs":
+                "s3_timed_continuation_routes_generic_binding_session_once_after_reconnect_ack",
+            "crates/extgate/tests/conformance/turn_queue.rs":
+                "s3_subtask_continuation_routes_by_exact_generic_session_without_prefix",
+            "crates/extgate/tests/conformance/delivery_modes.rs":
+                "s3_automatic_completion_routes_through_generic_binding_say",
+        }
+        for relative, assertion in expected.items():
+            with self.subTest(assertion=assertion):
+                self.assertIn(assertion, (root / relative).read_text())
+
+    def test_s3_reviewed_boundary_burn_down_has_exactly_412_findings(self):
         root = pathlib.Path(__file__).parents[2]
         baseline = json.loads((root / "scripts/gateway-boundary-baseline.json").read_text())
         findings = AUDIT.audit_texts(AUDIT.repository_texts(root))
-        self.assertEqual(len(findings), 414)
-        self.assertEqual(len(baseline["entries"]), 414)
-        self.assertEqual(baseline["review"]["finding_count"], 414)
+        self.assertEqual(len(findings), 412)
+        self.assertEqual(len(baseline["entries"]), 412)
+        self.assertEqual(baseline["review"]["finding_count"], 412)
         self.assertFalse(
             [finding for finding in findings if finding.rule == "public-gate-admin-reachable"]
         )
@@ -551,6 +567,17 @@ opencrab-example-gateway = { path = "../example-gateway" }
         document = AUDIT.baseline_document([finding])
         document["review"]["status"] = "line-by-line-reviewed"
         return document
+
+    def test_s3_generic_caller_role_deferral_requires_exact_finding_identity(self):
+        path = "crates/gateway/src/traits.rs"
+        approved_line = 19
+        snippet = "TrustedUser,"
+        source = "\n" * (approved_line - 1) + snippet + "\n" + snippet + "\n"
+        findings = self.findings({path: source}, "shared-concrete-schema")
+        self.assertEqual([approved_line, approved_line + 1], [item.line for item in findings])
+        approved, moved = (AUDIT._metadata_for(item) for item in findings)
+        self.assertEqual(("V11", "S5/S10"), (approved[1], approved[2]))
+        self.assertEqual(("V10", "S3"), (moved[1], moved[2]))
 
     def test_baseline_cannot_relabel_production_db_open_as_valid_store(self):
         finding = AUDIT.audit_texts({

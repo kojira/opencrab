@@ -81,6 +81,14 @@ impl DeliveryGuarantee {
             Self::AtMostOnceIndeterminate => "at_most_once_indeterminate",
         }
     }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "exactly_once" => Some(Self::ExactlyOnce),
+            "at_most_once_indeterminate" => Some(Self::AtMostOnceIndeterminate),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +154,57 @@ pub fn hello_frame_with_capabilities(
         "delivery_guarantee": capabilities.delivery_guarantee.as_str(),
         "operations": operations.cloned().unwrap_or_else(|| json!([])),
     })
+}
+
+/// Rebuild the canonical runtime snapshot digest from the hello data retained by this client.
+/// Only declaration fields understood by protocol v1 participate, matching extgate validation.
+pub(crate) fn runtime_declaration_digest_from_value(
+    operations: Option<&Value>,
+    capabilities: RuntimeCapabilities,
+) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let operations = operations
+        .cloned()
+        .unwrap_or_else(|| json!([]))
+        .as_array()
+        .cloned()?;
+    let mut canonical_operations = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let source = operation.as_object()?;
+        let authorization_source = source.get("authorization")?.as_object()?;
+        let mut authorization = serde_json::Map::new();
+        authorization.insert(
+            "allowed_callers".to_string(),
+            authorization_source.get("allowed_callers")?.clone(),
+        );
+        let mut canonical = serde_json::Map::new();
+        for field in [
+            "name",
+            "description",
+            "input_schema",
+            "output_schema",
+            "callback_schema",
+        ] {
+            canonical.insert(field.to_string(), source.get(field)?.clone());
+        }
+        canonical.insert("authorization".to_string(), Value::Object(authorization));
+        for field in ["dispatch", "sub_engine", "sharing", "effect"] {
+            canonical.insert(field.to_string(), source.get(field)?.clone());
+        }
+        if let Some(required) = source.get("required_delivery_guarantee") {
+            canonical.insert("required_delivery_guarantee".to_string(), required.clone());
+        }
+        canonical_operations.push(Value::Object(canonical));
+    }
+    let snapshot = json!({
+        "version": 1,
+        "final_delivery": capabilities.final_delivery.as_str(),
+        "delivery_guarantee": capabilities.delivery_guarantee.as_str(),
+        "operations": canonical_operations,
+    });
+    let bytes = serde_json::to_vec(&snapshot).ok()?;
+    Some(hex_lower(&Sha256::digest(bytes)))
 }
 
 pub fn create_binding_frame(
@@ -361,8 +420,11 @@ pub struct TurnFailed {
 pub struct Invoke {
     pub id: String,
     pub binding_id: String,
+    pub declaration_digest: String,
     pub operation: String,
+    pub dispatch: String,
     pub effect: String,
+    pub required_delivery_guarantee: DeliveryGuarantee,
     pub continuation_id: Option<String>,
     pub payload: Value,
 }
@@ -570,14 +632,22 @@ fn parse_say(obj: &Value) -> Result<Say, FrameError> {
 fn parse_invoke(obj: &Value) -> Result<Invoke, FrameError> {
     let id = parse_request_id(&require_str(obj, "id")?)?;
     let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
+    let declaration_digest = parse_digest(&require_str(obj, "declaration_digest")?)?;
     let operation = nonempty_str(obj, "operation")?;
     if obj.get("invocation_protocol").and_then(Value::as_u64) != Some(1) {
+        return Err(FrameError::BadRequest);
+    }
+    let dispatch = nonempty_str(obj, "dispatch")?;
+    if !matches!(dispatch.as_str(), "inline" | "background" | "utterance") {
         return Err(FrameError::BadRequest);
     }
     let effect = nonempty_str(obj, "effect")?;
     if !matches!(effect.as_str(), "read_only" | "state_change" | "utterance") {
         return Err(FrameError::BadRequest);
     }
+    let required_delivery_guarantee =
+        DeliveryGuarantee::parse(&nonempty_str(obj, "required_delivery_guarantee")?)
+            .ok_or(FrameError::BadRequest)?;
     let payload = obj.get("payload").cloned().ok_or(FrameError::BadRequest)?;
     // context.continuation_id は第一段では常に null（callback 無し）。
     let continuation_id = match obj.get("context") {
@@ -592,8 +662,11 @@ fn parse_invoke(obj: &Value) -> Result<Invoke, FrameError> {
     Ok(Invoke {
         id,
         binding_id,
+        declaration_digest,
         operation,
+        dispatch,
         effect,
+        required_delivery_guarantee,
         continuation_id,
         payload,
     })

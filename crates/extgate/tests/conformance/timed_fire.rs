@@ -44,7 +44,7 @@ async fn wait_binding_acknowledged(h: &Harness, instance_id: &str, binding_id: &
 }
 
 #[tokio::test]
-async fn timed_fire_sink_revalidates_lifecycle_and_delivers_once_after_reconnect_ack() {
+async fn s3_timed_continuation_routes_generic_binding_session_once_after_reconnect_ack() {
     let h = Harness::start().await;
     let alias = "opaque-timed-fire-session";
     let instance_id = uuid();

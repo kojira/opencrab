@@ -91,16 +91,52 @@ fn duplicate_member_is_bad_request() {
 
 #[test]
 fn parse_invoke_ok() {
-    let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","invocation_protocol":1,"binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","operation":"reply","effect":"utterance","context":{"continuation_id":null},"payload":{"event":"e7","text":"hi"}}"#;
+    let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","invocation_protocol":1,"binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","declaration_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","operation":"reply","dispatch":"utterance","effect":"utterance","required_delivery_guarantee":"exactly_once","context":{"continuation_id":null},"payload":{"event":"e7","text":"hi"}}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::Invoke(i) => {
             assert_eq!(i.id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
             assert_eq!(i.binding_id, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+            assert_eq!(i.declaration_digest.len(), 64);
             assert_eq!(i.operation, "reply");
+            assert_eq!(i.dispatch, "utterance");
+            assert_eq!(i.effect, "utterance");
+            assert_eq!(
+                i.required_delivery_guarantee,
+                DeliveryGuarantee::ExactlyOnce
+            );
             assert_eq!(i.continuation_id, None);
             assert_eq!(i.payload, json!({"event":"e7","text":"hi"}));
         }
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn s3_invoke_requires_digest_dispatch_and_effective_guarantee() {
+    let base = json!({
+        "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "m": "invoke",
+        "invocation_protocol": 1,
+        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "operation": "reply",
+        "dispatch": "utterance",
+        "effect": "utterance",
+        "required_delivery_guarantee": "exactly_once",
+        "context": {"continuation_id": null},
+        "payload": {"event": "e7", "text": "hi"}
+    });
+    for required in [
+        "declaration_digest",
+        "dispatch",
+        "required_delivery_guarantee",
+    ] {
+        let mut frame = base.clone();
+        frame.as_object_mut().unwrap().remove(required);
+        match parse_frame_bytes(&serde_json::to_vec(&frame).unwrap()).unwrap() {
+            CoreMsg::Invalid { code, .. } => assert_eq!(code, "bad_request", "{required}"),
+            other => panic!("missing {required} accepted: {other:?}"),
+        }
     }
 }
 

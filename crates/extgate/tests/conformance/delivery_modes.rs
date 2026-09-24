@@ -52,9 +52,9 @@ async fn hello_ok_digest(s: &mut UnixStream, instance_id: &str, revision: u64, d
             "m": "hello",
             "protocol": 3,
             "operation_protocol": 1,
-            "final_delivery": "automatic",
+            "final_delivery": "operation_driven",
             "delivery_guarantee": "at_most_once_indeterminate",
-            "operations": [],
+            "operations": ops_reply(),
             "instance_id": instance_id,
             "revision": revision,
             "config_digest": digest,
@@ -134,7 +134,7 @@ async fn tool_driven_inbound_is_no_reply_without_say() {
 }
 
 #[tokio::test]
-async fn missing_delivery_mode_keeps_say() {
+async fn s3_automatic_completion_routes_through_generic_binding_say() {
     assert_eq!(
         opencrab_extgate::delivery_mode_from_config_bytes(b"{}").unwrap(),
         opencrab_extgate::DeliveryMode::Say

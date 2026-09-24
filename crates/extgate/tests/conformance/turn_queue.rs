@@ -352,7 +352,7 @@ async fn settlement_is_consumed_on_next_turn() {
 /// 既存の `settlement_is_consumed_on_next_turn` は `extgate-{binding_id}` を使うため接頭辞判定を
 /// 素通りし、この穴を踏めていなかった。
 #[tokio::test]
-async fn settlement_on_reused_nostr_session_resumes() {
+async fn s3_subtask_continuation_routes_by_exact_generic_session_without_prefix() {
     let h = Harness::start().await;
     // 連結済みの instance/binding を用意する（Say 配送の送出先）。ただし決着させる親
     // セッションは binding の canonical（extgate-…）ではなく、Nostr 再利用の address 形式。

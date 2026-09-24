@@ -435,7 +435,7 @@ fn parse_policy(obj: &Map<String, Value>) -> Result<OperationPolicy, GateError> 
     }
     let required_delivery_guarantee = match obj.get("required_delivery_guarantee") {
         None => None,
-        Some(Value::String(raw)) => Some(DeliveryGuarantee::parse(raw).ok_or_else(invalid)?),
+        Some(Value::String(raw)) if raw == "exactly_once" => Some(DeliveryGuarantee::ExactlyOnce),
         Some(_) => return Err(invalid()),
     };
     if required_delivery_guarantee.is_some() && !matches!(dispatch, OperationDispatch::Utterance) {

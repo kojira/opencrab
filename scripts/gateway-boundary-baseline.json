@@ -3,31 +3,8 @@
   "purpose": "Issue #1006 S0 line-specific reviewed burn-down; entries are debts or explicit gateway-store provenance, never wildcard exceptions",
   "review": {
     "status": "line-by-line-reviewed",
-    "finding_count": 414,
-    "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance",
-    "rule_counts": {
-      "gateway-core-path": 16,
-      "gateway-db-open": 4,
-      "gateway-production-dependency": 4,
-      "reviewed-gateway-dev-dependency": 2,
-      "shared-concrete-route": 4,
-      "shared-concrete-schema": 212,
-      "shared-concrete-vocabulary": 157,
-      "shared-platform-dto": 15
-    },
-    "classification_counts": {
-      "dev-only-qc": 2,
-      "production-violation": 410,
-      "valid-gateway-owned-store": 2
-    },
-    "valid_gateway_store_entries": [
-      "crates/nostr-gateway/src/daemon.rs:115",
-      "crates/nostr-gateway/src/store.rs:66"
-    ],
-    "reviewed_dev_only_qc_entries": [
-      "crates/server/Cargo.toml:80",
-      "crates/server/Cargo.toml:83"
-    ]
+    "finding_count": 412,
+    "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance"
   },
   "entries": [
     {
@@ -1753,7 +1730,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/gate-client/src/wire.rs",
-      "line": 215,
+      "line": 274,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -1766,9 +1743,9 @@
       "line": 19,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
-      "violation": "V10",
-      "owner_stage": "S3",
-      "expires_when": "derive routing solely from dynamic declaration metadata"
+      "violation": "V11",
+      "owner_stage": "S5/S10",
+      "expires_when": "rename legacy generic caller-role vocabulary after gateway policy ownership moves"
     },
     {
       "rule": "shared-concrete-schema",
@@ -1776,9 +1753,9 @@
       "line": 46,
       "snippet": "GatewayCaller::TrustedUser => (\"trusted_user\", GatewayCallerClass::Trusted),",
       "classification": "production-violation",
-      "violation": "V10",
-      "owner_stage": "S3",
-      "expires_when": "derive routing solely from dynamic declaration metadata"
+      "violation": "V11",
+      "owner_stage": "S5/S10",
+      "expires_when": "rename legacy generic caller-role vocabulary after gateway policy ownership moves"
     },
     {
       "rule": "shared-concrete-schema",
@@ -1786,9 +1763,9 @@
       "line": 81,
       "snippet": "GatewayCaller::TrustedUser => CallerIdentity::TrustedUser,",
       "classification": "production-violation",
-      "violation": "V10",
-      "owner_stage": "S3",
-      "expires_when": "derive routing solely from dynamic declaration metadata"
+      "violation": "V11",
+      "owner_stage": "S5/S10",
+      "expires_when": "rename legacy generic caller-role vocabulary after gateway policy ownership moves"
     },
     {
       "rule": "shared-concrete-schema",
@@ -3253,7 +3230,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 118,
+      "line": 120,
       "snippet": "channel_id: row.address.as_str(),",
       "classification": "production-violation",
       "violation": "V11",
@@ -3263,7 +3240,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 120,
+      "line": 122,
       "snippet": "guild_id: instance_id,",
       "classification": "production-violation",
       "violation": "V11",
@@ -3273,7 +3250,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 150,
+      "line": 152,
       "snippet": "let whitelist = |channel_id: &str, agent_id: &str| {",
       "classification": "production-violation",
       "violation": "V11",
@@ -3283,7 +3260,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 160,
+      "line": 162,
       "snippet": "channel_whitelisted(&tx, agent_id, instance_id, channel_id)",
       "classification": "production-violation",
       "violation": "V11",
@@ -3902,26 +3879,6 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/subtask_spawn/sub_prompt.rs",
-      "line": 28,
-      "snippet": "- Discordへの直接送信は禁止されています\\n\\",
-      "classification": "production-violation",
-      "violation": "V09",
-      "owner_stage": "S3",
-      "expires_when": "replace platform-shaped routing with canonical generic binding/session IDs"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/subtask_spawn/sub_prompt.rs",
-      "line": 32,
-      "snippet": "- Discord送信はメインエンジンが行います\\n\\n\\",
-      "classification": "production-violation",
-      "violation": "V09",
-      "owner_stage": "S3",
-      "expires_when": "replace platform-shaped routing with canonical generic binding/session IDs"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/system_actions/definitions/heartbeat_schedules.rs",
       "line": 24,
       "snippet": "\"channel_id\": {",
@@ -4270,6 +4227,24 @@
       "needle": "s3_arbitrary_operation_name_is_classified_only_by_complete_metadata",
       "owner_stage": "S3/S7/S9",
       "expires_when": "retain synthetic arbitrary-name proof through zero-core-change S11 validation"
+    },
+    {
+      "violation": "V09",
+      "classification": "closed-production-violation",
+      "path": "crates/extgate/tests/conformance/timed_fire.rs",
+      "line": 47,
+      "needle": "s3_timed_continuation_routes_generic_binding_session_once_after_reconnect_ack",
+      "owner_stage": "S3",
+      "expires_when": "retain generic binding/session timed continuation proof"
+    },
+    {
+      "violation": "V10",
+      "classification": "closed-production-violation",
+      "path": "crates/extgate/src/operations/tests.rs",
+      "line": 160,
+      "needle": "s3_arbitrary_operation_name_is_classified_only_by_complete_metadata",
+      "owner_stage": "S3",
+      "expires_when": "retain metadata-only arbitrary operation routing proof"
     }
   ]
 }

@@ -16,7 +16,7 @@ use opencrab_gateway::{
     GatewayCallerClass, SubEngineAccess, ToolClass, ToolSharing,
 };
 
-use crate::operation_calls::{invoke_and_wait, invoke_utterance};
+use crate::operation_calls::{invoke_and_wait_for_digest, invoke_utterance_for_digest};
 use crate::operations::{
     AllowedCaller, GatewayOperationDeclaration, OperationDispatch, Sharing, SubEngine,
 };
@@ -30,6 +30,7 @@ pub struct ExtgateOpsGatewayActions {
     session_id: String,
     agent_id: String,
     declarations: Arc<Vec<GatewayOperationDeclaration>>,
+    declaration_digest: String,
 }
 
 impl ExtgateOpsGatewayActions {
@@ -42,9 +43,10 @@ impl ExtgateOpsGatewayActions {
         session_id: &str,
         agent_id: &str,
     ) -> Option<Self> {
-        let declarations = {
+        let (declarations, declaration_digest) = {
             let reg = state.lock_registry().ok()?;
-            reg.get(instance_id)?.declarations.clone()
+            let live = reg.get(instance_id)?;
+            (live.declarations.clone(), live.declaration_digest.clone())
         };
         if declarations.is_empty() {
             return None;
@@ -56,6 +58,7 @@ impl ExtgateOpsGatewayActions {
             session_id: session_id.to_string(),
             agent_id: agent_id.to_string(),
             declarations,
+            declaration_digest,
         })
     }
 
@@ -197,7 +200,7 @@ impl GatewayActions for ExtgateOpsGatewayActions {
         if matches!(declaration.policy.dispatch, OperationDispatch::Utterance) {
             let (body, kind, target_origin) = opencrab_gateway::utterance_body(name, &payload);
             let target_id = target_origin.as_deref().and_then(event_id_from_origin);
-            return match invoke_utterance(
+            return match invoke_utterance_for_digest(
                 &self.state,
                 &self.instance_id,
                 &self.binding_id,
@@ -210,6 +213,7 @@ impl GatewayActions for ExtgateOpsGatewayActions {
                 target_id.as_deref(),
                 target_origin.as_deref(),
                 ctx.tool_call_id.as_deref(),
+                &self.declaration_digest,
             )
             .await
             {
@@ -228,11 +232,12 @@ impl GatewayActions for ExtgateOpsGatewayActions {
 
         // 照会/道具クラス: 背景 subtask 内での await（option B）。turn は既に spawned で
         // 返り detach 済み。
-        match invoke_and_wait(
+        match invoke_and_wait_for_digest(
             &self.state,
             &self.instance_id,
             &self.binding_id,
             name,
+            &self.declaration_digest,
             &payload,
         )
         .await

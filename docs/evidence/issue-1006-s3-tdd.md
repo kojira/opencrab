@@ -16,6 +16,32 @@ No S4 heartbeat migration, gateway-owned identity/policy store, delivery-ledger 
 The retained RED runs were:
 
 ```text
+cargo test -p opencrab-extgate s3_declaration_requirement_allows_only_exactly_once -- --nocapture
+1 failed: at_most_once_indeterminate was accepted as a declaration requirement
+log: /tmp/issue-1006-s3-review-fix-declaration-red.log
+
+cargo test -p opencrab-extgate --test conformance s3_hello_final_delivery_rejects_both_legacy_config_mismatch_directions -- --nocapture
+1 failed: operation_driven hello was accepted over automatic legacy config
+log: /tmp/issue-1006-s3-review-fix-final-delivery-red.log
+
+cargo test -p opencrab-extgate --test conformance s3_exact_runtime_rejects_explicit_weaker_invocation_before_db_and_wire -- --nocapture
+hung after writing the forbidden invoke frame, proving the downgrade was executed
+log: /tmp/issue-1006-s3-review-fix-guarantee-red.log
+
+cargo test -p opencrab-gate-client s3_invoke_requires_digest_dispatch_and_effective_guarantee -- --nocapture
+compile-time assertion failures: Invoke retained none of the required snapshot fields
+log: /tmp/issue-1006-s3-review-fix-gate-client-red.log
+
+python3 -m unittest ...test_s3_named_production_seam_routing_and_continuation_assertions_exist
+4 assertion failures against checkpoint 2f0ad32: exact/global, timed, subtask, and automatic production-seam assertions absent
+log: /tmp/issue-1006-s3-review-fix-routing-red.log
+
+python3 -m unittest ...test_s3_generic_caller_role_deferral_requires_exact_finding_identity
+1 assertion failure: broad traits.rs classification incorrectly assigned the generic caller role to V10/S3
+log: /tmp/issue-1006-s3-review-fix-baseline-red.log
+```
+
+```text
 cargo test -p opencrab-extgate s3_ -- --nocapture
 3 failed, 1 passed
 log: /tmp/issue-1006-s3-operations-red.log
@@ -36,25 +62,29 @@ The failures independently detected platform-shaped timed-fire fields, operation
 - Protocol v3 hello carries operation protocol, final-delivery mode, delivery guarantee, and a complete operation declaration set.
 - Every declaration requires validated `authorization`, `dispatch`, `sub_engine`, `sharing`, and `effect`; `dispatch=utterance` iff `effect=utterance`.
 - Declaration and runtime capability digests cover all policy and compatibility fields.
-- Invocation protocol v1 carries declaration digest, effect, and the effective delivery requirement.
-- Runtime compatibility rejects operation-driven delivery without an utterance operation and rejects a guarantee weaker than either the declaration or an independently raised invocation requirement.
+- Invocation protocol v1 carries declaration digest, dispatch, effect, and the always-present effective live delivery guarantee.
+- Transitional hello validation rejects both `final_delivery`/legacy-config mismatch directions; after acceptance the hello snapshot is the sole runtime authority.
+- Declaration requirements accept only optional `exactly_once`; invocation requirements cannot raise beyond or lower the live guarantee, and incompatibility is rejected before DB/wire effects.
+- Projections retain the live declaration digest and recheck it at the DB/wire boundary. Gate-client retains its hello snapshot and rejects missing/stale digest, undeclared operations, dispatch/effect drift, and guarantee downgrade before calling the adapter handler.
 - `s3_raised_exactly_once_is_rejected_before_db_and_wire` proves an independently raised `exactly_once` requirement is rejected before a `gateway_operation_calls` insert and before an invoke frame.
 - `s3_arbitrary_synthetic_operation_projects_and_authorizes_from_metadata` proves an arbitrary `quasar.synthetic-v7` operation is projected without a shared allowlist, denies an undeclared caller before DB/wire effects, and executes for the metadata-authorized owner.
-- Timed fire and scheduler routing use only generic binding/session targets and one generic live sink.
+- `s3_projection_rejects_stale_live_declaration_digest_before_db_and_wire` proves reconnect drift cannot authorize from a stale projection.
+- Gate-client parser/snapshot assertions cover missing/stale digest, undeclared operation, dispatch/effect mismatch, and guarantee downgrade before the adapter handler.
+- Exact/global canonical lookup, timed fire, subtask resume, and automatic completion have named production-seam assertions using only generic binding/session IDs.
 - `AgentGatewayLifecycle`, `AgentGatewayRegistry`, and server `AppState.gateways` were removed; liveness is read from extgate.
 - Discord and Nostr declarations were migrated to the complete generic metadata contract. CLI and Web continue to use the opaque generic client.
 - Large test modules were split without behavior changes to keep every Rust source file below 800 lines.
 
 ## S0 burn-down
 
-The reviewed boundary inventory decreased from 451 to 414 findings. Exactly 37 stale findings were removed because their production sites disappeared:
+The reviewed boundary inventory decreased from 451 to 412 findings. Exactly 39 stale findings were removed because their production sites disappeared:
 
 - V08 concrete lifecycle registry/server ownership sites;
 - V09 platform-shaped timed-fire and heartbeat routing sites;
 - V10 gateway operation-name classification sites;
 - directly coupled V11 concrete symbols removed by the same S3 changes.
 
-All surviving entries retain generated `_metadata_for` classifications and received line-only refreshes where S3 moved code. V08 and V16 now use retained S3 static/synthetic proof anchors. No wildcard exception was added. `shared-gateway-name-branch` is now zero.
+The two remaining platform-shaped subtask prompt lines were removed. The three exact `GatewayCaller::TrustedUser` sites were semantically classified as generic caller-role naming debt (V11, S5/S10), not dynamic operation routing (V10); an exact-identity mutation test proves moved/duplicated sites remain V10/S3. V08–V10 and V16 have retained closed/static/synthetic proof anchors. No wildcard exception was added. `shared-gateway-name-branch` is zero.
 
 ## GREEN validation
 
@@ -62,10 +92,10 @@ Passed:
 
 ```text
 cargo test -p opencrab-extgate --all-targets --no-fail-fast
-71 library; 87 conformance; 1 production-boundary; 8 no-platform; 3 S3 static
+72 library; 90 conformance; 1 production-boundary; 8 no-platform; 3 S3 static
 
 cargo test -p opencrab-gate-client --all-targets --no-fail-fast
-28 library; 7 turn-origin
+30 library; 7 turn-origin
 
 cargo test -p opencrab-discord-gateway --all-targets --no-fail-fast
 61 library
@@ -86,6 +116,11 @@ bash scripts/check-deps.sh
 cargo tree -p opencrab-server --edges no-dev | (! grep -E 'opencrab-(discord|nostr|web)-gateway')
 python3 scripts/gateway_boundary_audit.py
 python3 -m unittest scripts/tests/test_gateway_boundary_audit.py
+56 passed
+
+cargo test -p opencrab-db s3_exact_and_global_fan_out_resolves_only_canonical_generic_binding_ids
+1 passed
+
 git diff --check
 ```
 
@@ -97,5 +132,5 @@ Per the S3 continuation contract, the unrelated full-workspace Issue #1011 failu
 
 - Code rollback point: `f33424c26f29a4de0e30aef763a75f1f1d0fea6a`.
 - S3 contains no schema migration, destructive cleanup, or gateway-store state mutation.
-- V08 remains partially mapped to S5 for daemon-owned concrete child lifecycle; V09 continues in S4/S7 for generic heartbeat and split-ledger proof; V10 continues in S7 for delivery guarantee proof. S3 closes only the shared/server seams assigned to this stage.
+- V08 remains partially mapped to S5 for daemon-owned concrete child lifecycle. Later-stage heartbeat and split-ledger work remains governed by S4/S7, but no surviving baseline item is incorrectly owned by completed S3 V09/V10 routing work.
 - `stash@{0}` remains untouched at `cc26425bc66f685160efeb2139bcaf85ed9dfca1`.

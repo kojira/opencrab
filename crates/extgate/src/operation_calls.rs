@@ -33,6 +33,21 @@ impl InvokeError {
     }
 }
 
+/// Always put the live transport guarantee on the wire. An explicit invocation requirement may
+/// neither exceed the live capability nor lower it.
+fn effective_delivery_guarantee(
+    live: DeliveryGuarantee,
+    declared: Option<DeliveryGuarantee>,
+    invoked: Option<DeliveryGuarantee>,
+) -> Result<DeliveryGuarantee, InvokeError> {
+    if declared.is_some_and(|required| !live.satisfies(required))
+        || invoked.is_some_and(|guarantee| guarantee != live)
+    {
+        return Err(InvokeError::new(ErrorCode::OperationRejected));
+    }
+    Ok(live)
+}
+
 /// 背景 subtask 内で呼ぶ（§5.2 / §10.6・option B）。call を `sending` で insert → commit →
 /// pending 登録 → invoke を exact 1 回 write → wire 応答 / close の terminal outcome を await する。
 ///
@@ -48,7 +63,36 @@ pub async fn invoke_and_wait(
     operation: &str,
     payload: &Value,
 ) -> Result<Value, InvokeError> {
-    invoke_and_wait_with_requirement(state, instance_id, binding_id, operation, None, payload).await
+    invoke_and_wait_checked(
+        state,
+        instance_id,
+        binding_id,
+        operation,
+        None,
+        None,
+        payload,
+    )
+    .await
+}
+
+pub(crate) async fn invoke_and_wait_for_digest(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    operation: &str,
+    expected_digest: &str,
+    payload: &Value,
+) -> Result<Value, InvokeError> {
+    invoke_and_wait_checked(
+        state,
+        instance_id,
+        binding_id,
+        operation,
+        Some(expected_digest),
+        None,
+        payload,
+    )
+    .await
 }
 
 /// Versioned invocation with an optional independently raised delivery requirement.
@@ -57,6 +101,27 @@ pub async fn invoke_and_wait_with_requirement(
     instance_id: &str,
     binding_id: &str,
     operation: &str,
+    invocation_requirement: Option<DeliveryGuarantee>,
+    payload: &Value,
+) -> Result<Value, InvokeError> {
+    invoke_and_wait_checked(
+        state,
+        instance_id,
+        binding_id,
+        operation,
+        None,
+        invocation_requirement,
+        payload,
+    )
+    .await
+}
+
+async fn invoke_and_wait_checked(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    operation: &str,
+    expected_digest: Option<&str>,
     invocation_requirement: Option<DeliveryGuarantee>,
     payload: &Value,
 ) -> Result<Value, InvokeError> {
@@ -71,27 +136,18 @@ pub async fn invoke_and_wait_with_requirement(
         if !live.acknowledged.contains(binding_id) {
             return Err(InvokeError::new(ErrorCode::NotConnected));
         }
+        if expected_digest.is_some_and(|digest| digest != live.declaration_digest) {
+            return Err(InvokeError::new(ErrorCode::OperationRejected));
+        }
         let declaration = live
             .declaration(operation)
             .cloned()
             .ok_or_else(|| InvokeError::new(ErrorCode::OperationUnknown))?;
-        let declared = declaration.policy.required_delivery_guarantee;
-        if matches!(declared, Some(DeliveryGuarantee::ExactlyOnce))
-            && matches!(
-                invocation_requirement,
-                Some(DeliveryGuarantee::AtMostOnceIndeterminate)
-            )
-        {
-            return Err(InvokeError::new(ErrorCode::OperationRejected));
-        }
-        let required = if matches!(invocation_requirement, Some(DeliveryGuarantee::ExactlyOnce)) {
-            Some(DeliveryGuarantee::ExactlyOnce)
-        } else {
-            declared
-        };
-        if required.is_some_and(|required| !live.delivery_guarantee.satisfies(required)) {
-            return Err(InvokeError::new(ErrorCode::OperationRejected));
-        }
+        let required = effective_delivery_guarantee(
+            live.delivery_guarantee,
+            declaration.policy.required_delivery_guarantee,
+            invocation_requirement,
+        )?;
         (
             live.writer.clone(),
             declaration,
@@ -171,7 +227,7 @@ pub async fn invoke_and_wait_with_requirement(
             &declaration_digest,
             &declaration,
             None,
-            required_delivery_guarantee,
+            Some(required_delivery_guarantee),
             payload,
         ),
     )
@@ -226,9 +282,77 @@ pub async fn invoke_utterance(
     utterance_kind: &str,
     reply_target_id: Option<&str>,
     reply_target_origin: Option<&str>,
+    provided_call_id: Option<&str>,
+) -> Result<(), InvokeError> {
+    invoke_utterance_checked(
+        state,
+        instance_id,
+        binding_id,
+        agent_id,
+        session_id,
+        operation,
+        payload,
+        speech_body,
+        utterance_kind,
+        reply_target_id,
+        reply_target_origin,
+        provided_call_id,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn invoke_utterance_for_digest(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    agent_id: &str,
+    session_id: &str,
+    operation: &str,
+    payload: &Value,
+    speech_body: &str,
+    utterance_kind: &str,
+    reply_target_id: Option<&str>,
+    reply_target_origin: Option<&str>,
+    provided_call_id: Option<&str>,
+    expected_digest: &str,
+) -> Result<(), InvokeError> {
+    invoke_utterance_checked(
+        state,
+        instance_id,
+        binding_id,
+        agent_id,
+        session_id,
+        operation,
+        payload,
+        speech_body,
+        utterance_kind,
+        reply_target_id,
+        reply_target_origin,
+        provided_call_id,
+        Some(expected_digest),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn invoke_utterance_checked(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    agent_id: &str,
+    session_id: &str,
+    operation: &str,
+    payload: &Value,
+    speech_body: &str,
+    utterance_kind: &str,
+    reply_target_id: Option<&str>,
+    reply_target_origin: Option<&str>,
     // #915: engine の tool_call.id。発話 id を engine→invoke→gateway で一意に保つため、
     // ある場合は invoke フレームの call_id に採用する（無ければ合成 uuid にフォールバック）。
     provided_call_id: Option<&str>,
+    expected_digest: Option<&str>,
 ) -> Result<(), InvokeError> {
     // live + acknowledged binding + live declaration を再検査（invoke_and_wait と同じ）。
     let (writer, declaration, declaration_digest, required_delivery_guarantee) = {
@@ -241,14 +365,18 @@ pub async fn invoke_utterance(
         if !live.acknowledged.contains(binding_id) {
             return Err(InvokeError::new(ErrorCode::NotConnected));
         }
+        if expected_digest.is_some_and(|digest| digest != live.declaration_digest) {
+            return Err(InvokeError::new(ErrorCode::OperationRejected));
+        }
         let declaration = live
             .declaration(operation)
             .cloned()
             .ok_or_else(|| InvokeError::new(ErrorCode::OperationUnknown))?;
-        let required = declaration.policy.required_delivery_guarantee;
-        if required.is_some_and(|required| !live.delivery_guarantee.satisfies(required)) {
-            return Err(InvokeError::new(ErrorCode::OperationRejected));
-        }
+        let required = effective_delivery_guarantee(
+            live.delivery_guarantee,
+            declaration.policy.required_delivery_guarantee,
+            None,
+        )?;
         (
             live.writer.clone(),
             declaration,
@@ -367,7 +495,7 @@ pub async fn invoke_utterance(
             &declaration_digest,
             &declaration,
             None,
-            required_delivery_guarantee,
+            Some(required_delivery_guarantee),
             payload,
         ),
     )
