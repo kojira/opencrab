@@ -21,7 +21,6 @@ pub(crate) use opencrab_gate_client::client::InstanceClient;
 pub(crate) use tracing_subscriber::layer::{Context, SubscriberExt};
 pub(crate) use tracing_subscriber::Layer;
 
-pub(crate) const TOKEN: &str = "KysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKys";
 pub(crate) const AGENT_ID: &str = "agent-discord-qc";
 pub(crate) const GUILD: &str = "500";
 pub(crate) const CHANNEL: &str = "600";

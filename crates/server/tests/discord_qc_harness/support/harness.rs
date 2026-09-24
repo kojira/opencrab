@@ -173,58 +173,71 @@ pub(crate) async fn admin(core: &Core, req: Request<Body>) -> (StatusCode, Vec<u
     (status, body)
 }
 
-fn install_database_backed_admin(core: &Core, instance_id: &str) {
+fn database_backed_admin(core: &Core, instance_id: &str) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
     use sha2::{Digest, Sha256};
 
     let salt = [0x3c_u8; 32];
-    let token = [43_u8; 32];
+    let token = Sha256::digest(instance_id.as_bytes());
+    let principal_id = format!("discord-qc-{instance_id}");
     let mut hasher = Sha256::new();
     hasher.update(b"opencrab/gate-admin/bearer/v1\0");
     hasher.update(salt);
     hasher.update(token);
     let hash = hasher.finalize().to_vec();
     let conn = core.extgate.db.lock().unwrap();
-    conn.execute(
-        "INSERT INTO gate_admin_principals
-         (principal_id, credential_salt, credential_hash, scope_mode, created_at, expires_at,
-          revoked_at, sealed_at, predecessor_principal_id, overlap_deadline)
-         VALUES ('discord-qc', ?1, ?2, 'exact', 1, 4000000000000000000,
-                 NULL, NULL, NULL, NULL)",
-        rusqlite::params![salt.as_slice(), hash],
-    )
-    .unwrap();
-    for operation in ["instance.put", "binding.put"] {
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM gate_admin_principals WHERE principal_id=?1)",
+            [&principal_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if !exists {
         conn.execute(
-            "INSERT INTO gate_admin_principal_operations VALUES ('discord-qc', ?1)",
-            [operation],
+            "INSERT INTO gate_admin_principals
+             (principal_id, credential_salt, credential_hash, scope_mode, created_at, expires_at,
+              revoked_at, sealed_at, predecessor_principal_id, overlap_deadline)
+             VALUES (?1, ?2, ?3, 'exact', 1, 4000000000000000000,
+                     NULL, NULL, NULL, NULL)",
+            rusqlite::params![principal_id, salt.as_slice(), hash],
+        )
+        .unwrap();
+        for operation in ["instance.put", "binding.put"] {
+            conn.execute(
+                "INSERT INTO gate_admin_principal_operations VALUES (?1, ?2)",
+                rusqlite::params![principal_id, operation],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO gate_admin_principal_subjects VALUES (?1, ?2)",
+            rusqlite::params![principal_id, core.subject_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO gate_admin_principal_instances VALUES (?1, ?2)",
+            rusqlite::params![principal_id, instance_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE gate_admin_principals SET sealed_at=2 WHERE principal_id=?1",
+            [&principal_id],
         )
         .unwrap();
     }
-    conn.execute(
-        "INSERT INTO gate_admin_principal_subjects VALUES ('discord-qc', ?1)",
-        [core.subject_id],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO gate_admin_principal_instances VALUES ('discord-qc', ?1)",
-        [instance_id],
-    )
-    .unwrap();
-    conn.execute(
-        "UPDATE gate_admin_principals SET sealed_at=2 WHERE principal_id='discord-qc'",
-        [],
-    )
-    .unwrap();
+    format!("Bearer {}", URL_SAFE_NO_PAD.encode(token))
 }
 
 pub(crate) async fn put_instance(core: &Core, instance_id: &str, config_b64: &str) {
-    install_database_backed_admin(core, instance_id);
+    let authorization = database_backed_admin(core, instance_id);
     let (st, body) = admin(
         core,
         Request::builder()
             .method("PUT")
             .uri(format!("/api/gate-instances/{instance_id}"))
-            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::AUTHORIZATION, authorization)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
                 serde_json::json!({
@@ -246,12 +259,13 @@ pub(crate) async fn put_instance(core: &Core, instance_id: &str, config_b64: &st
 }
 
 pub(crate) async fn put_binding(core: &Core, binding_id: &str, instance_id: &str, address: &str) {
+    let authorization = database_backed_admin(core, instance_id);
     let (st, body) = admin(
         core,
         Request::builder()
             .method("PUT")
             .uri(format!("/api/gate-bindings/{binding_id}"))
-            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::AUTHORIZATION, authorization)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
                 serde_json::json!({"instance_id": instance_id, "address": address}).to_string(),
