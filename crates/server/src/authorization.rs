@@ -35,7 +35,7 @@ pub fn authorize_timed_subtask_entry(
     check: &opencrab_core::authorization::AuthorizationCheck,
 ) -> anyhow::Result<()> {
     if depth > 0 && !check(AuthorizationBoundary::TimedSubtaskContinuation) {
-        anyhow::bail!("authorization_revoked");
+        anyhow::bail!("authorization_revoked:timed_subtask_continuation");
     }
     Ok(())
 }
