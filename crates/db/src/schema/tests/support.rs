@@ -30,6 +30,25 @@ pub(super) fn seed_legacy_impressions(conn: &Connection, rows: &str) {
     .unwrap();
 }
 
+pub(super) fn seed_minimal_s2_prerequisites(conn: &Connection) {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agents(
+             agent_id TEXT PRIMARY KEY,
+             subject_id INTEGER UNIQUE
+         );
+         CREATE TABLE IF NOT EXISTS gate_instances(
+             instance_id TEXT PRIMARY KEY,
+             subject_id INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS gate_bindings(
+             binding_id TEXT PRIMARY KEY,
+             address TEXT
+         );
+         CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY);",
+    )
+    .unwrap();
+}
+
 pub(super) fn user_tables(conn: &Connection) -> Vec<String> {
     conn.prepare(
         "SELECT name FROM sqlite_master

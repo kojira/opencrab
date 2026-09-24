@@ -1544,13 +1544,16 @@ name = "opencrab-db"
 version = "0.2.17"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
+ "getrandom 0.3.4",
  "r2d2",
  "r2d2_sqlite",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
 ]

@@ -541,6 +541,39 @@ async fn read_frame_opt(s: &mut UnixStream) -> Option<Value> {
 }
 
 async fn put_instance(h: &Harness, instance_id: &str, enabled: bool) -> Value {
+    let grant = {
+        let mut conn = h.state.db.lock().unwrap();
+        let exists: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM gate_instances WHERE instance_id=?1",
+                [instance_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if exists == 0 {
+            Some(
+                opencrab_db::queries::issue_subject_association_grant(
+                    &mut conn,
+                    "agent-1",
+                    h.subject_id,
+                    i64::MAX,
+                    now_nanos(),
+                )
+                .unwrap(),
+            )
+        } else {
+            None
+        }
+    };
+    let mut request = json!({
+        "kind_id": "discord",
+        "subject_id": h.subject_id,
+        "enabled": enabled,
+        "config_b64": config_b64(),
+    });
+    if let Some(grant) = grant {
+        request["subject_grant"] = json!(grant);
+    }
     let (st, body) = h
         .admin(
             Request::builder()
@@ -548,15 +581,7 @@ async fn put_instance(h: &Harness, instance_id: &str, enabled: bool) -> Value {
                 .uri(format!("/api/gate-instances/{instance_id}"))
                 .header(header::AUTHORIZATION, auth())
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "kind_id": "discord",
-                        "subject_id": h.subject_id,
-                        "enabled": enabled,
-                        "config_b64": config_b64(),
-                    })
-                    .to_string(),
-                ))
+                .body(Body::from(request.to_string()))
                 .unwrap(),
         )
         .await;
@@ -574,6 +599,13 @@ async fn put_binding(
     instance_id: &str,
     address: &str,
 ) -> StatusCode {
+    let (session_id, title) = {
+        let conn = h.state.db.lock().unwrap();
+        match opencrab_db::queries::get_session(&conn, address).unwrap() {
+            Some(session) => (address.to_string(), session.theme),
+            None => (session_id_for_binding(binding_id), address.to_string()),
+        }
+    };
     let (st, body) = h
         .admin(
             Request::builder()
@@ -582,7 +614,12 @@ async fn put_binding(
                 .header(header::AUTHORIZATION, auth())
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    json!({"instance_id": instance_id, "address": address}).to_string(),
+                    json!({
+                        "instance_id": instance_id,
+                        "address": address,
+                        "session": {"session_id": session_id, "title": title}
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )

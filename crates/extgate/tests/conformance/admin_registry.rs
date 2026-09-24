@@ -146,6 +146,62 @@ async fn s2_new_first_instance_association_without_grant_is_forbidden() {
 }
 
 #[tokio::test]
+async fn s2_subject_grant_is_consumed_once_and_exact_retry_needs_no_second_grant() {
+    let h = Harness::start().await;
+    let first = uuid();
+    let second = uuid();
+    let grant = {
+        let mut conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::issue_subject_association_grant(
+            &mut conn,
+            "agent-1",
+            h.subject_id,
+            i64::MAX,
+            now_nanos(),
+        )
+        .unwrap()
+    };
+    let request = |instance_id: &str, grant: Option<&str>| {
+        let mut body = json!({
+            "kind_id": "opaque-kind",
+            "subject_id": h.subject_id,
+            "enabled": true,
+            "config_b64": config_b64()
+        });
+        if let Some(grant) = grant {
+            body["subject_grant"] = json!(grant);
+        }
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/gate-instances/{instance_id}"))
+            .header(header::AUTHORIZATION, auth())
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    let (status, _) = h.admin(request(&first, Some(&grant))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = h.admin(request(&first, None)).await;
+    assert_eq!(status, StatusCode::OK, "exact retry consumed another grant");
+    let (status, body) = h.admin(request(&second, Some(&grant))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(err_code(&body), "instance_conflict");
+    let consumed_instance: String = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT consumed_instance_id FROM subject_association_grants",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(consumed_instance, first);
+}
+
+#[tokio::test]
 async fn instance_put_idempotent_and_conflict() {
     let h = Harness::start().await;
     let id = uuid();
@@ -332,7 +388,12 @@ async fn address_in_use_and_binding_closed_reuse() {
                 .header(header::AUTHORIZATION, auth())
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    json!({"instance_id": instance_id, "address": "same"}).to_string(),
+                    json!({
+                        "instance_id": instance_id,
+                        "address": "same",
+                        "session": {"session_id": session_id_for_binding(&b), "title": "same"}
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -358,7 +419,12 @@ async fn address_in_use_and_binding_closed_reuse() {
                 .header(header::AUTHORIZATION, auth())
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    json!({"instance_id": instance_id, "address": "same"}).to_string(),
+                    json!({
+                        "instance_id": instance_id,
+                        "address": "same",
+                        "session": {"session_id": session_id_for_binding(&a), "title": "same"}
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )

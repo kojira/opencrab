@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS subject_id_allocator (
     next_subject_id INTEGER NOT NULL CHECK(next_subject_id > 0)
 );
 INSERT INTO subject_id_allocator(singleton, next_subject_id)
-SELECT 1, COALESCE(MAX(subject_id), 0) + 1 FROM agents
+SELECT 1, (SELECT COALESCE(MAX(subject_id), 0) + 1 FROM agents)
 WHERE NOT EXISTS(SELECT 1 FROM subject_id_allocator);
 UPDATE subject_id_allocator
 SET next_subject_id = (SELECT COALESCE(MAX(subject_id), 0) + 1 FROM agents)
@@ -137,7 +137,9 @@ BEGIN SELECT RAISE(ABORT, 'subject association grants are single-use'); END;
 
 DROP TRIGGER IF EXISTS agents_subject_id_insert_guard;
 DROP TRIGGER IF EXISTS agents_subject_id_assign;
+DROP TRIGGER IF EXISTS agents_subject_id_advance_explicit;
 DROP TRIGGER IF EXISTS agents_subject_id_update_guard;
+DROP TRIGGER IF EXISTS agents_subject_tombstone_delete_guard;
 
 CREATE TRIGGER agents_subject_id_insert_guard
 BEFORE INSERT ON agents

@@ -73,6 +73,21 @@ fn require_string_any(obj: &Value, key: &str) -> Result<String, GateError> {
     }
 }
 
+fn optional_string(obj: &Value, key: &str) -> Result<Option<String>, GateError> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        _ => Err(GateError::new(ErrorCode::BadRequest)),
+    }
+}
+
+fn require_value_object<'a>(obj: &'a Value, key: &str) -> Result<&'a Value, GateError> {
+    match obj.get(key) {
+        Some(value @ Value::Object(_)) => Ok(value),
+        _ => Err(GateError::new(ErrorCode::BadRequest)),
+    }
+}
+
 fn require_bool(obj: &Value, key: &str) -> Result<bool, GateError> {
     match obj.get(key) {
         Some(Value::Bool(b)) => Ok(*b),
@@ -153,7 +168,7 @@ fn agent_for_subject(conn: &rusqlite::Connection, subject_id: i64) -> Result<Str
 }
 
 fn instance_json(conn: &rusqlite::Connection, instance_id: &str) -> Result<Value, GateError> {
-    conn.query_row(
+    let mut value = conn.query_row(
         "SELECT instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest,
                 created_at, updated_at, deleted_at
          FROM gate_instances WHERE instance_id = ?1",
@@ -176,12 +191,31 @@ fn instance_json(conn: &rusqlite::Connection, instance_id: &str) -> Result<Value
     .map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => GateError::new(ErrorCode::InstanceUnknown),
         _ => GateError::store(),
-    })
+    })?;
+    let mut statement = conn
+        .prepare(
+            "SELECT binding_id, address, session_id FROM gate_bindings
+             WHERE instance_id=?1 AND closed_at IS NULL ORDER BY binding_id",
+        )
+        .map_err(|_| GateError::store())?;
+    let bindings = statement
+        .query_map([instance_id], |row| {
+            Ok(json!({
+                "binding_id": row.get::<_, String>(0)?,
+                "address": row.get::<_, String>(1)?,
+                "session_id": row.get::<_, Option<String>>(2)?,
+            }))
+        })
+        .map_err(|_| GateError::store())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| GateError::store())?;
+    value["bindings"] = json!(bindings);
+    Ok(value)
 }
 
 fn binding_json(conn: &rusqlite::Connection, binding_id: &str) -> Result<Value, GateError> {
     conn.query_row(
-        "SELECT binding_id, instance_id, address, created_at, closed_at
+        "SELECT binding_id, instance_id, address, created_at, closed_at, session_id
          FROM gate_bindings WHERE binding_id = ?1",
         params![binding_id],
         |r| {
@@ -191,6 +225,7 @@ fn binding_json(conn: &rusqlite::Connection, binding_id: &str) -> Result<Value, 
                 "address": r.get::<_, String>(2)?,
                 "created_at": r.get::<_, i64>(3)?,
                 "closed_at": r.get::<_, Option<i64>>(4)?,
+                "session_id": r.get::<_, Option<String>>(5)?,
             }))
         },
     )
@@ -273,6 +308,12 @@ async fn put_instance_inner(
         require_positive_i64(&obj, "subject_id"),
     )?;
     let authorized = authorize_target(state, operation, &authenticated, subject_id, &instance_id)?;
+    let subject_grant = early(
+        state,
+        operation,
+        &authenticated,
+        optional_string(&obj, "subject_grant"),
+    )?;
     let enabled = early(
         state,
         operation,
@@ -295,7 +336,7 @@ async fn put_instance_inner(
     let now = now_nanos();
 
     audited_operation(state, operation, &authorized, |conn| {
-        let _agent = agent_for_subject(conn, subject_id)?;
+        let agent_id = agent_for_subject(conn, subject_id)?;
         let existing = conn
             .query_row(
                 "SELECT kind_id, subject_id, enabled, config_b64, deleted_at
@@ -324,11 +365,27 @@ async fn put_instance_inner(
                 }
             }
             None => {
+                let grant = subject_grant
+                    .as_deref()
+                    .ok_or_else(|| GateError::new(ErrorCode::InstanceConflict))?;
+                opencrab_db::queries::consume_subject_association_grant_in_tx(
+                    conn,
+                    grant,
+                    &agent_id,
+                    subject_id,
+                    &instance_id,
+                    now,
+                )
+                .map_err(|error| match error {
+                    opencrab_db::queries::SubjectGrantError::Store(_) => GateError::store(),
+                    _ => GateError::new(ErrorCode::InstanceConflict),
+                })?;
                 conn.execute(
                     "INSERT INTO gate_instances (
                         instance_id, kind_id, subject_id, revision, enabled,
-                        config_b64, config_digest, created_at, updated_at, deleted_at
-                     ) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?7, NULL)",
+                        config_b64, config_digest, created_at, updated_at, deleted_at,
+                        association_grandfathered
+                     ) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?7, NULL, 0)",
                     params![
                         instance_id,
                         kind_id,
@@ -546,93 +603,60 @@ async fn put_binding_inner(
         &authenticated,
         require_string(&obj, "address"),
     )?;
+    let session = early(
+        state,
+        operation,
+        &authenticated,
+        require_value_object(&obj, "session"),
+    )?;
+    let session_id = early(
+        state,
+        operation,
+        &authenticated,
+        require_string(session, "session_id"),
+    )?;
+    let session_title = early(
+        state,
+        operation,
+        &authenticated,
+        require_string_any(session, "title"),
+    )?;
     let now = now_nanos();
 
     let (response, created) = audited_operation(state, operation, &authorized, |conn| {
-        let inst = conn
-            .query_row(
-                "SELECT enabled, deleted_at, subject_id FROM gate_instances WHERE instance_id = ?1",
-                params![instance_id],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, Option<i64>>(1)?,
-                        r.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|_| GateError::store())?;
-        let (enabled, subject_id) = match inst {
-            None | Some((_, Some(_), _)) => {
-                return Err(GateError::new(ErrorCode::InstanceUnknown));
-            }
-            Some((enabled, None, subject)) => (enabled == 1, subject),
-        };
-        if !enabled {
-            return Err(GateError::new(ErrorCode::InstanceDisabled));
-        }
-        let _agent_id = agent_for_subject(conn, subject_id)?;
-
-        let existing = conn
-            .query_row(
-                "SELECT instance_id, address, closed_at FROM gate_bindings WHERE binding_id = ?1",
-                params![binding_id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<i64>>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|_| GateError::store())?;
-        match existing {
-            Some((_, _, Some(_))) => return Err(GateError::new(ErrorCode::BindingClosed)),
-            Some((inst, addr, None)) => {
-                if inst == instance_id && addr == address {
-                    return Ok((
-                        json_ok(StatusCode::OK, binding_json(conn, &binding_id)?),
-                        false,
-                    ));
-                }
-                return Err(GateError::new(ErrorCode::BindingConflict));
-            }
-            None => {}
-        }
-
-        let taken: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM gate_bindings
-                 WHERE instance_id = ?1 AND address = ?2 AND closed_at IS NULL",
-                params![instance_id, address],
-                |r| r.get(0),
-            )
-            .map_err(|_| GateError::store())?;
-        if taken > 0 {
-            return Err(GateError::new(ErrorCode::AddressInUse));
-        }
-        opencrab_db::queries::create_gate_binding_in_tx(
+        let outcome = opencrab_db::queries::CoreBindingService::create_in_tx(
             conn,
-            &binding_id,
-            &instance_id,
-            &address,
-            &address,
-            now,
+            &opencrab_db::queries::CoreBindingRequest {
+                binding_id: &binding_id,
+                instance_id: &instance_id,
+                address: &address,
+                session_id: &session_id,
+                session_title: &session_title,
+                now,
+            },
         )
         .map_err(|error| match error {
             opencrab_db::queries::CreateGateBindingError::Conflict => {
                 GateError::new(ErrorCode::BindingConflict)
+            }
+            opencrab_db::queries::CreateGateBindingError::AddressInUse => {
+                GateError::new(ErrorCode::AddressInUse)
+            }
+            opencrab_db::queries::CreateGateBindingError::Closed => {
+                GateError::new(ErrorCode::BindingClosed)
             }
             opencrab_db::queries::CreateGateBindingError::Store(_) => GateError::store(),
         })?;
         if opencrab_db::queries::injected_commit_failure() {
             return Err(GateError::store());
         }
+        let created = outcome == opencrab_db::queries::CoreBindingOutcome::Created;
         Ok((
-            json_ok(StatusCode::CREATED, binding_json(conn, &binding_id)?),
-            true,
+            json_ok(
+                if created { StatusCode::CREATED } else { StatusCode::OK },
+                binding_json(conn, &binding_id)?,
+            ),
+            created,
         ))
     })?;
 

@@ -29,6 +29,7 @@ fn v47_to_v48_adds_provider_tool_history_once_and_preserves_rows() {
     )
     .unwrap();
 
+    seed_minimal_s2_prerequisites(&conn);
     initialize(&conn).unwrap();
     initialize(&conn).unwrap();
 

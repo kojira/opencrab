@@ -5,6 +5,17 @@ fn tool_driven_digest() -> String {
 }
 
 async fn put_instance_config(h: &Harness, instance_id: &str, config_b64: &str) -> Value {
+    let grant = {
+        let mut conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::issue_subject_association_grant(
+            &mut conn,
+            "agent-1",
+            h.subject_id,
+            i64::MAX,
+            now_nanos(),
+        )
+        .unwrap()
+    };
     let (st, body) = h
         .admin(
             Request::builder()
@@ -18,6 +29,7 @@ async fn put_instance_config(h: &Harness, instance_id: &str, config_b64: &str) -
                         "subject_id": h.subject_id,
                         "enabled": true,
                         "config_b64": config_b64,
+                        "subject_grant": grant,
                     })
                     .to_string(),
                 ))

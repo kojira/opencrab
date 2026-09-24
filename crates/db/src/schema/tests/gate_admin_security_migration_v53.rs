@@ -52,6 +52,7 @@ fn gate_admin_security_schema_is_installed_on_fresh_and_populated_databases() {
              PRAGMA user_version=52;",
         )
         .unwrap();
+    seed_minimal_s2_prerequisites(&populated);
     initialize(&populated).unwrap();
     assert_eq!(
         populated

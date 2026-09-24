@@ -6,7 +6,18 @@ fn setup_pre_v44(conn: &Connection) {
          DROP TABLE IF EXISTS gate_instances;
          DROP TRIGGER IF EXISTS agents_subject_id_insert_guard;
          DROP TRIGGER IF EXISTS agents_subject_id_assign;
+         DROP TRIGGER IF EXISTS agents_subject_id_advance_explicit;
          DROP TRIGGER IF EXISTS agents_subject_id_update_guard;
+         DROP TRIGGER IF EXISTS agents_subject_tombstone_delete_guard;
+         DROP TRIGGER IF EXISTS subject_allocator_no_delete;
+         DROP TRIGGER IF EXISTS subject_allocator_monotonic;
+         DROP TRIGGER IF EXISTS subject_tombstones_no_update;
+         DROP TRIGGER IF EXISTS subject_tombstones_no_delete;
+         DROP TRIGGER IF EXISTS subject_grants_no_delete;
+         DROP TRIGGER IF EXISTS subject_grants_consume_once;
+         DROP TABLE IF EXISTS subject_association_grants;
+         DROP TABLE IF EXISTS subject_tombstones;
+         DROP TABLE IF EXISTS subject_id_allocator;
          DROP INDEX IF EXISTS idx_agents_subject_id;
          ALTER TABLE agents DROP COLUMN subject_id;
          PRAGMA user_version = 43;",

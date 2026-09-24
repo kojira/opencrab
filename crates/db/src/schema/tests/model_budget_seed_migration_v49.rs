@@ -28,6 +28,7 @@ fn v48_to_v49_completes_existing_default_and_only_fills_known_null_budgets() {
     )
     .unwrap();
 
+    seed_minimal_s2_prerequisites(&conn);
     initialize(&conn).unwrap();
     initialize(&conn).unwrap();
 

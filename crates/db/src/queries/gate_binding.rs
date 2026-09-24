@@ -16,6 +16,8 @@ use super::{
 #[derive(Debug)]
 pub enum CreateGateBindingError {
     Conflict,
+    AddressInUse,
+    Closed,
     Store(anyhow::Error),
 }
 
@@ -253,7 +255,7 @@ impl CoreBindingService {
             .optional()?
         {
             if closed_at.is_some() {
-                return Err(CreateGateBindingError::Conflict);
+                return Err(CreateGateBindingError::Closed);
             }
             let session_id = match stored_session_id {
                 Some(value) => value,
@@ -277,13 +279,14 @@ impl CoreBindingService {
             params![request.instance_id, request.address],
             |row| row.get(0),
         )?;
-        if taken != 0
-            || session_occupied_by_other_open_binding(
-                tx,
-                request.session_id,
-                request.binding_id,
-            )?
-        {
+        if taken != 0 {
+            return Err(CreateGateBindingError::AddressInUse);
+        }
+        if session_occupied_by_other_open_binding(
+            tx,
+            request.session_id,
+            request.binding_id,
+        )? {
             return Err(CreateGateBindingError::Conflict);
         }
 
@@ -607,6 +610,60 @@ mod tests {
             .expect("byte-identical binding creation must be idempotent");
             tx.commit().unwrap();
         }
+        assert_eq!(counts(&conn), (1, 1, 1));
+    }
+
+    #[test]
+    fn s2_concurrent_byte_identical_binding_creation_converges_to_one_row() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binding-race.sqlite");
+        let db = crate::Db::open(path.to_str().unwrap()).unwrap();
+        let instance = {
+            let conn = db.lock().unwrap();
+            seed_agent_and_instance(&conn).0
+        };
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let db = db.clone();
+            let instance = instance.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                let mut conn = db.lock().unwrap();
+                barrier.wait();
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .unwrap();
+                let outcome = CoreBindingService::create_in_tx(
+                    &tx,
+                    &CoreBindingRequest {
+                        binding_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                        instance_id: &instance,
+                        address: "race-address",
+                        session_id: "race-session",
+                        session_title: "Race title",
+                        now: 1_700_000_000_000_000_000,
+                    },
+                )
+                .unwrap();
+                tx.commit().unwrap();
+                outcome
+            }));
+        }
+        barrier.wait();
+        let mut outcomes = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        outcomes.sort_by_key(|outcome| match outcome {
+            CoreBindingOutcome::Created => 0,
+            CoreBindingOutcome::Existing => 1,
+        });
+        assert_eq!(
+            outcomes,
+            vec![CoreBindingOutcome::Created, CoreBindingOutcome::Existing]
+        );
+        let conn = db.lock().unwrap();
         assert_eq!(counts(&conn), (1, 1, 1));
     }
 

@@ -74,6 +74,59 @@ async fn framing_invalid_utf8_json_non_object_and_duplicates_close() {
 }
 
 #[tokio::test]
+async fn s2_runtime_and_admin_binding_creation_delegate_to_one_idempotent_authority() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    let binding_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    let mut stream = h.connect().await;
+    hello_ok(&mut stream, &instance_id, 1).await;
+
+    for request_id in ["create-1", "create-2"] {
+        write_frame(
+            &mut stream,
+            &json!({
+                "id": request_id,
+                "m": "create_binding",
+                "binding_id": binding_id,
+                "address": "runtime-opaque-address",
+                "session_theme": "Runtime title"
+            }),
+        )
+        .await;
+        let response = read_until(&mut stream, |value| value["id"] == request_id).await;
+        assert_eq!(response["m"], "ok", "{response}");
+    }
+
+    let session_id = session_id_for_binding(&binding_id);
+    let (status, body) = h
+        .admin(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/gate-bindings/{binding_id}"))
+                .header(header::AUTHORIZATION, auth())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "instance_id": instance_id,
+                        "address": "runtime-opaque-address",
+                        "session": {"session_id": session_id, "title": "Runtime title"}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{status} {}", String::from_utf8_lossy(&body));
+    let conn = h.state.db.lock().unwrap();
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM gate_bindings", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn hello_unknown_fields_ignored_and_missing_fields_fail() {
     let h = Harness::start().await;
     let instance_id = uuid();
