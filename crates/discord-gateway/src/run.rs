@@ -679,3 +679,91 @@ mod caller_tests {
         assert_eq!(caller_for(&access, "400"), SaidCaller::Agent);
     }
 }
+
+#[cfg(test)]
+mod model_command_route_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn selected_acknowledged_address(
+        candidates: Vec<String>,
+        acknowledged: &[&str],
+    ) -> Option<String> {
+        let acknowledged = acknowledged.iter().copied().collect::<BTreeSet<_>>();
+        candidates
+            .into_iter()
+            .find(|address| acknowledged.contains(address.as_str()))
+    }
+
+    #[test]
+    fn owner_model_actions_use_a_same_agent_binding_from_an_unbound_channel() {
+        let agent = "agent-a";
+        let requested = "discord-agent-a-10-999";
+        let configured = [
+            "discord-agent-a-10-300".to_string(),
+            "discord-agent-a-10-200".to_string(),
+        ];
+        let acknowledged = ["discord-agent-a-10-200", "discord-agent-a-10-300"];
+
+        for action in ["autocomplete", "list", "set", "reset"] {
+            let selected = selected_acknowledged_address(
+                model_command_transport_candidates(
+                    agent,
+                    requested,
+                    &SaidCaller::Owner,
+                    &configured,
+                ),
+                &acknowledged,
+            );
+            assert_eq!(
+                selected.as_deref(),
+                Some("discord-agent-a-10-200"),
+                "{action} must use the deterministic same-agent transport"
+            );
+        }
+    }
+
+    #[test]
+    fn model_command_transport_prefers_the_exact_acknowledged_binding() {
+        let requested = "discord-agent-a-10-999";
+        let candidates = model_command_transport_candidates(
+            "agent-a",
+            requested,
+            &SaidCaller::Owner,
+            &["discord-agent-a-10-200".to_string()],
+        );
+
+        assert_eq!(
+            selected_acknowledged_address(candidates, &[requested]).as_deref(),
+            Some(requested)
+        );
+    }
+
+    #[test]
+    fn model_command_fallback_never_crosses_agents_or_serves_non_owners() {
+        let requested = "discord-agent-a-10-999";
+        let configured = [
+            "discord-agent-b-10-100".to_string(),
+            "discord-agent-a-10-200".to_string(),
+        ];
+
+        let owner = model_command_transport_candidates(
+            "agent-a",
+            requested,
+            &SaidCaller::Owner,
+            &configured,
+        );
+        assert_eq!(
+            selected_acknowledged_address(owner, &["discord-agent-b-10-100"]).as_deref(),
+            None
+        );
+
+        let non_owner = model_command_transport_candidates(
+            "agent-a",
+            requested,
+            &SaidCaller::TrustedUser,
+            &configured,
+        );
+        assert_eq!(non_owner, [requested]);
+    }
+}
