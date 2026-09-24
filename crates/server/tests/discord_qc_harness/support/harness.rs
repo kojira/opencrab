@@ -78,7 +78,6 @@ fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppSt
         intake: std::sync::Arc::new(Default::default()),
         intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
-        gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
@@ -130,14 +129,12 @@ pub(crate) async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     // run_one_heartbeat）が extgate session を解決し発火できる（未登録なら resolve_target None で
     // 配送 0＝赤）。descriptor は本番経路で登録するので、`register_production_descriptors` から
     // ExtgateFire が抜けると本ハーネスの heartbeat も赤になる（配線漏れを捕捉）。
-    opencrab_server::register_production_descriptors(&state.timed_fire_router);
-    state.timed_fire_router.register_shared(
-        opencrab_extgate::EXTGATE_TIMED_FIRE_KIND,
-        Arc::new(opencrab_extgate::ExtgateTimedFireSink::new(
+    state
+        .timed_fire_router
+        .register_sink(Arc::new(opencrab_extgate::ExtgateTimedFireSink::new(
             extgate.clone(),
             state.clone(),
-        )),
-    );
+        )));
 
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("gate.sock");

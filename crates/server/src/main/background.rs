@@ -9,7 +9,7 @@ use tokio::sync::watch;
 pub(super) fn spawn_background_tasks(
     state: &AppState,
     cfg: &AppConfig,
-    gate_socket: &Option<std::path::PathBuf>,
+    _gate_socket: &Option<std::path::PathBuf>,
     heartbeat_config_tx: watch::Sender<HeartbeatConfig>,
     heartbeat_config_rx: watch::Receiver<HeartbeatConfig>,
 ) -> std::thread::JoinHandle<()> {
@@ -106,72 +106,6 @@ pub(super) fn spawn_background_tasks(
         let scheduler_state = state.clone();
         tokio::spawn(async move {
             scheduler::run_scheduler(scheduler_state, heartbeat_config_rx).await;
-        });
-    }
-
-    // #603 / #628 条件 A: 時刻発火の**起動時セルフチェック**を「descriptor 登録簿 ↔ sink 登録簿の
-    // 双方向照合」へ集約する。型で配線は強制した（マネージャは router 無しでは構築できない）が、
-    // ゲートウェイのループが実際に起動して受け口を登録するのは非同期（特に Nostr は spawn 後）。
-    // **手書きの kind 列挙を持たない**: 両登録簿の kind 集合を突き合わせ、(a) sink はあるが
-    // descriptor が無い＝発火先を parse できない配線バグ、(b) descriptor が「立ち上がるべき」
-    // （`should_be_running` が env を引く）なのに受け口が 0＝時刻発火がどこにも届かない、を ERROR で
-    // 知らせる（#602 の黙った全 skip を、コンパイルに加えて運用でも二重に検知する）。新 transport を
-    // 足しても、この照合はその descriptor と sink を自動で拾う（手書きリストの更新漏れが起きない）。
-    {
-        let check_state = state.clone();
-        // External V3 gateways are discovered from DB-backed descriptors and live registration.
-        let mut configured_shared_kinds: std::collections::HashSet<&'static str> =
-            std::collections::HashSet::new();
-        // #925: gate socket があれば V3 レーン（extgate）は立ち上がる。`ExtgateFire::should_be_running`
-        // がこれを見る（sink は下の serve_uds ブロックで register_shared する）。含めないと起動時
-        // セルフチェックが extgate を見ない（should_be_running=false で sink 不在を正常と誤認）。
-        if gate_socket.is_some() {
-            configured_shared_kinds.insert(opencrab_extgate::EXTGATE_TIMED_FIRE_KIND);
-        }
-        tokio::spawn(async move {
-            // ループの起動→受け口登録は非同期なので猶予を置く（Discord は同期登録だが Nostr は
-            // spawn 後に登録するため）。
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            let Ok(conn) = check_state.db.lock() else {
-                tracing::error!("timed-fire: 起動時セルフチェックで db lock 取得に失敗");
-                return;
-            };
-            let env = opencrab_actions::TransportFireEnv {
-                conn: &conn,
-                configured_shared_kinds: &configured_shared_kinds,
-            };
-            let issues = check_state.timed_fire_router.self_check(&env);
-            if issues.is_empty() {
-                tracing::info!(
-                    "timed-fire: 起動時セルフチェック OK（descriptor ↔ sink 双方向照合・prefix 排他・受け口あり）"
-                );
-            }
-            for issue in issues {
-                match issue {
-                    opencrab_actions::TimedFireSelfCheckIssue::SinkWithoutDescriptor { kind } => {
-                        tracing::error!(
-                            kind,
-                            "timed-fire: sink はあるが descriptor が無い（発火先を parse できない＝配線バグ）"
-                        );
-                    }
-                    opencrab_actions::TimedFireSelfCheckIssue::ExpectedSinkMissing { kind } => {
-                        tracing::error!(
-                            kind,
-                            "timed-fire: 有効な受信ゲートウェイがあるのに受け口が 0（時刻発火が届かない）。配線/起動を確認"
-                        );
-                    }
-                    opencrab_actions::TimedFireSelfCheckIssue::PrefixCollision {
-                        owner,
-                        shadowed_by,
-                    } => {
-                        tracing::error!(
-                            owner,
-                            shadowed_by,
-                            "timed-fire: prefix 排他違反（2 つの transport が同じ session_id を parse する）。first-match で発火先が横取りされる。descriptor の parse 書式を分離せよ"
-                        );
-                    }
-                }
-            }
         });
     }
 

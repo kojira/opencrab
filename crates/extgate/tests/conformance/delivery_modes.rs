@@ -50,7 +50,11 @@ async fn hello_ok_digest(s: &mut UnixStream, instance_id: &str, revision: u64, d
         &json!({
             "id": "h1",
             "m": "hello",
-            "protocol": 2,
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "delivery_guarantee": "at_most_once_indeterminate",
+            "operations": [],
             "instance_id": instance_id,
             "revision": revision,
             "config_digest": digest,

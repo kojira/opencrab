@@ -83,8 +83,6 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("context budget fail-loud at startup: {e}"))?;
     }
 
-    opencrab_server::register_production_descriptors(&state.timed_fire_router);
-
     // 前プロセスから残った保留対話を**期限切れとして明示的に閉じる**（#196）。
     // 保留状態のメモリ上の登録簿はプロセスと寿命を共にするので、ここに残っている
     // `pending` 行は誰も応答を受け取れない。無言で放置すると「ボタンを押しても何も
@@ -143,17 +141,10 @@ async fn main() -> anyhow::Result<()> {
         // #925: V3 heartbeat 受け口（extgate）を共有 sink として登録。`extgate` と `runtime`（AppState）
         // が揃う唯一の点。発火先の session→binding 解決と live 判定は sink 内で行う（§1.5・fail-loud）。
         // 前例: 共有 Discord loop の register_shared（上方）。
-        state.timed_fire_router.register_shared(
-            opencrab_extgate::EXTGATE_TIMED_FIRE_KIND,
-            std::sync::Arc::new(opencrab_extgate::ExtgateTimedFireSink::new(
-                extgate.clone(),
-                state.clone(),
-            )),
-        );
-        tracing::info!(
-            transport = opencrab_extgate::EXTGATE_TIMED_FIRE_KIND,
-            "timed-fire: 受け口を登録（V3 extgate・heartbeat）"
-        );
+        state.timed_fire_router.register_sink(std::sync::Arc::new(
+            opencrab_extgate::ExtgateTimedFireSink::new(extgate.clone(), state.clone()),
+        ));
+        tracing::info!("timed-fire: generic runtime sink registered");
         tokio::spawn(async move {
             if let Err(e) = opencrab_extgate::serve_uds(listen_state, runtime, path).await {
                 tracing::error!(error = %e, "extgate listener halted");

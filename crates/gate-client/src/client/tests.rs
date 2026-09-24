@@ -12,6 +12,7 @@
                 "author".into(),
                 SayPolicy::AcceptToLiveQueue,
                 None,
+                crate::wire::RuntimeCapabilities::default(),
                 None,
             );
             {
@@ -66,6 +67,7 @@
             "author".into(),
             SayPolicy::AcceptToLiveQueue,
             None,
+            crate::wire::RuntimeCapabilities::default(),
             None,
         );
         {
@@ -125,6 +127,7 @@ async fn command_timeout_removes_pending_and_ignores_late_reply() {
         "author".to_string(),
         SayPolicy::AcceptToLiveQueue,
         None,
+        crate::wire::RuntimeCapabilities::default(),
         None,
     );
     let (write_tx, mut write_rx) = mpsc::unbounded_channel();

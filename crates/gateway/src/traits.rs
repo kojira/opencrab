@@ -19,14 +19,31 @@ pub enum GatewayCaller {
     TrustedUser,
 }
 
+/// Platform-neutral authorization class exposed to dynamic operation policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayCallerClass {
+    Owner,
+    CoAgent,
+    Trusted,
+    Guest,
+}
+
 impl GatewayCaller {
     /// 監査ログ・表示用の正準ラベル（権限判定には enum match を使うこと）。
     pub fn label(&self) -> &'static str {
+        self.label_and_authorization_class().0
+    }
+
+    pub fn authorization_class(&self) -> GatewayCallerClass {
+        self.label_and_authorization_class().1
+    }
+
+    fn label_and_authorization_class(&self) -> (&'static str, GatewayCallerClass) {
         match self {
-            GatewayCaller::Owner => "owner",
-            GatewayCaller::Agent => "agent",
-            GatewayCaller::CoAgent { .. } => "co_agent",
-            GatewayCaller::TrustedUser => "trusted_user",
+            GatewayCaller::Owner => ("owner", GatewayCallerClass::Owner),
+            GatewayCaller::Agent => ("agent", GatewayCallerClass::Guest),
+            GatewayCaller::CoAgent { .. } => ("co_agent", GatewayCallerClass::CoAgent),
+            GatewayCaller::TrustedUser => ("trusted_user", GatewayCallerClass::Trusted),
         }
     }
 
@@ -255,48 +272,25 @@ pub enum DispatchMode {
     Utterance,
 }
 
-/// core 既知の**発話クラス** operation 名か（R3 統括裁定 (c)・第一段）。
+/// A dynamically declared utterance's generic transcript projection.
 ///
-/// `say`（最終応答＝既に撃ちっぱなし配送）と DI operation の `reply`/`reaction`/`repost`。
-/// `resolve` は結果を読む**照会クラス**なのでここに含めない（従来どおり Dispatchable）。
-/// `follow`/`unfollow`/`kind0`/`upload` 等の書き込み系も第一段では対象外（従来維持）。
-/// 将来の外部 DI gateway 拡張は宣言 field（additive）で自ら名乗れるが、その導出は
-/// 呼び出し側（`ops_projection`）が本関数へフォールバックする（DESIGN §3.3.1 C2）。
-pub fn is_known_utterance_op(name: &str) -> bool {
-    matches!(name, "say" | "reply" | "reaction" | "repost")
-}
-
-/// 発話 op の payload から `(永続する発話本文, 関係注記の種別, 対象参照)` を **core 既知名**で
-/// 導く（R3 (c)・DESIGN-RESUME-SETTLE §3.3.1 C5/C6）。
-///
-/// 既知名の field 規約（reply=text/event・reaction=emoji/event・repost=event）を第一段では直接
-/// 読む。未知の発話 op は best-effort（text/event or target を探し kind=op 名）。この関数と
-/// [`is_known_utterance_op`] が「core 既知名」の集約点であり、extgate の generic DI 中核
-/// （operations / operation_calls / ops_projection）には op 名リテラルを置かない
-/// （DI-18 / §11.6 の generic 性 audit を割らない）。
+/// Classification never depends on the operation name. The gateway declaration owns dispatch and
+/// effect; core only retains a best-effort human-readable scalar plus an opaque target reference.
 pub fn utterance_body(
     operation: &str,
     payload: &serde_json::Value,
 ) -> (String, String, Option<String>) {
-    let s = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(str::to_string);
-    match operation {
-        "reply" => (
-            s("text").unwrap_or_default(),
-            "reply".to_string(),
-            s("event"),
-        ),
-        "reaction" => (
-            s("emoji").unwrap_or_else(|| "+".to_string()),
-            "reaction".to_string(),
-            s("event"),
-        ),
-        "repost" => (String::new(), "repost".to_string(), s("event")),
-        other => (
-            s("text").unwrap_or_default(),
-            other.to_string(),
-            s("event").or_else(|| s("target")),
-        ),
-    }
+    let string = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    };
+    let body = string("text")
+        .or_else(|| string("emoji"))
+        .unwrap_or_default();
+    let target = string("target").or_else(|| string("event"));
+    (body, operation.to_string(), target)
 }
 
 /// depth>=1 の sub-engine（`spawn_subtask` で起動した子）から見たツールの扱い。

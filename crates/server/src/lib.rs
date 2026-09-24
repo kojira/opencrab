@@ -110,26 +110,6 @@ pub struct AppState {
     /// メンテナンスループの二重 LLM 支出防止）。
     pub index_build_inflight: memory_maintenance::IndexBuildInflight,
     pub mcp_manager: Option<SharedMcpManager>,
-    /// 受信を持つ transport の per-agent ライフサイクル登録簿（#191 段階2）。
-    ///
-    /// **Discord / Nostr の名指しフィールドはもう無い**（PR4 で撤去）。共通操作
-    /// （起動 / 停止 / 生存確認）も transport 固有の操作（ツール実行の実体・鍵の
-    /// 払い出し）も、すべてここから種別名（[`opencrab_actions::gateway_kinds`]）で
-    /// 引く。後者は既定 `None` の capability accessor
-    /// （`gateway_actions_for` / `key_provisioning`）で、`GatewayActions` の
-    /// `a2ui_surface` / `text_delivery` と同じ流儀。
-    /// 未登録の種別は生存確認が **false**（共有ゲートウェイが処理を続ける側）。
-    ///
-    /// **内部可変**（[`opencrab_actions::AgentGatewayRegistry`] が中で `RwLock` を持つ）。
-    /// マネージャの生成順は仕様であり（Discord のマネージャは共有ゲートウェイへ渡す
-    /// state clone より前、Nostr はルータ構築の直前）、不変フィールドにすると
-    /// 「全マネージャが state 構築前に揃っていること」を要求してその順序と衝突する。
-    /// 後から登録できる形にして順序依存を構造的に消す（`voice_runtime` /
-    /// `subtask_lifecycle_notifier` と同じ流儀）。
-    ///
-    /// **MCP は入れない。** `crates/mcp` は受信を持たず transport ではない（道具の
-    /// 供給者で、注入は深さ 0 限定）。`mcp_manager` は名指しのまま残す。
-    pub gateways: Arc<opencrab_actions::AgentGatewayRegistry>,
     /// 非ブロック dispatch（#152 S3a）の subtask registry 置き場（#169）。
     /// REST は session_id キー、heartbeat は agent_id キーで貸し借りし、
     /// dispatcher と `cancel_subtask`（#161）が同一 registry を見るようにする。
@@ -255,23 +235,6 @@ impl AppState {
     }
 }
 
-/// 本番の transport 発火先 descriptor を **1 箇所で**登録する（#628・生存非依存）。
-///
-/// **登録の源はこの関数だけ**にする（main.rs の起動配線 / `test_app_state` / scheduler の
-/// `test_router` / 登録簿を反復する generic テストが**すべてこれを呼ぶ**）。個々の register を
-/// 各所に散らすと、本番へ足してテスト側への追記を忘れる隙ができ、prefix 衝突が本番でだけ
-/// 顕在化しうる（#628 が直した密結合と同じ形になる）。重複を消せば、generic テストが**本当に
-/// 本番登録簿を反復する**。Discord は feature gate の内側（クレート自体が居ない構成がある）。
-///
-/// なお起動時の防御は [`opencrab_actions::TimedFireRouter::self_check`]（本番登録簿そのもので
-/// prefix 衝突・登録漏れを検出）が担う。この 1 本化は「登録関数への追加忘れ」を減らす方で、
-/// 両方あって初めて塞がる。
-pub fn register_production_descriptors(router: &opencrab_actions::TimedFireRouter) {
-    // #925: V3 レーンの canonical session `extgate-<binding_id>`を受ける単一 descriptor。
-    // gate socket が無い構成でも登録は生存非依存（発火は sink 側の live 判定で fail-loud）。
-    router.register_descriptor(Arc::new(opencrab_extgate::ExtgateFire));
-}
-
 /// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件、gateway マネージャ無し）。
 ///
 /// crate 内のユニットテストと L1 採取器で共用。`AppState` にフィールドが増えたときの
@@ -283,7 +246,6 @@ pub(crate) fn test_app_state() -> AppState {
     // `register_production_descriptors`）。これが無いと set/get_my_heartbeat・schedule ツールが
     // 発火先を解決できず（登録簿が空）拒否される。
     let timed_fire_router = opencrab_actions::TimedFireRouter::new();
-    register_production_descriptors(&timed_fire_router);
     AppState {
         db: opencrab_db::Db::from_connection(conn),
         llm_router: SharedLlmRouter::new(LlmRouter::new()),
@@ -306,7 +268,6 @@ pub(crate) fn test_app_state() -> AppState {
         intake: Arc::new(config::IntakeConfig::default()),
         intake_wake: Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
-        gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
         session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
         timed_fire_router: Arc::new(timed_fire_router),

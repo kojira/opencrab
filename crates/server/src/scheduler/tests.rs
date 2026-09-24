@@ -30,9 +30,7 @@ async fn no_reply_only_schedule_turn_persists_no_speech_899() {
 /// （各所での register の散らしを避ける・ブロッカー対応）。rebuild_entries は登録簿へ
 /// 問い合わせて発火先を解決するので、ここは scheduler がその登録簿を正しく引くことを見る。
 fn test_router() -> opencrab_actions::TimedFireRouter {
-    let router = opencrab_actions::TimedFireRouter::new();
-    opencrab_server::register_production_descriptors(&router);
-    router
+    opencrab_actions::TimedFireRouter::new()
 }
 
 /// scheduler は登録簿経由で発火先を解決する（Discord は G ゲート対象・Nostr は非対象）。
@@ -293,10 +291,8 @@ fn entry_at(session: &str, next: Option<DateTime<Utc>>) -> Entry {
         next_fire_at: next,
         kind: FireKind::Heartbeat {
             target: FireTarget {
-                kind: "test-kind",
-                channel_id: String::new(),
-                guild_id: String::new(),
-                route: String::new(),
+                binding_id: "11111111-1111-4111-8111-111111111111".into(),
+                session_id: "session".into(),
             },
         },
     }

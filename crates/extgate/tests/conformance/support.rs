@@ -19,12 +19,13 @@ use opencrab_core::EngineResult;
 use opencrab_db::queries::{AgentRow, SessionRow, TRUSTED_PLATFORM_EXTGATE};
 use opencrab_extgate::completion::ExtgateCompletionSink;
 use opencrab_extgate::{
-    admin_router, invoke_and_wait, now_nanos, recover_stale_calls, recover_stale_deliveries,
-    serve_uds, session_id_for_binding, validate_listen_socket, DeliveryMode,
-    ExtgateOpsGatewayActions, ExtgateState, UNAUTHORIZED_BODY,
+    admin_router, invoke_and_wait, invoke_and_wait_with_requirement, now_nanos,
+    recover_stale_calls, recover_stale_deliveries, serve_uds, session_id_for_binding,
+    validate_listen_socket, DeliveryGuarantee, DeliveryMode, ExtgateOpsGatewayActions,
+    ExtgateState, UNAUTHORIZED_BODY,
 };
 use opencrab_gate_client::client::{InstanceClient, SaidOutcome};
-use opencrab_gateway::{GatewayActions, GatewayCallContext};
+use opencrab_gateway::{GatewayActions, GatewayCallContext, GatewayCaller};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -646,7 +647,11 @@ async fn hello_ok(s: &mut UnixStream, instance_id: &str, revision: u64) {
         &json!({
             "id": "h1",
             "m": "hello",
-            "protocol": 2,
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "delivery_guarantee": "at_most_once_indeterminate",
+            "operations": [],
             "instance_id": instance_id,
             "revision": revision,
             "config_digest": config_digest(),

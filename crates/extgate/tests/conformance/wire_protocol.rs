@@ -137,7 +137,11 @@ async fn hello_unknown_fields_ignored_and_missing_fields_fail() {
         &json!({
             "id": "h1",
             "m": "hello",
-            "protocol": 2,
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "delivery_guarantee": "at_most_once_indeterminate",
+            "operations": [],
             "instance_id": instance_id,
             "revision": 1,
             "config_digest": config_digest(),
@@ -180,7 +184,11 @@ async fn protocol_order_before_hello_and_second_hello() {
         &json!({
             "id": "h2",
             "m": "hello",
-            "protocol": 2,
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "delivery_guarantee": "at_most_once_indeterminate",
+            "operations": [],
             "instance_id": instance_id,
             "revision": 1,
             "config_digest": config_digest()
@@ -215,7 +223,11 @@ async fn hello_failures_do_not_register() {
             "protocol": 1,
             "instance_id": instance_id,
             "revision": 1,
-            "config_digest": config_digest()
+            "config_digest": config_digest(),
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "delivery_guarantee": "at_most_once_indeterminate",
+            "operations": []
         }),
     )
     .await;
@@ -229,7 +241,11 @@ async fn hello_failures_do_not_register() {
         &json!({
             "id": "h1",
             "m": "hello",
-            "protocol": 2,
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "delivery_guarantee": "at_most_once_indeterminate",
+            "operations": [],
             "instance_id": uuid(),
             "revision": 1,
             "config_digest": config_digest()
@@ -247,7 +263,11 @@ async fn hello_failures_do_not_register() {
         &json!({
             "id": "h1",
             "m": "hello",
-            "protocol": 2,
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "delivery_guarantee": "at_most_once_indeterminate",
+            "operations": [],
             "instance_id": disabled,
             "revision": 1,
             "config_digest": config_digest()
@@ -263,7 +283,11 @@ async fn hello_failures_do_not_register() {
         &json!({
             "id": "h1",
             "m": "hello",
-            "protocol": 2,
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "delivery_guarantee": "at_most_once_indeterminate",
+            "operations": [],
             "instance_id": instance_id,
             "revision": 9,
             "config_digest": config_digest()
@@ -279,7 +303,11 @@ async fn hello_failures_do_not_register() {
         &json!({
             "id": "h1",
             "m": "hello",
-            "protocol": 2,
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "delivery_guarantee": "at_most_once_indeterminate",
+            "operations": [],
             "instance_id": instance_id,
             "revision": 1,
             "config_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -300,7 +328,11 @@ async fn double_live_hello_is_instance_active() {
         &json!({
             "id": "h1",
             "m": "hello",
-            "protocol": 2,
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "delivery_guarantee": "at_most_once_indeterminate",
+            "operations": [],
             "instance_id": instance_id,
             "revision": 1,
             "config_digest": config_digest()

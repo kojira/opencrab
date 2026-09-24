@@ -53,18 +53,62 @@ pub async fn write_json<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-pub fn hello_frame(id: &str, instance_id: &str, revision: u64, config_digest: &str) -> Value {
-    json!({
-        "id": id,
-        "m": "hello",
-        "protocol": 2,
-        "instance_id": instance_id,
-        "revision": revision,
-        "config_digest": config_digest,
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalDelivery {
+    Automatic,
+    OperationDriven,
 }
 
-/// 能力宣言つき hello（DI 拡張 §3.1）。`operations` が None なら従来の hello（能力ゼロ）。
+impl FinalDelivery {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::OperationDriven => "operation_driven",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryGuarantee {
+    ExactlyOnce,
+    AtMostOnceIndeterminate,
+}
+
+impl DeliveryGuarantee {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactlyOnce => "exactly_once",
+            Self::AtMostOnceIndeterminate => "at_most_once_indeterminate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeCapabilities {
+    pub final_delivery: FinalDelivery,
+    pub delivery_guarantee: DeliveryGuarantee,
+}
+
+impl Default for RuntimeCapabilities {
+    fn default() -> Self {
+        Self {
+            final_delivery: FinalDelivery::Automatic,
+            delivery_guarantee: DeliveryGuarantee::AtMostOnceIndeterminate,
+        }
+    }
+}
+
+pub fn hello_frame(id: &str, instance_id: &str, revision: u64, config_digest: &str) -> Value {
+    hello_frame_with_capabilities(
+        id,
+        instance_id,
+        revision,
+        config_digest,
+        None,
+        RuntimeCapabilities::default(),
+    )
+}
+
 pub fn hello_frame_with_operations(
     id: &str,
     instance_id: &str,
@@ -72,11 +116,36 @@ pub fn hello_frame_with_operations(
     config_digest: &str,
     operations: Option<&Value>,
 ) -> Value {
-    let mut frame = hello_frame(id, instance_id, revision, config_digest);
-    if let Some(ops) = operations {
-        frame["operations"] = ops.clone();
-    }
-    frame
+    hello_frame_with_capabilities(
+        id,
+        instance_id,
+        revision,
+        config_digest,
+        operations,
+        RuntimeCapabilities::default(),
+    )
+}
+
+pub fn hello_frame_with_capabilities(
+    id: &str,
+    instance_id: &str,
+    revision: u64,
+    config_digest: &str,
+    operations: Option<&Value>,
+    capabilities: RuntimeCapabilities,
+) -> Value {
+    json!({
+        "id": id,
+        "m": "hello",
+        "protocol": 3,
+        "instance_id": instance_id,
+        "revision": revision,
+        "config_digest": config_digest,
+        "operation_protocol": 1,
+        "final_delivery": capabilities.final_delivery.as_str(),
+        "delivery_guarantee": capabilities.delivery_guarantee.as_str(),
+        "operations": operations.cloned().unwrap_or_else(|| json!([])),
+    })
 }
 
 pub fn create_binding_frame(
@@ -293,6 +362,7 @@ pub struct Invoke {
     pub id: String,
     pub binding_id: String,
     pub operation: String,
+    pub effect: String,
     pub continuation_id: Option<String>,
     pub payload: Value,
 }
@@ -501,6 +571,13 @@ fn parse_invoke(obj: &Value) -> Result<Invoke, FrameError> {
     let id = parse_request_id(&require_str(obj, "id")?)?;
     let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
     let operation = nonempty_str(obj, "operation")?;
+    if obj.get("invocation_protocol").and_then(Value::as_u64) != Some(1) {
+        return Err(FrameError::BadRequest);
+    }
+    let effect = nonempty_str(obj, "effect")?;
+    if !matches!(effect.as_str(), "read_only" | "state_change" | "utterance") {
+        return Err(FrameError::BadRequest);
+    }
     let payload = obj.get("payload").cloned().ok_or(FrameError::BadRequest)?;
     // context.continuation_id は第一段では常に null（callback 無し）。
     let continuation_id = match obj.get("context") {
@@ -516,6 +593,7 @@ fn parse_invoke(obj: &Value) -> Result<Invoke, FrameError> {
         id,
         binding_id,
         operation,
+        effect,
         continuation_id,
         payload,
     })

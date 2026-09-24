@@ -9,17 +9,6 @@ pub trait InvokeHandler: Send + Sync {
         operation: &str,
         payload: &Value,
     ) -> InvokeOutcome;
-
-    /// この operation が**発話クラス**（reply/reaction/repost 等・ユーザーに見える発言）か。
-    ///
-    /// #900: 発話は say と同じく「そのターンで発話した」証跡になる。gateway 固有の operation
-    /// 名を知るのは handler なので、発話クラスの判定は handler が担う（gate-client は非依存）。
-    /// これが `true` の invoke が Ok で決着すると、ターンは沈黙ではなくなり `CompletedNoReply`
-    /// 外部側の沈黙表現を立てない。resolve/follow等の照会・操作classは既定の`false`。
-    fn is_utterance(&self, operation: &str) -> bool {
-        let _ = operation;
-        false
-    }
 }
 
 /// invoke の三結果（§5.3）。gateway 側の観測を core へ正しく伝える。
@@ -220,6 +209,7 @@ pub struct InstanceClient {
     say_policy: SayPolicy,
     /// DI 拡張 §3.1: hello に載せる能力宣言配列（None は従来の hello＝能力ゼロ）。
     operations: Option<Value>,
+    runtime_capabilities: super::wire::RuntimeCapabilities,
     /// DI 拡張 §5: invoke の実行 handler（None は operation_unknown を返す）。
     invoke_handler: Option<Arc<dyn InvokeHandler>>,
     inner: Mutex<Inner>,
@@ -234,6 +224,7 @@ impl InstanceClient {
         author_id: String,
         say_policy: SayPolicy,
         operations: Option<Value>,
+        runtime_capabilities: super::wire::RuntimeCapabilities,
         invoke_handler: Option<Arc<dyn InvokeHandler>>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -243,6 +234,7 @@ impl InstanceClient {
             author_id,
             say_policy,
             operations,
+            runtime_capabilities,
             invoke_handler,
             inner: Mutex::new(Inner {
                 acknowledged: HashMap::new(),
@@ -274,6 +266,7 @@ impl InstanceClient {
             author_id,
             SayPolicy::AcceptToLiveQueue,
             None,
+            super::wire::RuntimeCapabilities::default(),
             None,
         ));
         attach(&client, socket, revision, &config_digest).await?;
@@ -306,7 +299,14 @@ impl InstanceClient {
         config_digest: String,
         say_policy: SayPolicy,
     ) -> Arc<Self> {
-        let client = Arc::new(Self::blank(instance_id, author_id, say_policy, None, None));
+        let client = Arc::new(Self::blank(
+            instance_id,
+            author_id,
+            say_policy,
+            None,
+            super::wire::RuntimeCapabilities::default(),
+            None,
+        ));
         tokio::spawn(reconnect_loop(
             client.clone(),
             socket,
@@ -327,6 +327,7 @@ impl InstanceClient {
         config_digest: String,
         say_policy: SayPolicy,
         operations: Option<Value>,
+        runtime_capabilities: super::wire::RuntimeCapabilities,
         invoke_handler: Arc<dyn InvokeHandler>,
     ) -> Arc<Self> {
         let client = Arc::new(Self::blank(
@@ -334,6 +335,7 @@ impl InstanceClient {
             author_id,
             say_policy,
             operations,
+            runtime_capabilities,
             Some(invoke_handler),
         ));
         tokio::spawn(reconnect_loop(

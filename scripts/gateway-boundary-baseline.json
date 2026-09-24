@@ -3,7 +3,7 @@
   "purpose": "Issue #1006 S0 line-specific reviewed burn-down; entries are debts or explicit gateway-store provenance, never wildcard exceptions",
   "review": {
     "status": "line-by-line-reviewed",
-    "finding_count": 451,
+    "finding_count": 414,
     "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance",
     "rule_counts": {
       "gateway-core-path": 16,
@@ -12,13 +12,12 @@
       "reviewed-gateway-dev-dependency": 2,
       "shared-concrete-route": 4,
       "shared-concrete-schema": 212,
-      "shared-concrete-vocabulary": 192,
-      "shared-gateway-name-branch": 2,
+      "shared-concrete-vocabulary": 157,
       "shared-platform-dto": 15
     },
     "classification_counts": {
       "dev-only-qc": 2,
-      "production-violation": 447,
+      "production-violation": 410,
       "valid-gateway-owned-store": 2
     },
     "valid_gateway_store_entries": [
@@ -294,7 +293,7 @@
     {
       "rule": "shared-concrete-route",
       "path": "crates/server/src/lib.rs",
-      "line": 381,
+      "line": 342,
       "snippet": "$apply!($target, \"/api/agents/{id}/channel-configs\", get => api::channel_configs::list_channel_configs, put => api::channel_configs::upsert_channel_config);",
       "classification": "production-violation",
       "violation": "V11",
@@ -304,7 +303,7 @@
     {
       "rule": "shared-concrete-route",
       "path": "crates/server/src/lib.rs",
-      "line": 382,
+      "line": 343,
       "snippet": "$apply!($target, \"/api/agents/{id}/channel-configs/{channel_id}\", delete => api::channel_configs::delete_channel_config);",
       "classification": "production-violation",
       "violation": "V11",
@@ -314,7 +313,7 @@
     {
       "rule": "shared-concrete-route",
       "path": "crates/server/src/lib.rs",
-      "line": 383,
+      "line": 344,
       "snippet": "$apply!($target, \"/api/agents/{id}/trusted-users\", get => api::trusted_users::list_trusted_users, post => api::trusted_users::add_trusted_user);",
       "classification": "production-violation",
       "violation": "V11",
@@ -324,7 +323,7 @@
     {
       "rule": "shared-concrete-route",
       "path": "crates/server/src/lib.rs",
-      "line": 384,
+      "line": 345,
       "snippet": "$apply!($target, \"/api/agents/{id}/trusted-users/{user_id}\", patch => api::trusted_users::update_trusted_user, delete => api::trusted_users::delete_trusted_user);",
       "classification": "production-violation",
       "violation": "V11",
@@ -414,7 +413,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 31,
+      "line": 30,
       "snippet": "pub mod channel_config;",
       "classification": "production-violation",
       "violation": "V11",
@@ -424,7 +423,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 34,
+      "line": 33,
       "snippet": "pub mod session_watch_policy;",
       "classification": "production-violation",
       "violation": "V11",
@@ -434,7 +433,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 48,
+      "line": 43,
       "snippet": "pub use channel_config::apply_channel_config;",
       "classification": "production-violation",
       "violation": "V11",
@@ -444,7 +443,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 65,
+      "line": 60,
       "snippet": "pub use session_watch_policy::{",
       "classification": "production-violation",
       "violation": "V11",
@@ -454,7 +453,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 66,
+      "line": 61,
       "snippet": "caller_policy_key, parse_session_watch_policy, watch_author_standing, ClassPolicy,",
       "classification": "production-violation",
       "violation": "V11",
@@ -464,7 +463,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 67,
+      "line": 62,
       "snippet": "SessionPolicyError, SessionWatchPolicy, WatchAllowSets, WatchAuthorStanding,",
       "classification": "production-violation",
       "violation": "V11",
@@ -1734,7 +1733,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 215,
+      "line": 225,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -1744,7 +1743,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 503,
+      "line": 521,
       "snippet": "Some(\"trusted_user\") => Ok(SaidCaller::TrustedUser),",
       "classification": "production-violation",
       "violation": "V11",
@@ -1754,7 +1753,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/gate-client/src/wire.rs",
-      "line": 146,
+      "line": 215,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -1774,8 +1773,8 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/gateway/src/traits.rs",
-      "line": 29,
-      "snippet": "GatewayCaller::TrustedUser => \"trusted_user\",",
+      "line": 46,
+      "snippet": "GatewayCaller::TrustedUser => (\"trusted_user\", GatewayCallerClass::Trusted),",
       "classification": "production-violation",
       "violation": "V10",
       "owner_stage": "S3",
@@ -1784,7 +1783,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/gateway/src/traits.rs",
-      "line": 64,
+      "line": 81,
       "snippet": "GatewayCaller::TrustedUser => CallerIdentity::TrustedUser,",
       "classification": "production-violation",
       "violation": "V10",
@@ -2533,96 +2532,6 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/agent_gateway.rs",
-      "line": 72,
-      "snippet": "pub type SharedAgentGateway = Arc<dyn AgentGatewayLifecycle>;",
-      "classification": "production-violation",
-      "violation": "V08",
-      "owner_stage": "S5",
-      "expires_when": "remove concrete lifecycle registry after daemon-owned lifecycle is live"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/agent_gateway.rs",
-      "line": 212,
-      "snippet": "pub trait AgentGatewayLifecycle: Send + Sync + 'static {",
-      "classification": "production-violation",
-      "violation": "V08",
-      "owner_stage": "S5",
-      "expires_when": "remove concrete lifecycle registry after daemon-owned lifecycle is live"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/agent_gateway.rs",
-      "line": 344,
-      "snippet": "pub struct AgentGatewayRegistry {",
-      "classification": "production-violation",
-      "violation": "V08",
-      "owner_stage": "S5",
-      "expires_when": "remove concrete lifecycle registry after daemon-owned lifecycle is live"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/agent_gateway.rs",
-      "line": 352,
-      "snippet": "gateway: SharedAgentGateway,",
-      "classification": "production-violation",
-      "violation": "V08",
-      "owner_stage": "S5",
-      "expires_when": "remove concrete lifecycle registry after daemon-owned lifecycle is live"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/agent_gateway.rs",
-      "line": 360,
-      "snippet": "impl AgentGatewayRegistry {",
-      "classification": "production-violation",
-      "violation": "V08",
-      "owner_stage": "S5",
-      "expires_when": "remove concrete lifecycle registry after daemon-owned lifecycle is live"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/agent_gateway.rs",
-      "line": 369,
-      "snippet": "pub fn register(&self, gateway: SharedAgentGateway) {",
-      "classification": "production-violation",
-      "violation": "V08",
-      "owner_stage": "S5",
-      "expires_when": "remove concrete lifecycle registry after daemon-owned lifecycle is live"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/agent_gateway.rs",
-      "line": 383,
-      "snippet": "pub fn get(&self, kind: &str) -> Option<SharedAgentGateway> {",
-      "classification": "production-violation",
-      "violation": "V08",
-      "owner_stage": "S5",
-      "expires_when": "remove concrete lifecycle registry after daemon-owned lifecycle is live"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/agent_gateway.rs",
-      "line": 394,
-      "snippet": "pub fn all(&self) -> Vec<SharedAgentGateway> {",
-      "classification": "production-violation",
-      "violation": "V08",
-      "owner_stage": "S5",
-      "expires_when": "remove concrete lifecycle registry after daemon-owned lifecycle is live"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/agent_gateway.rs",
-      "line": 425,
-      "snippet": "let pending: Vec<SharedAgentGateway> = {",
-      "classification": "production-violation",
-      "violation": "V08",
-      "owner_stage": "S5",
-      "expires_when": "remove concrete lifecycle registry after daemon-owned lifecycle is live"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/actions/src/channel_config.rs",
       "line": 18,
       "snippet": "let channel_id = match args.get(\"channel_id\").and_then(|v| v.as_str()) {",
@@ -2713,26 +2622,6 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/lib.rs",
-      "line": 38,
-      "snippet": "is_start_declined, AgentGatewayLifecycle, AgentGatewayRegistry, GatewayIdentityProvisioning,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/lib.rs",
-      "line": 39,
-      "snippet": "GatewayKeyProvisioning, ProvisionedKey, SharedAgentGateway, StartDeclined,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/actions/src/session_inbound/admit.rs",
       "line": 128,
       "snippet": "let is_dm = event.guild_id.is_empty();",
@@ -2790,46 +2679,6 @@
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
       "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/timed_fire.rs",
-      "line": 48,
-      "snippet": "pub channel_id: String,",
-      "classification": "production-violation",
-      "violation": "V09",
-      "owner_stage": "S3",
-      "expires_when": "replace platform-shaped routing with canonical generic binding/session IDs"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/timed_fire.rs",
-      "line": 51,
-      "snippet": "pub guild_id: String,",
-      "classification": "production-violation",
-      "violation": "V09",
-      "owner_stage": "S3",
-      "expires_when": "replace platform-shaped routing with canonical generic binding/session IDs"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/timed_fire.rs",
-      "line": 93,
-      "snippet": "pub channel_id: String,",
-      "classification": "production-violation",
-      "violation": "V09",
-      "owner_stage": "S3",
-      "expires_when": "replace platform-shaped routing with canonical generic binding/session IDs"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/timed_fire.rs",
-      "line": 95,
-      "snippet": "pub guild_id: String,",
-      "classification": "production-violation",
-      "violation": "V09",
-      "owner_stage": "S3",
-      "expires_when": "replace platform-shaped routing with canonical generic binding/session IDs"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -3403,66 +3252,6 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/extgate/src/fire.rs",
-      "line": 57,
-      "snippet": "channel_id: String::new(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/extgate/src/fire.rs",
-      "line": 58,
-      "snippet": "guild_id: String::new(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/extgate/src/fire.rs",
-      "line": 75,
-      "snippet": "channel_id: String::new(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/extgate/src/fire.rs",
-      "line": 76,
-      "snippet": "guild_id: String::new(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/extgate/src/fire.rs",
-      "line": 117,
-      "snippet": "channel_id: String::new(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/extgate/src/fire.rs",
-      "line": 118,
-      "snippet": "guild_id: String::new(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
       "line": 118,
       "snippet": "channel_id: row.address.as_str(),",
@@ -3516,16 +3305,6 @@
       "path": "crates/extgate/src/inbound/turn.rs",
       "line": 142,
       "snippet": "channel_id: Some(&address),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/gateway/src/lib.rs",
-      "line": 8,
-      "snippet": "is_known_utterance_op, utterance_body, DispatchMode, GatewayActionDef, GatewayActionResult,",
       "classification": "production-violation",
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
@@ -3813,106 +3592,6 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_fire.rs",
-      "line": 21,
-      "snippet": "if target.channel_id.trim().is_empty() {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_fire.rs",
-      "line": 24,
-      "snippet": "target.channel_id.clone()",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_fire.rs",
-      "line": 55,
-      "snippet": "fn record_heartbeat_fire(db: &opencrab_db::Db, agent_id: &str, channel_id: &str, source: &str) {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_fire.rs",
-      "line": 59,
-      "snippet": "let result = serde_json::json!({ \"channel_id\": channel_id, \"source\": source });",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_fire.rs",
-      "line": 103,
-      "snippet": "let channel_id = target.channel_id.clone();",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_fire.rs",
-      "line": 104,
-      "snippet": "let guild_id = target.guild_id.clone();",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_fire.rs",
-      "line": 113,
-      "snippet": "opencrab_db::queries::resolve_heartbeat_instructions(&conn, agent_id, &channel_id);",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_fire.rs",
-      "line": 139,
-      "snippet": "channel_id: channel_id.clone(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_fire.rs",
-      "line": 140,
-      "snippet": "guild_id,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_fire.rs",
-      "line": 146,
-      "snippet": "record_heartbeat_fire(db, agent_id, &channel_id, instructions_source);",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/heartbeat_instructions.rs",
       "line": 131,
       "snippet": "let channel_id = match args.get(\"channel_id\").and_then(|v| v.as_str()) {",
@@ -4163,36 +3842,6 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/lib.rs",
-      "line": 132,
-      "snippet": "pub gateways: Arc<opencrab_actions::AgentGatewayRegistry>,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/lib.rs",
-      "line": 309,
-      "snippet": "gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/main/bootstrap.rs",
-      "line": 200,
-      "snippet": "gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/peer_review.rs",
       "line": 81,
       "snippet": "\"description\": \"レビュー対象のRAWコンテンツ（diff・出力・トレース等）。要約せずそのまま渡すこと。上限12000文字（超える場合はワークスペースに保存してdiscord_send_fileで添付する）。\"",
@@ -4370,26 +4019,6 @@
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
       "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-gateway-name-branch",
-      "path": "crates/extgate/src/ops_projection.rs",
-      "line": 112,
-      "snippet": ".unwrap_or_else(|| opencrab_gateway::is_known_utterance_op(&decl.name))",
-      "classification": "production-violation",
-      "violation": "V10",
-      "owner_stage": "S3",
-      "expires_when": "derive routing solely from dynamic declaration metadata"
-    },
-    {
-      "rule": "shared-gateway-name-branch",
-      "path": "crates/gateway/src/traits.rs",
-      "line": 265,
-      "snippet": "pub fn is_known_utterance_op(name: &str) -> bool {",
-      "classification": "production-violation",
-      "violation": "V10",
-      "owner_stage": "S3",
-      "expires_when": "derive routing solely from dynamic declaration metadata"
     },
     {
       "rule": "shared-platform-dto",
@@ -4625,13 +4254,22 @@
       "expires_when": "never delete or rewrite persisted conversation/history evidence during boundary cleanup"
     },
     {
+      "violation": "V08",
+      "classification": "closed-production-violation",
+      "path": "crates/extgate/tests/s3_static_boundary.rs",
+      "line": 56,
+      "needle": "s3_shared_and_server_production_have_no_concrete_lifecycle_registry",
+      "owner_stage": "S3",
+      "expires_when": "retain the static assertion that shared/server production has no concrete lifecycle registry"
+    },
+    {
       "violation": "V16",
-      "classification": "production-extensibility-violation",
-      "path": "crates/gateway/src/traits.rs",
-      "line": 265,
-      "needle": "is_known_utterance_op",
+      "classification": "production-extensibility-proof",
+      "path": "crates/extgate/src/operations/tests.rs",
+      "line": 160,
+      "needle": "s3_arbitrary_operation_name_is_classified_only_by_complete_metadata",
       "owner_stage": "S3/S7/S9",
-      "expires_when": "synthetic new gateway passes without core/shared/server source, schema, migration, or redeployment change"
+      "expires_when": "retain synthetic arbitrary-name proof through zero-core-change S11 validation"
     }
   ]
 }

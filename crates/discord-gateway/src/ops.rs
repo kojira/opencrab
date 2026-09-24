@@ -42,15 +42,18 @@ pub fn operation_declarations() -> Value {
     // 投稿・操作系は sub-engine へ出さない（not_exposed）。イベント参照は conversation_bound
     // （DI-02 の既存 gateway tool 可視性規則に対応・D17-13 で legacy `discord_add_reaction` の
     // Blocked+ConversationBound と同等以上に厳格であることを確認済み）。
-    let conv = json!({"sub_engine": "not_exposed", "sharing": "conversation_bound"});
-    let decl = |name: &str, desc: &str, input: Value| {
+    let decl = |name: &str, desc: &str, input: Value, dispatch: &str, effect: &str| {
         json!({
             "name": name,
             "description": desc,
             "input_schema": input,
             "output_schema": null,
             "callback_schema": null,
-            "class": conv,
+            "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
+            "dispatch": dispatch,
+            "sub_engine": "not_exposed",
+            "sharing": "conversation_bound",
+            "effect": effect,
         })
     };
     let str_prop = |desc: &str| json!({"type": "string", "description": desc});
@@ -65,6 +68,8 @@ pub fn operation_declarations() -> Value {
                 "event": ref_prop("対象メッセージの短縮参照（例 e7）"),
                 "emoji": str_prop("リアクション絵文字（例 👍）")
             }}),
+            "utterance",
+            "utterance",
         ),
         decl(
             "reply",
@@ -73,6 +78,8 @@ pub fn operation_declarations() -> Value {
                 "event": ref_prop("返信先メッセージの短縮参照（例 e7）"),
                 "text": str_prop("返信本文")
             }}),
+            "utterance",
+            "utterance",
         ),
         decl(
             "resolve",
@@ -80,6 +87,8 @@ pub fn operation_declarations() -> Value {
             json!({"type": "object", "required": ["ref"], "properties": {
                 "ref": ref_prop("u番号またはe番号の短縮参照（例 u2 / e7）")
             }}),
+            "background",
+            "read_only",
         ),
     ])
 }
@@ -156,11 +165,6 @@ async fn deliver_reply(
 
 #[async_trait]
 impl InvokeHandler for DiscordInvokeHandler {
-    // #900: reply/reaction は発話クラス（ユーザーに見える発言）。resolve は照会クラスなので false。
-    fn is_utterance(&self, operation: &str) -> bool {
-        matches!(operation, "reply" | "reaction")
-    }
-
     async fn handle(
         &self,
         call_id: &str,
@@ -242,8 +246,9 @@ mod tests {
         assert_eq!(names, vec!["reaction", "reply", "resolve"]);
         for d in arr {
             assert!(d["callback_schema"].is_null(), "フェーズ1は callback なし");
-            assert_eq!(d["class"]["sub_engine"], "not_exposed");
-            assert_eq!(d["class"]["sharing"], "conversation_bound");
+            assert_eq!(d["sub_engine"], "not_exposed");
+            assert_eq!(d["sharing"], "conversation_bound");
+            assert!(d["authorization"]["allowed_callers"].is_array());
         }
         for name in ["reaction", "reply"] {
             let description = arr

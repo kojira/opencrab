@@ -53,10 +53,9 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) ->
         .await
     {
         InvokeOutcome::Ok(result) => {
-            // #900: 発話クラス（reply/reaction/repost）の invoke が Ok で決着したら、進行中ターンを
-            // 「発話あり」に印づける。これで ended 時に沈黙（CompletedNoReply → 🤐）を立てない。
-            // 照会・操作クラス（resolve 等）は is_utterance=false なので印づけない（沈黙判定は不変）。
-            if handler.is_utterance(&inv.operation) {
+            // The versioned invocation envelope carries the declaration's generic effect. The
+            // client never classifies an operation by name.
+            if inv.effect == "utterance" {
                 let mut inner = client.inner.lock().await;
                 if let Some(turn) = inner.pending_turn.get_mut(&inv.binding_id) {
                     turn.saw_utterance = true;

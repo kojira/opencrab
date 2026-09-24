@@ -338,7 +338,11 @@ impl Session {
         let hello = self.mock.recv().await;
         let expect = json!({
             "m": "hello",
-            "protocol": 2,
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "delivery_guarantee": "at_most_once_indeterminate",
+            "operations": [],
             "instance_id": ids["instance_id"],
             "revision": ids["revision"],
             "config_digest": ids["config_digest"],

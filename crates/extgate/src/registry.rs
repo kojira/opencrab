@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 
 use crate::commands::CommandRegistry;
 use crate::error::{ErrorCode, GateError};
-use crate::operations::GatewayOperationDeclaration;
+use crate::operations::{DeliveryGuarantee, FinalDelivery, GatewayOperationDeclaration};
 use crate::turn_queue::SessionTurnQueues;
 
 /// hello 済みで未 close の接続。
@@ -26,8 +26,10 @@ pub struct LiveEntry {
     pub pending: HashMap<String, Pending>,
     /// hello で宣言された immutable な能力 snapshot（DI 拡張 §4.1）。欠落=能力ゼロ。
     pub declarations: Arc<Vec<GatewayOperationDeclaration>>,
-    /// 宣言配列の canonical digest（DI-04）。宣言なしは空 string。
+    /// Digest of the full versioned runtime capability snapshot.
     pub declaration_digest: String,
+    pub final_delivery: FinalDelivery,
+    pub delivery_guarantee: DeliveryGuarantee,
 }
 
 impl LiveEntry {

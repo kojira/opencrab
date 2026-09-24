@@ -402,18 +402,11 @@ mod tests {
         assert_eq!(kind, "nostr");
 
         let router = opencrab_actions::TimedFireRouter::new();
-        router.register_descriptor(std::sync::Arc::new(opencrab_extgate::ExtgateFire));
         let target = router
             .resolve_persisted_target(&conn, &sid, "a1")
-            .expect("reused protocol session must resolve through generic extgate metadata");
-        assert_eq!(
-            router
-                .descriptor(target.kind)
-                .unwrap()
-                .build_session_id(&target, "a1"),
-            sid,
-            "timed fire must preserve the provisioned canonical session"
-        );
+            .expect("reused protocol session must resolve through generic binding metadata");
+        assert_eq!(target.session_id, sid);
+        assert_eq!(target.binding_id, plans[0].binding_id);
     }
 
     #[test]

@@ -74,11 +74,13 @@ fn seed_hb_config(core: &Core, session_id: &str) {
 /// scheduler 実経路（`resolve_target` → `run_one_heartbeat`）で heartbeat を 1 回起こす。
 /// extgate descriptor 未登録なら `resolve_target` が None を返し発火しない（現 tip の #925 未実装状態）。
 async fn fire_heartbeat_via_scheduler_seam(core: &Core, session_id: &str) {
-    if let Some(target) = core
-        .state
-        .timed_fire_router
-        .resolve_target(session_id, AGENT_ID)
-    {
+    let target = {
+        let conn = core.state.db.lock().unwrap();
+        core.state
+            .timed_fire_router
+            .resolve_persisted_target(&conn, session_id, AGENT_ID)
+    };
+    if let Some(target) = target {
         opencrab_server::heartbeat_fire::run_one_heartbeat(&core.state, AGENT_ID, &target).await;
     }
 }

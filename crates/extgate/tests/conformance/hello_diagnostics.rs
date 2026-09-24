@@ -110,7 +110,11 @@ async fn hello_ops_raw(
         &json!({
             "id": id,
             "m": "hello",
-            "protocol": 2,
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "delivery_guarantee": "at_most_once_indeterminate",
+            "operations": [],
             "instance_id": instance_id,
             "revision": revision,
             "config_digest": config_digest_val,
@@ -129,7 +133,9 @@ fn ops_one(field_type: &str, desc: &str) -> Value {
         "input_schema": {"type": "object", "properties": {"emoji": {"type": field_type}}},
         "output_schema": null,
         "callback_schema": null,
-        "class": {"sub_engine": "allowed", "sharing": "conversation_bound"}
+        "authorization": {"allowed_callers": ["owner"]},
+        "dispatch": "background", "sub_engine": "allowed",
+        "sharing": "conversation_bound", "effect": "state_change"
     }])
 }
 

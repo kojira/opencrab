@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::error::{ErrorCode, GateError};
 use crate::ids::now_nanos;
+use crate::operations::DeliveryGuarantee;
 use crate::protocol::{invoke_frame, write_json};
 use crate::registry::{ExtgateState, OperationOutcome, Pending};
 
@@ -47,8 +48,20 @@ pub async fn invoke_and_wait(
     operation: &str,
     payload: &Value,
 ) -> Result<Value, InvokeError> {
+    invoke_and_wait_with_requirement(state, instance_id, binding_id, operation, None, payload).await
+}
+
+/// Versioned invocation with an optional independently raised delivery requirement.
+pub async fn invoke_and_wait_with_requirement(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    operation: &str,
+    invocation_requirement: Option<DeliveryGuarantee>,
+    payload: &Value,
+) -> Result<Value, InvokeError> {
     // §10.6 step 1: live + acknowledged binding + live declaration を再検査。
-    let writer = {
+    let (writer, declaration, declaration_digest, required_delivery_guarantee) = {
         let reg = state
             .lock_registry()
             .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
@@ -58,10 +71,33 @@ pub async fn invoke_and_wait(
         if !live.acknowledged.contains(binding_id) {
             return Err(InvokeError::new(ErrorCode::NotConnected));
         }
-        if live.declaration(operation).is_none() {
-            return Err(InvokeError::new(ErrorCode::OperationUnknown));
+        let declaration = live
+            .declaration(operation)
+            .cloned()
+            .ok_or_else(|| InvokeError::new(ErrorCode::OperationUnknown))?;
+        let declared = declaration.policy.required_delivery_guarantee;
+        if matches!(declared, Some(DeliveryGuarantee::ExactlyOnce))
+            && matches!(
+                invocation_requirement,
+                Some(DeliveryGuarantee::AtMostOnceIndeterminate)
+            )
+        {
+            return Err(InvokeError::new(ErrorCode::OperationRejected));
         }
-        live.writer.clone()
+        let required = if matches!(invocation_requirement, Some(DeliveryGuarantee::ExactlyOnce)) {
+            Some(DeliveryGuarantee::ExactlyOnce)
+        } else {
+            declared
+        };
+        if required.is_some_and(|required| !live.delivery_guarantee.satisfies(required)) {
+            return Err(InvokeError::new(ErrorCode::OperationRejected));
+        }
+        (
+            live.writer.clone(),
+            declaration,
+            live.declaration_digest.clone(),
+            required,
+        )
     };
 
     let call_id = Uuid::new_v4().to_string();
@@ -129,7 +165,15 @@ pub async fn invoke_and_wait(
     // close 側で indeterminate 化＋oneshot に Indeterminate 送出）。
     if write_json(
         &writer,
-        &invoke_frame(&call_id, binding_id, operation, None, payload),
+        &invoke_frame(
+            &call_id,
+            binding_id,
+            &declaration_digest,
+            &declaration,
+            None,
+            required_delivery_guarantee,
+            payload,
+        ),
     )
     .await
     .is_err()
@@ -187,7 +231,7 @@ pub async fn invoke_utterance(
     provided_call_id: Option<&str>,
 ) -> Result<(), InvokeError> {
     // live + acknowledged binding + live declaration を再検査（invoke_and_wait と同じ）。
-    let writer = {
+    let (writer, declaration, declaration_digest, required_delivery_guarantee) = {
         let reg = state
             .lock_registry()
             .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
@@ -197,10 +241,20 @@ pub async fn invoke_utterance(
         if !live.acknowledged.contains(binding_id) {
             return Err(InvokeError::new(ErrorCode::NotConnected));
         }
-        if live.declaration(operation).is_none() {
-            return Err(InvokeError::new(ErrorCode::OperationUnknown));
+        let declaration = live
+            .declaration(operation)
+            .cloned()
+            .ok_or_else(|| InvokeError::new(ErrorCode::OperationUnknown))?;
+        let required = declaration.policy.required_delivery_guarantee;
+        if required.is_some_and(|required| !live.delivery_guarantee.satisfies(required)) {
+            return Err(InvokeError::new(ErrorCode::OperationRejected));
         }
-        live.writer.clone()
+        (
+            live.writer.clone(),
+            declaration,
+            live.declaration_digest.clone(),
+            required,
+        )
     };
 
     let call_id = provided_call_id
@@ -307,7 +361,15 @@ pub async fn invoke_utterance(
     // invoke を exact 1 回 write（wire への invoke は従来どおり・gateway が publish）。
     if write_json(
         &writer,
-        &invoke_frame(&call_id, binding_id, operation, None, payload),
+        &invoke_frame(
+            &call_id,
+            binding_id,
+            &declaration_digest,
+            &declaration,
+            None,
+            required_delivery_guarantee,
+            payload,
+        ),
     )
     .await
     .is_err()

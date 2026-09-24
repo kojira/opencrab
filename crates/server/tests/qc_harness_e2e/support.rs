@@ -446,7 +446,6 @@ fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppSt
         intake: std::sync::Arc::new(Default::default()),
         intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
-        gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
@@ -484,10 +483,7 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     // #925: 本番と同じ descriptor 登録＋ V3 heartbeat 受け口を実型で配線する（Nostr レーンも
     // canonical session は `extgate-<binding_id>` で同一 descriptor が受ける）。未登録なら
     // resolve_target None で配送 0＝赤。
-    opencrab_server::register_production_descriptors(&state.timed_fire_router);
-    state.timed_fire_router.register_shared(
-        opencrab_extgate::EXTGATE_TIMED_FIRE_KIND,
-        Arc::new(opencrab_extgate::ExtgateTimedFireSink::new(
+    state.timed_fire_router.register_sink(Arc::new(opencrab_extgate::ExtgateTimedFireSink::new(
             extgate.clone(),
             state.clone(),
         )),

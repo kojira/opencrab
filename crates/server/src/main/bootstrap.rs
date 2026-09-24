@@ -197,7 +197,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         mcp_manager: None,
         // 受信を持つ transport の登録簿（#191 段階2 PR2）。空で作り、各マネージャの
         // 生成箇所から後で `register` する（内部可変なので生成順を変えずに済む）。
-        gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         subtask_registries: Arc::new(opencrab_server::subtask_registries::SubtaskRegistries::new()),
         // #588 Stage 2: プロセス全体で 1 つの per-session 直列化ロック。heartbeat・scheduler・
         // gateway受信ループが同じ実体を共有し、同一セッションのターンを直列化する。

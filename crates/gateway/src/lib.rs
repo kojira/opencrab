@@ -5,7 +5,7 @@ pub mod traits;
 
 pub use message::{Channel, ContentPart, IncomingMessage, MessageContent, MessageSource, Sender};
 pub use traits::{
-    is_known_utterance_op, utterance_body, DispatchMode, GatewayActionDef, GatewayActionResult,
-    GatewayActions, GatewayCallContext, GatewayCaller, SubEngineAccess, ToolClass, ToolSharing,
+    utterance_body, DispatchMode, GatewayActionDef, GatewayActionResult, GatewayActions,
+    GatewayCallContext, GatewayCaller, GatewayCallerClass, SubEngineAccess, ToolClass, ToolSharing,
     PEER_REVIEW_REPLY_MARKER, PEER_REVIEW_REQUEST_MARKER,
 };

@@ -115,7 +115,7 @@ async fn connect_client(sock: &std::path::Path) -> Arc<InstanceClient> {
 async fn hello_and_bind(mock: &mut MockCore) {
     let hello = mock.recv().await;
     assert_eq!(hello["m"], "hello");
-    assert_eq!(hello["protocol"], 2);
+    assert_eq!(hello["protocol"], 3);
     assert_eq!(hello["instance_id"], INSTANCE);
     mock.send(&json!({"id": hello["id"], "m": "ok"})).await;
     mock.send(&json!({

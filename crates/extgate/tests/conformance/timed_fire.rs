@@ -1,12 +1,11 @@
-use opencrab_actions::{TimedFireRequest, TimedFireSink, TransportFire};
-use opencrab_extgate::{ExtgateFire, ExtgateTimedFireSink};
+use opencrab_actions::{TimedFireRequest, TimedFireSink};
+use opencrab_extgate::ExtgateTimedFireSink;
 
-fn timed_fire_request(session_id: &str, agent_id: &str) -> TimedFireRequest {
+fn timed_fire_request(binding_id: &str, session_id: &str, agent_id: &str) -> TimedFireRequest {
     TimedFireRequest {
+        binding_id: binding_id.to_string(),
         session_id: session_id.to_string(),
         agent_id: agent_id.to_string(),
-        channel_id: String::new(),
-        guild_id: String::new(),
         prompt: "timed fire".into(),
         caller: CallerIdentity::Owner,
     }
@@ -61,14 +60,14 @@ async fn timed_fire_sink_revalidates_lifecycle_and_delivers_once_after_reconnect
     assert_eq!(bind["m"], "bind");
     assert_eq!(bind["binding_id"], binding_id);
 
-    sink.fire_timed_turn(timed_fire_request(alias, "agent-1"));
+    sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "agent-1"));
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
     assert!(read_frame_opt(&mut first).await.is_none());
 
     drop(first);
     wait_registry_absent(&h, &instance_id).await;
-    sink.fire_timed_turn(timed_fire_request(alias, "agent-1"));
+    sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "agent-1"));
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
 
@@ -77,17 +76,11 @@ async fn timed_fire_sink_revalidates_lifecycle_and_delivers_once_after_reconnect
     assert_eq!(ack_bind(&mut reconnected).await, binding_id);
     wait_binding_acknowledged(&h, &instance_id, &binding_id).await;
 
-    sink.fire_timed_turn(timed_fire_request(alias, "other-agent"));
+    sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "other-agent"));
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
     assert!(read_frame_opt(&mut reconnected).await.is_none());
 
-    let resolved = {
-        let conn = h.state.db.lock().unwrap();
-        ExtgateFire
-            .resolve_persisted(&conn, alias, "agent-1")
-            .expect("alias resolves before close")
-    };
     h.state
         .db
         .lock()
@@ -97,7 +90,7 @@ async fn timed_fire_sink_revalidates_lifecycle_and_delivers_once_after_reconnect
             rusqlite::params![now_nanos(), binding_id],
         )
         .unwrap();
-    sink.fire_timed_turn(timed_fire_request(&resolved.route, "agent-1"));
+    sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "agent-1"));
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
     assert!(read_frame_opt(&mut reconnected).await.is_none());
@@ -111,7 +104,7 @@ async fn timed_fire_sink_revalidates_lifecycle_and_delivers_once_after_reconnect
             [&binding_id],
         )
         .unwrap();
-    sink.fire_timed_turn(timed_fire_request(alias, "agent-1"));
+    sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "agent-1"));
     let say = read_until(&mut reconnected, |frame| frame["m"] == "say").await;
     assert_eq!(say["binding_id"], binding_id);
     assert_eq!(say["payload"]["text"], "hello from agent");

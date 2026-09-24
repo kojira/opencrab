@@ -104,6 +104,10 @@ pub fn spawn_instance(
         digest,
         SayPolicy::AcceptToLiveQueue,
         Some(crate::ops::operation_declarations()),
+        opencrab_gate_client::RuntimeCapabilities {
+            final_delivery: opencrab_gate_client::FinalDelivery::OperationDriven,
+            delivery_guarantee: opencrab_gate_client::DeliveryGuarantee::ExactlyOnce,
+        },
         invoke_handler,
     );
     let metrics = Arc::new(SaidMetrics::default());

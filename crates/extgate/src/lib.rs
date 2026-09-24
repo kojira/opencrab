@@ -29,16 +29,21 @@ pub use delivery_mode::{
     adjust_inbound_effect, delivery_mode_from_config_bytes, dispatches_v3_say, DeliveryMode,
 };
 pub use error::{ErrorCode, GateError, UNAUTHORIZED_BODY};
-pub use fire::{ExtgateFire, ExtgateTimedFireSink, EXTGATE_TIMED_FIRE_KIND};
+pub use fire::ExtgateTimedFireSink;
 pub use ids::{config_digest, encode_config_b64, now_nanos, session_id_for_binding};
 pub use inbound::channel_whitelisted;
 pub use listen::{
     enqueue_bind, recover_stale_deliveries, serve_uds, validate_listen_socket, wait_bind_ack,
     EnqueueBindOutcome,
 };
-pub use operation_calls::{invoke_and_wait, invoke_utterance, recover_stale_calls, InvokeError};
+pub use operation_calls::{
+    invoke_and_wait, invoke_and_wait_with_requirement, invoke_utterance, recover_stale_calls,
+    InvokeError,
+};
 pub use operations::{
-    declaration_digest, validate_operations, GatewayOperationDeclaration, OperationClass, Sharing,
+    declaration_digest, runtime_declaration_digest, validate_operations,
+    validate_runtime_compatibility, AllowedCaller, DeliveryGuarantee, FinalDelivery,
+    GatewayOperationDeclaration, OperationDispatch, OperationEffect, OperationPolicy, Sharing,
     SubEngine,
 };
 pub use ops_projection::ExtgateOpsGatewayActions;

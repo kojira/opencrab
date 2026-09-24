@@ -1,5 +1,4 @@
 pub mod a2ui;
-pub mod agent_gateway;
 pub mod agent_runtime;
 pub mod bridge;
 pub mod common;
@@ -34,10 +33,6 @@ pub mod session_inbound;
 pub mod session_watch_policy;
 
 pub use a2ui::{send_ui, send_ui_definition};
-pub use agent_gateway::{
-    is_start_declined, AgentGatewayLifecycle, AgentGatewayRegistry, GatewayIdentityProvisioning,
-    GatewayKeyProvisioning, ProvisionedKey, SharedAgentGateway, StartDeclined,
-};
 pub use agent_runtime::AgentRuntime;
 pub use bridge::{
     tool_policy, BridgedExecutor, EffectiveToolDefinition, ExecutorRuntimeState,
@@ -80,8 +75,7 @@ pub use subtask_notify::{
 };
 pub use subtask_registries::SubtaskRegistries;
 pub use timed_fire::{
-    new_turn_id, prompt_preview, FireTarget, TimedFireRequest, TimedFireRouter,
-    TimedFireSelfCheckIssue, TimedFireSink, TransportFire, TransportFireEnv,
+    new_turn_id, prompt_preview, FireTarget, TimedFireRequest, TimedFireRouter, TimedFireSink,
 };
 // tool_result の無害化は core 側（`opencrab_core::tool_result_log`）に一本化した
 // （#284）。LLM へ返す経路（`SkillEngine`）と DB 永続化経路（server / dispatch）で

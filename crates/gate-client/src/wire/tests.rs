@@ -91,7 +91,7 @@ fn duplicate_member_is_bad_request() {
 
 #[test]
 fn parse_invoke_ok() {
-    let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","operation":"reply","context":{"continuation_id":null},"payload":{"event":"e7","text":"hi"}}"#;
+    let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","invocation_protocol":1,"binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","operation":"reply","effect":"utterance","context":{"continuation_id":null},"payload":{"event":"e7","text":"hi"}}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::Invoke(i) => {
             assert_eq!(i.id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
@@ -245,11 +245,15 @@ fn invoke_ok_frame_carries_result() {
 }
 
 #[test]
-fn hello_with_operations_optional() {
-    // None は従来の hello（operations field なし＝能力ゼロ）。
+fn hello_always_carries_versioned_runtime_capabilities_and_operations() {
+    // Capability-zero clients still declare an explicit empty operation set in protocol v3.
     let plain = hello_frame_with_operations("h", "iid", 1, &"a".repeat(64), None);
-    assert!(plain.get("operations").is_none());
-    // Some は operations を載せる。
+    assert_eq!(plain["protocol"], 3);
+    assert_eq!(plain["operation_protocol"], 1);
+    assert_eq!(plain["final_delivery"], "automatic");
+    assert_eq!(plain["delivery_guarantee"], "at_most_once_indeterminate");
+    assert_eq!(plain["operations"], json!([]));
+    // Some carries the declared operation set.
     let ops = json!([{"name":"reply"}]);
     let withops = hello_frame_with_operations("h", "iid", 1, &"a".repeat(64), Some(&ops));
     assert_eq!(withops["operations"], ops);

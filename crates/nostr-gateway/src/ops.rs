@@ -27,13 +27,19 @@ pub fn operation_declarations() -> Value {
     // conversation_bound、agent 全体の設定系は agent_bound（DI-02 の既存規則に対応）。
     let conv = |sub: &str, sharing: &str| json!({"sub_engine": sub, "sharing": sharing});
     let decl = |name: &str, desc: &str, input: Value, class: Value| {
+        let utterance = matches!(name, "reaction" | "reply" | "repost");
+        let read_only = name == "resolve";
         json!({
             "name": name,
             "description": desc,
             "input_schema": input,
             "output_schema": null,
             "callback_schema": null,
-            "class": class,
+            "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
+            "dispatch": if utterance { "utterance" } else { "background" },
+            "sub_engine": class["sub_engine"],
+            "sharing": class["sharing"],
+            "effect": if utterance { "utterance" } else if read_only { "read_only" } else { "state_change" },
         })
     };
     let str_prop = |desc: &str| json!({"type": "string", "description": desc});
@@ -204,12 +210,6 @@ fn run_to_outcome(run: Run) -> InvokeOutcome {
 
 #[async_trait]
 impl InvokeHandler for NostrInvokeHandler {
-    // #900: reply/reaction/repost は発話クラス（ユーザーに見える発言）。follow/kind0/resolve/
-    // unfollow/upload は照会・操作クラスなので false（沈黙判定に影響させない）。
-    fn is_utterance(&self, operation: &str) -> bool {
-        matches!(operation, "reply" | "reaction" | "repost")
-    }
-
     async fn handle(
         &self,
         _call_id: &str,

@@ -148,14 +148,6 @@ impl InvokeHandler for RecordingHandler {
         // 外部 API へは出さず「受理した」を返す（dry-run 相当）。null result は §10.2 で合法。
         InvokeOutcome::Ok(Value::Null)
     }
-
-    /// #900: 発話クラス（reply/reaction/repost/say）の判定。本番ゲート（DiscordInvokeHandler）と
-    /// パリティを取り、core 既知名を集約する `is_known_utterance_op` へ委ねる。これを実装しないと
-    /// 既定 false で、reply だけのターンが沈黙扱い（CompletedNoReply=🤐）になり harness artifact に
-    /// なる。utterance invoke が Ok で決着すると gate-client が saw_utterance を立て、🤐 を立てない。
-    fn is_utterance(&self, operation: &str) -> bool {
-        opencrab_gateway::is_known_utterance_op(operation)
-    }
 }
 
 // ==================== HTTP（admin / REST）ヘルパ ====================
@@ -469,6 +461,10 @@ async fn run_gate(
         config_digest,
         SayPolicy::AcceptToLiveQueue,
         Some(opencrab_discord_gateway::ops::operation_declarations()),
+        opencrab_gate_client::RuntimeCapabilities {
+            final_delivery: opencrab_gate_client::FinalDelivery::OperationDriven,
+            delivery_guarantee: opencrab_gate_client::DeliveryGuarantee::AtMostOnceIndeterminate,
+        },
         handler,
     );
 

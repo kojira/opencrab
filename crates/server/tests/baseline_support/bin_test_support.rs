@@ -13,8 +13,7 @@ use opencrab_llm::message::{ChatRequest, ChatResponse, Choice, FinishReason, Mes
 use opencrab_llm::router::LlmRouter;
 use opencrab_llm::traits::{LlmProvider, ModelInfo};
 use opencrab_server::{
-    config, disconnected_heartbeat_config_rx, register_production_descriptors, subtask_registries,
-    AppState, SharedLlmRouter,
+    config, disconnected_heartbeat_config_rx, subtask_registries, AppState, SharedLlmRouter,
 };
 
 /// 常に固定テキストを返す最小 mock。生成回数も数える。
@@ -120,7 +119,6 @@ pub(crate) fn app_state_with_agent(provider: Arc<dyn LlmProvider>, agent_id: &st
     router.set_default_provider("mock");
 
     let timed_fire_router = opencrab_actions::TimedFireRouter::new();
-    register_production_descriptors(&timed_fire_router);
 
     AppState {
         db,
@@ -148,7 +146,6 @@ pub(crate) fn app_state_with_agent(provider: Arc<dyn LlmProvider>, agent_id: &st
         intake: Arc::new(config::IntakeConfig::default()),
         intake_wake: Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
-        gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
         session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
         timed_fire_router: Arc::new(timed_fire_router),
