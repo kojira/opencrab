@@ -99,12 +99,35 @@ fn bootstrap_is_atomic_exact_idempotent_and_full_scan_duplicate_safe() {
         bootstrap(&mut conn, &duplicate, 102),
         Err(SecurityError::Conflict)
     ));
+    assert!(matches!(
+        bootstrap(&mut conn, &manifest([8; 32], "first", 10_000), 102),
+        Err(SecurityError::Conflict)
+    ));
+    assert!(matches!(
+        bootstrap(&mut conn, &manifest([7; 32], "first", 10_001), 102),
+        Err(SecurityError::Conflict)
+    ));
+    let mut rescope = manifest([7; 32], "first", 10_000);
+    rescope.operations.insert(Operation::InstancePut);
+    assert!(matches!(
+        bootstrap(&mut conn, &rescope, 102),
+        Err(SecurityError::Conflict)
+    ));
     assert_eq!(
         conn.query_row("SELECT count(*) FROM gate_admin_principals", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
         1
     );
+    conn.execute(
+        "INSERT INTO gate_admin_principals VALUES ('unsealed',zeroblob(32),zeroblob(32),'exact',100,10000,NULL,NULL,NULL,NULL)",
+        [],
+    )
+    .unwrap();
+    assert!(matches!(
+        bootstrap(&mut conn, &first, 103),
+        Err(SecurityError::Conflict)
+    ));
 }
 
 #[test]
@@ -126,6 +149,31 @@ fn authentication_requires_exactly_one_current_match_and_never_unions_scope() {
         authorize(
             &mut conn,
             None,
+            Operation::InstanceRead,
+            1,
+            Uuid::nil(),
+            200
+        ),
+        Err(SecurityError::Unauthorized)
+    ));
+    for invalid in ["", "Bearer ", "Bearer short"] {
+        assert!(matches!(
+            authorize(
+                &mut conn,
+                Some(invalid),
+                Operation::InstanceRead,
+                1,
+                Uuid::nil(),
+                200
+            ),
+            Err(SecurityError::Unauthorized)
+        ));
+    }
+    let wrong = format!("Bearer {}", URL_SAFE_NO_PAD.encode([10_u8; 32]));
+    assert!(matches!(
+        authorize(
+            &mut conn,
+            Some(&wrong),
             Operation::InstanceRead,
             1,
             Uuid::nil(),
@@ -163,6 +211,17 @@ fn authentication_requires_exactly_one_current_match_and_never_unions_scope() {
             1,
             Uuid::max(),
             200
+        ),
+        Err(SecurityError::Unauthorized)
+    ));
+    assert!(matches!(
+        authorize(
+            &mut conn,
+            Some(&header),
+            Operation::InstanceRead,
+            1,
+            Uuid::nil(),
+            10_000
         ),
         Err(SecurityError::Unauthorized)
     ));
@@ -353,11 +412,18 @@ fn rotation_overlap_and_immediate_revocation_are_current_state_checks() {
     let first_token = [5; 32];
     let first = manifest(first_token, "first", 1_000);
     bootstrap(&mut conn, &first, 100).unwrap();
-    let mut successor = manifest([6; 32], "successor", 900);
-    successor.rotation = Some(Rotation {
+    let rotation = Rotation {
         predecessor_principal_id: "first".to_owned(),
         overlap_deadline: 500,
-    });
+    };
+    let mut duplicate_rotation = manifest(first_token, "duplicate-rotation", 900);
+    duplicate_rotation.rotation = Some(rotation.clone());
+    assert!(matches!(
+        bootstrap(&mut conn, &duplicate_rotation, 200),
+        Err(SecurityError::Conflict)
+    ));
+    let mut successor = manifest([6; 32], "successor", 900);
+    successor.rotation = Some(rotation);
     bootstrap(&mut conn, &successor, 200).unwrap();
     let first_header = format!("Bearer {}", URL_SAFE_NO_PAD.encode(first_token));
     assert!(authorize(

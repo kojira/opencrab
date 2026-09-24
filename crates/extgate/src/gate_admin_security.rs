@@ -441,27 +441,38 @@ pub fn bootstrap(
     if manifest.expires_at <= now {
         return Err(SecurityError::Conflict);
     }
+    // Existing-principal restart is a consistent read transaction and never obtains a
+    // writer lock. Only the absent path retries under BEGIN IMMEDIATE before insertion.
+    let read_tx = conn.transaction().map_err(|_| SecurityError::Store)?;
+    let read_rows = load_principals(&read_tx)?;
+    if read_rows.iter().any(|row| row.sealed_at.is_none()) {
+        return Err(SecurityError::Conflict);
+    }
+    let read_matches = matching_ids(&read_rows, &manifest.token[..]);
+    if let Some(row) = read_rows.iter().find(|row| row.id == manifest.principal_id) {
+        if read_matches.as_slice() != [manifest.principal_id.as_str()]
+            || !exact_restart_matches(&read_tx, manifest, row)?
+        {
+            return Err(SecurityError::Conflict);
+        }
+        read_tx.rollback().map_err(|_| SecurityError::Store)?;
+        return Ok(BootstrapOutcome {
+            created: false,
+            scanned_principals: read_rows.len(),
+        });
+    }
+    read_tx.rollback().map_err(|_| SecurityError::Store)?;
+
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| SecurityError::Store)?;
     let rows = load_principals(&tx)?;
-    if rows.iter().any(|row| row.sealed_at.is_none()) {
+    if rows.iter().any(|row| row.sealed_at.is_none())
+        || rows.iter().any(|row| row.id == manifest.principal_id)
+    {
         return Err(SecurityError::Conflict);
     }
     let matches = matching_ids(&rows, &manifest.token[..]);
-    let existing = rows.iter().find(|row| row.id == manifest.principal_id);
-    if let Some(row) = existing {
-        if matches.as_slice() != [manifest.principal_id.as_str()]
-            || !exact_restart_matches(&tx, manifest, row)?
-        {
-            return Err(SecurityError::Conflict);
-        }
-        tx.rollback().map_err(|_| SecurityError::Store)?;
-        return Ok(BootstrapOutcome {
-            created: false,
-            scanned_principals: rows.len(),
-        });
-    }
     if !matches.is_empty() {
         return Err(SecurityError::Conflict);
     }

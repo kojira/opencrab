@@ -14,7 +14,7 @@ struct SocketIdentity {
 
 pub struct PreparedAdminSocket {
     listener: Option<tokio::net::UnixListener>,
-    cleanup: SocketCleanup,
+    cleanup: Option<SocketCleanup>,
 }
 
 pub struct SocketCleanup {
@@ -25,18 +25,16 @@ pub struct SocketCleanup {
 impl PreparedAdminSocket {
     pub fn into_parts(mut self) -> (tokio::net::UnixListener, SocketCleanup) {
         let listener = self.listener.take().expect("prepared listener");
-        let cleanup = SocketCleanup {
-            path: self.cleanup.path.clone(),
-            identity: self.cleanup.identity,
-        };
-        std::mem::forget(self);
+        let cleanup = self.cleanup.take().expect("prepared cleanup identity");
         (listener, cleanup)
     }
 }
 
 impl Drop for PreparedAdminSocket {
     fn drop(&mut self) {
-        self.cleanup.remove_if_same_inode();
+        if let Some(cleanup) = &self.cleanup {
+            cleanup.remove_if_same_inode();
+        }
     }
 }
 
@@ -92,28 +90,33 @@ pub fn prepare_admin_socket(
         Err(_) => return Err(SecurityError::InvalidConfig),
     }
     let listener = tokio::net::UnixListener::bind(path).map_err(|_| SecurityError::Store)?;
-    if std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).is_err() {
-        let _ = std::fs::remove_file(path);
+    let created = std::fs::symlink_metadata(path).map_err(|_| SecurityError::Store)?;
+    if !created.file_type().is_socket() || created.uid() != service_euid {
         return Err(SecurityError::Store);
     }
+    let identity = SocketIdentity {
+        device: created.dev(),
+        inode: created.ino(),
+        uid: created.uid(),
+    };
+    let cleanup = SocketCleanup {
+        path: path.to_owned(),
+        identity,
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|_| SecurityError::Store)?;
     let metadata = std::fs::symlink_metadata(path).map_err(|_| SecurityError::Store)?;
     if !metadata.file_type().is_socket()
         || metadata.uid() != service_euid
         || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.dev() != identity.device
+        || metadata.ino() != identity.inode
     {
-        let _ = std::fs::remove_file(path);
         return Err(SecurityError::Store);
     }
     Ok(PreparedAdminSocket {
         listener: Some(listener),
-        cleanup: SocketCleanup {
-            path: path.to_owned(),
-            identity: SocketIdentity {
-                device: metadata.dev(),
-                inode: metadata.ino(),
-                uid: metadata.uid(),
-            },
-        },
+        cleanup: Some(cleanup),
     })
 }
 
@@ -142,5 +145,29 @@ mod tests {
             path.is_file(),
             "cleanup must not unlink a replacement inode"
         );
+    }
+
+    #[tokio::test]
+    async fn socket_rejects_insecure_or_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(matches!(
+            prepare_admin_socket(&root.join("insecure.sock"), unsafe { libc::geteuid() }),
+            Err(SecurityError::InvalidConfig)
+        ));
+
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let actual = root.join("actual");
+        std::fs::create_dir(&actual).unwrap();
+        std::fs::set_permissions(&actual, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let linked = root.join("linked");
+        symlink(&actual, &linked).unwrap();
+        assert!(matches!(
+            prepare_admin_socket(&linked.join("symlink.sock"), unsafe { libc::geteuid() }),
+            Err(SecurityError::InvalidConfig)
+        ));
     }
 }
