@@ -14,6 +14,7 @@ pub struct CoAgentDto {
     pub co_agent_id: String,
     pub created_by: String,
     pub created_at: String,
+    pub relationship_revision: u64,
 }
 
 fn row_to_dto(r: opencrab_db::queries::TrustedCoAgentRow) -> CoAgentDto {
@@ -24,6 +25,7 @@ fn row_to_dto(r: opencrab_db::queries::TrustedCoAgentRow) -> CoAgentDto {
         co_agent_id: r.co_agent_id,
         created_by: r.created_by,
         created_at: r.created_at,
+        relationship_revision: r.relationship_revision,
     }
 }
 
@@ -78,18 +80,24 @@ pub async fn add_co_agent(
         allowed_actions: None,
         created_by: "owner".to_string(),
         created_at: now.clone(),
+        relationship_revision: 1,
+        active: true,
     };
 
     opencrab_db::queries::insert_trusted_co_agent(&conn, &row)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(CoAgentDto {
-        id,
-        agent_id,
-        co_agent_id: req.co_agent_id,
-        created_by: "owner".to_string(),
-        created_at: now,
-    }))
+    let stored = opencrab_db::queries::list_trusted_co_agents(&conn, &agent_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .find(|stored| stored.co_agent_id == req.co_agent_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "relationship missing".to_string(),
+            )
+        })?;
+    Ok(Json(row_to_dto(stored)))
 }
 
 // PATCH は撤去した（#490）。唯一の役割が `allowed_actions` の変更だったが、その列は
@@ -150,6 +158,7 @@ mod tests {
         .expect("省略なら登録できるはず")
         .0;
         assert_eq!(dto.co_agent_id, "co-1");
+        assert_eq!(dto.relationship_revision, 1);
 
         let conn = state.db.lock().unwrap();
         let rows = opencrab_db::queries::list_trusted_co_agents(&conn, "agent-1").unwrap();

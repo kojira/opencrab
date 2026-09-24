@@ -44,6 +44,16 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// 実行要求は [`RunRequest`]（#33）で受ける。
     async fn run_agent_response(&self, req: RunRequest) -> Result<EngineResult>;
 
+    /// Revalidate gateway-projected generic co-agent evidence against core's current internal
+    /// relationship authority. Non-co-agent runs carry no evidence and do not call this method.
+    fn relationship_is_current(
+        &self,
+        _target_agent_id: &str,
+        _authority: &opencrab_core::authorization::RelationshipAuthority,
+    ) -> bool {
+        false
+    }
+
     /// system prompt と表示名を組み立てる（`(system_prompt, agent_name)`）。
     ///
     /// `caller` は本ターンの呼び出し元。caller=Agent のときだけ skill index を露出許可

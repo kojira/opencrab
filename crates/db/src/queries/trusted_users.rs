@@ -17,12 +17,15 @@ pub struct TrustedCoAgentRow {
     pub allowed_actions: Option<String>,
     pub created_by: String,
     pub created_at: String,
+    pub relationship_revision: u64,
+    pub active: bool,
 }
 
 pub fn list_trusted_co_agents(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedCoAgentRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, co_agent_id, allowed_actions, created_by, created_at
-         FROM trusted_co_agents WHERE agent_id = ?1 ORDER BY created_at ASC",
+        "SELECT id, agent_id, co_agent_id, allowed_actions, created_by, created_at,
+                relationship_revision, active
+         FROM trusted_co_agents WHERE agent_id = ?1 AND active = 1 ORDER BY created_at ASC",
     )?;
     let rows = stmt.query_map(params![agent_id], |row| {
         Ok(TrustedCoAgentRow {
@@ -32,6 +35,8 @@ pub fn list_trusted_co_agents(conn: &Connection, agent_id: &str) -> Result<Vec<T
             allowed_actions: row.get(3)?,
             created_by: row.get(4)?,
             created_at: row.get(5)?,
+            relationship_revision: row.get(6)?,
+            active: row.get::<_, i64>(7)? == 1,
         })
     })?;
     Ok(rows.filter_map(|r| r.ok()).collect())
@@ -47,7 +52,8 @@ pub fn list_trusted_co_agents(conn: &Connection, agent_id: &str) -> Result<Vec<T
 /// （登録があれば co_agent = owner 等価。#485 は widening のみで別ゲートを足さない）。
 pub fn is_trusted_co_agent(conn: &Connection, agent_id: &str, co_agent_id: &str) -> Result<bool> {
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM trusted_co_agents WHERE agent_id = ?1 AND co_agent_id = ?2",
+        "SELECT COUNT(*) FROM trusted_co_agents
+         WHERE agent_id = ?1 AND co_agent_id = ?2 AND active = 1",
         params![agent_id, co_agent_id],
         |row| row.get(0),
     )?;
@@ -60,7 +66,9 @@ pub fn insert_trusted_co_agent(conn: &Connection, row: &TrustedCoAgentRow) -> Re
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(agent_id, co_agent_id) DO UPDATE SET
             allowed_actions = excluded.allowed_actions,
-            created_by = excluded.created_by",
+            created_by = excluded.created_by,
+            active = 1,
+            relationship_revision = trusted_co_agents.relationship_revision + 1",
         params![
             row.id,
             row.agent_id,
@@ -77,13 +85,56 @@ pub fn insert_trusted_co_agent(conn: &Connection, row: &TrustedCoAgentRow) -> Re
 // co-agents API の PATCH（`allowed_actions` 更新）が無くなり、この列は権限判定に
 // 使われないため書き換える経路も要らなくなった（列自体は互換のため残す）。
 
+pub fn current_co_agent_relationship_revision(
+    conn: &Connection,
+    agent_id: &str,
+    co_agent_id: &str,
+) -> Result<Option<u64>> {
+    use rusqlite::OptionalExtension as _;
+    Ok(conn
+        .query_row(
+            "SELECT relationship_revision FROM trusted_co_agents
+             WHERE agent_id = ?1 AND co_agent_id = ?2 AND active = 1",
+            params![agent_id, co_agent_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+pub fn co_agent_relationship_is_current(
+    conn: &Connection,
+    agent_id: &str,
+    co_agent_id: &str,
+    relationship_revision: u64,
+) -> Result<bool> {
+    Ok(
+        current_co_agent_relationship_revision(conn, agent_id, co_agent_id)?
+            == Some(relationship_revision),
+    )
+}
+
+pub fn bump_trusted_co_agent_revision(
+    conn: &Connection,
+    agent_id: &str,
+    co_agent_id: &str,
+) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE trusted_co_agents
+         SET relationship_revision = relationship_revision + 1
+         WHERE agent_id = ?1 AND co_agent_id = ?2 AND active = 1",
+        params![agent_id, co_agent_id],
+    )? > 0)
+}
+
 pub fn delete_trusted_co_agent(
     conn: &Connection,
     agent_id: &str,
     co_agent_id: &str,
 ) -> Result<bool> {
     let deleted = conn.execute(
-        "DELETE FROM trusted_co_agents WHERE agent_id = ?1 AND co_agent_id = ?2",
+        "UPDATE trusted_co_agents
+         SET active = 0, relationship_revision = relationship_revision + 1
+         WHERE agent_id = ?1 AND co_agent_id = ?2 AND active = 1",
         params![agent_id, co_agent_id],
     )?;
     Ok(deleted > 0)

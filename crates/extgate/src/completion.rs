@@ -93,6 +93,7 @@ pub struct ExtgateCompletionSink<R: AgentRuntime> {
     pub speaker_id: String,
     pub delivery_mode: DeliveryMode,
     pub system_context: String,
+    pub relationship_authority: Option<opencrab_core::authorization::RelationshipAuthority>,
 }
 
 impl<R: AgentRuntime> Clone for ExtgateCompletionSink<R> {
@@ -108,6 +109,7 @@ impl<R: AgentRuntime> Clone for ExtgateCompletionSink<R> {
             speaker_id: self.speaker_id.clone(),
             delivery_mode: self.delivery_mode,
             system_context: self.system_context.clone(),
+            relationship_authority: self.relationship_authority.clone(),
         }
     }
 }
@@ -133,6 +135,17 @@ impl<R: AgentRuntime> SubtaskCompletionSink for ExtgateCompletionSink<R> {
     }
 
     fn deliver_continuation(&self, ev: SubtaskSettled) {
+        if self
+            .relationship_authority
+            .as_ref()
+            .is_some_and(|authority| {
+                !self
+                    .runtime
+                    .relationship_is_current(&self.agent_id, authority)
+            })
+        {
+            return;
+        }
         let locks = self.runtime.session_locks();
         if locks.holds_lock_entry(&self.session_id) {
             tracing::debug!(
@@ -299,6 +312,9 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                             })
                         })
                     });
+                    if let Some(authority) = sink.relationship_authority.clone() {
+                        req = req.with_relationship_authority(authority);
+                    }
                     // 連鎖: この resume が更に subtask を spawn したら、その完了 say も
                     // 同じ発端 origin へ返せるよう reply_target を引き継ぐ。
                     if let Some(rt) = reply_target.clone() {
@@ -342,6 +358,18 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                 None => opencrab_actions::DeliveryEffect::Empty,
             };
             let effect = adjust_inbound_effect(sink.delivery_mode, effect);
+            let effect = if sink
+                .relationship_authority
+                .as_ref()
+                .is_some_and(|authority| {
+                    !sink
+                        .runtime
+                        .relationship_is_current(&sink.agent_id, authority)
+                }) {
+                opencrab_actions::DeliveryEffect::Empty
+            } else {
+                effect
+            };
             let final_say_id = apply_delivery_effect(
                 &sink.state,
                 &sink.instance_id,

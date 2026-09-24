@@ -183,6 +183,14 @@ impl AgentRuntime for AppState {
         process::run_agent_response(self, req).await
     }
 
+    fn relationship_is_current(
+        &self,
+        target_agent_id: &str,
+        authority: &opencrab_core::authorization::RelationshipAuthority,
+    ) -> bool {
+        crate::authorization::relationship_is_current(&self.db, target_agent_id, authority)
+    }
+
     fn build_agent_context(
         &self,
         agent_id: &str,

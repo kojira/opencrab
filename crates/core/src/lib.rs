@@ -14,6 +14,7 @@
 
 pub mod a2ui;
 pub mod agent;
+pub mod authorization;
 pub mod caller;
 pub mod context_budget;
 pub mod continue_marker;

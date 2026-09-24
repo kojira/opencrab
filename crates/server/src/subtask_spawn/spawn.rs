@@ -34,6 +34,7 @@ pub async fn spawn_subtask(
     state: &AppState,
     registry: Option<&SubtaskRegistry>,
     sink: Option<Arc<dyn SubtaskCompletionSink>>,
+    relationship_authority: Option<opencrab_core::authorization::RelationshipAuthority>,
     root_gateway: Option<Arc<dyn opencrab_gateway::GatewayActions>>,
     args: &serde_json::Value,
     ctx: &GatewayCallContext,
@@ -224,6 +225,9 @@ pub async fn spawn_subtask(
         )
         .with_depth(depth)
         .with_run_notifier(run_notifier.clone());
+        if let Some(authority) = relationship_authority {
+            req = req.with_relationship_authority(authority);
+        }
         // 親と同一の登録簿・完了受け口を渡す。sub-engine の `report_progress` は
         // ここから自分自身のエントリを引き、進捗を親セッションへ再注入する。
         req = req.with_dispatch(Some(run_registry.clone()), run_sink.clone());

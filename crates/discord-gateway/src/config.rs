@@ -57,13 +57,20 @@ pub struct InstanceConfig {
 /// - `failed`（❌）: 発端メッセージへの返信配送が失敗した時点で付ける。
 /// - `no_reply`（🤐）: ターンが沈黙（say 無し）で終えた時点で発端メッセージへ付ける
 ///   （`CompletedNoReply` の reply_origin が Single のときだけ・裁定A で真の沈黙だけに立つ）。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoAgentProjection {
+    pub agent_id: String,
+    pub relationship_revision: u64,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccessConfig {
     #[serde(default)]
     pub owners: Vec<String>,
     #[serde(default)]
-    pub co_agents: std::collections::BTreeMap<String, String>,
+    pub co_agents: std::collections::BTreeMap<String, CoAgentProjection>,
     #[serde(default)]
     pub trusted_users: Vec<String>,
 }
@@ -203,12 +210,9 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
             anyhow::bail!("access user ids must be decimal snowflakes");
         }
     }
-    if cfg
-        .access
-        .co_agents
-        .values()
-        .any(|agent_id| agent_id.trim().is_empty())
-    {
+    if cfg.access.co_agents.values().any(|projection| {
+        projection.agent_id.trim().is_empty() || projection.relationship_revision == 0
+    }) {
         anyhow::bail!("access co-agent ids must be nonempty");
     }
     let sr = &cfg.system_reactions;
@@ -323,12 +327,13 @@ mod tests {
         let mut valid = sample_config();
         valid["access"] = serde_json::json!({
             "owners": ["100"],
-            "co_agents": {"200": "agent-b"},
+            "co_agents": {"200": {"agent_id":"agent-b","relationship_revision":1}},
             "trusted_users": ["300"]
         });
         let config = parse_instance_config(&serde_json::to_vec(&valid).unwrap()).unwrap();
         assert_eq!(config.access.owners, ["100"]);
-        assert_eq!(config.access.co_agents["200"], "agent-b");
+        assert_eq!(config.access.co_agents["200"].agent_id, "agent-b");
+        assert_eq!(config.access.co_agents["200"].relationship_revision, 1);
         assert_eq!(config.access.trusted_users, ["300"]);
 
         valid["access"]["owners"] = serde_json::json!(["not-a-snowflake"]);

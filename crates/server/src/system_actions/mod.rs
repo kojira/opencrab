@@ -46,6 +46,7 @@ pub struct SystemGatewayActions {
     /// REST のように「最後の subtask の決着でセッションを完了にする」経路は、この通知
     /// を受けて `sessions.status` の整合を取る（無いと永久 `active` のまま残る）。
     completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
+    relationship_authority: Option<opencrab_core::authorization::RelationshipAuthority>,
     /// transport が提供する A2UI 描画面（#156 S3）。`inner` から 1 度だけ引く。
     ///
     /// `send_ui` の実体は gateway 非依存層（`opencrab_actions::a2ui`）にあるが、描画と
@@ -103,9 +104,18 @@ impl SystemGatewayActions {
             inner,
             subtask_registry,
             completion_sink,
+            relationship_authority: None,
             a2ui,
             text_delivery,
         }
+    }
+
+    pub fn with_relationship_authority(
+        mut self,
+        authority: Option<opencrab_core::authorization::RelationshipAuthority>,
+    ) -> Self {
+        self.relationship_authority = authority;
+        self
     }
 
     /// 本ツール源が直接提供するツール定義（A2UI 描画面がある構成の全量）。

@@ -910,7 +910,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 155,
+      "line": 206,
       "snippet": "pub enum TrustedUserPermission {",
       "classification": "production-violation",
       "violation": "V06",
@@ -920,7 +920,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 167,
+      "line": 218,
       "snippet": "pub const TRUSTED_USER_PERMISSIONS: [TrustedUserPermission; 3] = [",
       "classification": "production-violation",
       "violation": "V06",
@@ -930,7 +930,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 168,
+      "line": 219,
       "snippet": "TrustedUserPermission::Owner,",
       "classification": "production-violation",
       "violation": "V06",
@@ -940,7 +940,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 169,
+      "line": 220,
       "snippet": "TrustedUserPermission::User,",
       "classification": "production-violation",
       "violation": "V06",
@@ -950,7 +950,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 170,
+      "line": 221,
       "snippet": "TrustedUserPermission::CoAgent,",
       "classification": "production-violation",
       "violation": "V06",
@@ -960,7 +960,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 173,
+      "line": 224,
       "snippet": "impl TrustedUserPermission {",
       "classification": "production-violation",
       "violation": "V06",
@@ -970,7 +970,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 186,
+      "line": 237,
       "snippet": "TRUSTED_USER_PERMISSIONS",
       "classification": "production-violation",
       "violation": "V06",
@@ -980,7 +980,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 202,
+      "line": 253,
       "snippet": "pub struct TrustedUserRow {",
       "classification": "production-violation",
       "violation": "V06",
@@ -990,7 +990,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 207,
+      "line": 258,
       "snippet": "pub permission: TrustedUserPermission,",
       "classification": "production-violation",
       "violation": "V06",
@@ -1000,7 +1000,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 216,
+      "line": 267,
       "snippet": "fn trusted_user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrustedUserRow> {",
       "classification": "production-violation",
       "violation": "V06",
@@ -1010,7 +1010,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 217,
+      "line": 268,
       "snippet": "Ok(TrustedUserRow {",
       "classification": "production-violation",
       "violation": "V06",
@@ -1020,7 +1020,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 221,
+      "line": 272,
       "snippet": "permission: TrustedUserPermission::from_db_str(&row.get::<_, String>(3)?),",
       "classification": "production-violation",
       "violation": "V06",
@@ -1030,7 +1030,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 229,
+      "line": 280,
       "snippet": "const TRUSTED_USER_COLUMNS: &str =",
       "classification": "production-violation",
       "violation": "V06",
@@ -1040,7 +1040,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 235,
+      "line": 286,
       "snippet": "pub fn get_trusted_user(",
       "classification": "production-violation",
       "violation": "V06",
@@ -1050,7 +1050,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 240,
+      "line": 291,
       "snippet": ") -> Option<TrustedUserRow> {",
       "classification": "production-violation",
       "violation": "V06",
@@ -1060,7 +1060,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 243,
+      "line": 294,
       "snippet": "\"SELECT {TRUSTED_USER_COLUMNS} \\",
       "classification": "production-violation",
       "violation": "V06",
@@ -1070,7 +1070,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 244,
+      "line": 295,
       "snippet": "FROM trusted_users \\",
       "classification": "production-violation",
       "violation": "V06",
@@ -1080,7 +1080,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 248,
+      "line": 299,
       "snippet": "trusted_user_from_row,",
       "classification": "production-violation",
       "violation": "V06",
@@ -1090,7 +1090,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 255,
+      "line": 306,
       "snippet": "pub fn list_trusted_users(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedUserRow>> {",
       "classification": "production-violation",
       "violation": "V06",
@@ -1100,68 +1100,8 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 257,
+      "line": 308,
       "snippet": "\"SELECT {TRUSTED_USER_COLUMNS} \\",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 258,
-      "snippet": "FROM trusted_users WHERE agent_id = ?1 ORDER BY created_at ASC\"",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 260,
-      "snippet": "let rows = stmt.query_map([agent_id], trusted_user_from_row)?;",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 274,
-      "snippet": "pub fn add_trusted_user(",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 280,
-      "snippet": "permission: TrustedUserPermission,",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 286,
-      "snippet": "\"INSERT INTO trusted_users (id, user_id, agent_id, permission, created_by, created_at, display_name, platform) \\",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 307,
-      "snippet": ") -> Result<Vec<TrustedUserRow>> {",
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
@@ -1171,7 +1111,7 @@
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
       "line": 309,
-      "snippet": "\"SELECT {TRUSTED_USER_COLUMNS} \\",
+      "snippet": "FROM trusted_users WHERE agent_id = ?1 ORDER BY created_at ASC\"",
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
@@ -1180,8 +1120,8 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 310,
-      "snippet": "FROM trusted_users WHERE platform = ?1 AND agent_id = ?2 AND permission = ?3 \\",
+      "line": 311,
+      "snippet": "let rows = stmt.query_map([agent_id], trusted_user_from_row)?;",
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
@@ -1190,8 +1130,8 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 317,
-      "snippet": "TrustedUserPermission::CoAgent.as_db_str(),",
+      "line": 325,
+      "snippet": "pub fn add_trusted_user(",
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
@@ -1200,47 +1140,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 319,
-      "snippet": "trusted_user_from_row,",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 324,
-      "snippet": "pub fn update_trusted_user_display_name(",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 330,
-      "snippet": "\"UPDATE trusted_users SET display_name = ?2 WHERE id = ?1\",",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 336,
-      "snippet": "pub fn update_trusted_user_permission(",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 339,
+      "line": 331,
       "snippet": "permission: TrustedUserPermission,",
       "classification": "production-violation",
       "violation": "V06",
@@ -1250,7 +1150,107 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 342,
+      "line": 337,
+      "snippet": "\"INSERT INTO trusted_users (id, user_id, agent_id, permission, created_by, created_at, display_name, platform) \\",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 358,
+      "snippet": ") -> Result<Vec<TrustedUserRow>> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 360,
+      "snippet": "\"SELECT {TRUSTED_USER_COLUMNS} \\",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 361,
+      "snippet": "FROM trusted_users WHERE platform = ?1 AND agent_id = ?2 AND permission = ?3 \\",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 368,
+      "snippet": "TrustedUserPermission::CoAgent.as_db_str(),",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 370,
+      "snippet": "trusted_user_from_row,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 375,
+      "snippet": "pub fn update_trusted_user_display_name(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 381,
+      "snippet": "\"UPDATE trusted_users SET display_name = ?2 WHERE id = ?1\",",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 387,
+      "snippet": "pub fn update_trusted_user_permission(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 390,
+      "snippet": "permission: TrustedUserPermission,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 393,
       "snippet": "\"UPDATE trusted_users SET permission = ?2 WHERE id = ?1\",",
       "classification": "production-violation",
       "violation": "V06",
@@ -1260,7 +1260,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 348,
+      "line": 399,
       "snippet": "pub fn remove_trusted_user(conn: &Connection, id: &str) -> Result<bool> {",
       "classification": "production-violation",
       "violation": "V06",
@@ -1270,7 +1270,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 349,
+      "line": 400,
       "snippet": "let n = conn.execute(\"DELETE FROM trusted_users WHERE id = ?1\", [id])?;",
       "classification": "production-violation",
       "violation": "V06",
@@ -1280,7 +1280,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 356,
+      "line": 407,
       "snippet": "\"SELECT COUNT(*) FROM trusted_users \\",
       "classification": "production-violation",
       "violation": "V06",
@@ -1290,7 +1290,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 377,
+      "line": 428,
       "snippet": "\"SELECT COUNT(*) FROM trusted_users WHERE platform = ?1 AND agent_id = ?2\",",
       "classification": "production-violation",
       "violation": "V06",
@@ -1330,7 +1330,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 431,
+      "line": 433,
       "snippet": "CREATE TABLE IF NOT EXISTS trusted_users (",
       "classification": "production-violation",
       "violation": "V06",
@@ -1340,7 +1340,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 443,
+      "line": 445,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -1350,7 +1350,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 684,
+      "line": 686,
       "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
       "classification": "production-violation",
       "violation": "V06",
@@ -1360,7 +1360,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 693,
+      "line": 695,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -1430,7 +1430,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 225,
+      "line": 228,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -1440,7 +1440,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 521,
+      "line": 524,
       "snippet": "Some(\"trusted_user\") => Ok(SaidCaller::TrustedUser),",
       "classification": "production-violation",
       "violation": "V11",
@@ -1450,7 +1450,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/gate-client/src/wire.rs",
-      "line": 274,
+      "line": 277,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -1630,7 +1630,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/server/src/process/wiring.rs",
-      "line": 88,
+      "line": 89,
       "snippet": "| opencrab_actions::CallerIdentity::TrustedUser",
       "classification": "production-violation",
       "violation": "V11",
@@ -2370,7 +2370,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 553,
+      "line": 555,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -2380,7 +2380,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 120,
+      "line": 135,
       "snippet": "channel_id: row.address.as_str(),",
       "classification": "production-violation",
       "violation": "V11",
@@ -2390,7 +2390,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 122,
+      "line": 137,
       "snippet": "guild_id: instance_id,",
       "classification": "production-violation",
       "violation": "V11",
@@ -2400,7 +2400,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 152,
+      "line": 167,
       "snippet": "let whitelist = |channel_id: &str, agent_id: &str| {",
       "classification": "production-violation",
       "violation": "V11",
@@ -2410,7 +2410,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 162,
+      "line": 177,
       "snippet": "channel_whitelisted(&tx, agent_id, instance_id, channel_id)",
       "classification": "production-violation",
       "violation": "V11",
@@ -2430,7 +2430,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/turn.rs",
-      "line": 142,
+      "line": 149,
       "snippet": "channel_id: Some(&address),",
       "classification": "production-violation",
       "violation": "V11",
@@ -2490,7 +2490,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/agent_runtime_impl.rs",
-      "line": 431,
+      "line": 439,
       "snippet": "channel_id = %c.channel_id,",
       "classification": "production-violation",
       "violation": "V11",
@@ -2690,7 +2690,7 @@
     {
       "rule": "shared-platform-dto",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 213,
+      "line": 264,
       "snippet": "pub platform: String,",
       "classification": "production-violation",
       "violation": "V06",
@@ -2700,7 +2700,7 @@
     {
       "rule": "shared-platform-dto",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 237,
+      "line": 288,
       "snippet": "platform: &str,",
       "classification": "production-violation",
       "violation": "V06",
@@ -2710,7 +2710,7 @@
     {
       "rule": "shared-platform-dto",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 276,
+      "line": 327,
       "snippet": "platform: &str,",
       "classification": "production-violation",
       "violation": "V06",
@@ -2720,7 +2720,7 @@
     {
       "rule": "shared-platform-dto",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 305,
+      "line": 356,
       "snippet": "platform: &str,",
       "classification": "production-violation",
       "violation": "V06",
@@ -2730,7 +2730,7 @@
     {
       "rule": "shared-platform-dto",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 354,
+      "line": 405,
       "snippet": "pub fn is_trusted_user(conn: &Connection, platform: &str, user_id: &str, agent_id: &str) -> bool {",
       "classification": "production-violation",
       "violation": "V06",
@@ -2740,7 +2740,7 @@
     {
       "rule": "shared-platform-dto",
       "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 375,
+      "line": 426,
       "snippet": "pub fn trusted_user_count(conn: &Connection, platform: &str, agent_id: &str) -> i64 {",
       "classification": "production-violation",
       "violation": "V06",

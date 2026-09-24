@@ -15,9 +15,9 @@ use crate::listen::{emit_activity, emit_ended_activity};
 use crate::protocol::Said;
 use crate::registry::ExtgateState;
 
-use super::asserted_caller;
 use super::binding::OriginRow;
 use super::record::seq_for_origin;
+use super::{asserted_caller, relationship_authority};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_turn<R: AgentRuntime>(
@@ -48,6 +48,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     let system_context = system_context.to_string();
     let reply_target = reply_target.map(str::to_string);
     let caller = asserted_caller(&said.caller);
+    let relationship_authority = relationship_authority(&said.caller);
     let only_speaker = said.only_speaker;
     if !state.turn_queues.try_reserve(&session_id) {
         #[cfg(any(test, feature = "extgate-probe"))]
@@ -81,6 +82,11 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                         );
                         return;
                     }
+                }
+                if relationship_authority.as_ref().is_some_and(|authority| {
+                    !runtime.relationship_is_current(&agent_id, authority)
+                }) {
+                    return;
                 }
                 #[cfg(any(test, feature = "extgate-probe"))]
                 state
@@ -132,6 +138,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     let hook_reply = reply_target.clone();
                     let request_reply_target = reply_target.clone();
                     let hook_last_continuation_say = Arc::clone(&last_continuation_say);
+                    let run_relationship_authority = relationship_authority.clone();
                     tokio::spawn(async move {
                         let inbound = NormalizedInbound {
                             session_id: &session_id,
@@ -170,6 +177,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 speaker_id: author_id.clone(),
                                 delivery_mode,
                                 system_context,
+                                relationship_authority: run_relationship_authority.clone(),
                             });
                         start_session_turn(
                             &runtime,
@@ -278,6 +286,9 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                         })
                                     })
                                 });
+                                if let Some(authority) = run_relationship_authority.clone() {
+                                    req = req.with_relationship_authority(authority);
+                                }
                                 // Gateway が与えた opaque な返信先だけを subtask 完了へ持ち回る。
                                 // 内部 origin を外部返信先として推測しない。
                                 if let Some(target) = request_reply_target.clone() {
@@ -327,6 +338,13 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             None => opencrab_actions::DeliveryEffect::Empty,
                         };
                         let effect = adjust_inbound_effect(delivery_mode, effect);
+                        let effect = if relationship_authority.as_ref().is_some_and(|authority| {
+                            !runtime.relationship_is_current(&agent_id, authority)
+                        }) {
+                            opencrab_actions::DeliveryEffect::Empty
+                        } else {
+                            effect
+                        };
                         // 単一メンションは発端 origin を say payload に明示（gateway が e-tag reply）。
                         // bundle は None（gateway が standalone post で publish・row292）。
                         let final_say_id = apply_delivery_effect(

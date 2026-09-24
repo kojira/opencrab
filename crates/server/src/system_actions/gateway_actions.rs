@@ -127,6 +127,7 @@ impl GatewayActions for SystemGatewayActions {
                     &self.state,
                     self.subtask_registry.as_ref(),
                     self.completion_sink.clone(),
+                    self.relationship_authority.clone(),
                     // sub-engine の inner は「自分を包む合成 gateway」。`BridgedExecutor`
                     // が注入したハンドルを辿ることで、許可リスト内の server ツール
                     // （`report_progress` / `nostr_generate_key`）へ到達できる。

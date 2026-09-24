@@ -36,10 +36,25 @@ fn asserted_caller(caller: &SaidCaller) -> CallerIdentity {
     match caller {
         SaidCaller::Owner => CallerIdentity::Owner,
         SaidCaller::Agent => CallerIdentity::Agent,
-        SaidCaller::CoAgent { agent_id } => CallerIdentity::CoAgent {
+        SaidCaller::CoAgent { agent_id, .. } => CallerIdentity::CoAgent {
             agent_id: agent_id.clone(),
         },
         SaidCaller::TrustedUser => CallerIdentity::TrustedUser,
+    }
+}
+
+fn relationship_authority(
+    caller: &SaidCaller,
+) -> Option<opencrab_core::authorization::RelationshipAuthority> {
+    match caller {
+        SaidCaller::CoAgent {
+            agent_id,
+            relationship_revision,
+        } => Some(opencrab_core::authorization::RelationshipAuthority {
+            co_agent_id: agent_id.clone(),
+            relationship_revision: *relationship_revision,
+        }),
+        _ => None,
     }
 }
 

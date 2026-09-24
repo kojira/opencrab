@@ -86,6 +86,34 @@ fn author_label_is_optional_display_metadata() {
 }
 
 #[test]
+fn s6_co_agent_caller_requires_positive_relationship_revision() {
+    let mut frame = serde_json::json!({
+        "id":"said-1", "m":"said",
+        "binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "origin":"event-1", "author_id":"sender-1", "text":"hello", "attachments":[],
+        "caller":{"role":"co_agent","agent_id":"peer-agent"}
+    });
+    assert!(matches!(
+        parse_inbound(&frame).unwrap(),
+        InboundMsg::Invalid {
+            code: ErrorCode::BadRequest,
+            ..
+        }
+    ));
+    frame["caller"]["relationship_revision"] = serde_json::json!(1);
+    let InboundMsg::Said(said) = parse_inbound(&frame).unwrap() else {
+        panic!("expected said");
+    };
+    assert_eq!(
+        said.caller,
+        SaidCaller::CoAgent {
+            agent_id: "peer-agent".into(),
+            relationship_revision: 1,
+        }
+    );
+}
+
+#[test]
 fn command_requires_an_object_caller() {
     for caller in [
         serde_json::Value::Null,

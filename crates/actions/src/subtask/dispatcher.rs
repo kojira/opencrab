@@ -193,6 +193,7 @@ pub struct SubtaskToolDispatcher {
     /// （inline 経路 `process.rs` の `tool_result_workspace` と同じもの）。
     /// `None` なら退避せず切り詰める。
     workspace_root: Option<std::path::PathBuf>,
+    authorization_check: Option<opencrab_core::authorization::AuthorizationCheck>,
 }
 
 impl SubtaskToolDispatcher {
@@ -222,6 +223,7 @@ impl SubtaskToolDispatcher {
             caller: CallerIdentity::Agent,
             timeout: std::time::Duration::from_secs(DEFAULT_DISPATCH_TIMEOUT_SECS),
             workspace_root: None,
+            authorization_check: None,
         }
     }
 
@@ -262,6 +264,14 @@ impl SubtaskToolDispatcher {
     /// 最小権限（`Agent`）のまま = 従来挙動。
     pub fn with_caller(mut self, caller: CallerIdentity) -> Self {
         self.caller = caller;
+        self
+    }
+
+    pub fn with_authorization_check(
+        mut self,
+        check: Option<opencrab_core::authorization::AuthorizationCheck>,
+    ) -> Self {
+        self.authorization_check = check;
         self
     }
 }
@@ -381,6 +391,7 @@ impl ToolDispatcher for SubtaskToolDispatcher {
         let sub_session_id_task = sub_session_id.clone();
         let timeout = self.timeout;
         let workspace_root = self.workspace_root.clone();
+        let authorization_check = self.authorization_check.clone();
         // 停止/決着の排他ラッチ。registry のエントリ（cancel 側）とタスク本体
         // （settle 側）が同じラッチを共有する。
         let lifecycle = SubtaskLifecycle::new();
@@ -398,9 +409,16 @@ impl ToolDispatcher for SubtaskToolDispatcher {
             let deadline = tokio::time::Instant::now() + timeout;
             let mut outcomes: Vec<(String, CallOutcome)> = Vec::with_capacity(calls_owned.len());
             let mut timed_out = false;
+            let mut authorization_revoked = false;
 
             // **逐次実行**（並行にしない）: LLM が並べた順序に依存関係があり得る。
             for call in &calls_owned {
+                if authorization_check.as_ref().is_some_and(|check| {
+                    !check(opencrab_core::authorization::AuthorizationBoundary::QueueDequeueRetry)
+                }) {
+                    authorization_revoked = true;
+                    break;
+                }
                 // panic を settle へ変換する（catch しないと task が unwind して
                 // settle を通らず、registry に死骸が残り REST は永久 active になる）。
                 let fut = std::panic::AssertUnwindSafe(executor.execute_with_id(
@@ -496,7 +514,9 @@ impl ToolDispatcher for SubtaskToolDispatcher {
                 }
             }
 
-            let exit_reason = if timed_out {
+            let exit_reason = if authorization_revoked {
+                "authorization_revoked"
+            } else if timed_out {
                 "timeout"
             } else if outcomes.iter().any(|(_, o)| o.failed) {
                 "error"

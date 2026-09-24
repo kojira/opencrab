@@ -421,6 +421,8 @@ CREATE TABLE IF NOT EXISTS trusted_co_agents (
     allowed_actions TEXT,
     created_by   TEXT NOT NULL,
     created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    relationship_revision INTEGER NOT NULL DEFAULT 1 CHECK(relationship_revision > 0),
+    active       INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
     UNIQUE (agent_id, co_agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_trusted_co_agents_agent ON trusted_co_agents(agent_id);
