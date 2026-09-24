@@ -147,6 +147,75 @@ async fn handlers_authenticate_before_parsing_or_lookup_and_audit_denials_and_au
 }
 
 #[tokio::test]
+async fn all_six_handlers_authenticate_before_malformed_percent_path_extraction_and_audit_safely() {
+    use axum::body::to_bytes;
+
+    let token = [34_u8; 32];
+    let state = protected_state(token);
+    let app = crate::admin::admin_router(state.clone());
+    let bearer = format!("Bearer {}", URL_SAFE_NO_PAD.encode(token));
+    let wrong = format!("Bearer {}", URL_SAFE_NO_PAD.encode([35_u8; 32]));
+    let cases = [
+        ("GET", "/api/gate-instances/%FF", ""),
+        ("PUT", "/api/gate-instances/%FF", "not-json"),
+        ("DELETE", "/api/gate-instances/%FF", ""),
+        ("POST", "/api/gate-instances/%FF/revisions", "not-json"),
+        ("PUT", "/api/gate-bindings/%FF", "not-json"),
+        ("DELETE", "/api/gate-bindings/%FF", ""),
+    ];
+
+    let baseline = protected_request(&app, "GET", cases[0].1, None, "").await;
+    assert_eq!(baseline.status(), axum::http::StatusCode::UNAUTHORIZED);
+    let baseline_headers = baseline.headers().clone();
+    let baseline_body = to_bytes(baseline.into_body(), usize::MAX).await.unwrap();
+
+    for (method, uri, body) in cases {
+        for credential in [None, Some(wrong.as_str())] {
+            let response = protected_request(&app, method, uri, credential, body).await;
+            assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED, "{method} {uri}");
+            assert_eq!(response.headers(), &baseline_headers, "{method} {uri} headers");
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                baseline_body,
+                "{method} {uri} body"
+            );
+        }
+
+        let response = protected_request(&app, method, uri, Some(&bearer), body).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST, "authorized {method} {uri}");
+    }
+
+    let conn = state.db.lock().unwrap();
+    let rows = conn
+        .prepare(
+            "SELECT principal_id, authorized_subject_id, authorized_instance_id, result_class
+             FROM gate_admin_request_audit ORDER BY rowid",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows.len(), 19);
+    for (principal, subject, instance, class) in rows {
+        assert_eq!(subject, None, "malformed target must never be audited");
+        assert_eq!(instance, None, "malformed target must never be audited");
+        if principal.is_some() {
+            assert_eq!(class, "bad_request");
+        } else {
+            assert_eq!(class, "unauthorized");
+        }
+    }
+}
+
+#[tokio::test]
 async fn handler_mutation_and_required_audit_commit_atomically_and_conflicts_are_audited() {
     let token = [32_u8; 32];
     let state = protected_state(token);
