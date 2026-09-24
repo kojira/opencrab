@@ -12,12 +12,31 @@ use super::{
     get_session, insert_agent_session_in_tx, insert_session_in_tx, list_session_participants,
 };
 
-/// `create_gate_binding_in_tx` の失敗。membership / 占有の不一致は Conflict。
+/// `CoreBindingService` の失敗。membership / 占有の不一致は Conflict。
 #[derive(Debug)]
 pub enum CreateGateBindingError {
     Conflict,
     Store(anyhow::Error),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreBindingRequest<'a> {
+    pub binding_id: &'a str,
+    pub instance_id: &'a str,
+    pub address: &'a str,
+    pub session_id: &'a str,
+    pub session_title: &'a str,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreBindingOutcome {
+    Created,
+    Existing,
+}
+
+/// The only core authority allowed to create a generic session/binding association.
+pub struct CoreBindingService;
 
 impl From<anyhow::Error> for CreateGateBindingError {
     fn from(e: anyhow::Error) -> Self {
@@ -163,17 +182,18 @@ fn agent_id_for_instance(tx: &Transaction<'_>, instance_id: &str) -> Result<Stri
     }
 }
 
-fn insert_binding_row(
-    tx: &Transaction<'_>,
-    binding_id: &str,
-    instance_id: &str,
-    address: &str,
-    now: i64,
-) -> Result<()> {
+fn insert_binding_row(tx: &Transaction<'_>, request: &CoreBindingRequest<'_>) -> Result<()> {
     tx.execute(
-        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at, closed_at)
-         VALUES (?1, ?2, ?3, ?4, NULL)",
-        params![binding_id, instance_id, address, now],
+        "INSERT INTO gate_bindings
+             (binding_id, instance_id, address, created_at, closed_at, session_id)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+        params![
+            request.binding_id,
+            request.instance_id,
+            request.address,
+            request.now,
+            request.session_id
+        ],
     )?;
     Ok(())
 }
@@ -191,45 +211,118 @@ pub fn create_gate_binding_in_tx(
     session_theme: &str,
     now: i64,
 ) -> std::result::Result<(), CreateGateBindingError> {
-    let agent_id = agent_id_for_instance(tx, instance_id)?;
-    if get_session(tx, address)?.is_some() {
-        return reuse_existing_session(tx, binding_id, instance_id, address, &agent_id, now);
-    }
-
-    let session_id = format!("extgate-{binding_id}");
-    let now_rfc = rfc3339_from_nanos(now)?;
-
-    fail_step(FAIL_SESSION)?;
-    if session_theme != address {
-        fail_step(FAIL_NAME)?;
-    }
-    insert_session_in_tx(tx, &session_id, session_theme, &now_rfc)?;
-    fail_step(FAIL_MEMBERSHIP)?;
-    insert_agent_session_in_tx(tx, &agent_id, &session_id)?;
-    fail_step(FAIL_BINDING)?;
-    insert_binding_row(tx, binding_id, instance_id, address, now)?;
+    let session_id = if get_session(tx, address)?.is_some() {
+        address.to_string()
+    } else {
+        format!("extgate-{binding_id}")
+    };
+    CoreBindingService::create_in_tx(
+        tx,
+        &CoreBindingRequest {
+            binding_id,
+            instance_id,
+            address,
+            session_id: &session_id,
+            session_title: session_theme,
+            now,
+        },
+    )?;
     Ok(())
 }
 
-fn reuse_existing_session(
+impl CoreBindingService {
+    pub fn create_in_tx(
+        tx: &Transaction<'_>,
+        request: &CoreBindingRequest<'_>,
+    ) -> std::result::Result<CoreBindingOutcome, CreateGateBindingError> {
+        let agent_id = agent_id_for_instance(tx, request.instance_id)?;
+        if let Some((instance_id, address, stored_session_id, closed_at)) = tx
+            .query_row(
+                "SELECT instance_id, address, session_id, closed_at
+                 FROM gate_bindings WHERE binding_id=?1",
+                [request.binding_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+        {
+            if closed_at.is_some() {
+                return Err(CreateGateBindingError::Conflict);
+            }
+            let session_id = match stored_session_id {
+                Some(value) => value,
+                None => canonical_session_id(tx, request.binding_id, &address)?
+                    .ok_or(CreateGateBindingError::Conflict)?,
+            };
+            let same = instance_id == request.instance_id
+                && address == request.address
+                && session_id == request.session_id
+                && session_matches(tx, &session_id, request.session_title, &agent_id)?;
+            return if same {
+                Ok(CoreBindingOutcome::Existing)
+            } else {
+                Err(CreateGateBindingError::Conflict)
+            };
+        }
+
+        let taken: i64 = tx.query_row(
+            "SELECT count(*) FROM gate_bindings
+             WHERE instance_id=?1 AND address=?2 AND closed_at IS NULL",
+            params![request.instance_id, request.address],
+            |row| row.get(0),
+        )?;
+        if taken != 0
+            || session_occupied_by_other_open_binding(
+                tx,
+                request.session_id,
+                request.binding_id,
+            )?
+        {
+            return Err(CreateGateBindingError::Conflict);
+        }
+
+        if get_session(tx, request.session_id)?.is_some() {
+            if !session_matches(
+                tx,
+                request.session_id,
+                request.session_title,
+                &agent_id,
+            )? {
+                return Err(CreateGateBindingError::Conflict);
+            }
+        } else {
+            let now_rfc = rfc3339_from_nanos(request.now)?;
+            fail_step(FAIL_SESSION)?;
+            if request.session_title != request.address {
+                fail_step(FAIL_NAME)?;
+            }
+            insert_session_in_tx(tx, request.session_id, request.session_title, &now_rfc)?;
+            fail_step(FAIL_MEMBERSHIP)?;
+            insert_agent_session_in_tx(tx, &agent_id, request.session_id)?;
+        }
+        fail_step(FAIL_BINDING)?;
+        insert_binding_row(tx, request)?;
+        Ok(CoreBindingOutcome::Created)
+    }
+}
+
+fn session_matches(
     tx: &Transaction<'_>,
-    binding_id: &str,
-    instance_id: &str,
-    address: &str,
+    session_id: &str,
+    title: &str,
     agent_id: &str,
-    now: i64,
-) -> std::result::Result<(), CreateGateBindingError> {
-    let members = list_session_participants(tx, address)?;
-    match members.as_slice() {
-        [sole] if sole == agent_id => {}
-        _ => return Err(CreateGateBindingError::Conflict),
-    }
-    if session_occupied_by_other_open_binding(tx, address, binding_id)? {
-        return Err(CreateGateBindingError::Conflict);
-    }
-    fail_step(FAIL_BINDING)?;
-    insert_binding_row(tx, binding_id, instance_id, address, now)?;
-    Ok(())
+) -> Result<bool> {
+    let Some(session) = get_session(tx, session_id)? else {
+        return Ok(false);
+    };
+    let members = list_session_participants(tx, session_id)?;
+    Ok(session.theme == title && members.as_slice() == [agent_id])
 }
 
 fn session_occupied_by_other_open_binding(
@@ -239,7 +332,8 @@ fn session_occupied_by_other_open_binding(
 ) -> Result<bool> {
     let by_address: i64 = tx.query_row(
         "SELECT COUNT(*) FROM gate_bindings
-         WHERE address = ?1 AND closed_at IS NULL AND binding_id != ?2",
+         WHERE (address = ?1 OR session_id = ?1)
+           AND closed_at IS NULL AND binding_id != ?2",
         params![session_id, current_binding_id],
         |r| r.get(0),
     )?;
@@ -267,6 +361,16 @@ pub fn canonical_session_id(
     binding_id: &str,
     address: &str,
 ) -> Result<Option<String>> {
+    let stored: Option<Option<String>> = conn
+        .query_row(
+            "SELECT session_id FROM gate_bindings WHERE binding_id=?1",
+            [binding_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(Some(session_id)) = stored {
+        return Ok(Some(session_id));
+    }
     let physical = format!("extgate-{binding_id}");
     if get_session(conn, &physical)?.is_some() {
         return Ok(Some(physical));

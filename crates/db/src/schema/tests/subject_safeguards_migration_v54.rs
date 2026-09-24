@@ -2,7 +2,23 @@
 fn s2_populated_upgrade_preserves_positive_subject_ids_and_associations_byte_for_byte() {
     let conn = crate::init_memory().expect("init v53 fixture");
     conn.execute_batch(
-        "INSERT INTO agents (agent_id, name, persona_name, subject_id)
+        "DROP TRIGGER IF EXISTS subject_allocator_no_delete;
+         DROP TRIGGER IF EXISTS subject_allocator_monotonic;
+         DROP TRIGGER IF EXISTS subject_tombstones_no_update;
+         DROP TRIGGER IF EXISTS subject_tombstones_no_delete;
+         DROP TRIGGER IF EXISTS subject_grants_no_delete;
+         DROP TRIGGER IF EXISTS subject_grants_consume_once;
+         DROP TRIGGER IF EXISTS agents_subject_id_insert_guard;
+         DROP TRIGGER IF EXISTS agents_subject_id_assign;
+         DROP TRIGGER IF EXISTS agents_subject_id_advance_explicit;
+         DROP TRIGGER IF EXISTS agents_subject_id_update_guard;
+         DROP TRIGGER IF EXISTS agents_subject_tombstone_delete_guard;
+         DROP TABLE subject_association_grants;
+         DROP TABLE subject_tombstones;
+         DROP TABLE subject_id_allocator;
+         ALTER TABLE gate_bindings DROP COLUMN session_id;
+         ALTER TABLE gate_instances DROP COLUMN association_grandfathered;
+         INSERT INTO agents (agent_id, name, persona_name, subject_id)
              VALUES ('s2-agent-a', 'A', 'p', 41), ('s2-agent-b', 'B', 'p', 97);
          INSERT INTO gate_instances
              (instance_id, kind_id, subject_id, revision, enabled, config_b64,
