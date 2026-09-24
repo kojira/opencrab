@@ -1598,6 +1598,7 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
+ "getrandom 0.3.4",
  "http-body-util",
  "libc",
  "opencrab-actions",
@@ -1619,6 +1620,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

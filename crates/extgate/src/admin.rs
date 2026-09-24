@@ -12,6 +12,7 @@ use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 
 use crate::error::{ErrorCode, GateError, JSON_CONTENT_TYPE};
+use crate::gate_admin_security::Operation;
 use crate::ids::{config_digest, decode_config_b64, now_nanos, parse_uuid};
 use crate::json::parse_object_no_dup;
 use crate::listen::enqueue_bind;
@@ -115,6 +116,51 @@ fn require_positive_u64(obj: &Value, key: &str) -> Result<u64, GateError> {
     }
 }
 
+fn subject_for_instance(state: &ExtgateState, instance_id: &str) -> Result<i64, GateError> {
+    let conn = state.db.lock().map_err(|_| GateError::store())?;
+    conn.query_row(
+        "SELECT subject_id FROM gate_instances WHERE instance_id=?1 AND deleted_at IS NULL",
+        [instance_id],
+        |row| row.get(0),
+    )
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => GateError::new(ErrorCode::InstanceUnknown),
+        _ => GateError::store(),
+    })
+}
+
+fn authorize_target(
+    state: &ExtgateState,
+    headers: &axum::http::HeaderMap,
+    operation: Operation,
+    subject_id: i64,
+    instance_id: &str,
+) -> Result<crate::gate_admin_security::Authorized, GateError> {
+    let uuid =
+        uuid::Uuid::parse_str(instance_id).map_err(|_| GateError::new(ErrorCode::BadRequest))?;
+    state.authorize_admin(headers, operation, subject_id, uuid)
+}
+
+fn audit_success(
+    state: &ExtgateState,
+    operation: Operation,
+    authorized: &crate::gate_admin_security::Authorized,
+) -> Result<(), GateError> {
+    if state.uses_legacy_admin() {
+        return Ok(());
+    }
+    let conn = state.db.lock().map_err(|_| GateError::store())?;
+    crate::gate_admin_security::append_audit(
+        &conn,
+        uuid::Uuid::new_v4(),
+        now_nanos(),
+        operation,
+        Some(authorized),
+        "succeeded",
+    )
+    .map_err(|_| GateError::store())
+}
+
 fn agent_for_subject(conn: &rusqlite::Connection, subject_id: i64) -> Result<String, GateError> {
     let mut stmt = conn
         .prepare("SELECT agent_id FROM agents WHERE subject_id = ?1")
@@ -194,9 +240,17 @@ async fn get_instance_inner(
     req: Request,
 ) -> Result<Response, GateError> {
     let (headers, body) = read_body(req).await?;
-    state.token.authorize(&headers)?;
+    state.authorize_legacy_admin(&headers)?;
     require_empty_body(&body)?;
     let instance_id = parse_uuid(instance_id)?;
+    let subject_id = subject_for_instance(state, &instance_id)?;
+    let authorized = authorize_target(
+        state,
+        &headers,
+        Operation::InstanceRead,
+        subject_id,
+        &instance_id,
+    )?;
     let conn = state.db.lock().map_err(|_| GateError::store())?;
     let deleted: Option<Option<i64>> = conn
         .query_row(
@@ -208,7 +262,12 @@ async fn get_instance_inner(
         .map_err(|_| GateError::store())?;
     match deleted {
         None | Some(Some(_)) => Err(GateError::new(ErrorCode::InstanceUnknown)),
-        Some(None) => Ok(json_ok(StatusCode::OK, instance_json(&conn, &instance_id)?)),
+        Some(None) => {
+            let response = json_ok(StatusCode::OK, instance_json(&conn, &instance_id)?);
+            drop(conn);
+            audit_success(state, Operation::InstanceRead, &authorized)?;
+            Ok(response)
+        }
     }
 }
 
@@ -229,11 +288,18 @@ async fn put_instance_inner(
     req: Request,
 ) -> Result<Response, GateError> {
     let (headers, body) = read_body(req).await?;
-    state.token.authorize(&headers)?;
+    state.authorize_legacy_admin(&headers)?;
     let obj = require_object(&body)?;
     let instance_id = parse_uuid(instance_id)?;
     let kind_id = require_string(&obj, "kind_id")?;
     let subject_id = require_positive_i64(&obj, "subject_id")?;
+    let authorized = authorize_target(
+        state,
+        &headers,
+        Operation::InstancePut,
+        subject_id,
+        &instance_id,
+    )?;
     let enabled = require_bool(&obj, "enabled")?;
     let config_b64 = require_string_any(&obj, "config_b64")?;
     let config_bytes = decode_config_b64(&config_b64)?;
@@ -264,7 +330,10 @@ async fn put_instance_inner(
         Some((k, s, e, cfg, None)) => {
             let same_bytes = decode_config_b64(&cfg)? == config_bytes;
             if k == kind_id && s == subject_id && (e == 1) == enabled && same_bytes {
-                Ok(json_ok(StatusCode::OK, instance_json(&conn, &instance_id)?))
+                let response = json_ok(StatusCode::OK, instance_json(&conn, &instance_id)?);
+                drop(conn);
+                audit_success(state, Operation::InstancePut, &authorized)?;
+                Ok(response)
             } else {
                 Err(GateError::new(ErrorCode::InstanceConflict))
             }
@@ -286,10 +355,10 @@ async fn put_instance_inner(
                 ],
             )
             .map_err(|_| GateError::store())?;
-            Ok(json_ok(
-                StatusCode::CREATED,
-                instance_json(&conn, &instance_id)?,
-            ))
+            let response = json_ok(StatusCode::CREATED, instance_json(&conn, &instance_id)?);
+            drop(conn);
+            audit_success(state, Operation::InstancePut, &authorized)?;
+            Ok(response)
         }
     }
 }
@@ -311,9 +380,17 @@ async fn delete_instance_inner(
     req: Request,
 ) -> Result<Response, GateError> {
     let (headers, body) = read_body(req).await?;
-    state.token.authorize(&headers)?;
+    state.authorize_legacy_admin(&headers)?;
     require_empty_body(&body)?;
     let instance_id = parse_uuid(instance_id)?;
+    let subject_id = subject_for_instance(state, &instance_id)?;
+    let authorized = authorize_target(
+        state,
+        &headers,
+        Operation::InstanceDelete,
+        subject_id,
+        &instance_id,
+    )?;
     let now = now_nanos();
     let reg = state.lock_registry()?;
     if reg.is_live(&instance_id) {
@@ -349,7 +426,9 @@ async fn delete_instance_inner(
             )
             .map_err(|_| GateError::store())?;
             tx.commit().map_err(|_| GateError::store())?;
+            drop(conn);
             drop(reg);
+            audit_success(state, Operation::InstanceDelete, &authorized)?;
             Ok(json_ok(
                 StatusCode::OK,
                 json!({"instance_id": instance_id, "deleted": true}),
@@ -375,9 +454,17 @@ async fn post_revision_inner(
     req: Request,
 ) -> Result<Response, GateError> {
     let (headers, body) = read_body(req).await?;
-    state.token.authorize(&headers)?;
+    state.authorize_legacy_admin(&headers)?;
     let obj = require_object(&body)?;
     let instance_id = parse_uuid(instance_id)?;
+    let subject_id = subject_for_instance(state, &instance_id)?;
+    let authorized = authorize_target(
+        state,
+        &headers,
+        Operation::InstanceRevise,
+        subject_id,
+        &instance_id,
+    )?;
     let expected = require_positive_u64(&obj, "expected_revision")?;
     let enabled = require_bool(&obj, "enabled")?;
     let config_b64 = require_string_any(&obj, "config_b64")?;
@@ -410,6 +497,7 @@ async fn post_revision_inner(
     })?;
     drop(conn);
     drop(reg);
+    audit_success(state, Operation::InstanceRevise, &authorized)?;
     Ok(json_ok(
         StatusCode::CREATED,
         json!({
@@ -438,10 +526,18 @@ async fn put_binding_inner(
     req: Request,
 ) -> Result<Response, GateError> {
     let (headers, body) = read_body(req).await?;
-    state.token.authorize(&headers)?;
+    state.authorize_legacy_admin(&headers)?;
     let obj = require_object(&body)?;
     let binding_id = parse_uuid(binding_id)?;
     let instance_id = parse_uuid(&require_string(&obj, "instance_id")?)?;
+    let subject_id = subject_for_instance(state, &instance_id)?;
+    let authorized = authorize_target(
+        state,
+        &headers,
+        Operation::BindingPut,
+        subject_id,
+        &instance_id,
+    )?;
     let address = require_string(&obj, "address")?;
     let now = now_nanos();
 
@@ -488,7 +584,10 @@ async fn put_binding_inner(
             Some((_, _, Some(_))) => return Err(GateError::new(ErrorCode::BindingClosed)),
             Some((inst, addr, None)) => {
                 if inst == instance_id && addr == address {
-                    return Ok(json_ok(StatusCode::OK, binding_json(&conn, &binding_id)?));
+                    let response = json_ok(StatusCode::OK, binding_json(&conn, &binding_id)?);
+                    drop(conn);
+                    audit_success(state, Operation::BindingPut, &authorized)?;
+                    return Ok(response);
                 }
                 return Err(GateError::new(ErrorCode::BindingConflict));
             }
@@ -533,6 +632,7 @@ async fn put_binding_inner(
     };
 
     enqueue_bind(state, &instance_id, &binding_id, &address).await;
+    audit_success(state, Operation::BindingPut, &authorized)?;
     Ok(json_ok(StatusCode::CREATED, body))
 }
 
@@ -553,9 +653,30 @@ async fn delete_binding_inner(
     req: Request,
 ) -> Result<Response, GateError> {
     let (headers, body) = read_body(req).await?;
-    state.token.authorize(&headers)?;
+    state.authorize_legacy_admin(&headers)?;
     require_empty_body(&body)?;
     let binding_id = parse_uuid(binding_id)?;
+    let (instance_id, subject_id) = {
+        let conn = state.db.lock().map_err(|_| GateError::store())?;
+        conn.query_row(
+            "SELECT b.instance_id, i.subject_id FROM gate_bindings b
+             JOIN gate_instances i ON i.instance_id=b.instance_id
+             WHERE b.binding_id=?1",
+            [&binding_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => GateError::new(ErrorCode::BindingUnknown),
+            _ => GateError::store(),
+        })?
+    };
+    let authorized = authorize_target(
+        state,
+        &headers,
+        Operation::BindingDelete,
+        subject_id,
+        &instance_id,
+    )?;
     let now = now_nanos();
     let conn = state.db.lock().map_err(|_| GateError::store())?;
     let row = conn
@@ -578,6 +699,7 @@ async fn delete_binding_inner(
         .map_err(|_| GateError::store())?;
     }
     drop(conn);
+    audit_success(state, Operation::BindingDelete, &authorized)?;
     if let Ok(mut reg) = state.lock_registry() {
         if let Some(live) = reg.get_mut(&instance_id) {
             live.acknowledged.remove(&binding_id);

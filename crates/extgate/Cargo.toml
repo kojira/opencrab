@@ -23,6 +23,8 @@ opencrab-actions = { workspace = true }
 opencrab-core = { workspace = true }
 opencrab-gateway = { workspace = true }
 base64 = "0.22"
+getrandom = "0.3"
+zeroize = "1"
 
 [features]
 default = ["extgate-probe"]

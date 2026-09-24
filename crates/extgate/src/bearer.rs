@@ -21,13 +21,15 @@ impl fmt::Debug for OperatorToken {
 }
 
 impl OperatorToken {
+    #[cfg(any(test, feature = "extgate-probe"))]
     pub fn from_bytes(expected: impl Into<String>) -> Self {
         Self {
             expected: expected.into(),
         }
     }
 
-    /// startup に 1 回読み、直後に `remove_var` する。
+    /// Legacy test/QC fixture only; production uses the strict manifest.
+    #[cfg(any(test, feature = "extgate-probe"))]
     pub fn take_from_env() -> Self {
         let expected = std::env::var(ENV_NAME).unwrap_or_default();
         std::env::remove_var(ENV_NAME);

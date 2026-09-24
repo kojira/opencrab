@@ -1,6 +1,7 @@
 //! External gate V3 最小形。
 
 pub mod admin;
+pub mod admin_socket;
 pub mod bearer;
 pub mod close;
 pub mod commands;
@@ -9,6 +10,7 @@ pub mod delivery;
 pub mod delivery_mode;
 pub mod error;
 pub mod fire;
+pub mod gate_admin_security;
 pub mod ids;
 pub mod inbound;
 pub mod json;

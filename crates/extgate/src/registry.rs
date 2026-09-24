@@ -197,7 +197,7 @@ pub type ReservedToolNameFn = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 pub struct ExtgateState {
     pub db: Db,
     pub registry: Mutex<Registry>,
-    pub token: OperatorToken,
+    legacy_admin_token: Option<OperatorToken>,
     pub halt: AtomicBool,
     halt_notify: tokio::sync::Notify,
     next_identity: AtomicU64,
@@ -220,11 +220,22 @@ pub struct ExtgateState {
 }
 
 impl ExtgateState {
+    /// Compatibility constructor for isolated tests and QC fixtures.
+    #[cfg(any(test, feature = "extgate-probe"))]
     pub fn new(db: Db, token: OperatorToken) -> Self {
+        Self::build(db, Some(token))
+    }
+
+    /// Production constructor: gate-admin authentication is database-backed.
+    pub fn new_protected(db: Db) -> Self {
+        Self::build(db, None)
+    }
+
+    fn build(db: Db, legacy_admin_token: Option<OperatorToken>) -> Self {
         Self {
             db,
             registry: Mutex::new(Registry::default()),
-            token,
+            legacy_admin_token,
             halt: AtomicBool::new(false),
             halt_notify: tokio::sync::Notify::new(),
             next_identity: AtomicU64::new(1),
@@ -236,6 +247,65 @@ impl ExtgateState {
             folded_seqs: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
+        }
+    }
+
+    pub(crate) fn uses_legacy_admin(&self) -> bool {
+        self.legacy_admin_token.is_some()
+    }
+
+    pub(crate) fn authorize_legacy_admin(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<(), GateError> {
+        if let Some(token) = &self.legacy_admin_token {
+            token.authorize(headers)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn authorize_admin(
+        &self,
+        headers: &axum::http::HeaderMap,
+        operation: crate::gate_admin_security::Operation,
+        subject_id: i64,
+        instance_id: uuid::Uuid,
+    ) -> Result<crate::gate_admin_security::Authorized, GateError> {
+        if let Some(token) = &self.legacy_admin_token {
+            token.authorize(headers)?;
+            return Ok(crate::gate_admin_security::Authorized {
+                principal_id: "test-fixture".to_owned(),
+                subject_id,
+                instance_id,
+            });
+        }
+        let header = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok());
+        let mut conn = self.db.lock().map_err(|_| GateError::store())?;
+        let now = crate::ids::now_nanos();
+        match crate::gate_admin_security::authorize(
+            &mut conn,
+            header,
+            operation,
+            subject_id,
+            instance_id,
+            now,
+        ) {
+            Ok(authorized) => Ok(authorized),
+            Err(crate::gate_admin_security::SecurityError::Store) => Err(GateError::store()),
+            Err(_) => {
+                crate::gate_admin_security::append_audit(
+                    &conn,
+                    uuid::Uuid::new_v4(),
+                    now,
+                    operation,
+                    None,
+                    "unauthorized",
+                )
+                .map_err(|_| GateError::store())?;
+                Err(GateError::new(ErrorCode::Unauthorized))
+            }
         }
     }
 
