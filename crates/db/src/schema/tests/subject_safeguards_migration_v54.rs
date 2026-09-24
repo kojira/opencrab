@@ -101,6 +101,84 @@ fn s2_populated_upgrade_preserves_positive_subject_ids_and_associations_byte_for
 }
 
 #[test]
+fn s2_pre_schema_snapshot_restores_byte_identical_fixture() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("core.sqlite");
+    let snapshot = directory.path().join("core-v53.snapshot");
+    {
+        let conn = crate::init_connection(database.to_str().unwrap()).unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS subject_allocator_no_delete;
+             DROP TRIGGER IF EXISTS subject_allocator_monotonic;
+             DROP TRIGGER IF EXISTS subject_tombstones_no_update;
+             DROP TRIGGER IF EXISTS subject_tombstones_no_delete;
+             DROP TRIGGER IF EXISTS subject_grants_no_delete;
+             DROP TRIGGER IF EXISTS subject_grants_consume_once;
+             DROP TRIGGER IF EXISTS agents_subject_id_insert_guard;
+             DROP TRIGGER IF EXISTS agents_subject_id_assign;
+             DROP TRIGGER IF EXISTS agents_subject_id_advance_explicit;
+             DROP TRIGGER IF EXISTS agents_subject_id_update_guard;
+             DROP TRIGGER IF EXISTS agents_subject_tombstone_delete_guard;
+             DROP TABLE subject_association_grants;
+             DROP TABLE subject_tombstones;
+             DROP TABLE subject_id_allocator;
+             ALTER TABLE gate_bindings DROP COLUMN session_id;
+             ALTER TABLE gate_instances DROP COLUMN association_grandfathered;
+             INSERT INTO agents (agent_id, name, persona_name, subject_id)
+                 VALUES ('rollback-agent', 'Rollback', 'p', 71);
+             INSERT INTO gate_instances
+                 (instance_id, kind_id, subject_id, revision, enabled, config_b64,
+                  config_digest, created_at, updated_at)
+                 VALUES ('00000000-0000-4000-8000-000000000071', 'opaque', 71, 1, 1,
+                         'e30=', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, 1);
+             PRAGMA user_version = 53;
+             PRAGMA wal_checkpoint(TRUNCATE);
+             PRAGMA journal_mode=DELETE;",
+        )
+        .unwrap();
+    }
+    std::fs::copy(&database, &snapshot).unwrap();
+    let snapshot_bytes = std::fs::read(&snapshot).unwrap();
+
+    {
+        let conn = crate::init_connection(database.to_str().unwrap()).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 54);
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+            .unwrap();
+    }
+
+    std::fs::copy(&snapshot, &database).unwrap();
+    assert_eq!(
+        std::fs::read(&database).unwrap(),
+        snapshot_bytes,
+        "restored pre-S2 snapshot differs byte-for-byte"
+    );
+    let restored = Connection::open(&database).unwrap();
+    assert_eq!(schema_version(&restored).unwrap(), 53);
+    assert_eq!(
+        restored
+            .query_row(
+                "SELECT subject_id FROM agents WHERE agent_id='rollback-agent'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        71
+    );
+    assert_eq!(
+        restored
+            .query_row(
+                "SELECT subject_id FROM gate_instances
+                 WHERE instance_id='00000000-0000-4000-8000-000000000071'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        71
+    );
+}
+
+#[test]
 fn s2_fresh_schema_installs_allocator_tombstones_and_hashed_grants() {
     let conn = crate::init_memory().expect("fresh schema");
     for table in [

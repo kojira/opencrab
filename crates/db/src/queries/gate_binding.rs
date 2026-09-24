@@ -15,6 +15,7 @@ use super::{
 /// `CoreBindingService` の失敗。membership / 占有の不一致は Conflict。
 #[derive(Debug)]
 pub enum CreateGateBindingError {
+    Unknown,
     Conflict,
     AddressInUse,
     Closed,
@@ -168,20 +169,20 @@ fn rfc3339_from_nanos(now: i64) -> Result<String> {
     Ok(dt.to_rfc3339())
 }
 
-fn agent_id_for_instance(tx: &Transaction<'_>, instance_id: &str) -> Result<String> {
-    let mut stmt = tx.prepare(
+fn agent_id_for_instance(
+    tx: &Transaction<'_>,
+    instance_id: &str,
+) -> std::result::Result<String, CreateGateBindingError> {
+    tx.query_row(
         "SELECT a.agent_id
          FROM gate_instances i
          JOIN agents a ON a.subject_id = i.subject_id
-         WHERE i.instance_id = ?1",
-    )?;
-    let ids: Vec<String> = stmt
-        .query_map(params![instance_id], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    match ids.as_slice() {
-        [id] => Ok(id.clone()),
-        _ => anyhow::bail!("instance {instance_id} has no unique agent"),
-    }
+         WHERE i.instance_id = ?1 AND i.deleted_at IS NULL",
+        [instance_id],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or(CreateGateBindingError::Unknown)
 }
 
 fn insert_binding_row(tx: &Transaction<'_>, request: &CoreBindingRequest<'_>) -> Result<()> {
@@ -282,21 +283,12 @@ impl CoreBindingService {
         if taken != 0 {
             return Err(CreateGateBindingError::AddressInUse);
         }
-        if session_occupied_by_other_open_binding(
-            tx,
-            request.session_id,
-            request.binding_id,
-        )? {
+        if session_occupied_by_other_open_binding(tx, request.session_id, request.binding_id)? {
             return Err(CreateGateBindingError::Conflict);
         }
 
         if get_session(tx, request.session_id)?.is_some() {
-            if !session_matches(
-                tx,
-                request.session_id,
-                request.session_title,
-                &agent_id,
-            )? {
+            if !session_matches(tx, request.session_id, request.session_title, &agent_id)? {
                 return Err(CreateGateBindingError::Conflict);
             }
         } else {
@@ -478,6 +470,10 @@ pub fn lookup_canonical_gate_binding(
 mod lookup_tests;
 
 #[cfg(test)]
+#[path = "gate_binding_s2_tests.rs"]
+mod s2_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::queries::{get_session, insert_session, upsert_agent, AgentRow, SessionRow};
@@ -533,41 +529,6 @@ mod tests {
         (sessions, members, bindings)
     }
 
-    #[test]
-    fn create_writes_session_membership_binding_with_theme() {
-        set_binding_tx_fail(FAIL_NONE);
-        let mut conn = crate::init_memory().unwrap();
-        let (instance, _) = seed_agent_and_instance(&conn);
-        let binding = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-        let address = "web-a1-c1";
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .unwrap();
-        create_gate_binding_in_tx(
-            &tx,
-            binding,
-            &instance,
-            address,
-            "My Name",
-            1_700_000_000_000_000_000,
-        )
-        .unwrap();
-        tx.commit().unwrap();
-        assert_eq!(counts(&conn), (1, 1, 1));
-        let row = get_session(&conn, &format!("extgate-{binding}"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.theme, "My Name");
-        let addr: String = conn
-            .query_row(
-                "SELECT address FROM gate_bindings WHERE binding_id = ?1",
-                [binding],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(addr, address);
-    }
-
     fn assert_fail_rolls_back(step: u8) {
         set_binding_tx_fail(step);
         let mut conn = crate::init_memory().unwrap();
@@ -587,84 +548,6 @@ mod tests {
         let _ = tx.rollback();
         assert_eq!(counts(&conn), (0, 0, 0), "step {step} left writes");
         set_binding_tx_fail(FAIL_NONE);
-    }
-
-    #[test]
-    fn s2_binding_creation_is_byte_idempotent_through_the_generic_authority() {
-        set_binding_tx_fail(FAIL_NONE);
-        let mut conn = crate::init_memory().unwrap();
-        let (instance, _) = seed_agent_and_instance(&conn);
-        let binding = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-        for _ in 0..2 {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .unwrap();
-            create_gate_binding_in_tx(
-                &tx,
-                binding,
-                &instance,
-                "opaque-address",
-                "Stable title",
-                1_700_000_000_000_000_000,
-            )
-            .expect("byte-identical binding creation must be idempotent");
-            tx.commit().unwrap();
-        }
-        assert_eq!(counts(&conn), (1, 1, 1));
-    }
-
-    #[test]
-    fn s2_concurrent_byte_identical_binding_creation_converges_to_one_row() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("binding-race.sqlite");
-        let db = crate::Db::open(path.to_str().unwrap()).unwrap();
-        let instance = {
-            let conn = db.lock().unwrap();
-            seed_agent_and_instance(&conn).0
-        };
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
-        let mut threads = Vec::new();
-        for _ in 0..2 {
-            let db = db.clone();
-            let instance = instance.clone();
-            let barrier = barrier.clone();
-            threads.push(std::thread::spawn(move || {
-                let mut conn = db.lock().unwrap();
-                barrier.wait();
-                let tx = conn
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .unwrap();
-                let outcome = CoreBindingService::create_in_tx(
-                    &tx,
-                    &CoreBindingRequest {
-                        binding_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-                        instance_id: &instance,
-                        address: "race-address",
-                        session_id: "race-session",
-                        session_title: "Race title",
-                        now: 1_700_000_000_000_000_000,
-                    },
-                )
-                .unwrap();
-                tx.commit().unwrap();
-                outcome
-            }));
-        }
-        barrier.wait();
-        let mut outcomes = threads
-            .into_iter()
-            .map(|thread| thread.join().unwrap())
-            .collect::<Vec<_>>();
-        outcomes.sort_by_key(|outcome| match outcome {
-            CoreBindingOutcome::Created => 0,
-            CoreBindingOutcome::Existing => 1,
-        });
-        assert_eq!(
-            outcomes,
-            vec![CoreBindingOutcome::Created, CoreBindingOutcome::Existing]
-        );
-        let conn = db.lock().unwrap();
-        assert_eq!(counts(&conn), (1, 1, 1));
     }
 
     #[test]

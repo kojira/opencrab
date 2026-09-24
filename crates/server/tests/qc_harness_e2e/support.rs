@@ -587,6 +587,17 @@ fn database_backed_admin(core: &Core, instance_id: &str) -> String {
 
 async fn put_instance(core: &Core, instance_id: &str, config_b64: &str) {
     let authorization = database_backed_admin(core, instance_id);
+    let subject_grant = {
+        let mut conn = core.extgate.db.lock().unwrap();
+        opencrab_db::queries::issue_subject_association_grant(
+            &mut conn,
+            AGENT_ID,
+            core.subject_id,
+            i64::MAX,
+            100,
+        )
+        .unwrap()
+    };
     let (st, body) = admin(
         core,
         Request::builder()
@@ -600,6 +611,7 @@ async fn put_instance(core: &Core, instance_id: &str, config_b64: &str) {
                     "subject_id": core.subject_id,
                     "enabled": true,
                     "config_b64": config_b64,
+                    "subject_grant": subject_grant,
                 })
                 .to_string(),
             ))
@@ -615,6 +627,16 @@ async fn put_instance(core: &Core, instance_id: &str, config_b64: &str) {
 
 async fn put_binding(core: &Core, binding_id: &str, instance_id: &str, address: &str) {
     let authorization = database_backed_admin(core, instance_id);
+    let (session_id, title) = {
+        let conn = core.extgate.db.lock().unwrap();
+        match opencrab_db::queries::get_session(&conn, address).unwrap() {
+            Some(session) => (address.to_string(), session.theme),
+            None => (
+                opencrab_extgate::session_id_for_binding(binding_id),
+                address.to_string(),
+            ),
+        }
+    };
     let (st, body) = admin(
         core,
         Request::builder()
@@ -623,7 +645,12 @@ async fn put_binding(core: &Core, binding_id: &str, instance_id: &str, address: 
             .header(header::AUTHORIZATION, authorization)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
-                serde_json::json!({"instance_id": instance_id, "address": address}).to_string(),
+                serde_json::json!({
+                    "instance_id": instance_id,
+                    "address": address,
+                    "session": {"session_id": session_id, "title": title},
+                })
+                .to_string(),
             ))
             .unwrap(),
     )

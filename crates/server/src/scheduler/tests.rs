@@ -140,7 +140,7 @@ fn seed_generic_alias_binding(
         &binding_id,
         &instance_id,
         session_id,
-        session_id,
+        "alias",
         1,
     )
     .unwrap();

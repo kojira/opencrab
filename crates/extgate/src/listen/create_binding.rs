@@ -48,6 +48,9 @@ fn persist(
         crate::now_nanos(),
     ) {
         Ok(()) => {}
+        Err(opencrab_db::queries::CreateGateBindingError::Unknown) => {
+            return Err(GateError::new(ErrorCode::InstanceUnknown));
+        }
         Err(
             opencrab_db::queries::CreateGateBindingError::Conflict
             | opencrab_db::queries::CreateGateBindingError::AddressInUse

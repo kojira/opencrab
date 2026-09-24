@@ -284,7 +284,7 @@ mod tests {
             &binding_id,
             &instance_id,
             &session_id,
-            &session_id,
+            "alias",
             1,
         )
         .unwrap();

@@ -26,8 +26,8 @@
       "crates/nostr-gateway/src/store.rs:66"
     ],
     "reviewed_dev_only_qc_entries": [
-      "crates/server/Cargo.toml:79",
-      "crates/server/Cargo.toml:82"
+      "crates/server/Cargo.toml:80",
+      "crates/server/Cargo.toml:83"
     ]
   },
   "entries": [
@@ -274,7 +274,7 @@
     {
       "rule": "reviewed-gateway-dev-dependency",
       "path": "crates/server/Cargo.toml",
-      "line": 79,
+      "line": 80,
       "snippet": "opencrab-nostr-gateway = { workspace = true }",
       "classification": "dev-only-qc",
       "violation": "V14",
@@ -284,7 +284,7 @@
     {
       "rule": "reviewed-gateway-dev-dependency",
       "path": "crates/server/Cargo.toml",
-      "line": 82,
+      "line": 83,
       "snippet": "opencrab-discord-gateway = { workspace = true }",
       "classification": "dev-only-qc",
       "violation": "V14",
@@ -1034,7 +1034,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/mod.rs",
-      "line": 33,
+      "line": 34,
       "snippet": "mod trusted_users;",
       "classification": "production-violation",
       "violation": "V06",
@@ -1044,7 +1044,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/mod.rs",
-      "line": 42,
+      "line": 43,
       "snippet": "pub use channel_config::*;",
       "classification": "production-violation",
       "violation": "V06",
@@ -1054,7 +1054,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/mod.rs",
-      "line": 56,
+      "line": 57,
       "snippet": "pub use session_watches::*;",
       "classification": "production-violation",
       "violation": "V06",
@@ -1064,7 +1064,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/mod.rs",
-      "line": 62,
+      "line": 64,
       "snippet": "pub use trusted_users::*;",
       "classification": "production-violation",
       "violation": "V06",
@@ -4574,7 +4574,7 @@
       "violation": "V14",
       "classification": "dev-only-qc",
       "path": "crates/server/Cargo.toml",
-      "line": 79,
+      "line": 80,
       "needle": "opencrab-nostr-gateway",
       "owner_stage": "S11",
       "expires_when": "must remain dev-only and absent from cargo tree --edges no-dev while QC needs it"

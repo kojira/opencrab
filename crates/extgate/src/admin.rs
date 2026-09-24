@@ -168,30 +168,31 @@ fn agent_for_subject(conn: &rusqlite::Connection, subject_id: i64) -> Result<Str
 }
 
 fn instance_json(conn: &rusqlite::Connection, instance_id: &str) -> Result<Value, GateError> {
-    let mut value = conn.query_row(
-        "SELECT instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest,
+    let mut value = conn
+        .query_row(
+            "SELECT instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest,
                 created_at, updated_at, deleted_at
          FROM gate_instances WHERE instance_id = ?1",
-        params![instance_id],
-        |r| {
-            Ok(json!({
-                "instance_id": r.get::<_, String>(0)?,
-                "kind_id": r.get::<_, String>(1)?,
-                "subject_id": r.get::<_, i64>(2)?,
-                "revision": r.get::<_, i64>(3)?,
-                "enabled": r.get::<_, i64>(4)? == 1,
-                "config_b64": r.get::<_, String>(5)?,
-                "config_digest": r.get::<_, String>(6)?,
-                "created_at": r.get::<_, i64>(7)?,
-                "updated_at": r.get::<_, i64>(8)?,
-                "deleted_at": r.get::<_, Option<i64>>(9)?,
-            }))
-        },
-    )
-    .map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => GateError::new(ErrorCode::InstanceUnknown),
-        _ => GateError::store(),
-    })?;
+            params![instance_id],
+            |r| {
+                Ok(json!({
+                    "instance_id": r.get::<_, String>(0)?,
+                    "kind_id": r.get::<_, String>(1)?,
+                    "subject_id": r.get::<_, i64>(2)?,
+                    "revision": r.get::<_, i64>(3)?,
+                    "enabled": r.get::<_, i64>(4)? == 1,
+                    "config_b64": r.get::<_, String>(5)?,
+                    "config_digest": r.get::<_, String>(6)?,
+                    "created_at": r.get::<_, i64>(7)?,
+                    "updated_at": r.get::<_, i64>(8)?,
+                    "deleted_at": r.get::<_, Option<i64>>(9)?,
+                }))
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => GateError::new(ErrorCode::InstanceUnknown),
+            _ => GateError::store(),
+        })?;
     let mut statement = conn
         .prepare(
             "SELECT binding_id, address, session_id FROM gate_bindings
@@ -636,6 +637,9 @@ async fn put_binding_inner(
             },
         )
         .map_err(|error| match error {
+            opencrab_db::queries::CreateGateBindingError::Unknown => {
+                GateError::new(ErrorCode::InstanceUnknown)
+            }
             opencrab_db::queries::CreateGateBindingError::Conflict => {
                 GateError::new(ErrorCode::BindingConflict)
             }
@@ -653,7 +657,11 @@ async fn put_binding_inner(
         let created = outcome == opencrab_db::queries::CoreBindingOutcome::Created;
         Ok((
             json_ok(
-                if created { StatusCode::CREATED } else { StatusCode::OK },
+                if created {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::OK
+                },
                 binding_json(conn, &binding_id)?,
             ),
             created,

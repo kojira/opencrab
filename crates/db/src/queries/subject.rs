@@ -89,7 +89,13 @@ pub fn consume_subject_association_grant_in_tx(
             if matched.is_some() {
                 return Err(SubjectGrantError::InvalidGrant);
             }
-            matched = Some((stored, stored_agent, stored_subject, expires_at, consumed_at));
+            matched = Some((
+                stored,
+                stored_agent,
+                stored_subject,
+                expires_at,
+                consumed_at,
+            ));
         }
     }
     drop(statement);
@@ -184,14 +190,9 @@ mod tests {
     fn s2_grant_is_hashed_pair_bound_expiring_and_single_use() {
         let mut conn = crate::init_memory().unwrap();
         let subject_id = seed_agent(&conn);
-        let grant = issue_subject_association_grant(
-            &mut conn,
-            "grant-agent",
-            subject_id,
-            1_000,
-            100,
-        )
-        .unwrap();
+        let grant =
+            issue_subject_association_grant(&mut conn, "grant-agent", subject_id, 1_000, 100)
+                .unwrap();
         let stored: Vec<u8> = conn
             .query_row(
                 "SELECT grant_hash FROM subject_association_grants",
@@ -199,7 +200,9 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(!stored.windows(grant.len()).any(|bytes| bytes == grant.as_bytes()));
+        assert!(!stored
+            .windows(grant.len())
+            .any(|bytes| bytes == grant.as_bytes()));
 
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -250,14 +253,9 @@ mod tests {
         let (subject_id, grant) = {
             let mut conn = db.lock().unwrap();
             let subject_id = seed_agent(&conn);
-            let grant = issue_subject_association_grant(
-                &mut conn,
-                "grant-agent",
-                subject_id,
-                1_000,
-                100,
-            )
-            .unwrap();
+            let grant =
+                issue_subject_association_grant(&mut conn, "grant-agent", subject_id, 1_000, 100)
+                    .unwrap();
             (subject_id, grant)
         };
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
@@ -301,14 +299,8 @@ mod tests {
     fn s2_expired_grant_is_denied_and_retained() {
         let mut conn = crate::init_memory().unwrap();
         let subject_id = seed_agent(&conn);
-        let grant = issue_subject_association_grant(
-            &mut conn,
-            "grant-agent",
-            subject_id,
-            200,
-            100,
-        )
-        .unwrap();
+        let grant = issue_subject_association_grant(&mut conn, "grant-agent", subject_id, 200, 100)
+            .unwrap();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();

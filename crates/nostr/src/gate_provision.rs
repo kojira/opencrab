@@ -297,8 +297,13 @@ fn ensure_bindings(
                 now,
             ) {
                 Ok(()) => {}
-                Err(CreateGateBindingError::Conflict) => bail!(
-                    "binding address {} の membership / 占有が一致しない",
+                Err(
+                    CreateGateBindingError::Unknown
+                    | CreateGateBindingError::Conflict
+                    | CreateGateBindingError::AddressInUse
+                    | CreateGateBindingError::Closed,
+                ) => bail!(
+                    "binding address {} の instance / membership / 占有が一致しない",
                     plan.address
                 ),
                 Err(CreateGateBindingError::Store(error)) => return Err(error),

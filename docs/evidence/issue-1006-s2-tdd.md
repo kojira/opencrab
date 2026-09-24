@@ -1,73 +1,137 @@
-# Issue #1006 S2 TDD evidence — paused checkpoint
+# Issue #1006 S2 TDD evidence — subject and binding authority
 
-Base: `6b25553b12fa3c3e3c1ad9efc05dbd529b6d8450` (approved S1).
-Scope: S2 structural safeguards only. Work was paused by user direction before final validation/review.
+Date: 2026-09-24
+Stage: S2 only
+Starting checkpoint: `9f66c6671591c406616a12bb5085da6c786befcb`
+Rollback checkpoint: `9f66c6671591c406616a12bb5085da6c786befcb`
+Completion commit: the commit containing this evidence
 
-## Assertion-level RED
+## Scope completed
 
-Commit `f7b0c6c` added the initial named S2 assertions before production changes.
+S2 establishes the generic core subject and binding authority required by the approved gateway-process architecture:
+
+- positive, monotonic `INTEGER` subject IDs with allocator state and non-reuse tombstones;
+- one active subject association per gateway instance;
+- grandfathering only for associations that existed when migration v54 ran;
+- opaque, hashed, pair-bound, expiring, single-use subject-association grants;
+- exactly one transaction authority for session, membership, and binding creation;
+- byte-identical retry idempotence and deterministic conflict behavior;
+- atomic concurrent grant consumption and binding creation;
+- admin and runtime delegation to the same authority;
+- rejection of new bindings for missing or deleted instances.
+
+No S3 ownership, gateway-store migration, runtime fallback, or destructive cleanup work is included.
+
+## RED
+
+Commit `f7b0c6c` introduced the S2 assertion-level RED tests. Before GREEN they exposed:
+
+1. `s2_populated_upgrade_preserves_positive_subject_ids_and_associations_byte_for_byte`
+   - schema version remained 53;
+   - no subject allocator or v54 safeguards existed.
+2. `s2_fresh_schema_installs_allocator_tombstones_and_hashed_grants`
+   - fresh schema lacked allocator, tombstone, grant, and binding-session columns.
+3. `s2_hard_delete_tombstones_subject_and_allocator_never_reuses_it`
+   - deleted subject IDs could be lost and reused.
+4. `s2_grant_is_hashed_pair_bound_expiring_and_single_use`
+   - no grant issuance or consumption API existed.
+5. `s2_concurrent_grant_consumption_has_exactly_one_winner`
+   - no atomic single-consumer grant authority existed.
+6. `s2_binding_creation_is_byte_idempotent_through_the_generic_authority`
+   - binding creation was split among call sites rather than one generic authority.
+7. `s2_concurrent_byte_identical_binding_creation_converges_to_one_row`
+   - concurrent retries had no shared deterministic authority.
+8. `s2_new_first_instance_association_without_grant_is_forbidden`
+   - first-instance association could be created without proof.
+9. `s2_subject_grant_is_consumed_once_and_exact_retry_needs_no_second_grant`
+   - no one-time grant or exact-retry semantics existed.
+10. `s2_runtime_and_admin_binding_creation_delegate_to_one_idempotent_authority`
+    - runtime and admin paths did not delegate to one service.
+
+A final safety assertion was then added:
+
+11. `s2_deleted_instance_cannot_create_a_binding`
+    - RED: a soft-deleted instance accepted a new binding;
+    - RED log: `/tmp/issue-1006-s2-deleted-instance-red.log`;
+    - GREEN: instance resolution now requires `deleted_at IS NULL` and reports `instance_unknown` through both admin and runtime paths.
+
+## Minimal GREEN
+
+- Migration v54 installs subject allocation, tombstones, grants, association grandfathering, and binding/session linkage while preserving existing positive IDs and associations.
+- `subject.rs` owns issuance and transactional consumption of opaque grants. Only hashes are persisted; agent/subject pair, expiry, and single-use state are checked atomically.
+- `CoreBindingService::create_in_tx` is the sole generic session/membership/binding write authority. Admin and runtime call it inside their own immediate transaction and preserve their required audit/protocol behavior.
+- Missing and soft-deleted instances return `CreateGateBindingError::Unknown`; call sites expose only `instance_unknown`.
+- Existing tests were updated only where S2 intentionally requires an explicit session descriptor or a subject-association grant.
+- Large binding tests were moved to `gate_binding_s2_tests.rs` to satisfy the 800-line source gate without production behavior changes.
+- The S0 boundary baseline received line-only maintenance for the S2 `subject` module insertion and inherited S1 dev-dependency line drift. Its finding count and classifications remain exactly 451.
+
+## Named GREEN results
 
 ```text
 cargo test -p opencrab-db s2_ -- --nocapture
+11 passed; 0 failed
+
+cargo test -p opencrab-extgate --test conformance s2_ -- --nocapture
+3 passed; 0 failed
 ```
 
-Exact result: **4 tests, 4 failures**:
+The 11 DB matches include the required rollback assertion:
 
-- `s2_populated_upgrade_preserves_positive_subject_ids_and_associations_byte_for_byte`: `no such table: subject_id_allocator`;
-- `s2_fresh_schema_installs_allocator_tombstones_and_hashed_grants`: `missing S2 table subject_id_allocator` (`left: 0`, `right: 1`);
-- `s2_hard_delete_tombstones_subject_and_allocator_never_reuses_it`: `no such table: subject_tombstones`;
-- `s2_binding_creation_is_byte_idempotent_through_the_generic_authority`: `UNIQUE constraint failed: sessions.id` on the byte-identical retry.
+- `s2_pre_schema_snapshot_restores_byte_identical_fixture`
+  - builds a populated pre-S2 v53 fixture;
+  - takes a stopped/offline snapshot;
+  - upgrades it through v54;
+  - restores the snapshot;
+  - proves byte-identical database contents, schema version 53, and exact subject/instance association restoration.
 
-Raw output was retained at `/tmp/issue-1006-s2-red-db.log` for this worktree session.
+## Validation
 
-```text
-cargo test -p opencrab-extgate --test conformance \
-  s2_new_first_instance_association_without_grant_is_forbidden -- --exact --nocapture
-```
+Passed:
 
-Exact result: **1 test, 1 failure**. The unauthorized first association returned `201 Created` rather than the asserted `409 Conflict`, and persisted the instance. Raw output: `/tmp/issue-1006-s2-red-extgate.log`.
+- `cargo test -p opencrab-db --lib --no-fail-fast`
+  - 261 passed; 3 ignored; 0 failed.
+- `cargo test -p opencrab-extgate --all-targets --no-fail-fast`
+  - library 67 passed;
+  - conformance 84 passed;
+  - production-boundary 1 passed;
+  - no-platform-branch 8 passed.
+- `cargo test -p opencrab-server --bin opencrab-server --no-fail-fast`
+  - 24 passed.
+- `cargo test -p opencrab-server --test discord_qc_harness_e2e --no-fail-fast`
+  - 40 passed.
+- `cargo test -p opencrab-server --test qc_harness_e2e --no-fail-fast`
+  - 21 passed.
+- `cargo check -p opencrab-nostr`
+- `cargo test --workspace --all-features --no-run`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo fmt --all -- --check`
+- `bash scripts/check-file-size.sh`
+- `bash scripts/check-deps.sh`
+- `cargo tree -p opencrab-server --edges no-dev | (! grep -E 'opencrab-(discord|nostr|web)-gateway')`
+- `python3 scripts/gateway_boundary_audit.py`
+  - 451 classified findings; no unclassified/stale entry; only the two reviewed dev-only QC edges.
+- `python3 -m unittest scripts/tests/test_gateway_boundary_audit.py`
+  - 19 passed.
+- `git diff --check`
 
-A later named cross-entry-point assertion was replayed against detached pre-production commit `f7b0c6c`:
+The first full-workspace attempt hit an environmental incremental-cache race (`dep-graph.part.bin` disappeared). Retrying with `CARGO_INCREMENTAL=0` ran the workspace and left four inherited, non-S2 targets failing:
 
-```text
-cargo test -p opencrab-extgate --test conformance \
-  s2_runtime_and_admin_binding_creation_delegate_to_one_idempotent_authority \
-  -- --exact --nocapture
-```
+- `opencrab-server --lib`: the checked L2 artifact still contains the S1-withdrawn public gate-admin routes and unauthorized response body;
+- `opencrab-web-gateway --test core_process_e2e`;
+- `opencrab-web-gateway --test web_conversation_create_e2e`;
+- `opencrab-web-gateway --test web_mock_contracts_e2e`.
 
-Exact RED: **1 test, 1 failure**, `expected frame not received` on the byte-identical runtime retry because the split runtime path attempted duplicate session creation. Raw output: `/tmp/issue-1006-s2-red-runtime-authority.log`. The temporary detached worktree was removed afterward.
+The three Web targets cannot start core because their pre-S2 harness config omits the S1-required protected `gate_admin.listen_socket` and `bootstrap_credential_file`. No S2 source or fixture assumption causes these failures, so they were not changed in this stage. They are recorded in Issue #1011: https://github.com/kojira/opencrab/issues/1011. All S2-relevant DB, extgate, server, Discord QC, Nostr QC, static boundary, format, and clippy checks pass.
 
-## GREEN reached before pause
+## Rollback
 
-Commit `a6e4a69` added v54 subject allocator/tombstone/grant schema, immutable grandfathering state, hard-delete tombstoning, and `CoreBindingService` idempotence. Subsequent uncommitted-at-the-time work added hashed random grant issue/consume, grant-required first instance association, explicit session envelopes, and admin/runtime delegation to `CoreBindingService`; it is preserved in the pause commit recorded by the implementation artifact.
+- Code rollback point: `9f66c6671591c406616a12bb5085da6c786befcb`.
+- Data rollback proof: `s2_pre_schema_snapshot_restores_byte_identical_fixture` passes using a stopped/offline pre-v54 snapshot and byte-for-byte restore comparison.
+- Migration preservation proof: `s2_populated_upgrade_preserves_positive_subject_ids_and_associations_byte_for_byte` verifies exact pre/post ID and association tuples.
+- No cleanup or irreversible legacy-state deletion occurs in S2.
 
-Passing checks reached:
+## Residual risks and deferrals
 
-```text
-cargo test -p opencrab-db s2_ -- --nocapture
-8 passed; 0 failed
-
-cargo test -p opencrab-extgate --test conformance --no-fail-fast
-83 passed; 0 failed
-
-cargo test -p opencrab-extgate --test conformance \
-  s2_runtime_and_admin_binding_creation_delegate_to_one_idempotent_authority \
-  -- --exact --nocapture
-1 passed; 0 failed
-```
-
-The 83-test conformance run preceded addition of the final cross-entry-point test; that final test passed focused.
-
-## Pause state and incomplete validation
-
-A full `cargo test -p opencrab-db --lib --no-fail-fast` initially exposed migration-test rerun compatibility defects. After one fix it reached **251 passed, 8 failed, 3 ignored**. The remaining failures were isolated to old partial migration fixtures and v44 rollback helpers; minimal fixture prerequisite/cleanup edits were made, but the required rerun was interrupted by the user pause and remains outstanding.
-
-Not yet completed after the latest edits:
-
-- full DB library rerun;
-- full extgate all-target rerun after the final test;
-- S0 54-test boundary suite and exact 451-finding audit;
-- dependency/file-size checks, metadata/no-dev tree, fmt, Clippy, and full affected workspace tests;
-- independent implementation review and rollback snapshot rehearsal.
-
-No S3+, concrete gateway fields, live migration/data, deployment, README, or Issue #1007 robustness work was intentionally added. `stash@{0}` was not applied, modified, or dropped.
+- The unrelated inherited full-workspace baseline/Web harness failures are isolated in Issue #1011 and do not weaken S2 authority or migration behavior.
+- Later gateway-store ownership, projection, freeze, cleanup, and zero-core-change gates remain S3–S11 work and are intentionally untouched.
+- `stash@{0}` (`cc26425bc66f685160efeb2139bcaf85ed9dfca1`) remains untouched.

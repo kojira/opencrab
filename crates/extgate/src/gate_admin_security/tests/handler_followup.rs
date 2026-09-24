@@ -20,11 +20,19 @@ async fn protected_router_serves_all_six_scoped_operations_with_database_credent
     let bearer = format!("Bearer {}", URL_SAFE_NO_PAD.encode(token));
     let instance = "/api/gate-instances/00000000-0000-0000-0000-000000000000";
     let binding = "/api/gate-bindings/00000000-0000-0000-0000-000000000002";
+    let grant = issue_test_subject_grant(&state);
     let cases = [
         (
             "PUT",
             instance.to_owned(),
-            r#"{"kind_id":"opaque","subject_id":1,"enabled":true,"config_b64":""}"#.to_owned(),
+            serde_json::json!({
+                "kind_id": "opaque",
+                "subject_id": 1,
+                "enabled": true,
+                "config_b64": "",
+                "subject_grant": grant,
+            })
+            .to_string(),
             201,
         ),
         ("GET", instance.to_owned(), String::new(), 200),
@@ -37,7 +45,7 @@ async fn protected_router_serves_all_six_scoped_operations_with_database_credent
         (
             "PUT",
             binding.to_owned(),
-            r#"{"instance_id":"00000000-0000-0000-0000-000000000000","address":"room"}"#.to_owned(),
+            r#"{"instance_id":"00000000-0000-0000-0000-000000000000","address":"room","session":{"session_id":"extgate-00000000-0000-0000-0000-000000000002","title":"room"}}"#.to_owned(),
             201,
         ),
         ("DELETE", binding.to_owned(), String::new(), 200),
@@ -86,6 +94,12 @@ async fn protected_request(
     app.clone()
         .oneshot(request.body(Body::from(body.to_owned())).unwrap())
         .await
+        .unwrap()
+}
+
+fn issue_test_subject_grant(state: &crate::registry::ExtgateState) -> String {
+    let mut conn = state.db.lock().unwrap();
+    opencrab_db::queries::issue_subject_association_grant(&mut conn, "agent-a", 1, i64::MAX, 100)
         .unwrap()
 }
 
@@ -153,7 +167,14 @@ async fn handler_mutation_and_required_audit_commit_atomically_and_conflicts_are
     let app = crate::admin::admin_router(state.clone());
     let bearer = format!("Bearer {}", URL_SAFE_NO_PAD.encode(token));
     let instance = "/api/gate-instances/00000000-0000-0000-0000-000000000000";
-    let body = r#"{"kind_id":"opaque","subject_id":1,"enabled":true,"config_b64":""}"#;
+    let body = serde_json::json!({
+        "kind_id": "opaque",
+        "subject_id": 1,
+        "enabled": true,
+        "config_b64": "",
+        "subject_grant": issue_test_subject_grant(&state),
+    })
+    .to_string();
     {
         let conn = state.db.lock().unwrap();
         conn.execute_batch(
@@ -165,7 +186,7 @@ async fn handler_mutation_and_required_audit_commit_atomically_and_conflicts_are
         .unwrap();
     }
 
-    let failed = protected_request(&app, "PUT", instance, Some(&bearer), body).await;
+    let failed = protected_request(&app, "PUT", instance, Some(&bearer), &body).await;
     assert_eq!(
         failed.status(),
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
@@ -183,7 +204,7 @@ async fn handler_mutation_and_required_audit_commit_atomically_and_conflicts_are
             .unwrap();
     }
 
-    let created = protected_request(&app, "PUT", instance, Some(&bearer), body).await;
+    let created = protected_request(&app, "PUT", instance, Some(&bearer), &body).await;
     assert_eq!(created.status(), axum::http::StatusCode::CREATED);
     let conflict_body = r#"{"kind_id":"different","subject_id":1,"enabled":true,"config_b64":""}"#;
     let conflict = protected_request(&app, "PUT", instance, Some(&bearer), conflict_body).await;
@@ -224,7 +245,14 @@ async fn real_http11_over_private_uds_enforces_auth_and_keeps_public_routes_abse
     let app = crate::admin::admin_router(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let bearer = URL_SAFE_NO_PAD.encode(token);
-    let body = r#"{"kind_id":"opaque","subject_id":1,"enabled":true,"config_b64":""}"#;
+    let body = serde_json::json!({
+        "kind_id": "opaque",
+        "subject_id": 1,
+        "enabled": true,
+        "config_b64": "",
+        "subject_grant": issue_test_subject_grant(&state),
+    })
+    .to_string();
     let protected = exchange(
         &path,
         format!(

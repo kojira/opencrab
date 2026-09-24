@@ -639,7 +639,7 @@ mod tests {
                 "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 &session_id,
-                &session_id,
+                "alias",
                 1,
             )
             .unwrap();
