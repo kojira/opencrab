@@ -213,6 +213,54 @@ async fn handler_mutation_and_required_audit_commit_atomically_and_conflicts_are
     assert_eq!(classes, ["succeeded", "conflict"]);
 }
 
+#[tokio::test]
+async fn real_http11_over_private_uds_enforces_auth_and_keeps_public_routes_absent() {
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn exchange(path: &Path, request: String) -> String {
+        let mut stream = tokio::net::UnixStream::connect(path).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        String::from_utf8(response).unwrap()
+    }
+
+    let token = [33_u8; 32];
+    let state = protected_state(token);
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = temp.path().canonicalize().unwrap().join("admin.sock");
+    let prepared =
+        crate::admin_socket::prepare_admin_socket(&path, unsafe { libc::geteuid() }).unwrap();
+    let (listener, cleanup) = prepared.into_parts();
+    let app = crate::admin::admin_router(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let bearer = URL_SAFE_NO_PAD.encode(token);
+    let body = r#"{"kind_id":"opaque","subject_id":1,"enabled":true,"config_b64":""}"#;
+    let protected = exchange(
+        &path,
+        format!(
+            "PUT /api/gate-instances/00000000-0000-0000-0000-000000000000 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+    .await;
+    assert!(
+        protected.starts_with("HTTP/1.1 201 Created\r\n"),
+        "{protected}"
+    );
+
+    let absent = exchange(
+        &path,
+        "GET /api/public HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_owned(),
+    )
+    .await;
+    assert!(absent.starts_with("HTTP/1.1 404 Not Found\r\n"), "{absent}");
+    server.abort();
+    drop(cleanup);
+}
+
 #[test]
 fn bootstrap_is_atomic_exact_idempotent_and_full_scan_duplicate_safe() {
     let mut conn = opencrab_db::init_memory().unwrap();

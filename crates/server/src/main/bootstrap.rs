@@ -39,6 +39,20 @@ fn configure_attachment_inbox(
     Ok(inbox)
 }
 
+#[cfg(test)]
+thread_local! {
+    static INJECTED_GATE_ADMIN_STARTUP_FAULT: std::cell::RefCell<Option<&'static str>> = const { std::cell::RefCell::new(None) };
+}
+
+fn inject_gate_admin_startup_fault(stage: &'static str) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if INJECTED_GATE_ADMIN_STARTUP_FAULT.with(|fault| *fault.borrow() == Some(stage)) {
+        anyhow::bail!("injected gate-admin {stage} startup failure");
+    }
+    let _ = stage;
+    Ok(())
+}
+
 /// Loads and validates startup configuration, scrubs secrets, recovers the DB,
 /// recovers the database and constructs the initial application state.
 /// No task is spawned before this function returns.
@@ -56,6 +70,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     let cfg = config::load_config("config/default.toml")?;
 
     // DB初期化（本番はコネクションプール）
+    inject_gate_admin_startup_fault("migration")?;
     let db = opencrab_db::Db::open(&cfg.database.path)?;
 
     // S1 security boundary: migration is applied by Db::open; manifest/bootstrap and the
@@ -69,6 +84,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         anyhow::bail!("[gate_admin].listen_socket must be distinct from [gate].listen_socket");
     }
     let service_euid = unsafe { libc::geteuid() };
+    inject_gate_admin_startup_fault("bootstrap")?;
     let manifest = opencrab_extgate::gate_admin_security::read_manifest(
         Path::new(&cfg.gate_admin.bootstrap_credential_file),
         service_euid,
@@ -84,6 +100,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         )?;
     }
     drop(manifest);
+    inject_gate_admin_startup_fault("socket")?;
     let prepared_admin = opencrab_extgate::admin_socket::prepare_admin_socket(
         Path::new(&cfg.gate_admin.listen_socket),
         service_euid,
@@ -104,6 +121,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     }
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
     let extgate = Arc::new(opencrab_extgate::ExtgateState::new_protected(db.clone()));
+    inject_gate_admin_startup_fault("router")?;
     let gate_admin_router = opencrab_extgate::admin_router(extgate.clone());
     configure_attachment_inbox(&extgate, Path::new(&cfg.database.path))?;
 
@@ -224,12 +242,32 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
 mod tests {
     #[test]
     fn gate_admin_startup_fault_injection_covers_every_pre_listener_stage() {
+        use std::cell::Cell;
+
         let source = include_str!("bootstrap.rs");
-        for stage in ["migration", "bootstrap", "socket", "router"] {
+        for failed_stage in ["migration", "bootstrap", "socket", "router"] {
             assert!(
-                source.contains(&format!("inject_gate_admin_startup_fault(\"{stage}\")")),
-                "missing pre-listener fault injection for {stage}"
+                source.contains(&format!(
+                    "inject_gate_admin_startup_fault(\"{failed_stage}\")"
+                )),
+                "missing pre-listener fault injection for {failed_stage}"
             );
+            super::INJECTED_GATE_ADMIN_STARTUP_FAULT
+                .with(|fault| *fault.borrow_mut() = Some(failed_stage));
+            let runtime_accepts = Cell::new(0);
+            let public_accepts = Cell::new(0);
+            let startup = (|| -> anyhow::Result<()> {
+                for stage in ["migration", "bootstrap", "socket", "router"] {
+                    super::inject_gate_admin_startup_fault(stage)?;
+                }
+                runtime_accepts.set(runtime_accepts.get() + 1);
+                public_accepts.set(public_accepts.get() + 1);
+                Ok(())
+            })();
+            super::INJECTED_GATE_ADMIN_STARTUP_FAULT.with(|fault| *fault.borrow_mut() = None);
+            assert!(startup.is_err(), "{failed_stage} fault must stop startup");
+            assert_eq!(runtime_accepts.get(), 0);
+            assert_eq!(public_accepts.get(), 0);
         }
     }
 
