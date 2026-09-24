@@ -11,6 +11,9 @@ pub(super) struct BootstrapContext {
     pub(super) cfg: AppConfig,
     pub(super) extgate: Arc<opencrab_extgate::ExtgateState>,
     pub(super) gate_socket: Option<std::path::PathBuf>,
+    pub(super) gate_admin_listener: tokio::net::UnixListener,
+    pub(super) gate_admin_cleanup: opencrab_extgate::admin_socket::SocketCleanup,
+    pub(super) gate_admin_router: axum::Router,
     pub(super) heartbeat_config_tx: watch::Sender<HeartbeatConfig>,
     pub(super) heartbeat_config_rx: watch::Receiver<HeartbeatConfig>,
     pub(super) state: AppState,
@@ -54,6 +57,38 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
 
     // DB初期化（本番はコネクションプール）
     let db = opencrab_db::Db::open(&cfg.database.path)?;
+
+    // S1 security boundary: migration is applied by Db::open; manifest/bootstrap and the
+    // protected socket are fully prepared before any runtime or public listener can start.
+    if cfg.gate_admin.listen_socket.is_empty()
+        || cfg.gate_admin.bootstrap_credential_file.is_empty()
+    {
+        anyhow::bail!("[gate_admin] listen_socket and bootstrap_credential_file are required");
+    }
+    if cfg.gate_admin.listen_socket == cfg.gate.listen_socket {
+        anyhow::bail!("[gate_admin].listen_socket must be distinct from [gate].listen_socket");
+    }
+    let service_euid = unsafe { libc::geteuid() };
+    let manifest = opencrab_extgate::gate_admin_security::read_manifest(
+        Path::new(&cfg.gate_admin.bootstrap_credential_file),
+        service_euid,
+    )?;
+    {
+        let mut conn = db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db lock for gate-admin bootstrap"))?;
+        opencrab_extgate::gate_admin_security::bootstrap(
+            &mut conn,
+            &manifest,
+            opencrab_extgate::now_nanos(),
+        )?;
+    }
+    let prepared_admin = opencrab_extgate::admin_socket::prepare_admin_socket(
+        Path::new(&cfg.gate_admin.listen_socket),
+        service_euid,
+    )?;
+    let (gate_admin_listener, gate_admin_cleanup) = prepared_admin.into_parts();
+
     {
         let mut conn = db
             .lock()
@@ -66,9 +101,9 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
             anyhow::anyhow!("extgate operation-call recover failed: {}", e.code.as_str())
         })?;
     }
-    let gate_token = opencrab_extgate::OperatorToken::take_from_env();
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
-    let extgate = Arc::new(opencrab_extgate::ExtgateState::new(db.clone(), gate_token));
+    let extgate = Arc::new(opencrab_extgate::ExtgateState::new_protected(db.clone()));
+    let gate_admin_router = opencrab_extgate::admin_router(extgate.clone());
     configure_attachment_inbox(&extgate, Path::new(&cfg.database.path))?;
 
     // #553: 起動時リコンサイル。新プロセスの subtask registry（in-memory）は必ず空なので、
@@ -175,6 +210,9 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         cfg,
         extgate,
         gate_socket,
+        gate_admin_listener,
+        gate_admin_cleanup,
+        gate_admin_router,
         heartbeat_config_tx,
         heartbeat_config_rx,
         state,

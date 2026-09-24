@@ -108,27 +108,11 @@ fn public_gate_admin_route_debt(
 }
 
 #[test]
-fn public_gate_admin_route_debt_matches_s0_burn_down() {
-    // V07 / owner S1: this is debt, not an approved public API. S1 expires the
-    // entire list by moving all six operations to the protected core UDS.
+fn public_gate_admin_routes_are_absent_after_s1() {
     let actual = public_gate_admin_route_debt(&opencrab_server::production_route_inventory());
-    let expected = vec![
-        (
-            "/api/gate-bindings/{binding_id}".to_string(),
-            vec!["DELETE".to_string(), "PUT".to_string()],
-        ),
-        (
-            "/api/gate-instances/{instance_id}".to_string(),
-            vec!["DELETE".to_string(), "GET".to_string(), "PUT".to_string()],
-        ),
-        (
-            "/api/gate-instances/{instance_id}/revisions".to_string(),
-            vec!["POST".to_string()],
-        ),
-    ];
-    assert_eq!(
-        actual, expected,
-        "unclassified public gate-admin route debt"
+    assert!(
+        actual.is_empty(),
+        "S1 requires all six gate-admin operations to be absent from public TCP: {actual:?}"
     );
 }
 

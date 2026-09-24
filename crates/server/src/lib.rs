@@ -1,6 +1,5 @@
 use std::sync::{Arc, RwLock};
 
-use axum::Extension;
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -434,52 +433,17 @@ pub struct HttpRouteDescriptor {
 pub fn production_route_inventory() -> Vec<HttpRouteDescriptor> {
     let mut routes = Vec::new();
     production_routes!(describe_route, routes);
-    describe_gate_admin_routes(&mut routes);
     routes.sort_by(|a, b| a.path.cmp(&b.path));
     routes
 }
 
-fn describe_gate_admin_routes(routes: &mut Vec<HttpRouteDescriptor>) {
-    describe_route!(
-        routes,
-        "/api/gate-instances/{instance_id}",
-        get => (),
-        put => (),
-        delete => ()
-    );
-    describe_route!(
-        routes,
-        "/api/gate-instances/{instance_id}/revisions",
-        post => ()
-    );
-    describe_route!(
-        routes,
-        "/api/gate-bindings/{binding_id}",
-        put => (),
-        delete => ()
-    );
-}
-
 pub fn create_router(state: AppState) -> Router {
-    let extgate = std::sync::Arc::new(opencrab_extgate::ExtgateState::new(
-        state.db.clone(),
-        opencrab_extgate::OperatorToken::from_bytes(""),
-    ));
-    create_router_with_gate(state, extgate)
-}
-
-pub fn create_router_with_gate(
-    state: AppState,
-    extgate: std::sync::Arc<opencrab_extgate::ExtgateState>,
-) -> Router {
     let mut router = Router::new();
     production_routes!(mount_route, router);
     router
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .layer(Extension(extgate.clone()))
         .with_state(state)
-        .merge(opencrab_extgate::admin_router(extgate))
 }
 
 async fn health_check() -> &'static str {

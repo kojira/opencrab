@@ -201,6 +201,11 @@ port = 3000
 [database]
 path = "data/opencrab.db"
 
+[gate_admin]
+# Core-owned protected administration UDS and strict 0600 bootstrap manifest.
+listen_socket = "/var/run/opencrab/gate-admin.sock"
+bootstrap_credential_file = "/etc/opencrab/gate-admin-credential.json"
+
 [gate]
 # External gate V3 の Unix domain socket。空・相対 path は起動失敗。
 listen_socket = "/tmp/opencrab-extgate.sock"
