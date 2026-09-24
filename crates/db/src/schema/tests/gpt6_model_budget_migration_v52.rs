@@ -32,5 +32,5 @@ fn v51_to_v52_seeds_gpt_6_chatgpt_model_budgets_without_overwriting_operator_row
     assert_eq!(luna.output_price_per_1m, 0.0);
     assert_eq!(luna.context_window, Some(400000));
     assert_eq!(luna.max_output_tokens, Some(32000));
-    assert_eq!(schema_version(&conn).unwrap(), 52);
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
 }
