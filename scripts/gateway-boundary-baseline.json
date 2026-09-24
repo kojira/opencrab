@@ -3,13 +3,12 @@
   "purpose": "Issue #1006 S0 line-specific reviewed burn-down; entries are debts or explicit gateway-store provenance, never wildcard exceptions",
   "review": {
     "status": "line-by-line-reviewed",
-    "finding_count": 454,
+    "finding_count": 451,
     "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance",
     "rule_counts": {
       "gateway-core-path": 16,
       "gateway-db-open": 4,
       "gateway-production-dependency": 4,
-      "public-gate-admin-reachable": 3,
       "reviewed-gateway-dev-dependency": 2,
       "shared-concrete-route": 4,
       "shared-concrete-schema": 212,
@@ -19,7 +18,7 @@
     },
     "classification_counts": {
       "dev-only-qc": 2,
-      "production-violation": 450,
+      "production-violation": 447,
       "valid-gateway-owned-store": 2
     },
     "valid_gateway_store_entries": [
@@ -273,36 +272,6 @@
       "expires_when": "remove forbidden normal/build dependency from the concrete daemon"
     },
     {
-      "rule": "public-gate-admin-reachable",
-      "path": "crates/extgate/src/admin.rs",
-      "line": 23,
-      "snippet": "\"/api/gate-instances/{instance_id}\",",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S1",
-      "expires_when": "public TCP cannot reach any of the six gate-admin operations"
-    },
-    {
-      "rule": "public-gate-admin-reachable",
-      "path": "crates/extgate/src/admin.rs",
-      "line": 27,
-      "snippet": "\"/api/gate-instances/{instance_id}/revisions\",",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S1",
-      "expires_when": "public TCP cannot reach any of the six gate-admin operations"
-    },
-    {
-      "rule": "public-gate-admin-reachable",
-      "path": "crates/extgate/src/admin.rs",
-      "line": 31,
-      "snippet": "\"/api/gate-bindings/{binding_id}\",",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S1",
-      "expires_when": "public TCP cannot reach any of the six gate-admin operations"
-    },
-    {
       "rule": "reviewed-gateway-dev-dependency",
       "path": "crates/server/Cargo.toml",
       "line": 79,
@@ -325,7 +294,7 @@
     {
       "rule": "shared-concrete-route",
       "path": "crates/server/src/lib.rs",
-      "line": 382,
+      "line": 381,
       "snippet": "$apply!($target, \"/api/agents/{id}/channel-configs\", get => api::channel_configs::list_channel_configs, put => api::channel_configs::upsert_channel_config);",
       "classification": "production-violation",
       "violation": "V11",
@@ -335,7 +304,7 @@
     {
       "rule": "shared-concrete-route",
       "path": "crates/server/src/lib.rs",
-      "line": 383,
+      "line": 382,
       "snippet": "$apply!($target, \"/api/agents/{id}/channel-configs/{channel_id}\", delete => api::channel_configs::delete_channel_config);",
       "classification": "production-violation",
       "violation": "V11",
@@ -345,7 +314,7 @@
     {
       "rule": "shared-concrete-route",
       "path": "crates/server/src/lib.rs",
-      "line": 384,
+      "line": 383,
       "snippet": "$apply!($target, \"/api/agents/{id}/trusted-users\", get => api::trusted_users::list_trusted_users, post => api::trusted_users::add_trusted_user);",
       "classification": "production-violation",
       "violation": "V11",
@@ -355,7 +324,7 @@
     {
       "rule": "shared-concrete-route",
       "path": "crates/server/src/lib.rs",
-      "line": 385,
+      "line": 384,
       "snippet": "$apply!($target, \"/api/agents/{id}/trusted-users/{user_id}\", patch => api::trusted_users::update_trusted_user, delete => api::trusted_users::delete_trusted_user);",
       "classification": "production-violation",
       "violation": "V11",
@@ -4195,7 +4164,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/lib.rs",
-      "line": 133,
+      "line": 132,
       "snippet": "pub gateways: Arc<opencrab_actions::AgentGatewayRegistry>,",
       "classification": "production-violation",
       "violation": "V11",
@@ -4205,7 +4174,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/lib.rs",
-      "line": 310,
+      "line": 309,
       "snippet": "gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),",
       "classification": "production-violation",
       "violation": "V11",
@@ -4215,7 +4184,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/main/bootstrap.rs",
-      "line": 146,
+      "line": 200,
       "snippet": "gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),",
       "classification": "production-violation",
       "violation": "V11",

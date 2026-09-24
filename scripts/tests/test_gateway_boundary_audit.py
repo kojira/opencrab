@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import pathlib
 import tempfile
 import textwrap
@@ -12,6 +13,20 @@ SPEC.loader.exec_module(AUDIT)
 
 
 class GatewayBoundaryMutationTests(unittest.TestCase):
+    def test_s1_public_isolation_burns_down_exactly_three_reviewed_findings(self):
+        root = pathlib.Path(__file__).parents[2]
+        baseline = json.loads((root / "scripts/gateway-boundary-baseline.json").read_text())
+        findings = AUDIT.audit_texts(AUDIT.repository_texts(root))
+        self.assertEqual(len(findings), 451)
+        self.assertEqual(len(baseline["entries"]), 451)
+        self.assertEqual(baseline["review"]["finding_count"], 451)
+        self.assertFalse(
+            [finding for finding in findings if finding.rule == "public-gate-admin-reachable"]
+        )
+        self.assertFalse(
+            [entry for entry in baseline["entries"] if entry["rule"] == "public-gate-admin-reachable"]
+        )
+
     def rules(self, files):
         return {finding.rule for finding in AUDIT.audit_texts(files)}
 
