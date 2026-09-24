@@ -1,0 +1,61 @@
+$ python3 - <<PY (assert clone checker requires integrity/model/memory classes)
+Traceback (most recent call last):
+  File "<stdin>", line 5, in <module>
+AssertionError: {'memory_sessions_fts', 'memory_index_nodes', 'memory_category_members', 'memory_curated', 'conversation_snapshots', 'model_pricing', 'agent_memory_index_config', 'memory_index_watermark', 'llm_provider_overrides'}
+exit=1
+$ test -x scripts/validate-production-nostr-recovery.py
+exit=1
+$ cargo test -p opencrab-db setting_same_self_pubkey_is_idempotent_and_preserves_updated_at
+   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/db)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.06s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_db-ccf59d11e90efdf1)
+
+running 1 test
+
+thread 'queries::agent_nostr_config::tests::setting_same_self_pubkey_is_idempotent_and_preserves_updated_at' panicked at crates/db/src/queries/agent_nostr_config.rs:431:9:
+assertion `left == right` failed: startup must not rewrite an unchanged identity row
+  left: "2026-09-24T17:55:34.461344+00:00"
+ right: "stable"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test queries::agent_nostr_config::tests::setting_same_self_pubkey_is_idempotent_and_preserves_updated_at ... FAILED
+
+failures:
+
+failures:
+    queries::agent_nostr_config::tests::setting_same_self_pubkey_is_idempotent_and_preserves_updated_at
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 259 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p opencrab-db --lib`
+exit=101
+$ cargo test -p opencrab-nostr repeated_identical_provision_preserves_instance_row
+   Compiling opencrab-llm-types v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/llm-types)
+   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/db)
+   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/gate-client)
+   Compiling opencrab-nostr-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/nostr-gateway)
+   Compiling opencrab-core v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/core)
+   Compiling opencrab-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/gateway)
+   Compiling opencrab-actions v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/actions)
+   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/extgate)
+   Compiling opencrab-nostr v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/nostr)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.43s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_nostr-cc1d2ece058a1ef6)
+
+running 1 test
+
+thread 'gate_provision::tests::repeated_identical_provision_preserves_instance_row' panicked at crates/nostr/src/gate_provision.rs:437:9:
+assertion `left == right` failed: startup restore must not rewrite identical placement
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test gate_provision::tests::repeated_identical_provision_preserves_instance_row ... FAILED
+
+failures:
+
+failures:
+    gate_provision::tests::repeated_identical_provision_preserves_instance_row
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 124 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p opencrab-nostr --lib`
+exit=101

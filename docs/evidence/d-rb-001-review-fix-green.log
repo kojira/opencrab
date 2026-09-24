@@ -1,0 +1,188 @@
+$ cargo fmt --check
+$ cargo test -p opencrab-db setting_same_self_pubkey_is_idempotent_and_preserves_updated_at
+   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/db)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.54s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_db-ccf59d11e90efdf1)
+
+running 1 test
+test queries::agent_nostr_config::tests::setting_same_self_pubkey_is_idempotent_and_preserves_updated_at ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 259 filtered out; finished in 0.02s
+
+$ cargo test -p opencrab-nostr repeated_identical_provision_preserves_instance_row
+   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/db)
+   Compiling opencrab-core v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/core)
+   Compiling opencrab-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/gateway)
+   Compiling opencrab-actions v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/actions)
+   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/extgate)
+   Compiling opencrab-nostr v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/nostr)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.78s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_nostr-cc1d2ece058a1ef6)
+
+running 1 test
+test gate_provision::tests::repeated_identical_provision_preserves_instance_row ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 124 filtered out; finished in 0.03s
+
+$ python3 scripts/test_preflight_production_nostr_recovery.py -v
+test_all_required_memory_and_model_tables_are_covered (__main__.RecoveryPreflightTests.test_all_required_memory_and_model_tables_are_covered) ... ok
+test_integrity_check_failure_is_fatal (__main__.RecoveryPreflightTests.test_integrity_check_failure_is_fatal) ... ok
+test_snapshot_comparison_allows_append_only_rows (__main__.RecoveryPreflightTests.test_snapshot_comparison_allows_append_only_rows) ... ok
+test_snapshot_comparison_rejects_rewrite_or_deletion (__main__.RecoveryPreflightTests.test_snapshot_comparison_rejects_rewrite_or_deletion) ... ok
+test_snapshot_runs_both_database_checks (__main__.RecoveryPreflightTests.test_snapshot_runs_both_database_checks) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.012s
+
+OK
+$ python3 scripts/check-production-nostr-rollback.py
+D-RB-001 structural checks passed
+$ python3 scripts/preflight-production-nostr-recovery.py --clone-root /tmp/d-rb-001-authentic-green --core-db /tmp/d-rb-001-authentic-green/data/opencrab.db --output /tmp/d-rb-001-authentic-green/evidence/read-only-preflight-final.json
+D-RB-001 clone preflight passed
+$ python3 scripts/validate-production-nostr-recovery.py --package-root target/release --clone-root /tmp/d-rb-001-authentic-green-final --output /tmp/d-rb-001-authentic-green-final/evidence/topology.json
+D-RB-001 authentic clone topology passed: /private/tmp/d-rb-001-authentic-green-final/evidence/topology.json
+$ cargo test -p opencrab-db agent_nostr_config -- --nocapture
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.63s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_db-ccf59d11e90efdf1)
+
+running 7 tests
+test queries::agent_nostr_config::tests::test_owner_pubkey_defaults_to_unset_and_roundtrips ... ok
+test queries::agent_nostr_config::tests::test_set_secret_key_preserves_other_columns ... ok
+test queries::agent_nostr_config::tests::test_upsert_preserves_owner_pubkey ... ok
+test queries::agent_nostr_config::tests::setting_same_self_pubkey_is_idempotent_and_preserves_updated_at ... ok
+test queries::agent_nostr_config::tests::test_self_pubkey_roundtrip_and_reverse_lookup ... ok
+test queries::agent_nostr_config::tests::test_upsert_get_roundtrip_and_enabled_filter ... ok
+test queries::agent_nostr_config::tests::test_upsert_and_secret_key_change_do_not_touch_self_pubkey ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 253 filtered out; finished in 0.18s
+
+$ cargo test -p opencrab-nostr gate_provision -- --nocapture
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_nostr-cc1d2ece058a1ef6)
+
+running 8 tests
+test gate_provision::tests::enabled_agent_without_v3_binding_is_fail_loud ... ok
+test gate_provision::tests::empty_agent_name_is_fail_loud ... ok
+test gate_provision::tests::missing_session_is_fail_loud ... ok
+test gate_provision::tests::repeated_identical_provision_preserves_instance_row ... ok
+test gate_provision::tests::provision_reuses_existing_session ... ok
+test gate_provision::tests::revise_bumps_revision ... ok
+test gate_provision::tests::instance_config_includes_agent_name ... ok
+test gate_provision::tests::enabled_agent_projects_to_external_gateway_placement ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 117 filtered out; finished in 0.21s
+
+$ cargo test -p opencrab-server nostr_runner_impl -- --nocapture
+   Compiling opencrab-llm-types v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/llm-types)
+   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/db)
+   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/gate-client)
+   Compiling opencrab-voice v0.1.0 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/voice)
+   Compiling opencrab-llm v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/llm)
+   Compiling opencrab-nostr-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/nostr-gateway)
+   Compiling opencrab-discord-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/discord-gateway)
+   Compiling opencrab-core v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/core)
+   Compiling opencrab-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/gateway)
+   Compiling opencrab-actions v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/actions)
+   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/extgate)
+   Compiling opencrab-nostr v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/nostr)
+   Compiling opencrab-mcp v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/mcp)
+   Compiling opencrab-server v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/crates/server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.63s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_server-f91264ec948b0acc)
+
+running 20 tests
+test nostr_runner_impl::caller_tests::owner_set_as_npub_matches_hex_speaker ... ok
+test nostr_runner_impl::caller_tests::gate_allow_keys_materializes_owner_coagent_and_nostr_trusted_only ... ok
+test nostr_runner_impl::caller_tests::trusted_row_with_owner_permission_does_not_become_owner ... ok
+test nostr_runner_impl::caller_tests::owner_is_scoped_to_the_agent ... ok
+test nostr_runner_impl::caller_tests::owner_pubkey_resolves_to_owner ... ok
+test nostr_runner_impl::caller_tests::malformed_speaker_is_least_privileged ... ok
+test nostr_runner_impl::caller_tests::trusted_row_registered_as_npub_matches_hex_speaker ... ok
+test nostr_runner_impl::caller_tests::co_agent_fail_closed_when_self_pubkey_absent ... ok
+test nostr_runner_impl::caller_tests::owner_set_as_hex_matches_npub_speaker ... ok
+test nostr_runner_impl::caller_tests::d_rb_001_two_enabled_agents_load_owner_from_schema_52_core_without_writes ... ok
+test nostr_runner_impl::caller_tests::co_agent_resolves_via_reverse_lookup ... ok
+test nostr_runner_impl::caller_tests::other_pubkey_stays_agent ... ok
+test nostr_runner_impl::caller_tests::gate_allow_keys_empty_when_nothing_registered ... ok
+test nostr_runner_impl::caller_tests::unset_owner_grants_owner_to_nobody ... ok
+test nostr_runner_impl::caller_tests::co_agent_fail_closed_when_reverse_maps_to_untrusted_uuid ... ok
+test nostr_runner_impl::tests::short_relay_text_stays_plain_json ... ok
+test nostr_runner_impl::tests::relay_post_never_blocks_the_caller ... ok
+test nostr_runner_impl::caller_tests::discord_trusted_rows_do_not_leak_into_nostr ... ok
+test nostr_runner_impl::tests::long_relay_text_is_one_multipart_post ... ok
+test nostr_runner_impl::tests::relay_post_failure_is_swallowed ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 524 filtered out; finished in 0.60s
+
+     Running unittests src/main.rs (target/debug/deps/opencrab_server-aa745177fc3d1e1d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests/api_e2e.rs (target/debug/deps/api_e2e-426a0c34d756f9f4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 75 filtered out; finished in 0.00s
+
+     Running tests/discord_qc_harness_e2e.rs (target/debug/deps/discord_qc_harness_e2e-d02e8a3ab27ed02a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.00s
+
+     Running tests/e2e_local.rs (target/debug/deps/e2e_local-b6e4d76f4f8e5179)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/live_di_smoke.rs (target/debug/deps/live_di_smoke-e678276ddd33f348)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/old_web_routes_404.rs (target/debug/deps/old_web_routes_404-0c0b5872d7ee43b5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/output_limit_e2e.rs (target/debug/deps/output_limit_e2e-0f495f43ba518b23)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/qc_harness_e2e.rs (target/debug/deps/qc_harness_e2e-d9e41b8bd8d737c5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.00s
+
+     Running tests/real_llm_e2e.rs (target/debug/deps/real_llm_e2e-723ea76288ec34a8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/transport_fire_registry.rs (target/debug/deps/transport_fire_registry-262bcbaf7e57c46a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/utterance_parity.rs (target/debug/deps/utterance_parity-f50677a93b8b10f2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/webgate_static_audit.rs (target/debug/deps/webgate_static_audit-f1ee33a5da1ab21b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+

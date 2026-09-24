@@ -1,0 +1,261 @@
+{
+  "design_id": "D-RB-001",
+  "clone_only": true,
+  "all_paths_under_clone_root": true,
+  "package_topology": {
+    "version": 1,
+    "nostr_lifecycle": "server_owned",
+    "nostr_authority": "core_agent_nostr_config",
+    "standalone_nostr_daemon": false
+  },
+  "schema_before": 52,
+  "schema_after": 52,
+  "checks_before": {
+    "quick_check": [
+      "ok"
+    ],
+    "integrity_check": [
+      "ok"
+    ]
+  },
+  "checks_after": {
+    "quick_check": [
+      "ok"
+    ],
+    "integrity_check": [
+      "ok"
+    ]
+  },
+  "owners": {
+    "agent-a": {
+      "source": "core agent_nostr_config",
+      "owner_only_ws_list_done": 1
+    },
+    "agent-b": {
+      "source": "core agent_nostr_config",
+      "owner_only_ws_list_done": 1
+    }
+  },
+  "nostr": {
+    "inbound_owner_events": 2,
+    "outbound_dry_run_observed": true,
+    "fixture": "local JSONL relay edge"
+  },
+  "discord": {
+    "gateway_started": true,
+    "inbound_fixture": true,
+    "outbound_dry_run_observed": true
+  },
+  "web_dashboard_model_admin": {
+    "core": 200,
+    "dashboard": 200,
+    "model_choices": 200,
+    "model_pricing": 200,
+    "web_create": 201
+  },
+  "processes": {
+    "server_pid": 87051,
+    "descendants": [
+      {
+        "pid": 87074,
+        "ppid": 87051,
+        "command_basename": "nostr-gateway"
+      },
+      {
+        "pid": 87075,
+        "ppid": 87051,
+        "command_basename": "nostr-gateway"
+      }
+    ],
+    "nostr_children": 2,
+    "standalone_daemons": 0,
+    "admin_uds_present": false
+  },
+  "database_comparison": {
+    "ok": true,
+    "tables": {
+      "agents": {
+        "before_count": 2,
+        "after_count": 2,
+        "before_sha256": "f8bd5fa303692ee51c330091171fb91e3cea072281774bffbbc484e7de948a35",
+        "after_sha256": "f8bd5fa303692ee51c330091171fb91e3cea072281774bffbbc484e7de948a35",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "sessions": {
+        "before_count": 2,
+        "after_count": 4,
+        "before_sha256": "3beb49ebbdcef7762b50517f8c70b2364a99dad786c736d82b1d545e8ecf6b91",
+        "after_sha256": "3b8dcdc85462ed07a2e1ef4cf31d13c605386e0db3a5821cbb58bb0f950368c6",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 2
+      },
+      "memory_curated": {
+        "before_count": 1,
+        "after_count": 1,
+        "before_sha256": "18fdb09811742f1d84e5bc2bffce15e4f0ecb9e24527086d15c5009b7da7e6b6",
+        "after_sha256": "18fdb09811742f1d84e5bc2bffce15e4f0ecb9e24527086d15c5009b7da7e6b6",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "memory_sessions": {
+        "before_count": 1,
+        "after_count": 100,
+        "before_sha256": "934fdc7e7136a1a017075f481c691ae3bb88575722cd51aea4f077870895e158",
+        "after_sha256": "a5e73602e1654c88ca75cb08730cfa7ad9dc3f39432fa428e7fd5003535b7c79",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 99
+      },
+      "memory_sessions_fts": {
+        "before_count": 0,
+        "after_count": 99,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e142a6492be27c33dc0c2903b3f1a75c8159543f6735e88563a1f0b2767a065c",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 99
+      },
+      "conversation_snapshots": {
+        "before_count": 0,
+        "after_count": 3,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "8aea22bdfac508637cabd492e15254e8b9ee080e64fddeb75290924a4f22ac6a",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 3
+      },
+      "memory_index_nodes": {
+        "before_count": 0,
+        "after_count": 13,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "7af8bb679327354f39507c120c5ea752865e67d92b0dc79001d7b7a375f38004",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 13
+      },
+      "memory_category_members": {
+        "before_count": 0,
+        "after_count": 0,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "memory_index_watermark": {
+        "before_count": 0,
+        "after_count": 2,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "d66fbfb6bd71a9bb36bc959ac1abc5539e4c6e2e9dd7212480642d26b06c106a",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 2
+      },
+      "agent_memory_index_config": {
+        "before_count": 0,
+        "after_count": 0,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "tool_logs": {
+        "before_count": 0,
+        "after_count": 3,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "b4ad578b165efc6560a6dc3a9f5b09aa81ae0f15b9ee935df8003145df192c29",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 3
+      },
+      "llm_logs": {
+        "before_count": 0,
+        "after_count": 90,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "ddac01feaa7e6fa6b4a75179dd9c86273e1061e7f7640adca195316fd30c4edf",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 90
+      },
+      "agent_nostr_config": {
+        "before_count": 2,
+        "after_count": 2,
+        "before_sha256": "2e66765757941df05a3bb8ade81f87203b4e966436c83e47fb641ad2a394a9bc",
+        "after_sha256": "2e66765757941df05a3bb8ade81f87203b4e966436c83e47fb641ad2a394a9bc",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "trusted_users": {
+        "before_count": 0,
+        "after_count": 0,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "trusted_co_agents": {
+        "before_count": 0,
+        "after_count": 0,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "gate_instances": {
+        "before_count": 0,
+        "after_count": 4,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "fb19a1ca9153be0c8c10bd7d7cf9b416fa64ecde868fd2bab6ee0db95824c12a",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 4
+      },
+      "gate_bindings": {
+        "before_count": 0,
+        "after_count": 4,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "5a6fffff01eb371905ac58adcb1f959c4f52104f3cad3812673108af124d4375",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 4
+      },
+      "llm_provider_overrides": {
+        "before_count": 0,
+        "after_count": 0,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "model_pricing": {
+        "before_count": 4,
+        "after_count": 4,
+        "before_sha256": "ee015c7d0fc4a135ce095012fceaad5807753808629d8e231a36b533ee6556c6",
+        "after_sha256": "ee015c7d0fc4a135ce095012fceaad5807753808629d8e231a36b533ee6556c6",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      }
+    },
+    "violations": [],
+    "authorized_session_rewrites": [],
+    "unauthorized_session_rewrites": []
+  },
+  "llm_fixture_requests": 94,
+  "logs": {
+    "recovery-server.log": "logs/recovery-server.log",
+    "web-gateway.log": "logs/web-gateway.log",
+    "discord-gateway.log": "logs/discord-gateway.log",
+    "secret-normalize.log": "logs/secret-normalize.log",
+    "schema-init.log": "logs/schema-init.log"
+  }
+}

@@ -166,7 +166,10 @@ pub fn set_agent_nostr_self_pubkey(
     self_pubkey: &str,
 ) -> Result<bool> {
     let updated = conn.execute(
-        "UPDATE agent_nostr_config SET self_pubkey = ?1, updated_at = ?2 WHERE agent_id = ?3",
+        "UPDATE agent_nostr_config
+         SET self_pubkey = ?1,
+             updated_at = CASE WHEN self_pubkey = ?1 THEN updated_at ELSE ?2 END
+         WHERE agent_id = ?3",
         params![self_pubkey, Utc::now().to_rfc3339(), agent_id],
     )?;
     Ok(updated > 0)
@@ -397,6 +400,41 @@ mod tests {
         assert!(resolve_agent_by_nostr_self_pubkey(&conn, "   ").is_none());
         // 登録と違う pubkey は None。
         assert!(resolve_agent_by_nostr_self_pubkey(&conn, &"b".repeat(64)).is_none());
+    }
+
+    #[test]
+    fn setting_same_self_pubkey_is_idempotent_and_preserves_updated_at() {
+        let conn = mem();
+        upsert_agent_nostr_config(
+            &conn,
+            &AgentNostrConfigRow {
+                agent_id: "a1".to_string(),
+                secret_key: "enc:v1:test".to_string(),
+                relays_json: "[]".to_string(),
+                filter_json: "{}".to_string(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+        let pk = "d".repeat(64);
+        assert!(set_agent_nostr_self_pubkey(&conn, "a1", &pk).unwrap());
+        conn.execute(
+            "UPDATE agent_nostr_config SET updated_at='stable' WHERE agent_id='a1'",
+            [],
+        )
+        .unwrap();
+        assert!(set_agent_nostr_self_pubkey(&conn, "a1", &pk).unwrap());
+        let updated_at: String = conn
+            .query_row(
+                "SELECT updated_at FROM agent_nostr_config WHERE agent_id='a1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            updated_at, "stable",
+            "startup must not rewrite an unchanged identity row"
+        );
     }
 
     /// #489: **汚染防止**。self_pubkey は upsert / secret_key 差し替えのどちらでも

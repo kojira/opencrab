@@ -193,10 +193,14 @@ pub fn provision_nostr_gate(
             bail!("nostr instance {instance_id} が別 kind/subject で存在する")
         }
         Some(_) => {
+            // Startup restore is idempotent: an identical projection is already
+            // authoritative and must not rewrite its timestamp.  This keeps a
+            // schema-52 recovery start from mutating preserved production rows.
             tx.execute(
                 "UPDATE gate_instances
                  SET config_b64 = ?2, config_digest = ?3, updated_at = ?4
-                 WHERE instance_id = ?1",
+                 WHERE instance_id = ?1
+                   AND (config_b64 <> ?2 OR config_digest <> ?3)",
                 params![instance_id, config_b64, digest, now],
             )?;
         }
@@ -400,6 +404,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kind, "nostr");
+    }
+
+    #[test]
+    fn repeated_identical_provision_preserves_instance_row() {
+        let mut conn = opencrab_db::init_memory().unwrap();
+        seed_agent(&conn);
+        let sid = nostr_session_id("a1");
+        let tx = conn.transaction().unwrap();
+        insert_session_in_tx(&tx, &sid, &sid, "2026-01-01T00:00:00Z").unwrap();
+        insert_agent_session_in_tx(&tx, "a1", &sid).unwrap();
+        tx.commit().unwrap();
+        let cfg = NostrConfig {
+            relays: vec!["wss://yabu.me".into()],
+            filter: crate::NostrFilter::default(),
+        };
+        for now in [1, 2] {
+            provision_nostr_gate(
+                &mut conn,
+                "a1",
+                &"aa".repeat(32),
+                &cfg,
+                &[],
+                &AllowSources::default(),
+                now,
+            )
+            .unwrap();
+        }
+        let updated_at: i64 = conn
+            .query_row(
+                "SELECT updated_at FROM gate_instances WHERE instance_id = ?1",
+                params![nostr_instance_id("a1")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            updated_at, 1,
+            "startup restore must not rewrite identical placement"
+        );
     }
 
     #[test]
