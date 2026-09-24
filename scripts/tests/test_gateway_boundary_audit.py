@@ -13,13 +13,47 @@ SPEC.loader.exec_module(AUDIT)
 
 
 class GatewayBoundaryMutationTests(unittest.TestCase):
-    def test_s4_reviewed_boundary_burn_down_has_exactly_374_findings(self):
+    def test_test_only_rust_file_is_excluded_from_production_findings(self):
+        findings = AUDIT.audit_texts({
+            "crates/example-gateway/src/test_support.rs": textwrap.dedent(
+                """\
+                #![cfg(test)]
+
+                fn test_support(core_database_path: &str) {
+                    let _ = core_database_path;
+                }
+                """
+            )
+        })
+        self.assertEqual(findings, [])
+
+    def test_production_file_with_cfg_test_module_is_not_excluded(self):
+        findings = AUDIT.audit_texts({
+            "crates/example-gateway/src/lib.rs": textwrap.dedent(
+                """\
+                fn production(core_database_path: &str) {
+                    let _ = core_database_path;
+                }
+
+                #[cfg(test)]
+                mod tests {
+                    fn helper() {}
+                }
+                """
+            )
+        })
+        self.assertTrue(
+            any(finding.rule == "gateway-core-path" for finding in findings),
+            findings,
+        )
+
+    def test_s5_reviewed_boundary_burn_down_has_exactly_275_findings(self):
         root = pathlib.Path(__file__).parents[2]
         baseline = json.loads((root / "scripts/gateway-boundary-baseline.json").read_text())
         findings = AUDIT.audit_texts(AUDIT.repository_texts(root))
-        self.assertEqual(len(findings), 374)
-        self.assertEqual(len(baseline["entries"]), 374)
-        self.assertEqual(baseline["review"]["finding_count"], 374)
+        self.assertEqual(len(findings), 275)
+        self.assertEqual(len(baseline["entries"]), 275)
+        self.assertEqual(baseline["review"]["finding_count"], 275)
         self.assertFalse(
             [finding for finding in findings if finding.rule == "public-gate-admin-reachable"]
         )
@@ -605,18 +639,7 @@ opencrab-example-gateway = { path = "../example-gateway" }
         self.assertTrue(any("classification mismatch" in error for error in errors), errors)
 
     def test_valid_gateway_db_open_requires_exact_finding_identity(self):
-        approved_sites = (
-            (
-                "crates/nostr-gateway/src/store.rs",
-                66,
-                "let conn = Connection::open(path)",
-            ),
-            (
-                "crates/nostr-gateway/src/daemon.rs",
-                115,
-                "let mut gateway_store = GatewayStore::open(&config.database_path)?;",
-            ),
-        )
+        approved_sites = sorted((path, line, snippet) for _, path, line, snippet in AUDIT.VALID_GATEWAY_DB_OPEN_IDENTITIES)
         for path, approved_line, snippet in approved_sites:
             with self.subTest(path=path):
                 source = "\n" * (approved_line - 1) + snippet + "\n" + snippet + "\n"
@@ -659,6 +682,34 @@ opencrab-example-gateway = { path = "../example-gateway" }
         document["entries"][0]["expires_when"] = "never"
         errors = AUDIT.check_baseline([finding], document)
         self.assertTrue(any("expires_when mismatch" in error for error in errors), errors)
+
+    def test_s5_gateway_store_open_allowlist_is_exact_and_complete(self):
+        self.assertEqual(len(AUDIT.VALID_GATEWAY_DB_OPEN_IDENTITIES), 6)
+        mutated = next(iter(AUDIT.VALID_GATEWAY_DB_OPEN_IDENTITIES))
+        changed = (mutated[0], mutated[1], mutated[2] + 1, mutated[3])
+        finding = AUDIT.Finding(*changed)
+        self.assertEqual(AUDIT._metadata_for(finding)[0], "production-violation")
+
+    def test_s5_runtime_gateway_sources_have_no_core_db_or_legacy_import(self):
+        root = pathlib.Path(__file__).resolve().parents[2]
+        for crate in ["discord-gateway", "nostr-gateway", "web-gateway"]:
+            manifest = (root / "crates" / crate / "Cargo.toml").read_text()
+            for forbidden in ["opencrab-core.workspace", "opencrab-db.workspace", "opencrab-nostr.workspace", "opencrab-gateway.workspace"]:
+                self.assertNotIn(forbidden, manifest.split("[dev-dependencies]")[0])
+            source = "\n".join(
+                path.read_text().split("#[cfg(test)]", 1)[0]
+                for path in (root / "crates" / crate / "src").rglob("*.rs")
+                if not path.name.endswith("_tests.rs")
+            )
+            self.assertNotIn("core_database_path", source)
+            self.assertNotIn("legacy_database_path", source)
+            self.assertNotIn("import_legacy", source)
+
+    def test_s5_server_has_no_concrete_identity_configuration_routes(self):
+        root = pathlib.Path(__file__).resolve().parents[2]
+        source = (root / "crates" / "server" / "src" / "lib.rs").read_text()
+        self.assertNotIn("/channel-configs", source)
+        self.assertNotIn("/trusted-users", source)
 
 
 if __name__ == "__main__":

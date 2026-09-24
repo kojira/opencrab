@@ -21,12 +21,11 @@ rusqlite.workspace = true
 url = "2"
 zeroize = "1"
 base64 = "0.22"
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
 async-trait.workspace = true
 opencrab-gate-client.workspace = true
-opencrab-core.workspace = true
-opencrab-db.workspace = true
-opencrab-gateway.workspace = true
-opencrab-nostr.workspace = true
+opencrab-process-supervisor.workspace = true
 
 [[bin]]
 name = "nostr-gateway"

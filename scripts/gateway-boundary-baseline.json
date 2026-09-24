@@ -3,175 +3,25 @@
   "purpose": "Issue #1006 S0 line-specific reviewed burn-down; entries are debts or explicit gateway-store provenance, never wildcard exceptions",
   "review": {
     "status": "line-by-line-reviewed",
-    "finding_count": 374,
+    "finding_count": 275,
     "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance"
   },
   "entries": [
     {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 28,
-      "snippet": "pub core_database_path: PathBuf,",
-      "classification": "production-violation",
+      "rule": "gateway-db-open",
+      "path": "crates/discord-gateway/src/daemon.rs",
+      "line": 475,
+      "snippet": "let store = DiscordStore::open(&config.database_path)?;",
+      "classification": "valid-gateway-owned-store",
       "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 31,
-      "snippet": "pub legacy_database_path: Option<PathBuf>,",
-      "classification": "production-violation",
-      "violation": "V03",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 69,
-      "snippet": "if !self.core_database_path.is_absolute() {",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 70,
-      "snippet": "anyhow::bail!(\"core_database_path must be absolute\");",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 72,
-      "snippet": "if self.database_path == self.core_database_path {",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 73,
-      "snippet": "anyhow::bail!(\"database_path must differ from core_database_path\");",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 76,
-      "snippet": ".legacy_database_path",
-      "classification": "production-violation",
-      "violation": "V03",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 80,
-      "snippet": "anyhow::bail!(\"legacy_database_path must be absolute\");",
-      "classification": "production-violation",
-      "violation": "V03",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 116,
-      "snippet": "if let Some(legacy_path) = &config.legacy_database_path {",
-      "classification": "production-violation",
-      "violation": "V03",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 117,
-      "snippet": "if gateway_store.import_legacy_once(legacy_path)? {",
-      "classification": "production-violation",
-      "violation": "V03",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 118,
-      "snippet": "tracing::info!(source = %legacy_path.display(), \"legacy gateway configuration imported\");",
-      "classification": "production-violation",
-      "violation": "V03",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 129,
-      "snippet": ".core_database_path",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 131,
-      "snippet": ".context(\"core_database_path must be UTF-8\")?,",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/store.rs",
-      "line": 80,
-      "snippet": "pub fn import_legacy_once(&mut self, legacy_path: &Path) -> Result<bool> {",
-      "classification": "production-violation",
-      "violation": "V03",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/store.rs",
-      "line": 94,
-      "snippet": "Connection::open_with_flags(legacy_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)",
-      "classification": "production-violation",
-      "violation": "V03",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-core-path",
-      "path": "crates/nostr-gateway/src/store.rs",
-      "line": 95,
-      "snippet": ".with_context(|| format!(\"open legacy DB {}\", legacy_path.display()))?;",
-      "classification": "production-violation",
-      "violation": "V03",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
+      "owner_stage": "S5",
+      "expires_when": "retain only while provenance remains the daemon-owned gateway database"
     },
     {
       "rule": "gateway-db-open",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 115,
-      "snippet": "let mut gateway_store = GatewayStore::open(&config.database_path)?;",
+      "path": "crates/discord-gateway/src/store.rs",
+      "line": 97,
+      "snippet": "let conn = Connection::open(path)?;",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",
       "owner_stage": "S5",
@@ -180,18 +30,8 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 127,
-      "snippet": "let core_db = opencrab_db::Db::open(",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
-    },
-    {
-      "rule": "gateway-db-open",
-      "path": "crates/nostr-gateway/src/store.rs",
-      "line": 66,
-      "snippet": "let conn = Connection::open(path)",
+      "line": 475,
+      "snippet": "let store = NostrStore::open(&config.database_path)?;",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",
       "owner_stage": "S5",
@@ -200,52 +40,32 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/store.rs",
-      "line": 94,
-      "snippet": "Connection::open_with_flags(legacy_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)",
-      "classification": "production-violation",
-      "violation": "V03",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
+      "line": 97,
+      "snippet": "let conn = Connection::open(path)?;",
+      "classification": "valid-gateway-owned-store",
+      "violation": "V02",
+      "owner_stage": "S5",
+      "expires_when": "retain only while provenance remains the daemon-owned gateway database"
     },
     {
-      "rule": "gateway-production-dependency",
-      "path": "crates/nostr-gateway/Cargo.toml",
-      "line": 26,
-      "snippet": "opencrab-core.workspace = true",
-      "classification": "production-violation",
-      "violation": "V01",
+      "rule": "gateway-db-open",
+      "path": "crates/web-gateway/src/owner.rs",
+      "line": 44,
+      "snippet": "let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));",
+      "classification": "valid-gateway-owned-store",
+      "violation": "V02",
       "owner_stage": "S5",
-      "expires_when": "remove forbidden normal/build dependency from the concrete daemon"
+      "expires_when": "retain only while provenance remains the daemon-owned gateway database"
     },
     {
-      "rule": "gateway-production-dependency",
-      "path": "crates/nostr-gateway/Cargo.toml",
-      "line": 27,
-      "snippet": "opencrab-db.workspace = true",
-      "classification": "production-violation",
-      "violation": "V01",
+      "rule": "gateway-db-open",
+      "path": "crates/web-gateway/src/store.rs",
+      "line": 60,
+      "snippet": "let conn = Connection::open(path)?;",
+      "classification": "valid-gateway-owned-store",
+      "violation": "V02",
       "owner_stage": "S5",
-      "expires_when": "remove forbidden normal/build dependency from the concrete daemon"
-    },
-    {
-      "rule": "gateway-production-dependency",
-      "path": "crates/nostr-gateway/Cargo.toml",
-      "line": 28,
-      "snippet": "opencrab-gateway.workspace = true",
-      "classification": "production-violation",
-      "violation": "V01",
-      "owner_stage": "S5",
-      "expires_when": "remove forbidden normal/build dependency from the concrete daemon"
-    },
-    {
-      "rule": "gateway-production-dependency",
-      "path": "crates/nostr-gateway/Cargo.toml",
-      "line": 29,
-      "snippet": "opencrab-nostr.workspace = true",
-      "classification": "production-violation",
-      "violation": "V01",
-      "owner_stage": "S5",
-      "expires_when": "remove forbidden normal/build dependency from the concrete daemon"
+      "expires_when": "retain only while provenance remains the daemon-owned gateway database"
     },
     {
       "rule": "reviewed-gateway-dev-dependency",
@@ -266,46 +86,6 @@
       "violation": "V14",
       "owner_stage": "S11",
       "expires_when": "retain only while isolated QC needs it and cargo tree --edges no-dev remains free of the daemon"
-    },
-    {
-      "rule": "shared-concrete-route",
-      "path": "crates/server/src/lib.rs",
-      "line": 342,
-      "snippet": "$apply!($target, \"/api/agents/{id}/channel-configs\", get => api::channel_configs::list_channel_configs, put => api::channel_configs::upsert_channel_config);",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-route",
-      "path": "crates/server/src/lib.rs",
-      "line": 343,
-      "snippet": "$apply!($target, \"/api/agents/{id}/channel-configs/{channel_id}\", delete => api::channel_configs::delete_channel_config);",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-route",
-      "path": "crates/server/src/lib.rs",
-      "line": 344,
-      "snippet": "$apply!($target, \"/api/agents/{id}/trusted-users\", get => api::trusted_users::list_trusted_users, post => api::trusted_users::add_trusted_user);",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-route",
-      "path": "crates/server/src/lib.rs",
-      "line": 345,
-      "snippet": "$apply!($target, \"/api/agents/{id}/trusted-users/{user_id}\", patch => api::trusted_users::update_trusted_user, delete => api::trusted_users::delete_trusted_user);",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
     },
     {
       "rule": "shared-concrete-schema",
@@ -349,58 +129,8 @@
     },
     {
       "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 13,
-      "snippet": "pub fn apply_channel_config(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 71,
-      "snippet": "opencrab_db::queries::get_channel_config_for_agent(&conn, channel_id, agent_id)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 80,
-      "snippet": "let cfg = opencrab_db::queries::ChannelConfigRow {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 95,
-      "snippet": "opencrab_db::queries::upsert_channel_config(&conn, &cfg),",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 30,
-      "snippet": "pub mod channel_config;",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/lib.rs",
-      "line": 33,
+      "line": 32,
       "snippet": "pub mod session_watch_policy;",
       "classification": "production-violation",
       "violation": "V11",
@@ -410,17 +140,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 43,
-      "snippet": "pub use channel_config::apply_channel_config;",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/lib.rs",
-      "line": 60,
+      "line": 58,
       "snippet": "pub use session_watch_policy::{",
       "classification": "production-violation",
       "violation": "V11",
@@ -430,7 +150,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 61,
+      "line": 59,
       "snippet": "caller_policy_key, parse_session_watch_policy, watch_author_standing, ClassPolicy,",
       "classification": "production-violation",
       "violation": "V11",
@@ -440,7 +160,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 62,
+      "line": 60,
       "snippet": "SessionPolicyError, SessionWatchPolicy, WatchAllowSets, WatchAuthorStanding,",
       "classification": "production-violation",
       "violation": "V11",
@@ -1809,396 +1529,6 @@
     },
     {
       "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 16,
-      "snippet": "pub struct ChannelConfigDto {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 33,
-      "snippet": "pub configs: Vec<ChannelConfigDto>,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 37,
-      "snippet": "pub async fn list_channel_configs(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 44,
-      "snippet": "opencrab_db::queries::list_channel_configs_by_agent(&conn, &agent_id).unwrap_or_default();",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 47,
-      "snippet": "let configs: Vec<ChannelConfigDto> = rows",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 50,
-      "snippet": ".map(|r| ChannelConfigDto {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 92,
-      "snippet": "pub async fn upsert_channel_config(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 100,
-      "snippet": "opencrab_db::queries::get_channel_config_for_agent(&conn, &req.channel_id, &agent_id)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 123,
-      "snippet": "let cfg = opencrab_db::queries::ChannelConfigRow {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 135,
-      "snippet": "opencrab_db::queries::upsert_channel_config(&conn, &cfg)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 144,
-      "snippet": "pub async fn delete_channel_config(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 150,
-      "snippet": "opencrab_db::queries::delete_channel_config_for_agent(&conn, &channel_id, &agent_id)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/mod.rs",
-      "line": 5,
-      "snippet": "pub mod channel_configs;",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/mod.rs",
-      "line": 24,
-      "snippet": "pub mod trusted_users;",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 8,
-      "snippet": "use opencrab_db::queries::TrustedUserPermission;",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 13,
-      "snippet": "pub struct TrustedUserDto {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 22,
-      "snippet": "pub permission: TrustedUserPermission,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 33,
-      "snippet": "fn row_to_dto(r: opencrab_db::queries::TrustedUserRow) -> TrustedUserDto {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 34,
-      "snippet": "TrustedUserDto {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 46,
-      "snippet": "pub async fn list_trusted_users(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 49,
-      "snippet": ") -> Json<Vec<TrustedUserDto>> {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 51,
-      "snippet": "let rows = opencrab_db::queries::list_trusted_users(&conn, &agent_id).unwrap_or_default();",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 56,
-      "snippet": "pub struct AddTrustedUserRequest {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 81,
-      "snippet": "pub async fn add_trusted_user(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 84,
-      "snippet": "Json(req): Json<AddTrustedUserRequest>,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 85,
-      "snippet": ") -> Result<Json<TrustedUserDto>, StatusCode> {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 95,
-      "snippet": "opencrab_db::queries::add_trusted_user(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 115,
-      "snippet": "Ok(Json(TrustedUserDto {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 131,
-      "snippet": "fn parse_permission(raw: Option<&str>) -> Result<TrustedUserPermission, StatusCode> {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 133,
-      "snippet": "None => Ok(TrustedUserPermission::default()),",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 134,
-      "snippet": "Some(s) => TrustedUserPermission::parse(s).ok_or(StatusCode::BAD_REQUEST),",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 148,
-      "snippet": "pub struct UpdateTrustedUserRequest {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 155,
-      "snippet": "pub async fn update_trusted_user(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 158,
-      "snippet": "Json(req): Json<UpdateTrustedUserRequest>,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 162,
-      "snippet": "Some(s) => Some(TrustedUserPermission::parse(s).ok_or(StatusCode::BAD_REQUEST)?),",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 171,
-      "snippet": "opencrab_db::queries::update_trusted_user_permission(&tx, &user_id, permission)?;",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 174,
-      "snippet": "updated |= opencrab_db::queries::update_trusted_user_display_name(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 187,
-      "snippet": "pub async fn delete_trusted_user(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 192,
-      "snippet": "let deleted = opencrab_db::queries::remove_trusted_user(&conn, &user_id).unwrap_or(false);",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-schema",
       "path": "crates/server/src/caller_identity.rs",
       "line": 32,
       "snippet": "CallerIdentity::TrustedUser",
@@ -2466,96 +1796,6 @@
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
       "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 18,
-      "snippet": "let channel_id = match args.get(\"channel_id\").and_then(|v| v.as_str()) {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 24,
-      "snippet": "error: Some(\"channel_idパラメータが必要です\".to_string()),",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 28,
-      "snippet": "let guild_id = match args.get(\"guild_id\").and_then(|v| v.as_str()) {",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 34,
-      "snippet": "error: Some(\"guild_idパラメータが必要です\".to_string()),",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 75,
-      "snippet": "opencrab_db::queries::is_channel_whitelisted_for_agent(&conn, channel_id, agent_id)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 81,
-      "snippet": "channel_id: channel_id.to_string(),",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 83,
-      "snippet": "guild_id: guild_id.to_string(),",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 104,
-      "snippet": "\"channel_id\": channel_id,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 111,
-      "snippet": "if channel_name.is_empty() { channel_id } else { channel_name },",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -3239,26 +2479,6 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/gateway/src/process_supervisor.rs",
-      "line": 404,
-      "snippet": "secret_env: \"DISCORD_BOT_TOKEN\",",
-      "classification": "production-violation",
-      "violation": "V05",
-      "owner_stage": "S5",
-      "expires_when": "move platform-neutral process utility out of shared concrete ownership"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/gateway/src/process_supervisor.rs",
-      "line": 405,
-      "snippet": "gateway_name: \"discord-gateway\",",
-      "classification": "production-violation",
-      "violation": "V05",
-      "owner_stage": "S5",
-      "expires_when": "move platform-neutral process utility out of shared concrete ownership"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/agent_heartbeat.rs",
       "line": 104,
       "snippet": "for key in [\"scope\", \"channel_id\", \"guild_id\"] {",
@@ -3286,196 +2506,6 @@
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
       "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 12,
-      "snippet": "pub guild_id: Option<String>,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 17,
-      "snippet": "pub channel_id: String,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 20,
-      "snippet": "pub guild_id: String,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 32,
-      "snippet": "pub guild_id: String,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 46,
-      "snippet": "let guild_filter = query.guild_id.clone().unwrap_or_default();",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 49,
-      "snippet": ".filter(|r| guild_filter.is_empty() || r.guild_id == guild_filter)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 51,
-      "snippet": "channel_id: r.channel_id,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 53,
-      "snippet": "guild_id: r.guild_id,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 65,
-      "snippet": "guild_id: query.guild_id.unwrap_or_default(),",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 73,
-      "snippet": "pub channel_id: String,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 74,
-      "snippet": "pub guild_id: String,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 104,
-      "snippet": "opencrab_db::queries::is_channel_readable_for_agent(&conn, &req.channel_id, &agent_id)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 107,
-      "snippet": "opencrab_db::queries::is_channel_writable_for_agent(&conn, &req.channel_id, &agent_id)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 110,
-      "snippet": "opencrab_db::queries::is_channel_whitelisted_for_agent(&conn, &req.channel_id, &agent_id)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 124,
-      "snippet": "channel_id: req.channel_id.clone(),",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 126,
-      "snippet": "guild_id: req.guild_id,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 138,
-      "snippet": "\"channel_id\": req.channel_id,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 146,
-      "snippet": "Path((agent_id, channel_id)): Path<(String, String)>,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 154,
-      "snippet": "\"channel_id\": channel_id,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -3719,26 +2749,6 @@
     },
     {
       "rule": "shared-platform-dto",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 30,
-      "snippet": "pub platform: String,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-platform-dto",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 63,
-      "snippet": "pub platform: String,",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-platform-dto",
       "path": "crates/server/src/peer_review.rs",
       "line": 626,
       "snippet": "platform: &str,",
@@ -3749,24 +2759,6 @@
     }
   ],
   "coverage": [
-    {
-      "violation": "V04",
-      "classification": "production-architecture-gap",
-      "path": "crates/discord-gateway/Cargo.toml",
-      "line": 25,
-      "needle": "[[bin]]",
-      "owner_stage": "S5",
-      "expires_when": "discord-gatewayd store/admin/lifecycle owns and supervises verified instances"
-    },
-    {
-      "violation": "V12",
-      "classification": "valid-production-plus-architecture-gap",
-      "path": "crates/web-gateway/Cargo.toml",
-      "line": 21,
-      "needle": "opencrab-gate-client.workspace",
-      "owner_stage": "S5/S8",
-      "expires_when": "preserve generic client while adding Web-owned identity/policy store and local admin destination"
-    },
     {
       "violation": "V13",
       "classification": "valid-production",
@@ -3856,6 +2848,51 @@
       "needle": "s3_arbitrary_operation_name_is_classified_only_by_complete_metadata",
       "owner_stage": "S3",
       "expires_when": "retain metadata-only arbitrary operation routing proof"
+    },
+    {
+      "violation": "V01",
+      "classification": "closed-production-violation",
+      "path": "crates/nostr-gateway/Cargo.toml",
+      "line": 28,
+      "needle": "opencrab-process-supervisor.workspace",
+      "owner_stage": "S5",
+      "expires_when": "retain no-dev dependency proof that concrete daemons do not link core, db, legacy concrete libraries, or server"
+    },
+    {
+      "violation": "V03",
+      "classification": "closed-production-violation",
+      "path": "crates/nostr-gateway/src/daemon_tests.rs",
+      "line": 278,
+      "needle": "s5_nostr_runtime_config_rejects_core_and_legacy_database_paths",
+      "owner_stage": "S5",
+      "expires_when": "retain runtime legacy-path rejection and absence of import code"
+    },
+    {
+      "violation": "V04",
+      "classification": "closed-production-violation",
+      "path": "crates/discord-gateway/src/daemon_tests.rs",
+      "line": 134,
+      "needle": "s5_discord_daemon_runs_and_crash_state_persists_while_server_is_stopped",
+      "owner_stage": "S5",
+      "expires_when": "retain daemon-owned server-stopped lifecycle proof"
+    },
+    {
+      "violation": "V05",
+      "classification": "closed-production-violation",
+      "path": "crates/process-supervisor/src/tests.rs",
+      "line": 4,
+      "needle": "s5_process_supervisor_has_no_concrete_gateway_vocabulary",
+      "owner_stage": "S5",
+      "expires_when": "retain platform-neutral process utility assertion"
+    },
+    {
+      "violation": "V12",
+      "classification": "closed-production-violation",
+      "path": "crates/web-gateway/src/store.rs",
+      "line": 157,
+      "needle": "s5_web_store_owns_identity_policy_and_redacted_credentials",
+      "owner_stage": "S5",
+      "expires_when": "retain Web-owned store/admin and independent runtime proof"
     }
   ]
 }

@@ -1,8 +1,9 @@
-//! discord-gateway 子プロセスの監視・自動再起動・後始末（DESIGN-DISCORD-GATE / #865）。
+//! Daemon-owned external child monitoring, restart, and cleanup.
 //!
-//! server が spawn する外部gatewayは「1 process = 1 agent」。子のサイレント死を防ぐ。
+//! The caller is the sole lifecycle authority for each target. This utility has no platform,
+//! server, configuration-schema, or placement knowledge.
 //!
-//! この module は 3 つを足す（core に Discord 語彙は増やさない・server の spawn 層で完結）:
+//! The utility provides three generic process guarantees:
 //!
 //! 1. **監視**: 子の終了を [`SupervisedChild::wait_exit`]（本番は `tokio` の `child.wait()`）で検知し、
 //!    意図しない終了は fail-loud で ERROR（#857 `owner_warning` 流儀＝サイレント死の禁止）。
@@ -13,8 +14,11 @@
 //!
 //! 再起動で子がcore UDSへ再接続すると、extgateのlive registryが再び稼働を示す。
 //!
-//! **秘密（bot token）**: 本番 spawner は token を **子の env のみ**へ注入し、親 env・argv・ログの
-//! いずれにも出さない（`nostr-gateway` の watch 子と同じ流儀）。
+//! **Secrets**: the production spawner injects decrypted bytes only into the selected child
+//! environment and never into the parent environment, argv, config file, or logs.
+
+pub mod lifecycle;
+pub mod lock;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +47,8 @@ pub struct SupervisorConfig {
     pub reset_after: Duration,
     /// 連続でこの回数 quick death したら警告を強める（crash-loop）。`0` は無効。
     pub crash_loop_threshold: u32,
+    /// `false` when a durable daemon saga, rather than this utility, owns retry timing.
+    pub restart_on_exit: bool,
 }
 
 impl Default for SupervisorConfig {
@@ -52,6 +58,16 @@ impl Default for SupervisorConfig {
             max_delay: Duration::from_secs(60),
             reset_after: Duration::from_secs(60),
             crash_loop_threshold: 5,
+            restart_on_exit: true,
+        }
+    }
+}
+
+impl SupervisorConfig {
+    pub fn daemon_owned() -> Self {
+        Self {
+            restart_on_exit: false,
+            ..Self::default()
         }
     }
 }
@@ -93,13 +109,12 @@ pub fn is_crash_loop(consecutive: u32, threshold: u32) -> bool {
 
 /// 子が **意図せず** 終了したときの fail-loud（#857 `owner_warning` 流儀）。鳴らしたら `true`。
 ///
-/// **接続死のサイレント停止を潰すのが役目。** 外部gateway停止中は受信・配送とも停止する。
-/// crash-loop時は原因の切り分け先（binary / placement / core UDS / credential）を残す。`error!`
-/// なのは、子が死んでいる局面では Discord 経由通知も壊れうるため（ログなら落ちない）。
+/// Prevent silent child loss. During a crash loop, retain a generic diagnostic pointing to the
+/// executable, config, service endpoint, or credential without exposing their contents.
 ///
 /// `outcome` には exit status の人間可読要約だけを渡す（**秘密を含めない**）。
 pub fn escalate_child_exited(
-    agent_id: &str,
+    target_id: &str,
     consecutive: u32,
     uptime_secs: u64,
     outcome: &str,
@@ -108,24 +123,24 @@ pub fn escalate_child_exited(
 ) -> bool {
     if is_crash_loop(consecutive, crash_loop_threshold) {
         error!(
-            agent_id = %agent_id,
+            target_id = %target_id,
             consecutive,
             uptime_secs,
             outcome = %outcome,
             next_delay_secs,
-            "gateway child has died {consecutive} times in a row (CRASH LOOP). Ingress and \
+            "external child has died {consecutive} times in a row (CRASH LOOP). Ingress and \
              delivery for this agent are DOWN with no legacy fallback. The supervisor keeps \
-             retrying with capped backoff (next in {next_delay_secs}s). Check the gateway binary, \
-             placement, core UDS socket, and child credential."
+             retrying with capped backoff (next in {next_delay_secs}s). Check the external binary, \
+             config, core UDS socket, and child credential."
         );
     } else {
         error!(
-            agent_id = %agent_id,
+            target_id = %target_id,
             consecutive,
             uptime_secs,
             outcome = %outcome,
             next_delay_secs,
-            "gateway child exited WITHOUT a shutdown having been requested (was up \
+            "external child exited WITHOUT a shutdown having been requested (was up \
              {uptime_secs}s). Ingress and delivery are down with no fallback until restart. \
              Auto-restarting in {next_delay_secs}s."
         );
@@ -135,19 +150,19 @@ pub fn escalate_child_exited(
 
 /// spawn 自体が失敗したとき（binary が無い・権限が無い等）の fail-loud。鳴らしたら `true`。
 pub fn escalate_spawn_failed(
-    agent_id: &str,
+    target_id: &str,
     consecutive: u32,
     error: &str,
     next_delay_secs: u64,
 ) -> bool {
     error!(
-        agent_id = %agent_id,
+        target_id = %target_id,
         consecutive,
         error = %error,
         next_delay_secs,
-        "failed to (re)spawn the gateway child ({consecutive} attempts in a row). Ingress and \
+        "failed to (re)spawn the external child ({consecutive} attempts in a row). Ingress and \
          delivery for this agent are DOWN with no fallback. Retrying in {next_delay_secs}s. \
-         Check the gateway binary path, permissions, and placement."
+         Check the external binary path, permissions, and config."
     );
     true
 }
@@ -163,17 +178,28 @@ pub trait SupervisedChild: Send {
     fn pid(&self) -> Option<u32>;
 }
 
-/// 子を spawn する手段。本番は [`GatewayChildSpawner`]、テストは fake で差し替える。
+/// 子を spawn する手段。本番は [`ExternalProcessSpawner`]、テストは fake で差し替える。
 #[async_trait::async_trait]
 pub trait ChildSpawner: Send + Sync {
-    /// 子を spawn する（placement.json は事前に書かれている前提・再起動でも同じ file を再 exec）。
+    /// 子を spawn する（config.json は事前に書かれている前提・再起動でも同じ file を再 exec）。
     async fn spawn(&self) -> std::io::Result<Box<dyn SupervisedChild>>;
-    /// どの agent / gateway か（ログ用）。
-    fn agent_id(&self) -> &str;
-    fn gateway_name(&self) -> &str {
-        "gateway"
+    /// Stable target identifier used only for lifecycle ownership and redacted logs.
+    fn target_id(&self) -> &str;
+    fn service_name(&self) -> &str {
+        "external-service"
     }
 }
+
+#[async_trait::async_trait]
+pub trait ProcessObserver: Send + Sync {
+    async fn spawned(&self, _target_id: &str, _pid: Option<u32>) {}
+    async fn spawn_failed(&self, _target_id: &str) {}
+    async fn exited(&self, _target_id: &str, _summary: &str) {}
+}
+
+struct NoopObserver;
+#[async_trait::async_trait]
+impl ProcessObserver for NoopObserver {}
 
 struct SupervisedTask {
     shutdown: watch::Sender<bool>,
@@ -195,16 +221,16 @@ impl Drop for SupervisedTask {
     }
 }
 
-/// Owns one supervised external gateway task per agent and provides race-free replacement.
-pub struct GatewaySupervisorSet {
+/// Owns one supervised task per opaque target and provides race-free replacement.
+pub struct ProcessSupervisorSet {
     config: SupervisorConfig,
     tasks: tokio::sync::Mutex<HashMap<String, SupervisedTask>>,
-    /// Serializes compound lifecycle operations so task replacement cannot race stop/shutdown.
+    /// Serializes compound lifecycle operations so task reconfig cannot race stop/shutdown.
     lifecycle: tokio::sync::Mutex<()>,
     closed: AtomicBool,
 }
 
-impl GatewaySupervisorSet {
+impl ProcessSupervisorSet {
     pub fn new(config: SupervisorConfig) -> Arc<Self> {
         Arc::new(Self {
             config,
@@ -214,33 +240,43 @@ impl GatewaySupervisorSet {
         })
     }
 
-    pub async fn start(&self, agent_id: &str, spawner: Arc<dyn ChildSpawner>) {
+    pub async fn start(&self, target_id: &str, spawner: Arc<dyn ChildSpawner>) {
+        self.start_observed(target_id, spawner, Arc::new(NoopObserver))
+            .await;
+    }
+
+    pub async fn start_observed(
+        &self,
+        target_id: &str,
+        spawner: Arc<dyn ChildSpawner>,
+        observer: Arc<dyn ProcessObserver>,
+    ) {
         let _lifecycle = self.lifecycle.lock().await;
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        self.stop_locked(agent_id).await;
+        self.stop_locked(target_id).await;
         let (shutdown, receiver) = watch::channel(false);
         let config = self.config.clone();
         // Acquire the map before spawning. There must be no cancellation point between spawn and
         // registration, otherwise dropping `start` could detach an untracked supervisor owner.
         let mut tasks = self.tasks.lock().await;
-        let join = tokio::spawn(supervise(spawner, config, receiver));
-        tasks.insert(agent_id.to_string(), SupervisedTask { shutdown, join });
+        let join = tokio::spawn(supervise_observed(spawner, observer, config, receiver));
+        tasks.insert(target_id.to_string(), SupervisedTask { shutdown, join });
     }
 
-    async fn stop_locked(&self, agent_id: &str) {
-        let task = self.tasks.lock().await.remove(agent_id);
+    async fn stop_locked(&self, target_id: &str) {
+        let task = self.tasks.lock().await.remove(target_id);
         if let Some(task) = task {
-            let mut tasks = vec![(agent_id.to_string(), task)];
+            let mut tasks = vec![(target_id.to_string(), task)];
             tasks[0].1.request_shutdown();
             join_supervisors_bounded(&mut tasks).await;
         }
     }
 
-    pub async fn stop(&self, agent_id: &str) {
+    pub async fn stop(&self, target_id: &str) {
         let _lifecycle = self.lifecycle.lock().await;
-        self.stop_locked(agent_id).await;
+        self.stop_locked(target_id).await;
     }
 
     pub async fn shutdown_all(&self) {
@@ -257,12 +293,12 @@ impl GatewaySupervisorSet {
 async fn join_supervisors_bounded(tasks: &mut [(String, SupervisedTask)]) {
     let joins = tasks
         .iter_mut()
-        .map(|(agent_id, task)| async move { (agent_id.clone(), (&mut task.join).await) });
+        .map(|(target_id, task)| async move { (target_id.clone(), (&mut task.join).await) });
     match tokio::time::timeout(SUPERVISOR_JOIN_TIMEOUT, futures::future::join_all(joins)).await {
         Ok(results) => {
-            for (agent_id, result) in results {
+            for (target_id, result) in results {
                 if let Err(error) = result {
-                    warn!(%agent_id, %error, "gateway supervisor task failed while shutting down");
+                    warn!(%target_id, %error, "process supervisor task failed while shutting down");
                 }
             }
         }
@@ -270,7 +306,7 @@ async fn join_supervisors_bounded(tasks: &mut [(String, SupervisedTask)]) {
             warn!(
                 supervisors = tasks.len(),
                 timeout_secs = SUPERVISOR_JOIN_TIMEOUT.as_secs(),
-                "gateway supervisor shutdown timed out; aborting remaining supervisors"
+                "process supervisor shutdown timed out; aborting remaining supervisors"
             );
             for (_, task) in tasks.iter_mut() {
                 task.join.abort();
@@ -286,7 +322,7 @@ async fn join_supervisors_bounded(tasks: &mut [(String, SupervisedTask)]) {
             {
                 error!(
                     timeout_secs = ABORTED_JOIN_TIMEOUT.as_secs(),
-                    "aborted gateway supervisors did not finish promptly; continuing shutdown"
+                    "aborted process supervisors did not finish promptly; continuing shutdown"
                 );
             }
         }
@@ -308,7 +344,7 @@ impl TokioChild {
         if rc != 0 {
             let error = std::io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
-                warn!(%error, process_group = self.process_group, "failed to signal gateway process group");
+                warn!(%error, process_group = self.process_group, "failed to signal external process group");
             }
         }
     }
@@ -329,7 +365,7 @@ impl SupervisedChild for TokioChild {
             Ok(status) => format!("{status}"),
             Err(e) => format!("wait() error: {e}"),
         };
-        // If the gateway itself crashed, do not leave credential-bearing descendants behind.
+        // If the direct child crashed, do not leave credential-bearing descendants behind.
         self.signal_group(libc::SIGKILL);
         outcome
     }
@@ -341,14 +377,14 @@ impl SupervisedChild for TokioChild {
         {
             Ok(Ok(_)) => false,
             Ok(Err(error)) => {
-                warn!(%error, process_group = self.process_group, "failed waiting for gateway child after SIGTERM; forcing cleanup");
+                warn!(%error, process_group = self.process_group, "failed waiting for external child after SIGTERM; forcing cleanup");
                 true
             }
             Err(_) => {
                 warn!(
                     process_group = self.process_group,
                     timeout_secs = TERMINATE_WAIT_TIMEOUT.as_secs(),
-                    "gateway child did not exit after SIGTERM; sending SIGKILL"
+                    "external child did not exit after SIGTERM; sending SIGKILL"
                 );
                 true
             }
@@ -358,12 +394,12 @@ impl SupervisedChild for TokioChild {
             match tokio::time::timeout(FORCE_KILL_WAIT_TIMEOUT, self.child.wait()).await {
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => {
-                    warn!(%error, process_group = self.process_group, "failed to reap gateway child after SIGKILL; continuing shutdown")
+                    warn!(%error, process_group = self.process_group, "failed to reap external child after SIGKILL; continuing shutdown")
                 }
                 Err(_) => error!(
                     process_group = self.process_group,
                     timeout_secs = FORCE_KILL_WAIT_TIMEOUT.as_secs(),
-                    "gateway child did not report exit after SIGKILL; continuing shutdown"
+                    "external child did not report exit after SIGKILL; continuing shutdown"
                 ),
             }
         }
@@ -376,71 +412,55 @@ impl SupervisedChild for TokioChild {
     }
 }
 
-/// 外部 gateway バイナリを exec する本番 spawner。
+/// Production spawner for an external child executable.
 ///
-/// 資格情報は指定された子の env だけへ渡し、argv・placement・ログには載せない。
+/// 資格情報は指定された子の env だけへ渡し、argv・config・ログには載せない。
 /// `kill_on_drop(true)` で監視タスクが drop されても子を確実に殺す（孤児防止の backstop）。
-pub struct GatewayChildSpawner {
+pub struct ExternalProcessSpawner {
     bin: std::path::PathBuf,
-    placement_path: std::path::PathBuf,
+    config_path: std::path::PathBuf,
     /// 秘密。Debug 導出しない・ログに出さない。
     secret: String,
     secret_env: &'static str,
-    gateway_name: &'static str,
-    agent_id: String,
+    service_name: &'static str,
+    target_id: String,
 }
 
-impl GatewayChildSpawner {
-    pub fn new(
-        bin: std::path::PathBuf,
-        placement_path: std::path::PathBuf,
-        bot_token: String,
-        agent_id: String,
-    ) -> Self {
-        Self {
-            bin,
-            placement_path,
-            secret: bot_token,
-            secret_env: "DISCORD_BOT_TOKEN",
-            gateway_name: "discord-gateway",
-            agent_id,
-        }
-    }
-
-    /// 任意の外部 gateway 用。復号済み資格情報は子 env だけへ注入し、
-    /// placement/argv へ載せない。
+impl ExternalProcessSpawner {
+    /// 任意の外部 service 用。復号済み資格情報は子 env だけへ注入し、
+    /// config/argv へ載せない。
     pub fn with_secret_env(
         bin: std::path::PathBuf,
-        placement_path: std::path::PathBuf,
+        config_path: std::path::PathBuf,
         secret: String,
         secret_env: &'static str,
-        gateway_name: &'static str,
-        agent_id: String,
+        service_name: &'static str,
+        target_id: String,
     ) -> Self {
         Self {
             bin,
-            placement_path,
+            config_path,
             secret,
             secret_env,
-            gateway_name,
-            agent_id,
+            service_name,
+            target_id,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl ChildSpawner for GatewayChildSpawner {
+impl ChildSpawner for ExternalProcessSpawner {
     async fn spawn(&self) -> std::io::Result<Box<dyn SupervisedChild>> {
         let mut cmd = tokio::process::Command::new(&self.bin);
-        cmd.arg(&self.placement_path);
+        cmd.arg(&self.config_path);
         cmd.env(self.secret_env, &self.secret);
         cmd.kill_on_drop(true);
-        // External gateways may spawn transport helpers (for example `nostaro watch`). Keep
-        // each gateway tree in an isolated group so stop/restart/shutdown cannot orphan them.
+        // External services may spawn helpers. Keep each process tree in an isolated group so
+        // stop/restart/shutdown cannot orphan them.
         std::os::unix::process::CommandExt::process_group(cmd.as_std_mut(), 0);
         let child = cmd.spawn()?;
         let process_group = child.id().ok_or_else(|| {
-            std::io::Error::other("spawned gateway child did not expose a process id")
+            std::io::Error::other("spawned external child did not expose a process id")
         })? as i32;
         Ok(Box::new(TokioChild {
             child,
@@ -448,12 +468,12 @@ impl ChildSpawner for GatewayChildSpawner {
         }))
     }
 
-    fn agent_id(&self) -> &str {
-        &self.agent_id
+    fn target_id(&self) -> &str {
+        &self.target_id
     }
 
-    fn gateway_name(&self) -> &str {
-        self.gateway_name
+    fn service_name(&self) -> &str {
+        self.service_name
     }
 }
 
@@ -465,10 +485,19 @@ impl ChildSpawner for GatewayChildSpawner {
 pub async fn supervise(
     spawner: Arc<dyn ChildSpawner>,
     cfg: SupervisorConfig,
+    shutdown: watch::Receiver<bool>,
+) {
+    supervise_observed(spawner, Arc::new(NoopObserver), cfg, shutdown).await;
+}
+
+pub async fn supervise_observed(
+    spawner: Arc<dyn ChildSpawner>,
+    observer: Arc<dyn ProcessObserver>,
+    cfg: SupervisorConfig,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let agent_id = spawner.agent_id().to_string();
-    let gateway_name = spawner.gateway_name().to_string();
+    let target_id = spawner.target_id().to_string();
+    let service_name = spawner.service_name().to_string();
     let mut consecutive: u32 = 0;
 
     loop {
@@ -479,18 +508,24 @@ pub async fn supervise(
         // ---- spawn ----
         let mut child = match spawner.spawn().await {
             Ok(c) => {
+                let pid = c.pid();
                 info!(
-                    agent_id = %agent_id,
-                    gateway = %gateway_name,
-                    pid = ?c.pid(),
-                    "gateway child started under supervision; credential injected by env"
+                    target_id = %target_id,
+                    service = %service_name,
+                    pid = ?pid,
+                    "external child started under supervision; credential injected by env"
                 );
+                observer.spawned(&target_id, pid).await;
                 c
             }
             Err(e) => {
                 consecutive = consecutive.saturating_add(1);
                 let delay = backoff_delay(consecutive, cfg.base_delay, cfg.max_delay);
-                escalate_spawn_failed(&agent_id, consecutive, &e.to_string(), delay.as_secs());
+                escalate_spawn_failed(&target_id, consecutive, &e.to_string(), delay.as_secs());
+                observer.spawn_failed(&target_id).await;
+                if !cfg.restart_on_exit {
+                    break;
+                }
                 if sleep_or_shutdown(&mut shutdown, delay).await {
                     break;
                 }
@@ -505,10 +540,10 @@ pub async fn supervise(
                 if *shutdown.borrow() {
                     // shutdown 中の終了は意図した停止。鳴らさず（誤エスカレーション防止）再起動もしない。
                     info!(
-                        agent_id = %agent_id,
-                        gateway = %gateway_name,
+                        target_id = %target_id,
+                        service = %service_name,
                         outcome = %outcome,
-                        "gateway child exited during shutdown (expected; no restart)"
+                        "external child exited during shutdown (expected; no restart)"
                     );
                     break;
                 }
@@ -516,13 +551,17 @@ pub async fn supervise(
                 consecutive = next_consecutive(consecutive, uptime, cfg.reset_after);
                 let delay = backoff_delay(consecutive, cfg.base_delay, cfg.max_delay);
                 escalate_child_exited(
-                    &agent_id,
+                    &target_id,
                     consecutive,
                     uptime.as_secs(),
                     &outcome,
                     delay.as_secs(),
                     cfg.crash_loop_threshold,
                 );
+                observer.exited(&target_id, &outcome).await;
+                if !cfg.restart_on_exit {
+                    break;
+                }
                 if sleep_or_shutdown(&mut shutdown, delay).await {
                     break;
                 }
@@ -530,7 +569,7 @@ pub async fn supervise(
             }
             _ = wait_for_shutdown(&mut shutdown) => {
                 // 生きている子を terminate（孤児防止）。再起動はしない。
-                info!(agent_id = %agent_id, gateway = %gateway_name, "terminating gateway child on shutdown");
+                info!(target_id = %target_id, service = %service_name, "terminating external child on shutdown");
                 child.kill().await;
                 break;
             }
@@ -563,5 +602,5 @@ async fn sleep_or_shutdown(shutdown: &mut watch::Receiver<bool>, delay: Duration
 }
 
 #[cfg(test)]
-#[path = "process_supervisor_tests.rs"]
+#[path = "tests.rs"]
 mod tests;

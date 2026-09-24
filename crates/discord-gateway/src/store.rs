@@ -1,4 +1,4 @@
-//! Nostr-owned durable configuration, policy, identity, credential, and lifecycle store.
+//! Discord-owned durable configuration, policy, identity, credential, and lifecycle store.
 
 use crate::secret_store;
 use anyhow::{Context as _, Result};
@@ -84,12 +84,12 @@ impl InstanceRow {
     }
 }
 
-pub struct NostrStore {
+pub struct DiscordStore {
     path: PathBuf,
     conn: Connection,
 }
 
-impl NostrStore {
+impl DiscordStore {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -381,11 +381,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn s5_nostr_store_encrypts_secret_and_persists_lifecycle_restart() {
+    fn s5_discord_store_encrypts_secret_and_persists_lifecycle_restart() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("nostr.db");
+        let path = temp.path().join("discord.db");
         let key = [7_u8; 32];
-        let store = NostrStore::open(&path).unwrap();
+        let store = DiscordStore::open(&path).unwrap();
         let generation = store
             .upsert_desired(
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -426,7 +426,7 @@ mod tests {
         assert!(!bytes
             .windows(b"grant-secret-at-rest".len())
             .any(|window| window == b"grant-secret-at-rest"));
-        let reopened = NostrStore::open(&path).unwrap();
+        let reopened = DiscordStore::open(&path).unwrap();
         let row = reopened
             .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
             .unwrap()
@@ -439,9 +439,9 @@ mod tests {
     }
 
     #[test]
-    fn s5_nostr_disabled_and_nonready_instances_never_eligible() {
+    fn s5_discord_disabled_and_nonready_instances_never_eligible() {
         let temp = tempfile::tempdir().unwrap();
-        let store = NostrStore::open(&temp.path().join("nostr.db")).unwrap();
+        let store = DiscordStore::open(&temp.path().join("discord.db")).unwrap();
         let generation = store
             .upsert_desired(
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",

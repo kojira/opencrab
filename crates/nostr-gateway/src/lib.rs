@@ -11,6 +11,7 @@ pub mod ops;
 pub mod post;
 pub mod run;
 pub mod secret;
+pub mod secret_store;
 pub mod store;
 pub mod watch;
 

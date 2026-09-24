@@ -5,6 +5,7 @@ members = [
     "crates/llm",
     "crates/llm-types",
     "crates/gateway",
+    "crates/process-supervisor",
     "crates/actions",
     "crates/db",
     "crates/discord",
@@ -90,6 +91,7 @@ opencrab-llm = { path = "crates/llm" }
 opencrab-voice = { path = "crates/voice" }
 opencrab-llm-types = { path = "crates/llm-types" }
 opencrab-gateway = { path = "crates/gateway" }
+opencrab-process-supervisor = { path = "crates/process-supervisor" }
 opencrab-actions = { path = "crates/actions" }
 opencrab-db = { path = "crates/db" }
 opencrab-discord = { path = "crates/discord" }

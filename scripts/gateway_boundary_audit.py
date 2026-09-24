@@ -59,18 +59,12 @@ HISTORICAL_FILES = {
     "crates/db/src/schema/v43_v47.rs",
 }
 VALID_GATEWAY_DB_OPEN_IDENTITIES = {
-    (
-        "gateway-db-open",
-        "crates/nostr-gateway/src/store.rs",
-        66,
-        "let conn = Connection::open(path)",
-    ),
-    (
-        "gateway-db-open",
-        "crates/nostr-gateway/src/daemon.rs",
-        115,
-        "let mut gateway_store = GatewayStore::open(&config.database_path)?;",
-    ),
+    ("gateway-db-open", "crates/discord-gateway/src/daemon.rs", 475, "let store = DiscordStore::open(&config.database_path)?;"),
+    ("gateway-db-open", "crates/discord-gateway/src/store.rs", 97, "let conn = Connection::open(path)?;"),
+    ("gateway-db-open", "crates/nostr-gateway/src/daemon.rs", 475, "let store = NostrStore::open(&config.database_path)?;"),
+    ("gateway-db-open", "crates/nostr-gateway/src/store.rs", 97, "let conn = Connection::open(path)?;"),
+    ("gateway-db-open", "crates/web-gateway/src/owner.rs", 44, "let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));"),
+    ("gateway-db-open", "crates/web-gateway/src/store.rs", 60, "let conn = Connection::open(path)?;"),
 }
 # These three exact sites are a generic caller-role naming debt, not operation-name routing.
 # Exact finding identities prevent a moved or duplicated occurrence from inheriting the deferral.
@@ -244,6 +238,10 @@ def _mask_strings(code: str) -> str:
             else:
                 out.append(char)
     return "".join(out)
+
+
+def _is_test_only_rust_file(path: str, text: str) -> bool:
+    return path.endswith(".rs") and text.lstrip().startswith("#![cfg(test)]")
 
 
 def _production_rust_lines(path: str, text: str) -> Iterable[tuple[int, str]]:
@@ -555,7 +553,13 @@ def _public_route_findings(files: Mapping[str, str]) -> list[Finding]:
 
 
 def audit_texts(files: Mapping[str, str]) -> list[Finding]:
-    normalized = {pathlib.PurePosixPath(path).as_posix(): text for path, text in files.items()}
+    normalized = {
+        normalized_path: text
+        for path, text in files.items()
+        if not _is_test_only_rust_file(
+            normalized_path := pathlib.PurePosixPath(path).as_posix(), text
+        )
+    }
     gateway_alias_sources: dict[str, list[tuple[int, str]]] = {}
     for path, text in normalized.items():
         if _gateway_production_path(path):
@@ -589,7 +593,10 @@ def repository_texts(root: pathlib.Path) -> dict[str, str]:
         src = crate / "src"
         if src.is_dir():
             for source in src.rglob("*.rs"):
-                files[source.relative_to(root).as_posix()] = source.read_text()
+                relative = source.relative_to(root).as_posix()
+                text = source.read_text()
+                if not _is_test_only_rust_file(relative, text):
+                    files[relative] = text
     return files
 
 

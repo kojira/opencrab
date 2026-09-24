@@ -27,7 +27,6 @@ pub mod transcript;
 pub mod webhook_target;
 pub mod workspace;
 
-pub mod channel_config;
 pub mod run_request;
 pub mod session_inbound;
 pub mod session_watch_policy;
@@ -40,7 +39,6 @@ pub use bridge::{
     CORE_DISPATCHABLE_ACTIONS, CORE_INLINE_ACTIONS, MCP_TOOL_PREFIX, OWNER_ONLY_ACTIONS,
     REJECTION_CODE_PREFIX, TRUSTED_ONLY_ACTIONS,
 };
-pub use channel_config::apply_channel_config;
 pub use continue_marker::visible_speech_after_markers;
 pub use dispatcher::ActionDispatcher;
 pub use model_admin::{ModelAdminError, ModelAdministration, ModelSnapshot};

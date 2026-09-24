@@ -33,10 +33,10 @@
         /// **ダッシュボードと同じ REST 入口・同じ表記**（`co-agent`）を通す（#234）。
         /// `platform` は省略 = `discord`（回収側の受理ゲートと同じ経路 / #159）。
         async fn register_reviewer(state: &crate::AppState) {
-            let _dto = crate::api::trusted_users::add_trusted_user(
+            let _dto = crate::api::test_identity_api::add_trusted_user(
                 State(state.clone()),
                 Path(AGENT.to_string()),
-                Json(crate::api::trusted_users::AddTrustedUserRequest {
+                Json(crate::api::test_identity_api::AddTrustedUserRequest {
                     user_id: REVIEWER_ID.to_string(),
                     permission: Some("co-agent".to_string()),
                     display_name: Some(REVIEWER_NAME.to_string()),
@@ -283,7 +283,7 @@
             // 落ちて素通りし、権限の検査が黙って消える（この PR が批判している
             // 二重書きそのもの）。
             let (state2, task2, _d2) = request_sent().await;
-            let row_id = crate::api::trusted_users::list_trusted_users(
+            let row_id = crate::api::test_identity_api::list_trusted_users(
                 State(state2.clone()),
                 Path(AGENT.to_string()),
             )
@@ -293,10 +293,10 @@
             .find(|u| u.user_id == REVIEWER_ID)
             .expect("登録済みのレビュアー")
             .id;
-            let _updated = crate::api::trusted_users::update_trusted_user(
+            let _updated = crate::api::test_identity_api::update_trusted_user(
                 State(state2.clone()),
                 Path((AGENT.to_string(), row_id)),
-                Json(crate::api::trusted_users::UpdateTrustedUserRequest {
+                Json(crate::api::test_identity_api::UpdateTrustedUserRequest {
                     permission: Some("user".to_string()),
                     display_name: None,
                 }),

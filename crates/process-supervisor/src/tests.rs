@@ -1,4 +1,12 @@
 use super::*;
+
+#[test]
+fn s5_process_supervisor_has_no_concrete_gateway_vocabulary() {
+    let source = include_str!("lib.rs");
+    for concrete in ["discord", "nostr", "web-gateway"] {
+        assert!(!source.to_ascii_lowercase().contains(concrete));
+    }
+}
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tokio::sync::Notify;
@@ -7,17 +15,17 @@ use tokio::sync::Notify;
 
 #[test]
 fn generic_spawner_injects_only_the_selected_secret_env() {
-    let spawner = GatewayChildSpawner::with_secret_env(
-        "example-gateway".into(),
-        "placement.json".into(),
+    let spawner = ExternalProcessSpawner::with_secret_env(
+        "example-service".into(),
+        "config.json".into(),
         "not-a-real-secret".into(),
-        "EXAMPLE_GATEWAY_SECRET",
-        "example-gateway",
+        "EXAMPLE_SERVICE_SECRET",
+        "example-service",
         "a1".into(),
     );
-    assert_eq!(spawner.secret_env, "EXAMPLE_GATEWAY_SECRET");
-    assert_eq!(spawner.gateway_name(), "example-gateway");
-    assert_eq!(spawner.agent_id(), "a1");
+    assert_eq!(spawner.secret_env, "EXAMPLE_SERVICE_SECRET");
+    assert_eq!(spawner.service_name(), "example-service");
+    assert_eq!(spawner.target_id(), "a1");
 }
 
 #[test]
@@ -139,13 +147,13 @@ impl ChildSpawner for HangingSpawner {
         }))
     }
 
-    fn agent_id(&self) -> &str {
+    fn target_id(&self) -> &str {
         "hanging"
     }
 }
 
 struct FakeSpawner {
-    agent_id: String,
+    target_id: String,
     spawns: Arc<AtomicUsize>,
     kills: Arc<AtomicUsize>,
     /// spawn するたびに、その子の die-notify を積む（テストが特定の子を殺せるように）。
@@ -163,8 +171,8 @@ impl ChildSpawner for FakeSpawner {
             kills: self.kills.clone(),
         }))
     }
-    fn agent_id(&self) -> &str {
-        &self.agent_id
+    fn target_id(&self) -> &str {
+        &self.target_id
     }
 }
 
@@ -175,6 +183,7 @@ fn fast_cfg() -> SupervisorConfig {
         max_delay: Duration::from_millis(2),
         reset_after: Duration::from_secs(3600),
         crash_loop_threshold: 5,
+        restart_on_exit: true,
     }
 }
 
@@ -195,7 +204,7 @@ async fn abnormal_exit_triggers_respawn() {
     let kills = Arc::new(AtomicUsize::new(0));
     let dies: Arc<Mutex<Vec<Arc<Notify>>>> = Arc::default();
     let spawner = Arc::new(FakeSpawner {
-        agent_id: "a1".into(),
+        target_id: "a1".into(),
         spawns: spawns.clone(),
         kills: kills.clone(),
         dies: dies.clone(),
@@ -225,7 +234,7 @@ async fn shutdown_terminates_child_and_does_not_restart() {
     let kills = Arc::new(AtomicUsize::new(0));
     let dies: Arc<Mutex<Vec<Arc<Notify>>>> = Arc::default();
     let spawner = Arc::new(FakeSpawner {
-        agent_id: "a1".into(),
+        target_id: "a1".into(),
         spawns: spawns.clone(),
         kills: kills.clone(),
         dies: dies.clone(),
@@ -255,17 +264,17 @@ async fn shutdown_terminates_child_and_does_not_restart() {
 }
 
 #[tokio::test]
-async fn concurrent_replacement_leaves_one_owned_child() {
+async fn concurrent_reconfig_leaves_one_owned_child() {
     let spawns = Arc::new(AtomicUsize::new(0));
     let kills = Arc::new(AtomicUsize::new(0));
     let dies: Arc<Mutex<Vec<Arc<Notify>>>> = Arc::default();
     let spawner = Arc::new(FakeSpawner {
-        agent_id: "a1".into(),
+        target_id: "a1".into(),
         spawns: spawns.clone(),
         kills: kills.clone(),
         dies,
     });
-    let set = GatewaySupervisorSet::new(fast_cfg());
+    let set = ProcessSupervisorSet::new(fast_cfg());
     tokio::join!(set.start("a1", spawner.clone()), set.start("a1", spawner));
     assert!(wait_until(|| spawns.load(Ordering::SeqCst) >= 1).await);
     set.shutdown_all().await;
@@ -286,7 +295,7 @@ async fn shutdown_all_bounds_hung_supervisor_join_and_aborts_owner() {
         kill_started: kill_started.clone(),
         drops: drops.clone(),
     });
-    let set = GatewaySupervisorSet::new(fast_cfg());
+    let set = ProcessSupervisorSet::new(fast_cfg());
     set.start("hanging", spawner).await;
     spawned.notified().await;
 
@@ -299,11 +308,11 @@ async fn shutdown_all_bounds_hung_supervisor_join_and_aborts_owner() {
 }
 
 #[tokio::test]
-async fn cancelled_replacement_does_not_leave_an_untracked_owner() {
+async fn cancelled_reconfig_does_not_leave_an_untracked_owner() {
     let spawned = Arc::new(Notify::new());
     let kill_started = Arc::new(AtomicUsize::new(0));
     let drops = Arc::new(AtomicUsize::new(0));
-    let set = GatewaySupervisorSet::new(fast_cfg());
+    let set = ProcessSupervisorSet::new(fast_cfg());
     set.start(
         "hanging",
         Arc::new(HangingSpawner {
@@ -315,16 +324,16 @@ async fn cancelled_replacement_does_not_leave_an_untracked_owner() {
     .await;
     spawned.notified().await;
 
-    let replacement_spawns = Arc::new(AtomicUsize::new(0));
-    let replacement = Arc::new(FakeSpawner {
-        agent_id: "hanging".into(),
-        spawns: replacement_spawns.clone(),
+    let reconfig_spawns = Arc::new(AtomicUsize::new(0));
+    let reconfig = Arc::new(FakeSpawner {
+        target_id: "hanging".into(),
+        spawns: reconfig_spawns.clone(),
         kills: Arc::new(AtomicUsize::new(0)),
         dies: Arc::default(),
     });
     let replacing_set = set.clone();
     let replacing = tokio::spawn(async move {
-        replacing_set.start("hanging", replacement).await;
+        replacing_set.start("hanging", reconfig).await;
     });
     assert!(wait_until(|| kill_started.load(Ordering::SeqCst) == 1).await);
 
@@ -332,19 +341,19 @@ async fn cancelled_replacement_does_not_leave_an_untracked_owner() {
     let _ = replacing.await;
     assert!(wait_until(|| drops.load(Ordering::SeqCst) == 1).await);
     set.shutdown_all().await;
-    assert_eq!(replacement_spawns.load(Ordering::SeqCst), 0);
+    assert_eq!(reconfig_spawns.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
 async fn shutdown_is_terminal_against_concurrent_or_later_start() {
     let spawns = Arc::new(AtomicUsize::new(0));
     let spawner = Arc::new(FakeSpawner {
-        agent_id: "a1".into(),
+        target_id: "a1".into(),
         spawns: spawns.clone(),
         kills: Arc::new(AtomicUsize::new(0)),
         dies: Arc::default(),
     });
-    let set = GatewaySupervisorSet::new(fast_cfg());
+    let set = ProcessSupervisorSet::new(fast_cfg());
     set.shutdown_all().await;
     set.start("a1", spawner).await;
     tokio::task::yield_now().await;
@@ -358,7 +367,7 @@ async fn already_shutdown_never_spawns() {
     let kills = Arc::new(AtomicUsize::new(0));
     let dies: Arc<Mutex<Vec<Arc<Notify>>>> = Arc::default();
     let spawner = Arc::new(FakeSpawner {
-        agent_id: "a1".into(),
+        target_id: "a1".into(),
         spawns: spawns.clone(),
         kills: kills.clone(),
         dies: dies.clone(),

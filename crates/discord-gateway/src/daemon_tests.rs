@@ -66,7 +66,7 @@ impl ChildSpawner for FakeSpawner {
         &self.target
     }
     fn service_name(&self) -> &str {
-        "nostr-adapter"
+        "discord-adapter"
     }
 }
 
@@ -96,12 +96,12 @@ fn daemon(
     enabled: bool,
 ) -> (
     tempfile::TempDir,
-    NostrDaemon<FakeGate, FakeFactory>,
+    DiscordDaemon<FakeGate, FakeFactory>,
     Arc<AtomicUsize>,
     Arc<Notify>,
 ) {
     let temp = tempfile::tempdir().unwrap();
-    let store = NostrStore::open(&temp.path().join("owner.db")).unwrap();
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
     store
         .upsert_desired(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -124,14 +124,14 @@ fn daemon(
     });
     (
         temp,
-        NostrDaemon::new(store, [9; 32], Arc::new(FakeGate), factory).unwrap(),
+        DiscordDaemon::new(store, [9; 32], Arc::new(FakeGate), factory).unwrap(),
         started,
         exit,
     )
 }
 
 #[tokio::test]
-async fn s5_nostr_daemon_runs_and_crash_state_persists_while_server_is_stopped() {
+async fn s5_discord_daemon_runs_and_crash_state_persists_while_server_is_stopped() {
     let (_temp, daemon, started, exit) = daemon(true);
     daemon.reconcile_once().await.unwrap();
     for _ in 0..100 {
@@ -199,10 +199,10 @@ async fn s5_nostr_daemon_runs_and_crash_state_persists_while_server_is_stopped()
 }
 
 #[tokio::test]
-async fn s5_nostr_restart_starts_persisted_ready_child_while_server_is_stopped() {
+async fn s5_discord_restart_starts_persisted_ready_child_while_server_is_stopped() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("owner.db");
-    let store = NostrStore::open(&path).unwrap();
+    let store = DiscordStore::open(&path).unwrap();
     let generation = store
         .upsert_desired(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -232,8 +232,8 @@ async fn s5_nostr_restart_starts_persisted_ready_child_while_server_is_stopped()
     drop(store);
 
     let started = Arc::new(AtomicUsize::new(0));
-    let daemon = NostrDaemon::new(
-        NostrStore::open(&path).unwrap(),
+    let daemon = DiscordDaemon::new(
+        DiscordStore::open(&path).unwrap(),
         [9; 32],
         Arc::new(OfflineGate),
         Arc::new(FakeFactory {
@@ -255,7 +255,7 @@ async fn s5_nostr_restart_starts_persisted_ready_child_while_server_is_stopped()
 }
 
 #[tokio::test]
-async fn s5_nostr_disabled_and_nonready_instances_never_spawn() {
+async fn s5_discord_disabled_and_nonready_instances_never_spawn() {
     let (_temp, daemon, started, _) = daemon(false);
     daemon.reconcile_once().await.unwrap();
     tokio::task::yield_now().await;
@@ -275,18 +275,18 @@ async fn s5_nostr_disabled_and_nonready_instances_never_spawn() {
 }
 
 #[test]
-fn s5_nostr_runtime_config_rejects_core_and_legacy_database_paths() {
+fn s5_discord_runtime_config_rejects_core_and_legacy_database_paths() {
     let value = serde_json::json!({
-        "database_path":"/tmp/nostr.db","admin_socket":"/tmp/admin.sock",
+        "database_path":"/tmp/discord.db","admin_socket":"/tmp/admin.sock",
         "gate_admin_socket":"/tmp/gate-admin.sock","gate_admin_credential":"/tmp/token",
-        "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place","nostaro_bin":"/bin/true",
+        "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place",
         "core_database_path":"/tmp/core.db"
     });
     assert!(serde_json::from_value::<DaemonConfig>(value).is_err());
     let legacy = serde_json::json!({
-        "database_path":"/tmp/nostr.db","admin_socket":"/tmp/admin.sock",
+        "database_path":"/tmp/discord.db","admin_socket":"/tmp/admin.sock",
         "gate_admin_socket":"/tmp/gate-admin.sock","gate_admin_credential":"/tmp/token",
-        "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place","nostaro_bin":"/bin/true",
+        "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place",
         "legacy_database_path":"/tmp/core.db"
     });
     assert!(serde_json::from_value::<DaemonConfig>(legacy).is_err());

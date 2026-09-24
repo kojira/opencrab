@@ -1,6 +1,6 @@
-//! Protected Nostr-local administration over a mode-0600 Unix socket.
+//! Protected Discord-local administration over a mode-0600 Unix socket.
 
-use crate::store::NostrStore;
+use crate::store::DiscordStore;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -45,7 +45,7 @@ struct Response {
 
 pub fn spawn(
     socket: PathBuf,
-    store: Arc<Mutex<NostrStore>>,
+    store: Arc<Mutex<DiscordStore>>,
     master_key: Arc<[u8; 32]>,
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move { serve(&socket, store, master_key).await })
@@ -53,7 +53,7 @@ pub fn spawn(
 
 pub async fn serve(
     socket: &Path,
-    store: Arc<Mutex<NostrStore>>,
+    store: Arc<Mutex<DiscordStore>>,
     master_key: Arc<[u8; 32]>,
 ) -> Result<()> {
     prepare_socket(socket)?;
@@ -65,7 +65,7 @@ pub async fn serve(
         let key = master_key.clone();
         tokio::spawn(async move {
             if let Err(error) = handle(stream, store, key).await {
-                tracing::warn!(error = %error, "nostr local admin request failed");
+                tracing::warn!(error = %error, "discord local admin request failed");
             }
         });
     }
@@ -73,7 +73,7 @@ pub async fn serve(
 
 async fn handle(
     stream: UnixStream,
-    store: Arc<Mutex<NostrStore>>,
+    store: Arc<Mutex<DiscordStore>>,
     key: Arc<[u8; 32]>,
 ) -> Result<()> {
     let (read, mut write) = stream.into_split();
@@ -95,7 +95,7 @@ async fn handle(
     Ok(())
 }
 
-fn apply(request: Request, store: &Mutex<NostrStore>, key: &[u8; 32]) -> Response {
+fn apply(request: Request, store: &Mutex<DiscordStore>, key: &[u8; 32]) -> Response {
     let id = request.id.clone();
     let result = (|| -> Result<Value> {
         anyhow::ensure!(
@@ -187,11 +187,11 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     #[tokio::test]
-    async fn s5_nostr_admin_is_exact_scoped_mode_0600_and_redacts_secret() {
+    async fn s5_discord_admin_is_exact_scoped_mode_0600_and_redacts_secret() {
         let temp = tempfile::tempdir().unwrap();
         let socket = temp.path().join("admin.sock");
         let store = Arc::new(Mutex::new(
-            NostrStore::open(&temp.path().join("owner.db")).unwrap(),
+            DiscordStore::open(&temp.path().join("owner.db")).unwrap(),
         ));
         let inspect = store.clone();
         let task = spawn(socket.clone(), store, Arc::new([4; 32]));

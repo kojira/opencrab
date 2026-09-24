@@ -1,3 +1,6 @@
+#![cfg(test)]
+#![allow(clippy::duplicated_attributes)]
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,

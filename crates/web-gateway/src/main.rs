@@ -26,10 +26,27 @@ async fn run() -> anyhow::Result<()> {
         )
         .init();
 
-    let path = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .context("usage: web-gateway <placement.json>")?;
+    let mut args = std::env::args().skip(1);
+    let first = args
+        .next()
+        .context("usage: web-gateway daemon <config.json> | instance <placement.json>")?;
+    if first == "daemon" {
+        let path = args
+            .next()
+            .map(PathBuf::from)
+            .context("usage: web-gateway daemon <config.json>")?;
+        return opencrab_web_gateway::owner::run(opencrab_web_gateway::owner::OwnerConfig::load(
+            &path,
+        )?)
+        .await;
+    }
+    let path = if first == "instance" {
+        args.next()
+            .map(PathBuf::from)
+            .context("usage: web-gateway instance <placement.json>")?
+    } else {
+        PathBuf::from(first)
+    };
     let place = Placement::load(&path)?;
     let socket = PathBuf::from(&place.core_socket);
 

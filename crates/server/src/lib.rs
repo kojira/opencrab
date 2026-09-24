@@ -339,10 +339,6 @@ macro_rules! production_routes {
         $apply!($target, "/api/agents/{id}/mcp/{name}/test", post => api::mcp::test_mcp_server);
         $apply!($target, "/api/agents/{id}/co-agents", get => api::co_agents::list_co_agents, post => api::co_agents::add_co_agent);
         $apply!($target, "/api/agents/{id}/co-agents/{co_agent_id}", delete => api::co_agents::delete_co_agent);
-        $apply!($target, "/api/agents/{id}/channel-configs", get => api::channel_configs::list_channel_configs, put => api::channel_configs::upsert_channel_config);
-        $apply!($target, "/api/agents/{id}/channel-configs/{channel_id}", delete => api::channel_configs::delete_channel_config);
-        $apply!($target, "/api/agents/{id}/trusted-users", get => api::trusted_users::list_trusted_users, post => api::trusted_users::add_trusted_user);
-        $apply!($target, "/api/agents/{id}/trusted-users/{user_id}", patch => api::trusted_users::update_trusted_user, delete => api::trusted_users::delete_trusted_user);
         $apply!($target, "/api/agents/{id}/schedules", get => api::schedules::list_schedules, post => api::schedules::create_schedule);
         $apply!($target, "/api/schedules/{sid}", patch => api::schedules::update_schedule, delete => api::schedules::delete_schedule);
         $apply!($target, "/api/agents/{id}/allowed-commands", get => api::allowed_commands::list_allowed_commands, post => api::allowed_commands::add_allowed_command);

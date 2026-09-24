@@ -3,14 +3,23 @@
 
 /// bot token を渡す env 変数。setup（supervisor / secret provider）が注入する。
 pub const TOKEN_ENV: &str = "DISCORD_BOT_TOKEN";
+pub const MASTER_KEY_ENV: &str = "OPENCRAB_DISCORD_MASTER_KEY";
 
 /// 起動時に 1 回読む。直後に process env から消す。空は「トークンなし」。
 ///
 /// 消すことで、以後子プロセス spawn や誤ログで token が漏れる経路を塞ぐ（Nostr の
 /// `take_watch_secret` と同形）。real transport は返り値を保持して serenity へだけ渡す。
+pub fn take_master_key() -> Option<String> {
+    take_env(MASTER_KEY_ENV)
+}
+
 pub fn take_bot_token() -> Option<String> {
-    let value = std::env::var(TOKEN_ENV).ok().filter(|s| !s.is_empty());
-    std::env::remove_var(TOKEN_ENV);
+    take_env(TOKEN_ENV)
+}
+
+fn take_env(name: &str) -> Option<String> {
+    let value = std::env::var(name).ok().filter(|s| !s.is_empty());
+    std::env::remove_var(name);
     value
 }
 
