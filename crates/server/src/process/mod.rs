@@ -374,11 +374,7 @@ pub async fn run_agent_response(
     if let Some(authority) = relationship_authority.clone() {
         let check =
             crate::authorization::make_check(state.db.clone(), agent_id.to_string(), authority);
-        if depth > 0
-            && !check(opencrab_core::authorization::AuthorizationBoundary::TimedSubtaskContinuation)
-        {
-            anyhow::bail!("authorization_revoked");
-        }
+        crate::authorization::authorize_timed_subtask_entry(depth, &check)?;
         engine.set_authorization_check(check);
     }
 

@@ -2,48 +2,44 @@
 
 ## Scope and design-impact map
 
-Authority is limited to `docs/design-gateway-process-ownership.md` §6 and S6. Before editing, each change was mapped as follows:
+Authority is limited to `docs/design-gateway-process-ownership.md` §6 and S6. The review fix changes only the three approved S6 violations at checkpoint `f707fe2d87c824608ebfffcbefb2d58be74127f6`.
 
-| S6 clause | Minimal change | Preserved boundary |
+| S6 clause | Production seam and behavioral assertion | Preserved boundary |
 |---|---|---|
-| Gateway supplies generic co-agent ID plus relationship revision | `RelationshipAuthority`; V3 `co_agent` caller requires positive `relationship_revision`; Discord/Nostr gateway-owned access projections carry the generic pair | Gateways still authenticate external IDs; core receives no platform identity or policy |
-| Core owns current internal relationship/revision | v56 adds `relationship_revision` and `active` to existing internal `trusted_co_agents`; revoke and bump invalidate older evidence | No gateway DB is opened by core; S0–S5 store/lifecycle ownership is unchanged |
-| Initial model turn | SkillEngine revalidates immediately before the first LLM request | No model/provider or prompt behavior changed |
-| Queue dequeue/retry | extgate dequeue and auto-dispatch dequeue revalidate before work executes | Existing session locking/queue ordering remains unchanged |
-| Tool invocation | SkillEngine revalidates before inline or dispatched execution | Existing tool policy and dispatch classification remain unchanged |
-| Automatic continuation | every later LLM iteration and continuation-speech callback revalidate | Existing completion and `NO_REPLY` semantics remain unchanged |
-| Operation-driven continuation | utterance operation revalidates before executor invocation | S3 dynamic metadata remains authoritative; no operation-name policy was added |
-| Timed/subtask continuation | inherited manual-subtask authority is revalidated on sub-run; extgate completion sink revalidates before resume | S4 generic binding/session routing remains unchanged |
-| Outbound-delivery commit | extgate checks current authority immediately before final delivery effect; revoked work becomes empty and creates no outbound row | No S7 emission ledger, guarantee, reconnect, or adapter work was added |
+| Initial model turn | `SkillEngine` rejects stale generic relationship evidence before its real `LlmClient`; model-call counter stays zero for revoke and revision bump | No provider/prompt behavior changed |
+| Queue dequeue/retry | `SubtaskToolDispatcher` rechecks at its actual dequeue loop; a queued stale item and a concurrently released item both leave the real executor counter at zero | Existing ordering/settlement remains unchanged |
+| Tool invocation | `SkillEngine` changes authority after initial admission and rejects before the real `ActionExecutor`; tool counter stays zero | Existing tool policy remains unchanged |
+| Automatic continuation | `SkillEngine` changes authority after the first model call and rejects before continuation speech or a second model call | Existing completion and `NO_REPLY` semantics remain unchanged |
+| Operation-driven continuation | The actual utterance-operation path passes the generic tool check, then rejects at the operation boundary before executor invocation | S3 metadata remains authoritative |
+| Timed/subtask continuation | `process` calls the fixed-boundary `authorize_timed_subtask_entry` before engine execution for `depth > 0`; real DB revoke/revision evidence is rejected | S4 generic routing remains unchanged |
+| Outbound-delivery commit | All holding, ordinary-continuation, and late-inbound callbacks call `authorize_continuation_speech`, which checks automatic-continuation and then outbound-commit authority immediately before the callback | No S7 ledger/guarantee/reconnect behavior added |
 
-No S7+, Issue #1011, migration/cutover, deployment, README, crash-window, malformed-internal-input, or unrelated robustness work is included.
+The continuation callback conformance test uses the real extgate `deliver_intermediate_say` transaction. It changes the real DB relationship after the automatic-continuation check returns current and before the outbound-commit check, then proves both `memory_sessions` speech rows and `deliveries` rows remain zero for revoke and revision bump at all three callbacks.
+
+No S7+, Issue #1011, migration/cutover, deployment, README, or unrelated robustness work is included.
 
 ## Assertion-level RED
 
-The final table-driven seven-boundary test was replayed with the current-authority guard deliberately removed. `/tmp/issue-1006-s6-seven-boundary-red.log` failed and listed all fourteen unwanted side effects:
+- `/tmp/issue-1006-s6-continuation-callbacks-red.log`: the final callback assertion failed before GREEN because holding continuation speech invoked the callback after revocation (`left: 1`, `right: 0`).
+- `/tmp/issue-1006-s6-actual-seams-red.log`: the actual `SkillEngine` seam produced continuation speech after revocation (`revoke:automatic:speech`, `left: 1`, `right: 0`).
+- `/tmp/issue-1006-s6-real-ledger-red.log`: mutation removed only the immediate outbound-commit recheck while retaining the automatic check. The final extgate test failed with one real speech row and one real delivery row (`left: (1, 1)`, `right: (0, 0)`).
 
-- revoke at all seven boundaries;
-- revision bump at all seven boundaries.
-
-This was an assertion failure, not a compile failure. The production guard was then restored.
+These are behavioral assertion failures at production seams, not compile failures or source-name sentinels. The prior test-only `run_if_current` matrix and its helper-only RED claim were removed.
 
 ## Minimal GREEN
 
-- `AuthorizationBoundary::ALL` is exactly the seven approved boundaries.
-- `s6_seven_boundaries_fail_closed_after_revoke_and_revision_bump` proves zero side effects for revoke and revision bump at every boundary.
-- `s6_queued_and_concurrent_boundaries_never_use_cached_authority` releases queued workers only after a revision bump and proves zero side effects, so the current DB relationship is read at execution time rather than cached at admission.
-- v56 fresh/upgrade parity and the current/revoke/bump queries pass.
-- V3 rejects a co-agent caller without a positive relationship revision.
+- `authorize_continuation_speech` performs the two approved checks immediately before each continuation-speech callback.
+- `s6_actual_engine_boundaries_block_model_tool_and_continuation_effects` drives the real model, tool, automatic-continuation, operation, and outbound callback seams for revoke and revision bump.
+- `s6_continuation_speech_callbacks_revalidate_after_revoke_and_revision_bump` covers the holding, ordinary, and late-inbound callback branches.
+- `s6_real_queue_dequeue_and_concurrent_release_revalidate_current_relationship` drives the production dispatcher dequeue loop for both queued stale work and deterministic release-after-mutation.
+- `s6_real_timed_subtask_entry_rejects_revoke_and_revision_bump_before_model` exercises the fixed timed/subtask entry check used by `process`.
+- `s6_three_real_continuation_callbacks_leave_speech_and_delivery_ledgers_empty` proves zero real speech/delivery ledger rows at all three callbacks.
 
 ## Retained GREEN transcripts
 
-- `/tmp/issue-1006-s6-matrix-green.log`: focused seven-boundary and concurrent matrix passed.
-- `/tmp/issue-1006-s6-focused-green.log`: final matrix 2 passed, subtask/dispatcher 56 passed, V3 revision parser 1 passed.
-- `/tmp/issue-1006-s6-db-green.log`: DB all-targets 268 passed, 3 ignored.
-- `/tmp/issue-1006-s6-extgate-green.log`: extgate 72 library, 91 conformance, 1 production-boundary, 8 no-platform, and 3 S3 static tests passed.
-- `/tmp/issue-1006-s6-server-green.log`: server library 495 passed.
-- `/tmp/issue-1006-s6-gateways-green.log`: Discord 74, Nostr 69, gate-client 31 + 7 passed.
-- `/tmp/issue-1006-s6-clippy-green.log`: workspace all-target/all-feature clippy passed with warnings denied.
-- `/tmp/issue-1006-s6-static-green.log`: actions tests passed; dependency checks passed. File-size was rerun after extracting authorization helpers and now passes at exactly 800 lines maximum.
+- `/tmp/issue-1006-s6-actual-seams-green.log`: focused production-seam tests passed: core 2, actions queue/concurrency 1, server timed/subtask 1, extgate real-ledger 1.
+- `/tmp/issue-1006-s6-file-size-green.log`: exact `bash scripts/check-file-size.sh` rerun passed (`OK: every Rust source file is at most 800 lines.`).
+- `/tmp/issue-1006-s6-design-fix-clippy.log`: focused affected-crate clippy passed with warnings denied.
+- `/tmp/issue-1006-s6-design-fix-static.log`: formatting, dependency/static audit, and boundary mutation tests passed.
 
-The reviewed boundary baseline remains 275 findings; only exact line identities moved. `gateway_boundary_audit.py` and its 61 mutation tests pass.
+The previously retained `/tmp/issue-1006-s6-static-green.log` is not GREEN evidence for file size; it contains the superseded failure and is intentionally not cited as passing evidence.

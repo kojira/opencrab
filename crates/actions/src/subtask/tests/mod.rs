@@ -8,6 +8,7 @@ use opencrab_core::{
 
 include!("sink.rs");
 include!("dispatcher.rs");
+include!("authorization.rs");
 include!("manage.rs");
 include!("lifecycle.rs");
 include!("batch.rs");

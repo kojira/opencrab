@@ -30,25 +30,20 @@ pub fn make_check(
     std::sync::Arc::new(move |_boundary| relationship_is_current(&db, &target_agent_id, &authority))
 }
 
-pub fn run_if_current<T>(
-    db: &opencrab_db::Db,
-    target_agent_id: &str,
-    authority: Option<&RelationshipAuthority>,
-    _boundary: AuthorizationBoundary,
-    side_effect: impl FnOnce() -> T,
-) -> Result<T, &'static str> {
-    if authority.is_some_and(|authority| !relationship_is_current(db, target_agent_id, authority)) {
-        return Err("authorization_revoked");
+pub fn authorize_timed_subtask_entry(
+    depth: u32,
+    check: &opencrab_core::authorization::AuthorizationCheck,
+) -> anyhow::Result<()> {
+    if depth > 0 && !check(AuthorizationBoundary::TimedSubtaskContinuation) {
+        anyhow::bail!("authorization_revoked");
     }
-    Ok(side_effect())
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use opencrab_db::queries::TrustedCoAgentRow;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier};
 
     fn fixture() -> (opencrab_db::Db, RelationshipAuthority) {
         let db = opencrab_db::Db::memory().expect("db");
@@ -79,79 +74,34 @@ mod tests {
     }
 
     #[test]
-    fn s6_seven_boundaries_fail_closed_after_revoke_and_revision_bump() {
-        let mut violations = Vec::new();
+    fn s6_real_timed_subtask_entry_rejects_revoke_and_revision_bump_before_model() {
         for mutation in ["revoke", "revision_bump"] {
-            for boundary in AuthorizationBoundary::ALL {
-                let (db, authority) = fixture();
-                {
-                    let conn = db.lock().unwrap();
-                    match mutation {
-                        "revoke" => assert!(opencrab_db::queries::delete_trusted_co_agent(
+            let (db, authority) = fixture();
+            {
+                let conn = db.lock().unwrap();
+                match mutation {
+                    "revoke" => assert!(opencrab_db::queries::delete_trusted_co_agent(
+                        &conn,
+                        "target-agent",
+                        "peer-agent",
+                    )
+                    .unwrap()),
+                    "revision_bump" => {
+                        assert!(opencrab_db::queries::bump_trusted_co_agent_revision(
                             &conn,
                             "target-agent",
                             "peer-agent",
                         )
-                        .unwrap()),
-                        "revision_bump" => {
-                            assert!(opencrab_db::queries::bump_trusted_co_agent_revision(
-                                &conn,
-                                "target-agent",
-                                "peer-agent",
-                            )
-                            .unwrap())
-                        }
-                        _ => unreachable!(),
+                        .unwrap())
                     }
-                }
-                let effects = AtomicUsize::new(0);
-                let result =
-                    run_if_current(&db, "target-agent", Some(&authority), boundary, || {
-                        effects.fetch_add(1, Ordering::SeqCst)
-                    });
-                if result != Err("authorization_revoked") || effects.load(Ordering::SeqCst) != 0 {
-                    violations.push(format!("{mutation}:{boundary:?}"));
+                    _ => unreachable!(),
                 }
             }
-        }
-        assert!(
-            violations.is_empty(),
-            "unwanted side effects crossed revoked boundaries: {violations:?}"
-        );
-    }
-
-    #[test]
-    fn s6_queued_and_concurrent_boundaries_never_use_cached_authority() {
-        for boundary in AuthorizationBoundary::ALL {
-            let (db, authority) = fixture();
-            let start = Arc::new(Barrier::new(2));
-            let effects = Arc::new(AtomicUsize::new(0));
-            let worker_db = db.clone();
-            let worker_authority = authority.clone();
-            let worker_start = Arc::clone(&start);
-            let worker_effects = Arc::clone(&effects);
-            let worker = std::thread::spawn(move || {
-                worker_start.wait();
-                run_if_current(
-                    &worker_db,
-                    "target-agent",
-                    Some(&worker_authority),
-                    boundary,
-                    || worker_effects.fetch_add(1, Ordering::SeqCst),
-                )
-            });
-            {
-                let conn = db.lock().unwrap();
-                opencrab_db::queries::bump_trusted_co_agent_revision(
-                    &conn,
-                    "target-agent",
-                    "peer-agent",
-                )
-                .unwrap();
-            }
-            start.wait();
-            assert_eq!(worker.join().unwrap(), Err("authorization_revoked"));
-            assert_eq!(effects.load(Ordering::SeqCst), 0, "{boundary:?}");
+            let check = make_check(db, "target-agent".to_string(), authority);
+            assert!(
+                authorize_timed_subtask_entry(1, &check).is_err(),
+                "{mutation}"
+            );
         }
     }
 }
