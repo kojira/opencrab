@@ -142,7 +142,7 @@ fn s2_pre_schema_snapshot_restores_byte_identical_fixture() {
 
     {
         let conn = crate::init_connection(database.to_str().unwrap()).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 54);
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
             .unwrap();
     }

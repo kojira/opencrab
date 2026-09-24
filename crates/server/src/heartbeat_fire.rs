@@ -39,9 +39,12 @@ pub async fn run_one_heartbeat(
 ) -> Option<()> {
     let (prompt, instructions_source) = {
         let conn = state.db.lock().ok()?;
-        // S4 owns the generic per-session instruction schema. Until then this preserves the
-        // existing agent/default fallback without decoding an external destination.
-        let resolved = opencrab_db::queries::resolve_heartbeat_instructions(&conn, agent_id, "");
+        let resolved = opencrab_db::queries::resolve_session_heartbeat_instructions(
+            &conn,
+            agent_id,
+            &target.session_id,
+        )
+        .ok()?;
         (
             format_heartbeat_prompt(HEARTBEAT_NEUTRAL_CHANNEL_LABEL, &resolved.text),
             resolved.source,

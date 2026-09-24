@@ -13,13 +13,13 @@ SPEC.loader.exec_module(AUDIT)
 
 
 class GatewayBoundaryMutationTests(unittest.TestCase):
-    def test_s3_reviewed_boundary_burn_down_has_exactly_412_findings(self):
+    def test_s4_reviewed_boundary_burn_down_has_exactly_374_findings(self):
         root = pathlib.Path(__file__).parents[2]
         baseline = json.loads((root / "scripts/gateway-boundary-baseline.json").read_text())
         findings = AUDIT.audit_texts(AUDIT.repository_texts(root))
-        self.assertEqual(len(findings), 412)
-        self.assertEqual(len(baseline["entries"]), 412)
-        self.assertEqual(baseline["review"]["finding_count"], 412)
+        self.assertEqual(len(findings), 374)
+        self.assertEqual(len(baseline["entries"]), 374)
+        self.assertEqual(baseline["review"]["finding_count"], 374)
         self.assertFalse(
             [finding for finding in findings if finding.rule == "public-gate-admin-reachable"]
         )
@@ -31,6 +31,37 @@ class GatewayBoundaryMutationTests(unittest.TestCase):
         )
         self.assertFalse(
             [entry for entry in baseline["entries"] if entry["rule"] == "shared-gateway-name-branch"]
+        )
+
+    def test_s4_live_heartbeat_paths_reject_platform_destinations_and_session_watches(self):
+        root = pathlib.Path(__file__).parents[2]
+        paths = [
+            "crates/server/src/heartbeat_fire.rs",
+            "crates/server/src/heartbeat_instructions.rs",
+            "crates/server/src/scheduler.rs",
+            "crates/db/src/queries/session_heartbeat.rs",
+        ]
+        files = {path: (root / path).read_text() for path in paths}
+        debt = [
+            finding
+            for finding in AUDIT.audit_texts(files)
+            if finding.rule in {"shared-concrete-schema", "shared-concrete-vocabulary"}
+            and any(token in finding.snippet.lower() for token in ("channel_id", "guild_id", "session_watch"))
+        ]
+        self.assertEqual(debt, [])
+
+        mutated = dict(files)
+        mutated["crates/server/src/heartbeat_fire.rs"] += (
+            '\nfn leaked_platform_destination(channel_id: &str) { let _ = channel_id; }\n'
+        )
+        self.assertTrue(
+            [
+                finding
+                for finding in AUDIT.audit_texts(mutated)
+                if finding.rule in {"shared-concrete-schema", "shared-concrete-vocabulary"}
+                and "channel_id" in finding.snippet
+            ],
+            "the S4 static boundary must fail on a reintroduced platform destination",
         )
 
     def rules(self, files):

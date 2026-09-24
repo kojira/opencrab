@@ -1,4 +1,45 @@
 #[tokio::test]
+async fn s4_gate_admin_binding_rejects_platform_destination_fields_without_partial_targets() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    let binding_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    let session_id = session_id_for_binding(&binding_id);
+    let (status, body) = h
+        .admin(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/gate-bindings/{binding_id}"))
+                .header(header::AUTHORIZATION, auth())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "instance_id": instance_id,
+                        "address": "opaque-address",
+                        "channel_id": "platform-destination",
+                        "session": {"session_id": session_id, "title": "generic"}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err_code(&body), "bad_request");
+    let conn = h.state.db.lock().unwrap();
+    for table in [
+        "gate_bindings",
+        "session_heartbeat_config",
+        "session_heartbeat_instructions",
+    ] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "{table} must remain unchanged");
+    }
+}
+
+#[tokio::test]
 async fn dynamic_binding_put_keeps_old_said_and_new_not_ready() {
     let h = Harness::start().await;
     let (mut s, instance_id, binding_a) = ready_pair(&h).await;

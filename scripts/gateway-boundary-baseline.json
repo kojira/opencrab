@@ -3,7 +3,7 @@
   "purpose": "Issue #1006 S0 line-specific reviewed burn-down; entries are debts or explicit gateway-store provenance, never wildcard exceptions",
   "review": {
     "status": "line-by-line-reviewed",
-    "finding_count": 412,
+    "finding_count": 374,
     "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance"
   },
   "entries": [
@@ -1590,7 +1590,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 297,
+      "line": 298,
       "snippet": "CREATE TABLE IF NOT EXISTS channel_config (",
       "classification": "production-violation",
       "violation": "V06",
@@ -1600,7 +1600,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 311,
+      "line": 312,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_channel_guild ON channel_config(guild_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -1610,7 +1610,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 430,
+      "line": 431,
       "snippet": "CREATE TABLE IF NOT EXISTS trusted_users (",
       "classification": "production-violation",
       "violation": "V06",
@@ -1620,7 +1620,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 442,
+      "line": 443,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -1630,7 +1630,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 670,
+      "line": 684,
       "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
       "classification": "production-violation",
       "violation": "V06",
@@ -1640,7 +1640,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 679,
+      "line": 693,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -1650,7 +1650,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/mod.rs",
-      "line": 205,
+      "line": 223,
       "snippet": "pub(super) const SESSION_WATCHES_SQL: &str = \"",
       "classification": "production-violation",
       "violation": "V06",
@@ -1660,7 +1660,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/mod.rs",
-      "line": 206,
+      "line": 224,
       "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
       "classification": "production-violation",
       "violation": "V06",
@@ -1670,7 +1670,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/mod.rs",
-      "line": 215,
+      "line": 233,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -2260,52 +2260,12 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 141,
-      "snippet": "let existing = opencrab_db::queries::get_channel_config_for_agent(",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 177,
-      "snippet": "None => opencrab_db::queries::ChannelConfigRow {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 203,
-      "snippet": "if let Err(e) = opencrab_db::queries::upsert_channel_config(&conn, &cfg) {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 242,
+      "line": 112,
       "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
       "classification": "production-violation",
       "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 282,
-      "snippet": "let text = opencrab_db::queries::get_channel_config_for_agent(",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
+      "owner_stage": "S5/S10",
+      "expires_when": "rename legacy generic caller-role vocabulary after gateway policy ownership moves"
     },
     {
       "rule": "shared-concrete-schema",
@@ -3039,56 +2999,6 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/heartbeat.rs",
-      "line": 341,
-      "snippet": "pub channel_id: Option<String>,",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/heartbeat.rs",
-      "line": 356,
-      "snippet": "(agent_id, scope, channel_id, caller_identity, caller_user_id, old_value, new_value, reason, created_at)",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/heartbeat.rs",
-      "line": 361,
-      "snippet": "audit.channel_id,",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/heartbeat.rs",
-      "line": 380,
-      "snippet": "\"SELECT agent_id, scope, channel_id, caller_identity, caller_user_id, old_value, new_value, reason",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/heartbeat.rs",
-      "line": 387,
-      "snippet": "channel_id: row.get(2)?,",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/queries/pending_interactions.rs",
       "line": 16,
       "snippet": "pub channel_id: String,",
@@ -3190,7 +3100,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 298,
+      "line": 299,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -3200,7 +3110,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 300,
+      "line": 301,
       "snippet": "guild_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -3210,7 +3120,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 309,
+      "line": 310,
       "snippet": "PRIMARY KEY (channel_id, agent_id)",
       "classification": "production-violation",
       "violation": "V06",
@@ -3220,7 +3130,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 552,
+      "line": 553,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -3569,256 +3479,6 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 131,
-      "snippet": "let channel_id = match args.get(\"channel_id\").and_then(|v| v.as_str()) {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 137,
-      "snippet": "error: Some(\"scope=channelのときはchannel_idが必要です\".to_string()),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 143,
-      "snippet": "channel_id,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 151,
-      "snippet": "let guild_id = args",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 152,
-      "snippet": ".get(\"guild_id\")",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 155,
-      "snippet": ".or_else(|| existing.as_ref().map(|c| c.guild_id.clone()));",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 156,
-      "snippet": "let guild_id = match guild_id {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 162,
-      "snippet": "error: Some(\"新規チャンネル設定の作成にはguild_idが必要です\".to_string()),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 178,
-      "snippet": "channel_id: channel_id.to_string(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 180,
-      "snippet": "guild_id,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 184,
-      "snippet": "channel_id,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 189,
-      "snippet": "channel_id,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 194,
-      "snippet": "channel_id,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 214,
-      "snippet": "Some(channel_id),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 220,
-      "snippet": "success_response(\"channel\", Some(channel_id), &instructions)",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 271,
-      "snippet": "let channel_id = match args.get(\"channel_id\").and_then(|v| v.as_str()) {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 277,
-      "snippet": "error: Some(format!(\"scope={scope}のときはchannel_idが必要です\")),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 284,
-      "snippet": "channel_id,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 294,
-      "snippet": "json!({ \"scope\": \"channel\", \"channel_id\": channel_id, \"instructions\": text }),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 302,
-      "snippet": "channel_id,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 308,
-      "snippet": "\"channel_id\": channel_id,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 331,
-      "snippet": "channel_id: Option<&str>,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 340,
-      "snippet": "channel_id: channel_id.map(|s| s.to_string()),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 355,
-      "snippet": "channel_id: Option<&str>,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 364,
-      "snippet": "\"channel_id\": channel_id,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/peer_review.rs",
       "line": 81,
       "snippet": "\"description\": \"レビュー対象のRAWコンテンツ（diff・出力・トレース等）。要約せずそのまま渡すこと。上限12000文字（超える場合はワークスペースに保存してdiscord_send_fileで添付する）。\"",
@@ -3872,46 +3532,6 @@
       "path": "crates/server/src/peer_review.rs",
       "line": 415,
       "snippet": "\"channel_id\": target,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/system_actions/definitions/heartbeat_schedules.rs",
-      "line": 24,
-      "snippet": "\"channel_id\": {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/system_actions/definitions/heartbeat_schedules.rs",
-      "line": 28,
-      "snippet": "\"guild_id\": {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/system_actions/definitions/heartbeat_schedules.rs",
-      "line": 57,
-      "snippet": "\"description\": \"agent / channel / effective。channel・effectiveのときはchannel_id必須。\"",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/system_actions/definitions/heartbeat_schedules.rs",
-      "line": 59,
-      "snippet": "\"channel_id\": {",
       "classification": "production-violation",
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
@@ -4182,15 +3802,6 @@
       "needle": "opencrab-web-gateway",
       "owner_stage": "S11",
       "expires_when": "retain or update with the test contract; never classify as production runtime vocabulary"
-    },
-    {
-      "violation": "V15",
-      "classification": "comment",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 7,
-      "needle": "Discord",
-      "owner_stage": "S4/S10",
-      "expires_when": "review with owning code; comments are evidence and not mechanically deleted"
     },
     {
       "violation": "V15",

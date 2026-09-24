@@ -57,6 +57,10 @@ fn set_hb_instructions(core: &Core, text: &str) {
 /// なる」という前提を明示するために置く（seam 駆動でも観測結果は変わらない）。
 fn seed_hb_config(core: &Core, session_id: &str) {
     let conn = core.extgate.db.lock().unwrap();
+    let projected_override = opencrab_db::queries::get_agent(&conn, AGENT_ID)
+        .unwrap()
+        .unwrap()
+        .heartbeat_instructions;
     opencrab_db::queries::upsert_session_heartbeat_config(
         &conn,
         &opencrab_db::queries::SessionHeartbeatConfigRow {
@@ -66,6 +70,15 @@ fn seed_hb_config(core: &Core, session_id: &str) {
             interval_secs: Some(60),
             anchor_at: None,
             last_fired_at: None,
+        },
+    )
+    .unwrap();
+    opencrab_db::queries::upsert_session_heartbeat_instructions(
+        &conn,
+        &opencrab_db::queries::SessionHeartbeatInstructionsRow {
+            agent_id: AGENT_ID.into(),
+            session_id: session_id.into(),
+            override_text: Some(projected_override),
         },
     )
     .unwrap();
@@ -187,6 +200,7 @@ async fn heartbeat_h1_two_posts_flag_only_on_last() {
         &format!("{M_HB1} 巡回して報告することがあれば 2 回に分けて投稿して"),
     );
     seed_hb_config(&core, &session_id);
+    set_hb_instructions(&core, "agent fallback must not replace the projected session override");
 
     fire_heartbeat_via_scheduler_seam(&core, &session_id).await;
 

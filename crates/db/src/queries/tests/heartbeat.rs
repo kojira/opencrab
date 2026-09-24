@@ -133,7 +133,7 @@ fn test_heartbeat_instructions_audit_roundtrip() {
     let audit = HeartbeatInstructionsAuditRow {
         agent_id: "a1".to_string(),
         scope: "agent".to_string(),
-        channel_id: None,
+        session_id: None,
         caller_identity: "owner".to_string(),
         caller_user_id: Some("123".to_string()),
         old_value: Some("old".to_string()),

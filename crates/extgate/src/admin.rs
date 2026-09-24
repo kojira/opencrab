@@ -81,6 +81,17 @@ fn optional_string(obj: &Value, key: &str) -> Result<Option<String>, GateError> 
     }
 }
 
+fn require_only_keys(obj: &Value, allowed: &[&str]) -> Result<(), GateError> {
+    let Some(fields) = obj.as_object() else {
+        return Err(GateError::new(ErrorCode::BadRequest));
+    };
+    if fields.keys().all(|key| allowed.contains(&key.as_str())) {
+        Ok(())
+    } else {
+        Err(GateError::new(ErrorCode::BadRequest))
+    }
+}
+
 fn require_value_object<'a>(obj: &'a Value, key: &str) -> Result<&'a Value, GateError> {
     match obj.get(key) {
         Some(value @ Value::Object(_)) => Ok(value),
@@ -583,6 +594,12 @@ async fn put_binding_inner(
     let operation = Operation::BindingPut;
     let (authenticated, body) = begin_request(state, operation, req).await?;
     let obj = early(state, operation, &authenticated, require_object(&body))?;
+    early(
+        state,
+        operation,
+        &authenticated,
+        require_only_keys(&obj, &["instance_id", "address", "session"]),
+    )?;
     let binding_id = early(state, operation, &authenticated, parse_uuid(binding_id))?;
     let raw_instance = early(
         state,
@@ -609,6 +626,12 @@ async fn put_binding_inner(
         operation,
         &authenticated,
         require_value_object(&obj, "session"),
+    )?;
+    early(
+        state,
+        operation,
+        &authenticated,
+        require_only_keys(session, &["session_id", "title"]),
     )?;
     let session_id = early(
         state,

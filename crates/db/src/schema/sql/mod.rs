@@ -85,6 +85,24 @@ CREATE TABLE IF NOT EXISTS session_heartbeat_config (
 );
 ";
 
+/// Generic per-session heartbeat instructions (Issue #1006 S4).
+///
+/// `override_text = NULL` inherits the current agent instructions and then the generic default.
+/// The composite foreign key prevents instructions from naming a target that has no generic
+/// heartbeat configuration; the session foreign key keeps the target conversation-generic.
+pub(super) const SESSION_HEARTBEAT_INSTRUCTIONS_SQL: &str = "
+CREATE TABLE IF NOT EXISTS session_heartbeat_instructions (
+    agent_id      TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    override_text TEXT,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (agent_id, session_id),
+    FOREIGN KEY (agent_id, session_id)
+        REFERENCES session_heartbeat_config(agent_id, session_id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+";
+
 /// per-agent 定時実行（#455 の PR1 スキーマ）。cron / `@every` をセッション時刻源へ載せる。
 ///
 /// 既定は**無効**（fail-closed・#240）。`session_id` は注入先の一本化されたセッション
