@@ -1711,6 +1711,7 @@ dependencies = [
  "opencrab-db",
  "opencrab-extgate",
  "opencrab-gateway",
+ "opencrab-nostr-gateway",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1729,14 +1730,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
- "chrono",
  "libc",
- "opencrab-core",
- "opencrab-db",
  "opencrab-gate-client",
- "opencrab-gateway",
- "opencrab-nostr",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -1744,9 +1739,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "url",
  "uuid",
- "zeroize",
 ]
 
 [[package]]

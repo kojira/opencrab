@@ -8,11 +8,14 @@ use tower_http::trace::TraceLayer;
 pub mod agent_heartbeat;
 pub mod agent_log;
 pub mod agent_management;
+#[cfg(feature = "nostr")]
+pub mod agent_nostr_relay;
 pub mod agent_runtime_impl;
 pub mod agent_schedule;
 pub mod api;
 pub mod caller_identity;
 pub mod config;
+pub mod dedicated_gateway;
 pub mod heartbeat_fire;
 pub mod heartbeat_instructions;
 pub mod hot_reload;
@@ -23,6 +26,8 @@ pub mod memory_condense;
 pub mod memory_declare;
 pub mod memory_maintenance;
 pub mod memory_organize;
+#[cfg(feature = "nostr")]
+pub mod nostr_runner_impl;
 pub mod offload_cleanup;
 pub mod peer_review;
 pub mod process;
@@ -44,6 +49,10 @@ pub mod baseline_l1;
 pub mod baseline_l2;
 
 pub mod transcript;
+
+/// per-agent Nostr sub-gateway マネージャの共有ハンドル。
+#[cfg(feature = "nostr")]
+pub type SharedNostrManager = Arc<opencrab_nostr::NostrGatewayManager<AppState>>;
 
 /// per-agent MCP 接続マネージャの共有ハンドル。
 pub type SharedMcpManager = Arc<opencrab_mcp::McpClientManager>;
@@ -87,6 +96,8 @@ pub struct AppState {
     /// プロバイダー設定変更を再起動なしで反映するために使う。
     pub voice_runtime: Arc<std::sync::Mutex<Option<Arc<dyn opencrab_voice::VoiceRuntime>>>>,
     pub workspace_base: String,
+    #[cfg(feature = "nostr")]
+    pub nostr_master_key: Option<opencrab_nostr::MasterKey>,
     pub default_model: String,
     pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
     /// コンパクション比率: context_window のうち会話履歴に使う割合 (0.0-1.0, デフォルト 0.5)。
@@ -268,6 +279,8 @@ impl AppState {
 /// prefix 衝突・登録漏れを検出）が担う。この 1 本化は「登録関数への追加忘れ」を減らす方で、
 /// 両方あって初めて塞がる。
 pub fn register_production_descriptors(router: &opencrab_actions::TimedFireRouter) {
+    #[cfg(feature = "nostr")]
+    router.register_descriptor(Arc::new(opencrab_nostr::NostrFire));
     // #925: V3 レーンの canonical session `extgate-<binding_id>`を受ける単一 descriptor。
     // gate socket が無い構成でも登録は生存非依存（発火は sink 側の live 判定で fail-loud）。
     router.register_descriptor(Arc::new(opencrab_extgate::ExtgateFire));
@@ -293,6 +306,8 @@ pub(crate) fn test_app_state() -> AppState {
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
+        #[cfg(feature = "nostr")]
+        nostr_master_key: None,
         default_model: "mock:test".to_string(),
         tools_config: Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
         compaction_ratio: 0.5,
@@ -400,6 +415,19 @@ macro_rules! production_routes {
     };
 }
 
+#[cfg(feature = "nostr")]
+macro_rules! nostr_production_routes {
+    ($apply:ident, $target:ident) => {
+        $apply!($target, "/api/agents/{id}/nostr", get => api::nostr::get_nostr_config, put => api::nostr::update_nostr_config, delete => api::nostr::delete_nostr_config);
+        $apply!($target, "/api/agents/{id}/nostr/generate", post => api::nostr::generate_nostr_key);
+        $apply!($target, "/api/agents/{id}/nostr/start", post => api::nostr::start_nostr_gateway);
+        $apply!($target, "/api/agents/{id}/nostr/stop", post => api::nostr::stop_nostr_gateway);
+        $apply!($target, "/api/agents/{id}/nostr-relay", get => api::nostr_relay::get_nostr_relay_config, put => api::nostr_relay::update_nostr_relay_config);
+        $apply!($target, "/api/agents/{id}/nostr/watches", get => api::session_watches::list_session_watches, post => api::session_watches::create_session_watch);
+        $apply!($target, "/api/agents/{id}/nostr/watches/{watch_id}", put => api::session_watches::update_session_watch, delete => api::session_watches::delete_session_watch);
+    };
+}
+
 macro_rules! mount_route {
     ($router:ident, $path:literal, $first_method:ident => $first_handler:expr $(, $method:ident => $handler:expr)*) => {
         $router = $router.route(
@@ -434,6 +462,8 @@ pub struct HttpRouteDescriptor {
 pub fn production_route_inventory() -> Vec<HttpRouteDescriptor> {
     let mut routes = Vec::new();
     production_routes!(describe_route, routes);
+    #[cfg(feature = "nostr")]
+    nostr_production_routes!(describe_route, routes);
     describe_gate_admin_routes(&mut routes);
     routes.sort_by(|a, b| a.path.cmp(&b.path));
     routes
@@ -474,6 +504,8 @@ pub fn create_router_with_gate(
 ) -> Router {
     let mut router = Router::new();
     production_routes!(mount_route, router);
+    #[cfg(feature = "nostr")]
+    nostr_production_routes!(mount_route, router);
     router
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())

@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use opencrab_nostr_gateway::config::{decode_config_b64, Placement};
-use opencrab_nostr_gateway::daemon::DaemonConfig;
 use opencrab_nostr_gateway::harness::HarnessOverrides;
 use opencrab_nostr_gateway::run::spawn_instance;
 use opencrab_nostr_gateway::secret::take_watch_secret;
@@ -28,26 +27,10 @@ async fn run() -> anyhow::Result<()> {
         )
         .init();
 
-    let mut args = std::env::args().skip(1);
-    let first = args
-        .next()
-        .context("usage: nostr-gateway daemon <config.json> | instance <placement.json>")?;
-    if first == "daemon" {
-        let path = args
-            .next()
-            .map(PathBuf::from)
-            .context("usage: nostr-gateway daemon <config.json>")?;
-        return opencrab_nostr_gateway::daemon::run(DaemonConfig::load(&path)?).await;
-    }
-    let path = if first == "instance" {
-        args.next()
-            .map(PathBuf::from)
-            .context("usage: nostr-gateway instance <placement.json>")?
-    } else {
-        // Temporary CLI compatibility for existing isolated harnesses. This does not create a
-        // second runtime path: both forms execute the same instance owner.
-        PathBuf::from(first)
-    };
+    let path = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .context("usage: nostr-gateway <placement.json>")?;
     let secret = take_watch_secret().map(Arc::new);
     let place = Placement::load(&path)?;
     let socket = PathBuf::from(&place.core_socket);

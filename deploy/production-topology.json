@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "nostr_lifecycle": "server_owned",
+  "nostr_authority": "core_agent_nostr_config",
+  "standalone_nostr_daemon": false
+}

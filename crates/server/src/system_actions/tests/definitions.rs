@@ -279,7 +279,7 @@ fn server_tool_class_invariants_are_fixed() {
     .iter()
     .map(|s| s.to_string())
     .collect();
-#[cfg(any())]
+#[cfg(feature = "nostr")]
     expected_dispatch.insert("nostr_generate_key".to_string());
     assert_eq!(
         dispatchable, expected_dispatch,
@@ -300,7 +300,7 @@ fn server_tool_class_invariants_are_fixed() {
     #[allow(unused_mut)]
     let mut expected: std::collections::BTreeSet<String> =
         std::iter::once("report_progress".to_string()).collect();
-#[cfg(any())]
+#[cfg(feature = "nostr")]
     expected.insert("nostr_generate_key".to_string());
     assert_eq!(
         allowed, expected,

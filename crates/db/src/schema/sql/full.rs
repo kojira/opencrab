@@ -324,6 +324,25 @@ CREATE TABLE IF NOT EXISTS soul_presets (
 );
 CREATE INDEX IF NOT EXISTS idx_soul_presets_agent ON soul_presets(agent_id);
 
+-- D-RB-001: server-owned Nostr authority retained at schema 52.
+CREATE TABLE IF NOT EXISTS agent_nostr_config (
+    agent_id TEXT PRIMARY KEY,
+    secret_key TEXT NOT NULL,
+    relays_json TEXT NOT NULL DEFAULT '[]',
+    filter_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 0,
+    owner_pubkey TEXT NOT NULL DEFAULT '',
+    self_pubkey TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_nostr_relay_config (
+    agent_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    webhook_url TEXT,
+    updated_at TEXT NOT NULL
+);
+
 -- ============================================
 -- Agent Webhook Config (subtask/tool/lifecycle webhook defaults)
 -- ============================================

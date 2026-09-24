@@ -14,6 +14,37 @@ pub type MainKeyProvider = Arc<dyn Fn(&str) -> Result<Zeroizing<String>> + Send 
 /// 生成鍵ファイル（`enc:v1:…`）の暗号/復号に使うマスターキー holder（#620）。
 pub type MasterKey = Arc<Zeroizing<[u8; secret_box::MASTER_KEY_LEN]>>;
 
+/// DB の（暗号化された）本鍵を復号して返す [`MainKeyProvider`] を作る（#620）。
+///
+/// `base_command` に注入され、spawn ごとに `agent_id` の本鍵を DB から引いて復号し env へ
+/// 載せる。暗号文（`enc:v1:…`）なら復号、平文（移行前）ならそのまま返す。マスターキーは
+/// closure に capture する（外へ出さない）。
+pub fn db_main_key_provider(db: opencrab_db::Db, master_key: MasterKey) -> MainKeyProvider {
+    Arc::new(move |agent_id: &str| {
+        let sk = {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow::anyhow!("DB ロック取得に失敗しました"))?;
+            opencrab_db::queries::get_agent_nostr_config(&conn, agent_id)
+                .ok()
+                .flatten()
+                .map(|r| r.secret_key)
+                .ok_or_else(|| anyhow::anyhow!("Nostr 設定が見つかりません"))?
+        };
+        if sk.trim().is_empty() {
+            anyhow::bail!("秘密鍵が未設定です");
+        }
+        if secret_box::is_encrypted(&sk) {
+            let bytes = secret_box::decrypt(&sk, &master_key)?;
+            Ok(Zeroizing::new(
+                String::from_utf8(bytes.to_vec()).context("復号した本鍵が UTF-8 ではありません")?,
+            ))
+        } else {
+            // 移行前の平文（次回移行で暗号化される）。
+            Ok(Zeroizing::new(sk))
+        }
+    })
+}
 /// nostaro を起動する作業ディレクトリ（= エージェントの workspace ルート）のテンプレート。
 /// `config/default.toml` の `agent.workspace_path` と同じ既定値で、実配線ではそこから
 /// [`NostaroCli::with_workspace_base`] で渡される（#299）。

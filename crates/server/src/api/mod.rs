@@ -13,8 +13,14 @@ pub mod llm_logs;
 pub mod mcp;
 pub mod memory;
 pub mod model_pricing;
+#[cfg(feature = "nostr")]
+pub mod nostr;
+#[cfg(feature = "nostr")]
+pub mod nostr_relay;
 pub mod providers;
 pub mod schedules;
+#[cfg(feature = "nostr")]
+pub mod session_watches;
 pub mod sessions;
 pub mod setup;
 pub mod skills;

@@ -112,6 +112,10 @@ pub fn delete_trusted_co_agent(
 // **#159 に残っている作業**:
 // - 一意制約 `(user_id, agent_id)` → `(platform, user_id, agent_id)`（表の再構築＝非可逆）
 
+/// Discord user識別子source（legacy core rows remain readable during recovery）。
+pub const TRUSTED_PLATFORM_DISCORD: &str = "discord";
+/// Nostrの公開鍵識別子source（D-RB-001 server-owned authority）。
+pub const TRUSTED_PLATFORM_NOSTR: &str = "nostr";
 /// REST message intakeが使う識別子source。
 pub const TRUSTED_PLATFORM_REST: &str = "rest";
 /// external gateが運ぶopaqueな識別子source。

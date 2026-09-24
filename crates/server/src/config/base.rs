@@ -54,6 +54,9 @@ pub struct AppConfig {
 pub struct GateConfig {
     #[serde(default)]
     pub listen_socket: String,
+    /// D-RB-001: restored server-owned Nostr ingress remains V3-only.
+    #[serde(default)]
+    pub nostr_ingress: String,
 }
 
 /// 古い `llm_logs` を zip へ書き出して DB から外す設定（#337）。

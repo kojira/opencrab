@@ -573,7 +573,7 @@ mod tests {
             voice_config: std::sync::Arc::new(Default::default()),
             voice_runtime: std::sync::Arc::new(std::sync::Mutex::new(None)),
             workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
-            #[cfg(any())]
+            #[cfg(feature = "nostr")]
             nostr_master_key: None,
             default_model: "mock:gpt-4o".to_string(),
             tools_config: std::sync::Arc::new(std::sync::RwLock::new(

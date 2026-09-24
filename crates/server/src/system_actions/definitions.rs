@@ -4,8 +4,16 @@ impl SystemGatewayActions {
         vec![
             configure_llm_provider_definition(),
             manage_allowed_commands_definition(),
+            #[cfg(feature = "nostr")]
+            configure_nostr_definition(),
             configure_self_definition(),
             configure_mcp_server_definition(),
+            #[cfg(feature = "nostr")]
+            nostr_generate_key_definition(),
+            #[cfg(feature = "nostr")]
+            nostr_list_keys_definition(),
+            #[cfg(feature = "nostr")]
+            nostr_switch_identity_definition(),
             spawn_subtask_definition(),
             cancel_subtask_definition(),
             steer_subtask_definition(),
@@ -18,6 +26,10 @@ impl SystemGatewayActions {
             create_skill_definition(),
             update_heartbeat_instructions_definition(),
             read_heartbeat_instructions_definition(),
+            #[cfg(feature = "nostr")]
+            get_my_nostr_relay_definition(),
+            #[cfg(feature = "nostr")]
+            set_my_nostr_relay_definition(),
             get_my_heartbeat_definition(),
             set_my_heartbeat_definition(),
             run_my_heartbeat_definition(),

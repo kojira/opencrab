@@ -7,6 +7,8 @@
 mod agent_inbox;
 mod agent_logs;
 mod agent_mcp_config;
+mod agent_nostr_config;
+mod agent_nostr_relay_config;
 mod agent_schedules;
 mod agents;
 mod allowed_commands;
@@ -36,6 +38,8 @@ mod webhook_config;
 pub use agent_inbox::*;
 pub use agent_logs::*;
 pub use agent_mcp_config::*;
+pub use agent_nostr_config::*;
+pub use agent_nostr_relay_config::*;
 pub use agent_schedules::*;
 pub use agents::*;
 pub use allowed_commands::*;

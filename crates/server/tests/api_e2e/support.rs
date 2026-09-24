@@ -30,7 +30,7 @@ fn create_test_state(compaction_ratio: f64) -> (AppState, opencrab_db::Db) {
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
-#[cfg(any())]
+#[cfg(feature = "nostr")]
         nostr_master_key: None,
         default_model: "mock:test".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(

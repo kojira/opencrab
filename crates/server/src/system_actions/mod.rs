@@ -134,6 +134,7 @@ impl SystemGatewayActions {
 }
 
 include!("definitions/configuration.rs");
+include!("definitions/nostr.rs");
 include!("definitions/subtasks_progress.rs");
 include!("definitions/memory_commands_skill.rs");
 include!("definitions/heartbeat_schedules.rs");
@@ -141,6 +142,7 @@ include!("definitions/webhooks.rs");
 include!("definitions/peer_review.rs");
 include!("definitions.rs");
 
+include!("execution/nostr.rs");
 include!("execution/subtasks_memory.rs");
 include!("execution/configuration.rs");
 include!("gateway_actions.rs");

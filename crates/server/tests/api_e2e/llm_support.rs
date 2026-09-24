@@ -180,7 +180,7 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
             .join("opencrab_test")
             .to_string_lossy()
             .to_string(),
-#[cfg(any())]
+#[cfg(feature = "nostr")]
         nostr_master_key: None,
         default_model: "mock:gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(

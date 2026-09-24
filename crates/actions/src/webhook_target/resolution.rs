@@ -201,6 +201,29 @@ pub fn resolve_subtask_webhook(
 /// 明示 per-call webhook も env/config fallback も用いない（design 2.2: env/config は
 /// subtask ファミリ限定）。activity kind の DB 行のみを見る。
 /// disabled / 不正 URL は下位へ fall through しない（no-silent-fallback）。
+/// Resolve the optional per-agent Nostr relay webhook from the core-owned row.
+pub fn resolve_nostr_relay_webhook(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+) -> Option<WebhookConfig> {
+    let row = match opencrab_db::queries::get_agent_nostr_relay_config(conn, agent_id) {
+        Ok(Some(row)) => row,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(agent_id, "failed to read Nostr relay config: {error}");
+            return None;
+        }
+    };
+    if !row.enabled {
+        return None;
+    }
+    let url = row.webhook_url?.trim().to_string();
+    if url.is_empty() || validate_discord_webhook_url(&url).is_err() {
+        return None;
+    }
+    Some(WebhookConfig { url, events: None })
+}
+
 pub fn resolve_activity_webhook(
     conn: &rusqlite::Connection,
     agent_id: &str,

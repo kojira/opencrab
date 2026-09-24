@@ -41,12 +41,40 @@ echo "R5(gateway/actions) OK"
 
 # --- R6: shared/server から concrete gateway への逆流を禁止する ---
 CONCRETE='opencrab-cli-gateway|opencrab-discord|opencrab-discord-gateway|opencrab-nostr|opencrab-nostr-gateway|opencrab-web-gateway'
+# D-RB-001 の明示 topology だけは、production recovery 中の server-owned Nostr を許可する。
+# 許可対象は server -> Nostr の 2 crate に限定し、他の shared crate や concrete gateway は
+# 従来どおり fail closed にする。manifest を外した時点で通常の R6 に自動で戻る。
+recovery_nostr=false
+if python3 - <<'PY'
+import json
+from pathlib import Path
+p = Path("deploy/production-topology.json")
+if not p.is_file():
+    raise SystemExit(1)
+t = json.loads(p.read_text())
+raise SystemExit(0 if t == {
+    "version": 1,
+    "nostr_lifecycle": "server_owned",
+    "nostr_authority": "core_agent_nostr_config",
+    "standalone_nostr_daemon": False,
+} else 1)
+PY
+then
+  recovery_nostr=true
+fi
 for p in opencrab-core opencrab-db opencrab-gateway opencrab-actions opencrab-extgate opencrab-gate-client opencrab-server; do
   deps="$(cargo tree -p "$p" --edges no-dev --prefix none --no-dedupe \
     | sed -E 's/ v[0-9].*//' | sort -u)"
-  if printf '%s\n' "$deps" | grep -qxE "$CONCRETE"; then
+  concrete_deps="$(printf '%s\n' "$deps" | grep -xE "$CONCRETE" || true)"
+  if [[ -n "$concrete_deps" ]]; then
+    if [[ "$p" == opencrab-server && "$recovery_nostr" == true ]] \
+      && ! printf '%s\n' "$concrete_deps" \
+        | grep -vxE 'opencrab-nostr|opencrab-nostr-gateway' | grep -q .; then
+      echo "R6 D-RB-001: explicit server-owned Nostr recovery dependencies accepted"
+      continue
+    fi
     echo "R6 FAIL: $p が concrete gateway crate に依存している:"
-    printf '%s\n' "$deps" | grep -xE "$CONCRETE"
+    printf '%s\n' "$concrete_deps"
     exit 1
   fi
 done
@@ -62,6 +90,11 @@ for pair in 'opencrab-discord opencrab-discord-gateway' 'opencrab-nostr opencrab
   platform_deps="$(cargo tree -p "$platform" --edges no-dev --prefix none --no-dedupe \
     | sed -E 's/ v[0-9].*//' | sort -u)"
   if printf '%s\n' "$platform_deps" | grep -qx "$daemon"; then
+    if [[ "$platform" == opencrab-nostr && "$daemon" == opencrab-nostr-gateway \
+      && "$recovery_nostr" == true ]]; then
+      echo "R7 D-RB-001: server-owned Nostr recovery child dependency accepted"
+      continue
+    fi
     echo "R7 FAIL: $platform が daemon $daemon へ逆向き依存している"
     exit 1
   fi

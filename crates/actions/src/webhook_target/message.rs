@@ -428,6 +428,32 @@ fn redact_secret_token(tok: &str) -> (String, bool) {
 /// 共有webhook URLの最小安全条件を検証する。
 ///
 /// 個別serviceのhostやpath形式は解釈しない。理由文字列にraw URLは含めない。
+pub fn validate_discord_webhook_url(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| "url must use https".to_string())?;
+    let (host, path) = rest
+        .split_once('/')
+        .ok_or_else(|| "url has no path".to_string())?;
+    const ALLOWED_HOSTS: [&str; 4] = [
+        "discord.com",
+        "discordapp.com",
+        "ptb.discord.com",
+        "canary.discord.com",
+    ];
+    if !ALLOWED_HOSTS.contains(&host) {
+        return Err("host is not a Discord webhook host".to_string());
+    }
+    let webhook = path
+        .strip_prefix("api/webhooks/")
+        .ok_or_else(|| "path must start with /api/webhooks/".to_string())?;
+    if webhook.split('/').filter(|part| !part.is_empty()).count() < 2 {
+        return Err("path is missing webhook id or token".to_string());
+    }
+    Ok(())
+}
+
 pub fn validate_webhook_url(url: &str) -> Result<(), String> {
     let url = url.trim();
     if url.is_empty() {

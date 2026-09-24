@@ -60,7 +60,7 @@ fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppSt
             .join("opencrab_discord_qc")
             .to_string_lossy()
             .to_string(),
-        #[cfg(any())]
+        #[cfg(feature = "nostr")]
         nostr_master_key: None,
         default_model: "mock:gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(

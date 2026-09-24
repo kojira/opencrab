@@ -7,6 +7,9 @@ mod background;
 #[path = "main/bootstrap.rs"]
 mod bootstrap;
 mod intake_process;
+#[cfg(feature = "nostr")]
+#[path = "main/nostr_ignition.rs"]
+mod nostr_ignition;
 mod scheduler;
 
 #[cfg(test)]
@@ -51,17 +54,72 @@ fn resolve_agent_id(conn: &rusqlite::Connection, agent_id: &str) -> String {
     agent_id.to_string()
 }
 
+#[cfg(feature = "nostr")]
+fn resolve_gateway_bin(env_name: &str, binary_name: &str) -> std::path::PathBuf {
+    if let Ok(path) = std::env::var(env_name) {
+        if !path.trim().is_empty() {
+            return std::path::PathBuf::from(path);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join(binary_name);
+            if sibling.exists() {
+                return sibling;
+            }
+        }
+    }
+    std::path::PathBuf::from(binary_name)
+}
+
+#[cfg(feature = "nostr")]
+fn require_resolvable_binary(label: &str, path: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let executable = |candidate: &std::path::Path| {
+        candidate
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    };
+    let found = if path.components().count() > 1 || path.is_absolute() {
+        executable(path)
+    } else {
+        std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths).any(|dir| executable(&dir.join(path)))
+        })
+    };
+    if !found {
+        anyhow::bail!("{label} binary is not resolvable: {}", path.display());
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let bootstrap::BootstrapContext {
         cfg,
         extgate,
         gate_socket,
+        #[cfg(feature = "nostr")]
+        gate_socket_for_nostr,
+        #[cfg(feature = "nostr")]
+        nostr_master_key,
+        #[cfg(feature = "nostr")]
+        start_nostr,
         heartbeat_config_tx,
         heartbeat_config_rx,
         mut state,
         ..
     } = bootstrap::initialize()?;
+
+    #[cfg(feature = "nostr")]
+    let nostr_gateway_bin = resolve_gateway_bin("OPENCRAB_NOSTR_GATEWAY_BIN", "nostr-gateway");
+    #[cfg(feature = "nostr")]
+    let nostaro_bin = resolve_gateway_bin("OPENCRAB_NOSTARO_BIN", "nostaro");
+    #[cfg(feature = "nostr")]
+    if start_nostr {
+        require_resolvable_binary("nostr-gateway", &nostr_gateway_bin)?;
+        require_resolvable_binary("nostaro", &nostaro_bin)?;
+    }
 
     // #628: transport の発火先 descriptor を**生存非依存で**登録する（ゲートウェイの起動有無・
     // 資格情報の有無に関わらず常時。受理判定・ゲート理由表示・parse はゲートウェイ停止中でも
@@ -100,6 +158,83 @@ async fn main() -> anyhow::Result<()> {
         heartbeat_config_tx,
         heartbeat_config_rx,
     );
+
+    // D-RB-001: core DB is again the live Nostr authority and the server owns the child lifecycle.
+    #[cfg(feature = "nostr")]
+    let mut nostr_process_controller: Option<Arc<nostr_ignition::NostrV3Controller>> = None;
+    #[cfg(feature = "nostr")]
+    if let Some(master_key) = nostr_master_key.clone() {
+        let provider = opencrab_nostr::db_main_key_provider(state.db.clone(), master_key.clone());
+        let process_controller = nostr_ignition::NostrV3Controller::new(
+            &state.db,
+            &cfg.database.path,
+            gate_socket_for_nostr.as_deref(),
+            matches!(
+                opencrab_nostr::NostrIngress::parse(&cfg.gate.nostr_ingress),
+                Some(opencrab_nostr::NostrIngress::V3)
+            ),
+            &provider,
+            &nostr_gateway_bin,
+            &nostaro_bin,
+        )?;
+        nostr_process_controller = Some(process_controller.clone());
+        let cli = opencrab_nostr::NostaroCli::new()
+            .with_binary_path(nostaro_bin.to_string_lossy().into_owned())
+            .with_workspace_base(state.workspace_base.clone())
+            .with_master_key(master_key)
+            .with_main_key_provider(provider);
+        let db_for_provision = state.db.clone();
+        let db_for_revise = state.db.clone();
+        let manager_builder = opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        )
+        .with_cli(cli)
+        .with_provisioner(Arc::new(
+            move |agent_id, self_pk, config, watches, allow| {
+                let mut conn = db_for_provision
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("db lock for Nostr provision"))?;
+                opencrab_nostr::gate_provision::provision_nostr_gate(
+                    &mut conn,
+                    agent_id,
+                    self_pk,
+                    config,
+                    watches,
+                    allow,
+                    opencrab_extgate::now_nanos(),
+                )?;
+                Ok(())
+            },
+        ))
+        .with_reviser(Arc::new(
+            move |agent_id, self_pk, config, watches, allow| {
+                let mut conn = db_for_revise
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("db lock for Nostr revise"))?;
+                opencrab_nostr::gate_provision::revise_nostr_gate(
+                    &mut conn,
+                    agent_id,
+                    self_pk,
+                    config,
+                    watches,
+                    allow,
+                    opencrab_extgate::now_nanos(),
+                )
+            },
+        ));
+        let manager: opencrab_server::SharedNostrManager = Arc::new(manager_builder);
+        let extgate_for_liveness = extgate.clone();
+        let liveness: opencrab_server::dedicated_gateway::V3LivenessProbe =
+            Arc::new(move |agent_id| {
+                extgate_for_liveness.agent_has_live_gateway(agent_id, "nostr")
+            });
+        manager.restore_from_db_checked().await?;
+        state.gateways.register(
+            opencrab_server::dedicated_gateway::V3OnlyGateway::new(manager, liveness)
+                .with_process(process_controller),
+        );
+    }
 
     // Per-agent MCP 接続マネージャ。enabled なサーバへ起動時に接続する。
     //
@@ -149,6 +284,15 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    #[cfg(feature = "nostr")]
+    if start_nostr {
+        nostr_process_controller
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Nostr process controller is unavailable"))?
+            .start_all()
+            .await?;
+    }
+
     let app = create_router_with_gate(state, extgate);
 
     let addr = format!("0.0.0.0:{}", cfg.gateway.rest.port);
@@ -156,7 +300,14 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Server listening on {}", addr);
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(wait_for_os_shutdown())
+        .with_graceful_shutdown(async move {
+            wait_for_os_shutdown().await;
+            #[cfg(feature = "nostr")]
+            if let Some(controller) = &nostr_process_controller {
+                use opencrab_server::dedicated_gateway::V3ProcessControl as _;
+                controller.shutdown_all().await;
+            }
+        })
         .await?;
 
     Ok(())

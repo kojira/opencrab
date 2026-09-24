@@ -179,6 +179,8 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // （費用と挙動に効く / #240 の「意図せず自律実行が始まる」の再来）。
     "get_my_heartbeat",
     "set_my_heartbeat",
+    "get_my_nostr_relay",
+    "set_my_nostr_relay",
     // 定時実行（#455）。`set_my_heartbeat` と同じ理由: **owner 限定にはしない**（自分の
     // 定時実行を自分で決めるのが目的で、本人が触るターン〔heartbeat tick / ダッシュボード /
     // オーナー会話〕は caller=Owner）。一方 caller=Agent（未信頼の外部ユーザー会話ターン）へ

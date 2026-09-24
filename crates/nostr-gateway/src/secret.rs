@@ -1,21 +1,11 @@
 //! watch 用 nsec。process env から除去し、child env にだけ渡す。
 
 pub const SECRET_ENV: &str = "NOSTARO_SECRET_KEY";
-pub const MASTER_KEY_ENV: &str = "OPENCRAB_SECRET_MASTER_KEY";
 
 /// 起動時に 1 回読む。直後に process env から消す。空は「鍵なし」。
 pub fn take_watch_secret() -> Option<String> {
-    take_env(SECRET_ENV)
-}
-
-/// Daemon起動時にmaster keyを1回だけ読み、直後に環境から除去する。
-pub fn take_master_key() -> Option<String> {
-    take_env(MASTER_KEY_ENV)
-}
-
-fn take_env(name: &str) -> Option<String> {
-    let value = std::env::var(name).ok().filter(|s| !s.trim().is_empty());
-    std::env::remove_var(name);
+    let value = std::env::var(SECRET_ENV).ok().filter(|s| !s.is_empty());
+    std::env::remove_var(SECRET_ENV);
     value
 }
 

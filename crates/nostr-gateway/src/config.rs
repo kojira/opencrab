@@ -1,15 +1,15 @@
 //! operator と gateway が共有する配置。HTTP bind は無い。秘密は載せない。
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Placement {
     pub core_socket: String,
     pub nostaro_bin: String,
     pub instances: Vec<InstancePlacement>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct InstancePlacement {
     pub instance_id: String,
     pub revision: u64,

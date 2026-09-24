@@ -11,6 +11,12 @@ pub(super) struct BootstrapContext {
     pub(super) cfg: AppConfig,
     pub(super) extgate: Arc<opencrab_extgate::ExtgateState>,
     pub(super) gate_socket: Option<std::path::PathBuf>,
+    #[cfg(feature = "nostr")]
+    pub(super) gate_socket_for_nostr: Option<String>,
+    #[cfg(feature = "nostr")]
+    pub(super) nostr_master_key: Option<opencrab_nostr::MasterKey>,
+    #[cfg(feature = "nostr")]
+    pub(super) start_nostr: bool,
     pub(super) heartbeat_config_tx: watch::Sender<HeartbeatConfig>,
     pub(super) heartbeat_config_rx: watch::Receiver<HeartbeatConfig>,
     pub(super) state: AppState,
@@ -52,6 +58,18 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     // Load config from TOML (with env var expansion)
     let cfg = config::load_config("config/default.toml")?;
 
+    // Nostr秘密はserver-owned lifecycleへ渡す前に環境から取り出し、親環境から消す。
+    #[cfg(feature = "nostr")]
+    let master_key_env = std::env::var("OPENCRAB_SECRET_MASTER_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    #[cfg(feature = "nostr")]
+    std::env::remove_var("OPENCRAB_SECRET_MASTER_KEY");
+    #[cfg(feature = "nostr")]
+    let master_key_parsed: Option<anyhow::Result<opencrab_nostr::MasterKey>> = master_key_env
+        .as_deref()
+        .map(|encoded| opencrab_core::secret_box::parse_master_key(encoded).map(Arc::new));
+
     // DB初期化（本番はコネクションプール）
     let db = opencrab_db::Db::open(&cfg.database.path)?;
     {
@@ -68,8 +86,83 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     }
     let gate_token = opencrab_extgate::OperatorToken::take_from_env();
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
+    #[cfg(feature = "nostr")]
+    let gate_socket_for_nostr = gate_socket
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
     let extgate = Arc::new(opencrab_extgate::ExtgateState::new(db.clone(), gate_token));
     configure_attachment_inbox(&extgate, Path::new(&cfg.database.path))?;
+
+    #[cfg(feature = "nostr")]
+    let nostr_configured = {
+        let conn = db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db lock for Nostr configuration detection"))?;
+        opencrab_db::queries::has_any_agent_nostr_config(&conn)?
+    };
+    #[cfg(feature = "nostr")]
+    let nostr_enabled = db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("db lock for enabled Nostr detection"))?
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_nostr_config WHERE enabled = 1)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+    #[cfg(feature = "nostr")]
+    if nostr_configured {
+        if !matches!(
+            opencrab_nostr::NostrIngress::parse(&cfg.gate.nostr_ingress),
+            Some(opencrab_nostr::NostrIngress::V3)
+        ) {
+            anyhow::bail!("configured Nostr requires gate.nostr_ingress = v3");
+        }
+        if gate_socket.is_none() {
+            anyhow::bail!("configured Nostr requires an absolute gate.listen_socket");
+        }
+    }
+    #[cfg(feature = "nostr")]
+    let mut nostr_master_key = match master_key_parsed {
+        Some(Ok(key)) => Some(key),
+        Some(Err(error)) => {
+            if nostr_configured {
+                emit_master_key_banner(&format!("OPENCRAB_SECRET_MASTER_KEY is invalid: {error}"));
+            }
+            None
+        }
+        None => {
+            if nostr_configured {
+                emit_master_key_banner("OPENCRAB_SECRET_MASTER_KEY is not set");
+            }
+            None
+        }
+    };
+    #[cfg(feature = "nostr")]
+    if let Some(key) = nostr_master_key.clone() {
+        if let Some(reason) =
+            opencrab_nostr::secret_migration::master_key_mismatch_reason(&db, &key)
+        {
+            emit_master_key_banner(&reason);
+            nostr_master_key = None;
+        }
+    }
+    #[cfg(feature = "nostr")]
+    if nostr_enabled && nostr_master_key.is_none() {
+        anyhow::bail!("enabled Nostr agent requires a valid OPENCRAB_SECRET_MASTER_KEY");
+    }
+    #[cfg(feature = "nostr")]
+    let start_nostr = nostr_enabled;
+    #[cfg(feature = "nostr")]
+    if let Some(key) = &nostr_master_key {
+        let report = opencrab_nostr::secret_migration::migrate_nostr_secrets_at_rest(
+            &db,
+            key,
+            Path::new("data/agents"),
+        );
+        if report.changed_anything() {
+            tracing::info!(?report, "Nostr secrets migrated at rest");
+        }
+    }
 
     // #553: 起動時リコンサイル。新プロセスの subtask registry（in-memory）は必ず空なので、
     // この時点で status='active' の subtask セッションは定義上すべて孤児（前プロセスと共に
@@ -128,6 +221,8 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         voice_config: Arc::new(cfg.voice.clone()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: cfg.agent.workspace_path.clone(),
+        #[cfg(feature = "nostr")]
+        nostr_master_key: nostr_master_key.clone(),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,
         compaction_ratio: cfg.llm.compaction_ratio,
@@ -175,10 +270,24 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         cfg,
         extgate,
         gate_socket,
+        #[cfg(feature = "nostr")]
+        gate_socket_for_nostr,
+        #[cfg(feature = "nostr")]
+        nostr_master_key,
+        #[cfg(feature = "nostr")]
+        start_nostr,
         heartbeat_config_tx,
         heartbeat_config_rx,
         state,
     })
+}
+
+#[cfg(feature = "nostr")]
+fn emit_master_key_banner(reason: &str) {
+    tracing::error!(
+        reason,
+        "Nostr is disabled because its master key is unavailable or invalid"
+    );
 }
 
 #[cfg(test)]
