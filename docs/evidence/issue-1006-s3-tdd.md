@@ -39,14 +39,21 @@ checkpoint: 2f0ad32 (before the runtime-authority fix)
 1 failed after the real timed continuation emitted no say frame once legacy config was changed
 log: /tmp/issue-1006-s3-behavioral-automatic-red.log
 
-The exact/global canonical TimedFireRouter fan-out behavior already passed at `2afe535`; the rereview blocker was missing behavioral coverage, not missing production behavior. The new regression was therefore retained honestly as characterization rather than fabricated RED:
+The production scheduler already enumerated and fanned out exact-address and physical/global-address sources at `2afe535`; both later checkpoints lacked authentic retained proof. The replacement regression is therefore honest characterization, not fabricated RED:
 
-cargo test -p opencrab-server --test transport_fire_registry \
-  s3_exact_and_global_fixtures_fan_out_through_canonical_timed_fire_routes \
+cargo test -p opencrab-server --bin opencrab-server \
+  s3_scheduler_fans_authentic_exact_and_global_sources_to_canonical_destinations \
   -- --nocapture
-checkpoint: 2afe535
+checkpoint: 2afe535 with the regression applied
 1 passed
-log: /tmp/issue-1006-s3-routing-characterization-2afe535.log
+log: /tmp/issue-1006-s3-authentic-fanout-characterization-2afe535.log
+
+The regression starts the real `run_scheduler` producer once over two enabled persisted source rows. One source is an exact address alias backed by a pre-existing address-named session; the other has no exact session and therefore uses its canonical physical `extgate-<binding_id>` global-address fallback. The scheduler's production enumeration, `TimedFireRouter` resolution, due-entry fan-out, `run_one_heartbeat`, and registered sink deliver the two canonical `(binding_id, session_id)` pairs. There is no test-owned fan-out loop. Mutation runs independently removed each real lookup branch; each timed out with only one deliverable source:
+
+- `/tmp/issue-1006-s3-authentic-fanout-exact-branch-mutation.log`
+- `/tmp/issue-1006-s3-authentic-fanout-physical-branch-mutation.log`
+
+The prior `s3_exact_and_global_fixtures_fan_out_through_canonical_timed_fire_routes` test and its manufactured two-item loop were removed and are no longer claimed as evidence.
 
 python3 -m unittest ...test_s3_generic_caller_role_deferral_requires_exact_finding_identity
 1 assertion failure: broad traits.rs classification incorrectly assigned the generic caller role to V10/S3
@@ -83,7 +90,7 @@ The failures independently detected platform-shaped timed-fire fields, operation
 - `s3_projection_rejects_stale_live_declaration_digest_before_db_and_wire` proves reconnect drift cannot authorize from a stale projection.
 - Gate-client parser/snapshot assertions cover missing/stale digest, undeclared operation, dispatch/effect mismatch, and guarantee downgrade before the adapter handler.
 - `s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_continuation` accepts a real automatic hello, mutates legacy config afterward, resolves the canonical generic route, triggers a real timed continuation, and observes exactly one say on that binding.
-- `s3_exact_and_global_fixtures_fan_out_through_canonical_timed_fire_routes` resolves distinct exact/global fixtures through `TimedFireRouter`, fans both targets into a collecting production sink, and asserts both canonical binding/session destinations and an exact count of two.
+- `s3_scheduler_fans_authentic_exact_and_global_sources_to_canonical_destinations` starts the real scheduler once with authentic exact-address and physical/global-address persisted sources. Production enumeration and routing feed the collecting sink, which receives exactly the two expected canonical binding/session destinations; independent branch-removal mutations each fail.
 - The prior Python function-name sentinel was removed; it is not behavioral evidence.
 - `AgentGatewayLifecycle`, `AgentGatewayRegistry`, and server `AppState.gateways` were removed; liveness is read from extgate.
 - Discord and Nostr declarations were migrated to the complete generic metadata contract. CLI and Web continue to use the opaque generic client.
@@ -118,7 +125,10 @@ cargo test -p opencrab-nostr-gateway --all-targets --no-fail-fast
 72 library
 
 cargo test -p opencrab-server --test transport_fire_registry --test utterance_parity --no-fail-fast
-3 transport-fire; 1 utterance-parity
+2 transport-fire; 1 utterance-parity
+
+cargo test -p opencrab-server --bin opencrab-server --no-fail-fast
+25 passed, including the authentic exact/global scheduler fan-out regression
 
 cargo test -p opencrab-server --lib --no-fail-fast
 493 passed
