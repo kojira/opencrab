@@ -19,7 +19,7 @@ mod handler_followup;
 fn bootstrap_is_atomic_exact_idempotent_and_full_scan_duplicate_safe() {
     let mut conn = opencrab_db::init_memory().unwrap();
     let first = manifest([7; 32], "first", 10_000);
-    assert_eq!(bootstrap(&mut conn, &first, 100).unwrap().created, true);
+    assert!(bootstrap(&mut conn, &first, 100).unwrap().created);
     let restart = bootstrap(&mut conn, &first, 101).unwrap();
     assert_eq!(
         restart,

@@ -47,7 +47,7 @@ impl Drop for PreparedAdminSocket {
 fn matches_identity(stat: &libc::stat, identity: SocketIdentity) -> bool {
     (stat.st_mode & libc::S_IFMT) == libc::S_IFSOCK
         && stat.st_dev as u64 == identity.device
-        && stat.st_ino as u64 == identity.inode
+        && stat.st_ino == identity.inode
         && stat.st_uid == identity.uid
 }
 

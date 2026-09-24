@@ -137,3 +137,48 @@ This checkpoint is not ready to merge without follow-up implementation review:
 5. The complete S1 RED matrix was not captured assertion-by-assertion before implementation; only the schema and public-isolation RED outputs above are retained.
 
 These are S1-owned issues and must not be deferred into S2.
+
+## Follow-up review-blocker GREEN (from `be2a57c`)
+
+The follow-up RED assertions above are now GREEN. The six handlers authenticate the credential and
+operation before body parsing or target lookup, then revalidate target scope. Denials collapse to
+the byte-stable unauthorized response and append a target-free sanitized audit. Authenticated
+bad-request/not-found outcomes append principal-only audit rows; target-authorized success,
+conflict, and store outcomes use one outer transaction plus savepoint so an audit failure rolls
+back domain mutation. All six operations use this contract.
+
+Manifest resolution now uses an `openat(O_NOFOLLOW)` directory-fd component walk. Admin socket
+creation is relative to the held parent fd in a syscall-only fork child and transfers the listening
+fd with `SCM_RIGHTS`; cleanup atomically quarantines with `renameat`, verifies identity, and only
+then uses `unlinkat`, so a replacement inode is never unlinked. Component/final replacement tests
+are GREEN. Unsupported non-Unix behavior remains fail-closed through the crate's existing Unix-only
+platform boundary.
+
+Startup has fault injection at migration, credential bootstrap, socket preparation, and router
+preparation, all in the synchronous pre-listener phase. A real raw HTTP/1.1-over-UDS test proves
+protected authenticated success and unrelated-route 404 behavior.
+
+### Reviewed boundary baseline transition
+
+The old 454-entry baseline correctly failed stale after S1 public isolation. With supervisor
+approval, exactly the three S1-owned `public-gate-admin-reachable` entries were removed and exactly
+seven otherwise unchanged reviewed identities received mechanical line updates. A named transition
+assertion first failed `454 != 451`, then passed with 451 current findings and zero public gate-admin
+reachability findings. No finding classification, owner, expiry, or detector policy changed.
+
+### Final validation
+
+- focused follow-up handler/path/startup/real-UDS tests: passed;
+- `cargo test -p opencrab-db --lib`: 251 passed, 3 ignored;
+- `cargo test -p opencrab-extgate --all-targets`: 70 unit, 81 conformance, 8 static passed;
+- `cargo test -p opencrab-server --lib`: 497 passed;
+- `cargo test -p opencrab-server --test webgate_static_audit`: 9 passed;
+- startup fault-injection binary test: passed;
+- Python boundary mutation suite: 54 passed (the retained 53 S0 assertions plus the S1 transition assertion);
+- `python3 scripts/gateway_boundary_audit.py`: exactly 451 classified findings after the authorized three-entry S1 burn-down;
+- `bash scripts/check-deps.sh` and `bash scripts/check-file-size.sh`: passed;
+- Cargo metadata: Discord/Nostr concrete gateways remain dev-only and Web absent; server no-dev tree contains no concrete gateway;
+- `cargo fmt --all -- --check`: passed;
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
+
+No S2+ schema/API, live data, deployment state, or `stash@{0}` was touched.
