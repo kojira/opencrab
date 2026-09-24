@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use opencrab_gate_client::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
+use opencrab_gate_client::client::{
+    CommandError, InstanceClient, LiveEvent, PostRefuse, SaidOutcome,
+};
 use opencrab_gate_client::wire::{LiveInboundScope, SaidCaller, SaidContext};
 use opencrab_gate_client::{InvokeHandler, SayPolicy};
 
@@ -138,6 +140,7 @@ fn supervise(supervision: Supervision) {
         cfg.agent_id.clone(),
         cfg.self_bot_id.clone(),
         cfg.access.clone(),
+        addresses.clone(),
         attachment_spool,
         serenity_http,
     );
@@ -173,6 +176,7 @@ fn build_on_line(
     agent_id: String,
     self_bot_id: String,
     access: AccessConfig,
+    configured_addresses: Vec<String>,
     attachment_spool: Option<Arc<AttachmentSpool>>,
     serenity_http: Option<Arc<serenity::http::Http>>,
 ) -> OnLine {
@@ -182,6 +186,7 @@ fn build_on_line(
         let agent_id = agent_id.clone();
         let self_bot_id = self_bot_id.clone();
         let access = access.clone();
+        let configured_addresses = configured_addresses.clone();
         let attachment_spool = attachment_spool.clone();
         let serenity_http = serenity_http.clone();
         let model_cache = model_cache.clone();
@@ -193,6 +198,7 @@ fn build_on_line(
                             &client,
                             &agent_id,
                             &access,
+                            &configured_addresses,
                             &http,
                             &model_cache,
                             event,
@@ -223,10 +229,56 @@ struct CachedModels {
 
 type ModelCache = Arc<tokio::sync::Mutex<HashMap<String, CachedModels>>>;
 
+// `/model` is global, so its invocation channel need not be a configured conversation binding.
+// A fallback is only a transport for Owner administration of this process's one configured agent.
+fn model_command_transport_candidates(
+    agent_id: &str,
+    requested_address: &str,
+    caller: &SaidCaller,
+    configured_addresses: &[String],
+) -> Vec<String> {
+    let mut candidates = vec![requested_address.to_string()];
+    if !matches!(caller, SaidCaller::Owner) {
+        return candidates;
+    }
+
+    let mut fallbacks = configured_addresses
+        .iter()
+        .filter(|address| address.as_str() != requested_address)
+        .filter(|address| parse_address(agent_id, address).is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    fallbacks.sort();
+    fallbacks.dedup();
+    candidates.extend(fallbacks);
+    candidates
+}
+
+async fn resolve_model_command_transport(
+    client: &InstanceClient,
+    agent_id: &str,
+    requested_address: &str,
+    caller: &SaidCaller,
+    configured_addresses: &[String],
+) -> Option<(String, String)> {
+    for address in model_command_transport_candidates(
+        agent_id,
+        requested_address,
+        caller,
+        configured_addresses,
+    ) {
+        if let Some(binding_id) = client.binding_for_address(&address).await {
+            return Some((address, binding_id));
+        }
+    }
+    None
+}
+
 async fn handle_model_interaction(
     client: &InstanceClient,
     agent_id: &str,
     access: &AccessConfig,
+    configured_addresses: &[String],
     http: &serenity::http::Http,
     cache: &ModelCache,
     event: ModelInteractionEvent,
@@ -240,11 +292,24 @@ async fn handle_model_interaction(
     http.set_application_id(serenity::all::ApplicationId::new(application_id));
     let interaction_id = serenity::all::InteractionId::new(interaction_id);
     let guild = event.guild_id.as_deref().unwrap_or("");
-    let address = address_for(agent_id, guild, &event.channel_id);
+    let requested_address = address_for(agent_id, guild, &event.channel_id);
     let caller = caller_for(access, &event.user_id);
+    let transport = resolve_model_command_transport(
+        client,
+        agent_id,
+        &requested_address,
+        &caller,
+        configured_addresses,
+    )
+    .await;
 
     if event.autocomplete {
-        let models = autocomplete_models(client, &address, &caller, cache).await;
+        let models = match transport.as_ref() {
+            Some((address, binding_id)) => {
+                autocomplete_models(client, address, binding_id, &caller, cache).await
+            }
+            None => Vec::new(),
+        };
         let choices = autocomplete_choices(&models, event.model.as_deref().unwrap_or_default());
         let response = choices.into_iter().fold(
             serenity::all::CreateAutocompleteResponse::new(),
@@ -282,10 +347,19 @@ async fn handle_model_interaction(
         .await;
         return;
     };
-    let binding_id = client.binding_for_address(&address).await;
-    let outcome = client
-        .command(&address, &caller, &name, &args, COMMAND_TIMEOUT)
-        .await;
+    let binding_id = transport.as_ref().map(|(_, binding_id)| binding_id.clone());
+    let outcome = match transport {
+        Some((address, _)) => {
+            client
+                .command(&address, &caller, &name, &args, COMMAND_TIMEOUT)
+                .await
+        }
+        None if matches!(caller, SaidCaller::Owner) => Err(CommandError::NotReady),
+        None => Err(CommandError::Rejected {
+            code: "forbidden".to_string(),
+            message: Some("Only an owner may use model commands.".to_string()),
+        }),
+    };
     let text = match outcome {
         Ok(value) => {
             if name == "list_models" {
@@ -310,14 +384,12 @@ async fn handle_model_interaction(
 async fn autocomplete_models(
     client: &InstanceClient,
     address: &str,
+    binding_id: &str,
     caller: &SaidCaller,
     cache: &ModelCache,
 ) -> Vec<String> {
-    let Some(binding_id) = client.binding_for_address(address).await else {
-        return Vec::new();
-    };
     let now = std::time::Instant::now();
-    if let Some(entry) = cache.lock().await.get(&binding_id).cloned() {
+    if let Some(entry) = cache.lock().await.get(binding_id).cloned() {
         if now.duration_since(entry.fetched_at) < MODEL_CACHE_TTL {
             return entry.result.models;
         }
@@ -339,7 +411,7 @@ async fn autocomplete_models(
     };
     let models = result.models.clone();
     cache.lock().await.insert(
-        binding_id,
+        binding_id.to_string(),
         CachedModels {
             fetched_at: std::time::Instant::now(),
             result,
@@ -698,18 +770,40 @@ mod model_command_route_tests {
     #[test]
     fn owner_model_actions_use_a_same_agent_binding_from_an_unbound_channel() {
         let agent = "agent-a";
-        let requested = "discord-agent-a-10-999";
         let configured = [
             "discord-agent-a-10-300".to_string(),
             "discord-agent-a-10-200".to_string(),
         ];
         let acknowledged = ["discord-agent-a-10-200", "discord-agent-a-10-300"];
+        let event = |autocomplete, subcommand: &str, model: Option<&str>| ModelInteractionEvent {
+            event_kind: "model_interaction".to_string(),
+            interaction_id: "1".to_string(),
+            application_id: "2".to_string(),
+            token: "test-token".to_string(),
+            guild_id: Some("10".to_string()),
+            channel_id: "999".to_string(),
+            user_id: "100".to_string(),
+            autocomplete,
+            subcommand: subcommand.to_string(),
+            model: model.map(str::to_string),
+        };
+        let events = [
+            event(true, "set", Some("")),
+            event(false, "list", None),
+            event(false, "set", Some("openai:gpt-6-sol")),
+            event(false, "reset", None),
+        ];
 
-        for action in ["autocomplete", "list", "set", "reset"] {
+        for event in events {
+            let requested = address_for(
+                agent,
+                event.guild_id.as_deref().unwrap_or_default(),
+                &event.channel_id,
+            );
             let selected = selected_acknowledged_address(
                 model_command_transport_candidates(
                     agent,
-                    requested,
+                    &requested,
                     &SaidCaller::Owner,
                     &configured,
                 ),
@@ -718,7 +812,12 @@ mod model_command_route_tests {
             assert_eq!(
                 selected.as_deref(),
                 Some("discord-agent-a-10-200"),
-                "{action} must use the deterministic same-agent transport"
+                "{} must use the deterministic same-agent transport",
+                if event.autocomplete {
+                    "autocomplete"
+                } else {
+                    event.subcommand.as_str()
+                }
             );
         }
     }
