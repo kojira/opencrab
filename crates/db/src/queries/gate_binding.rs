@@ -483,6 +483,30 @@ mod tests {
     }
 
     #[test]
+    fn s2_binding_creation_is_byte_idempotent_through_the_generic_authority() {
+        set_binding_tx_fail(FAIL_NONE);
+        let mut conn = crate::init_memory().unwrap();
+        let (instance, _) = seed_agent_and_instance(&conn);
+        let binding = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        for _ in 0..2 {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            create_gate_binding_in_tx(
+                &tx,
+                binding,
+                &instance,
+                "opaque-address",
+                "Stable title",
+                1_700_000_000_000_000_000,
+            )
+            .expect("byte-identical binding creation must be idempotent");
+            tx.commit().unwrap();
+        }
+        assert_eq!(counts(&conn), (1, 1, 1));
+    }
+
+    #[test]
     fn fail_session_write_zero() {
         assert_fail_rolls_back(FAIL_SESSION);
     }

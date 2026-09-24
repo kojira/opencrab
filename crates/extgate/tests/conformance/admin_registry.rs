@@ -111,6 +111,41 @@ async fn live_binding_delete_stops_said() {
 }
 
 #[tokio::test]
+async fn s2_new_first_instance_association_without_grant_is_forbidden() {
+    let h = Harness::start().await;
+    let id = uuid();
+    let (status, body) = h
+        .admin(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/gate-instances/{id}"))
+                .header(header::AUTHORIZATION, auth())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "kind_id": "opaque-kind",
+                        "subject_id": h.subject_id,
+                        "enabled": true,
+                        "config_b64": config_b64()
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{status} {}", String::from_utf8_lossy(&body));
+    assert_eq!(err_code(&body), "instance_conflict");
+    let associations: i64 = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM gate_instances", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(associations, 0, "unauthorized first association was persisted");
+}
+
+#[tokio::test]
 async fn instance_put_idempotent_and_conflict() {
     let h = Harness::start().await;
     let id = uuid();
