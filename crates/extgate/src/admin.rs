@@ -2,13 +2,12 @@
 
 use std::sync::Arc;
 
-use axum::body::to_bytes;
 use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::Router;
-use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::error::{ErrorCode, GateError, JSON_CONTENT_TYPE};
@@ -17,6 +16,9 @@ use crate::ids::{config_digest, decode_config_b64, now_nanos, parse_uuid};
 use crate::json::parse_object_no_dup;
 use crate::listen::enqueue_bind;
 use crate::registry::ExtgateState;
+
+mod audit;
+use audit::{audited_operation, begin_request, early};
 
 pub fn admin_router(state: Arc<ExtgateState>) -> Router {
     Router::new()
@@ -33,125 +35,6 @@ pub fn admin_router(state: Arc<ExtgateState>) -> Router {
             put(put_binding).delete(delete_binding),
         )
         .with_state(state)
-}
-
-async fn begin_request(
-    state: &ExtgateState,
-    operation: Operation,
-    req: Request,
-) -> Result<(crate::gate_admin_security::Authenticated, Vec<u8>), GateError> {
-    let (parts, body) = req.into_parts();
-    let authenticated = state.authenticate_admin(&parts.headers, operation)?;
-    let bytes = match to_bytes(body, usize::MAX).await {
-        Ok(bytes) => bytes.to_vec(),
-        Err(_) => {
-            audit_early_error(state, operation, &authenticated, ErrorCode::BadRequest)?;
-            return Err(GateError::new(ErrorCode::BadRequest));
-        }
-    };
-    Ok((authenticated, bytes))
-}
-
-fn result_class(code: ErrorCode) -> &'static str {
-    match code {
-        ErrorCode::BadRequest => "bad_request",
-        ErrorCode::SubjectUnknown | ErrorCode::InstanceUnknown | ErrorCode::BindingUnknown => {
-            "not_found"
-        }
-        ErrorCode::StoreError => "store_error",
-        ErrorCode::Unauthorized => "unauthorized",
-        _ => "conflict",
-    }
-}
-
-fn audit_early_error(
-    state: &ExtgateState,
-    operation: Operation,
-    authenticated: &crate::gate_admin_security::Authenticated,
-    code: ErrorCode,
-) -> Result<(), GateError> {
-    if state.uses_legacy_admin() {
-        return Ok(());
-    }
-    let conn = state.db.lock().map_err(|_| GateError::store())?;
-    crate::gate_admin_security::append_audit_for_attempt(
-        &conn,
-        uuid::Uuid::new_v4(),
-        now_nanos(),
-        operation,
-        Some(&authenticated.principal_id),
-        None,
-        result_class(code),
-    )
-    .map_err(|_| GateError::store())
-}
-
-fn early<T>(
-    state: &ExtgateState,
-    operation: Operation,
-    authenticated: &crate::gate_admin_security::Authenticated,
-    result: Result<T, GateError>,
-) -> Result<T, GateError> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(error) => {
-            audit_early_error(state, operation, authenticated, error.code)?;
-            Err(error)
-        }
-    }
-}
-
-fn audited_operation<T, F>(
-    state: &ExtgateState,
-    operation: Operation,
-    authorized: &crate::gate_admin_security::Authorized,
-    action: F,
-) -> Result<T, GateError>
-where
-    F: FnOnce(&Transaction<'_>) -> Result<T, GateError>,
-{
-    let mut conn = state.db.lock().map_err(|_| GateError::store())?;
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|_| GateError::store())?;
-    tx.execute_batch("SAVEPOINT gate_admin_handler")
-        .map_err(|_| GateError::store())?;
-    match action(&tx) {
-        Ok(value) => {
-            if !state.uses_legacy_admin() {
-                crate::gate_admin_security::append_audit(
-                    &tx,
-                    uuid::Uuid::new_v4(),
-                    now_nanos(),
-                    operation,
-                    Some(authorized),
-                    "succeeded",
-                )
-                .map_err(|_| GateError::store())?;
-            }
-            tx.execute_batch("RELEASE gate_admin_handler")
-                .map_err(|_| GateError::store())?;
-            tx.commit().map_err(|_| GateError::store())?;
-            Ok(value)
-        }
-        Err(error) => {
-            tx.execute_batch("ROLLBACK TO gate_admin_handler; RELEASE gate_admin_handler")
-                .map_err(|_| GateError::store())?;
-            if !state.uses_legacy_admin() {
-                crate::gate_admin_security::append_audit(
-                    &tx,
-                    uuid::Uuid::new_v4(),
-                    now_nanos(),
-                    operation,
-                    Some(authorized),
-                    result_class(error.code),
-                )
-                .map_err(|_| GateError::store())?;
-            }
-            tx.commit().map_err(|_| GateError::store())?;
-            Err(error)
-        }
-    }
 }
 
 fn json_ok(status: StatusCode, value: Value) -> Response {
