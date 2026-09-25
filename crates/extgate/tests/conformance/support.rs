@@ -550,6 +550,10 @@ async fn read_frame_opt(s: &mut UnixStream) -> Option<Value> {
 }
 
 async fn put_instance(h: &Harness, instance_id: &str, enabled: bool) -> Value {
+    put_instance_kind(h, instance_id, enabled, "discord").await
+}
+
+async fn put_instance_kind(h: &Harness, instance_id: &str, enabled: bool, kind_id: &str) -> Value {
     let grant = {
         let mut conn = h.state.db.lock().unwrap();
         let exists: i64 = conn
@@ -575,7 +579,7 @@ async fn put_instance(h: &Harness, instance_id: &str, enabled: bool) -> Value {
         }
     };
     let mut request = json!({
-        "kind_id": "discord",
+        "kind_id": kind_id,
         "subject_id": h.subject_id,
         "enabled": enabled,
         "config_b64": config_b64(),

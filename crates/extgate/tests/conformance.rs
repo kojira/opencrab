@@ -14,4 +14,5 @@ include!("conformance/turn_queue.rs");
 include!("conformance/operations.rs");
 include!("conformance/s3_operations.rs");
 include!("conformance/strict_separation_parity.rs");
+include!("conformance/s9_synthetic_gateway.rs");
 include!("conformance/hello_diagnostics.rs");
