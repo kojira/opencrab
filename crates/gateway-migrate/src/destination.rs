@@ -156,7 +156,7 @@ pub fn import(
             } else {
                 accepted.push(key_value("instances", vec![plan.instance_id.clone()], outcome.1.clone())?);
             }
-            credentials.push(json!({"instance_id":plan.instance_id,"source":plan.credential_source,"envelope_sha256":outcome.2,"credential_configured":true}));
+            credentials.push(json!({"instance_sha256":canonical::hash(&plan.instance_id)?,"source":credential_source_category(&plan.credential_source, &destination.kind_id)?,"envelope_sha256":outcome.2,"credential_configured":true}));
         }
         for identity in &destination_identities {
             let (was_inserted, hash) = apply_identity(&tx, identity)?;
@@ -189,6 +189,18 @@ pub fn import(
         }));
     }
     Ok(Value::Array(outputs))
+}
+
+fn credential_source_category(source: &str, kind: &str) -> Result<&'static str> {
+    match kind {
+        "discord" if source.starts_with("legacy-core:agent_discord_config:") => Ok("legacy-core:agent_discord_config"),
+        "nostr" if source.starts_with("legacy-core:agent_nostr_config:") => Ok("legacy-core:agent_nostr_config"),
+        "web" if source.starts_with("operator-file:") => Ok("operator-file"),
+        "discord" if source.starts_with("existing-destination:discord:") => Ok("existing-destination:discord"),
+        "nostr" if source.starts_with("existing-destination:nostr:") => Ok("existing-destination:nostr"),
+        "web" if source.starts_with("existing-destination:web:") => Ok("existing-destination:web"),
+        _ => anyhow::bail!("credential source category mismatch"),
+    }
 }
 
 pub fn validate_project_artifacts(
@@ -469,7 +481,7 @@ fn value_key_order(a: &Value, b: &Value) -> std::cmp::Ordering {
     a.to_string().cmp(&b.to_string())
 }
 fn value_instance_order(a: &Value, b: &Value) -> std::cmp::Ordering {
-    a["instance_id"].as_str().cmp(&b["instance_id"].as_str())
+    a["instance_sha256"].as_str().cmp(&b["instance_sha256"].as_str())
 }
 
 fn read_master_key(path: &Path, kind: &str) -> Result<Zeroizing<[u8; 32]>> {

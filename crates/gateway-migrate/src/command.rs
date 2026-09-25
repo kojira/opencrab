@@ -20,7 +20,6 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct ImportReport {
     pub version: u64,
-    pub approval: Approval,
     pub approval_sha256: String,
     pub backup_set_sha256: String,
     pub backups: Vec<BackupRecord>,
@@ -120,14 +119,14 @@ fn validate_destination_reports(value: &Value) -> Result<()> {
             let credential = object(
                 credential,
                 &[
-                    "instance_id",
+                    "instance_sha256",
                     "source",
                     "envelope_sha256",
                     "credential_configured",
                 ],
             )?;
             ensure!(
-                credential["instance_id"].is_string()
+                credential["instance_sha256"].is_string()
                     && credential["source"].is_string()
                     && credential["envelope_sha256"].is_string()
                     && credential["credential_configured"] == true,
@@ -187,12 +186,8 @@ pub fn run_import(args: ImportArgs<'_>) -> Result<ImportReport> {
             "existing import report not canonical"
         );
         ensure!(
-            existing.version == 1 && existing.approval == approval,
+            existing.version == 1 && existing.approval_sha256 == approval.sha256()?,
             "existing import report approval mismatch"
-        );
-        ensure!(
-            existing.approval_sha256 == approval.sha256()?,
-            "existing import report approval hash mismatch"
         );
         ensure!(
             existing.backup_set_sha256 == backup::set_sha256(&existing.backups)?,
@@ -273,7 +268,6 @@ pub fn run_import(args: ImportArgs<'_>) -> Result<ImportReport> {
     let report = ImportReport {
         version: 1,
         approval_sha256: approval.sha256()?,
-        approval,
         backup_set_sha256,
         backups,
         source_rows,
@@ -294,10 +288,9 @@ pub fn run_project(args: ProjectArgs<'_>) -> Result<Value> {
     );
     ensure!(report.version == 1, "report version");
     let approval = Approval::load(args.approval_path)?;
-    ensure!(approval == report.approval, "approval/report mismatch");
     ensure!(
-        report.approval.sha256()? == report.approval_sha256,
-        "approval hash mismatch"
+        approval.sha256()? == report.approval_sha256,
+        "approval/report hash mismatch"
     );
     ensure!(
         backup::set_sha256(&report.backups)? == report.backup_set_sha256,
@@ -341,8 +334,28 @@ pub fn run_project(args: ProjectArgs<'_>) -> Result<Value> {
             )?
         }
     };
-    let core_projection = serde_json::to_value(&outcome)?;
-    let mut value = serde_json::json!({"version":1,"approval":report.approval,"approval_sha256":report.approval_sha256,"backup_set_sha256":report.backup_set_sha256,"backups":report.backups,"source_rows":report.source_rows,"destinations":report.destinations,"core_projection":core_projection});
+    let core_projection = serde_json::json!({
+        "before_logical_sha256": outcome.before_logical_sha256,
+        "after_logical_sha256": outcome.after_logical_sha256,
+        "inserted_api_principals": {
+            "row_count": outcome.inserted_api_principal_ids.len(),
+            "ids_sha256": canonical::hash(&outcome.inserted_api_principal_ids)?,
+        },
+        "accepted_existing_api_principals": {
+            "row_count": outcome.accepted_existing_api_principal_ids.len(),
+            "ids_sha256": canonical::hash(&outcome.accepted_existing_api_principal_ids)?,
+        },
+        "deliveries": outcome.deliveries,
+        "heartbeat": {
+            "inserted_count": outcome.heartbeat.inserted_keys.len(),
+            "inserted_keys_sha256": canonical::hash(&outcome.heartbeat.inserted_keys)?,
+            "accepted_existing_count": outcome.heartbeat.accepted_existing_keys.len(),
+            "accepted_existing_keys_sha256": canonical::hash(&outcome.heartbeat.accepted_existing_keys)?,
+            "initial_sha256": outcome.heartbeat.initial_sha256,
+            "lineage_sha256": outcome.heartbeat.lineage_sha256,
+        },
+    });
+    let mut value = serde_json::json!({"version":1,"approval_sha256":report.approval_sha256,"backup_set_sha256":report.backup_set_sha256,"backups":report.backups,"source_rows":report.source_rows,"destinations":report.destinations,"core_projection":core_projection});
     let digest = canonical::hash(&value)?;
     value
         .as_object_mut()
