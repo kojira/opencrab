@@ -84,7 +84,7 @@ Exactly one nonempty source is selected. Multiple candidates must decrypt to ide
 
 ## S8-D6 — matched backup, failure restore, and rerun
 
-Before any write, prevalidation covers required versions/columns, all present source rows and edges, current destination conflicts, credentials, and preservation digests. The tool then creates one SQLite-consistent matched backup set for core and every participating destination and records file/logical digests.
+Before the matched backup, prevalidation covers required versions/columns, all present source rows and edges, credentials, and preservation digests. The tool then creates one SQLite-consistent matched backup set for core and every participating destination and records file/logical digests. Existing destination semantic conflicts can be detected after the backup and partial evidence are created, but before destination or core data writes; earlier conflict detection is deferred to Issue #1016.
 
 Destination transactions run in deterministic destination order while core remains read-only. If any destination or later projection step fails, S8 does not resume or adopt partial progress: all processes remain stopped, the operator restores the entire matched backup set, and restarts the migration. Partial-operation artifacts, partial adoption, lost-response provenance reconstruction, stale-backup adoption, and free-space proof are Issue #1016 scope.
 
