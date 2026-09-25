@@ -143,6 +143,63 @@ impl Approval {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn s8_approval_load_normalizes_unsorted_destinations_and_identity_edges() {
+        let sorted = Approval {
+            version: 1,
+            operation_id: "00000000-0000-4000-8000-000000000008".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            core_user_version: 56,
+            source_core_sha256: "a".repeat(64),
+            destinations: vec![
+                Destination {
+                    kind_id: "discord".into(),
+                    path_id: "discord-primary".into(),
+                    schema: "s5-discord-v1".into(),
+                },
+                Destination {
+                    kind_id: "nostr".into(),
+                    path_id: "nostr-primary".into(),
+                    schema: "s5-nostr-v1".into(),
+                },
+            ],
+            identity_dispositions: vec![IdentityDisposition {
+                source_fingerprint: "b".repeat(64),
+                edges: vec![
+                    IdentityEdge::Gateway {
+                        kind_id: "discord".into(),
+                        instance_id: "11111111-1111-4111-8111-111111111111".into(),
+                    },
+                    IdentityEdge::Gateway {
+                        kind_id: "nostr".into(),
+                        instance_id: "22222222-2222-4222-8222-222222222222".into(),
+                    },
+                ],
+            }],
+            channel_edges: vec![],
+            watch_edges: vec![],
+            credential_sources: vec![],
+        };
+        let mut unsorted = sorted.clone();
+        unsorted.destinations.reverse();
+        unsorted.identity_dispositions[0].edges.reverse();
+        let dir = tempfile::tempdir().unwrap();
+        let sorted_path = dir.path().join("sorted.json");
+        let unsorted_path = dir.path().join("unsorted.json");
+        fs::write(&sorted_path, canonical::bytes(&sorted).unwrap()).unwrap();
+        fs::write(&unsorted_path, canonical::bytes(&unsorted).unwrap()).unwrap();
+        let baseline = Approval::load(&sorted_path).unwrap();
+        assert_eq!(baseline.sha256().unwrap(), sorted.sha256().unwrap());
+        let loaded = Approval::load(&unsorted_path).unwrap();
+        assert_eq!(loaded, baseline);
+        assert_eq!(loaded.sha256().unwrap(), baseline.sha256().unwrap());
+    }
+}
+
 fn valid_timestamp(value: &str) -> bool {
     if value.len() != 20 || !value.ends_with('Z') {
         return false;
