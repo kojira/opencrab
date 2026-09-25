@@ -91,7 +91,7 @@ fn duplicate_member_is_bad_request() {
 
 #[test]
 fn parse_invoke_ok() {
-    let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","invocation_protocol":1,"binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","declaration_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","operation":"reply","dispatch":"utterance","effect":"utterance","required_delivery_guarantee":"exactly_once","context":{"continuation_id":null},"payload":{"event":"e7","text":"hi"}}"#;
+    let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","invocation_protocol":1,"binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","declaration_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","operation":"reply","dispatch":"utterance","effect":"utterance","context":{"continuation_id":null},"payload":{"event":"e7","text":"hi"}}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::Invoke(i) => {
             assert_eq!(i.id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
@@ -100,10 +100,6 @@ fn parse_invoke_ok() {
             assert_eq!(i.operation, "reply");
             assert_eq!(i.dispatch, "utterance");
             assert_eq!(i.effect, "utterance");
-            assert_eq!(
-                i.required_delivery_guarantee,
-                DeliveryGuarantee::ExactlyOnce
-            );
             assert_eq!(i.continuation_id, None);
             assert_eq!(i.payload, json!({"event":"e7","text":"hi"}));
         }
@@ -112,7 +108,7 @@ fn parse_invoke_ok() {
 }
 
 #[test]
-fn s3_invoke_requires_digest_dispatch_and_effective_guarantee() {
+fn s3_invoke_requires_digest_dispatch_and_effect() {
     let base = json!({
         "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         "m": "invoke",
@@ -122,15 +118,10 @@ fn s3_invoke_requires_digest_dispatch_and_effective_guarantee() {
         "operation": "reply",
         "dispatch": "utterance",
         "effect": "utterance",
-        "required_delivery_guarantee": "exactly_once",
         "context": {"continuation_id": null},
         "payload": {"event": "e7", "text": "hi"}
     });
-    for required in [
-        "declaration_digest",
-        "dispatch",
-        "required_delivery_guarantee",
-    ] {
+    for required in ["declaration_digest", "dispatch", "effect"] {
         let mut frame = base.clone();
         frame.as_object_mut().unwrap().remove(required);
         match parse_frame_bytes(&serde_json::to_vec(&frame).unwrap()).unwrap() {
@@ -287,7 +278,6 @@ fn hello_always_carries_versioned_runtime_capabilities_and_operations() {
     assert_eq!(plain["protocol"], 3);
     assert_eq!(plain["operation_protocol"], 1);
     assert_eq!(plain["final_delivery"], "automatic");
-    assert_eq!(plain["delivery_guarantee"], "at_most_once_indeterminate");
     assert_eq!(plain["operations"], json!([]));
     // Some carries the declared operation set.
     let ops = json!([{"name":"reply"}]);

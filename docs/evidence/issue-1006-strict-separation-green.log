@@ -1,0 +1,36 @@
+...
+----------------------------------------------------------------------
+Ran 3 tests in 0.305s
+
+OK
+   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/db)
+   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
+   Compiling opencrab-core v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/core)
+   Compiling opencrab-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gateway)
+   Compiling opencrab-actions v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/actions)
+   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/extgate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 31.85s
+     Running tests/conformance.rs (target/debug/deps/conformance-1748002750a6d3d5)
+
+running 2 tests
+test strict_separation_hello_has_no_delivery_guarantee_contract ... ok
+test strict_separation_co_agent_admission_uses_the_historical_role_snapshot ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 89 filtered out; finished in 0.07s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.24s
+     Running tests/conformance.rs (target/debug/deps/conformance-1748002750a6d3d5)
+
+running 1 test
+test delivery_disconnect_is_indeterminate_and_no_resend ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 90 filtered out; finished in 0.45s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running tests/conformance.rs (target/debug/deps/conformance-1748002750a6d3d5)
+
+running 1 test
+test startup_recover_stale_sending ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 90 filtered out; finished in 0.02s
+

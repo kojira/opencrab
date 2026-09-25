@@ -220,70 +220,26 @@ fn s3_dispatch_utterance_if_and_only_if_effect_utterance() {
 }
 
 #[test]
-fn s3_runtime_compatibility_rejects_missing_utterance_and_weak_guarantee() {
+fn s3_runtime_compatibility_rejects_operation_driven_without_utterance() {
     let background = validate_operations(
         &json!([s3_decl("synthetic", "background", "state_change")]),
         &no_reserved,
     )
     .unwrap();
-    assert!(validate_runtime_compatibility(
-        &background,
-        FinalDelivery::OperationDriven,
-        DeliveryGuarantee::AtMostOnceIndeterminate,
-    )
-    .is_err());
-
-    let mut exact = s3_decl("synthetic", "utterance", "utterance");
-    exact["required_delivery_guarantee"] = json!("exactly_once");
-    let exact = validate_operations(&json!([exact]), &no_reserved).unwrap();
-    assert!(validate_runtime_compatibility(
-        &exact,
-        FinalDelivery::OperationDriven,
-        DeliveryGuarantee::AtMostOnceIndeterminate,
-    )
-    .is_err());
-    assert!(validate_runtime_compatibility(
-        &exact,
-        FinalDelivery::OperationDriven,
-        DeliveryGuarantee::ExactlyOnce,
-    )
-    .is_ok());
+    assert!(validate_runtime_compatibility(&background, FinalDelivery::OperationDriven).is_err());
+    assert!(validate_runtime_compatibility(&background, FinalDelivery::Automatic).is_ok());
 }
 
 #[test]
-fn s3_declaration_requirement_allows_only_exactly_once() {
-    let mut weak = s3_decl("synthetic", "utterance", "utterance");
-    weak["required_delivery_guarantee"] = json!("at_most_once_indeterminate");
-    assert_eq!(
-        validate_operations(&json!([weak]), &no_reserved)
-            .unwrap_err()
-            .code,
-        ErrorCode::OperationDeclarationInvalid
-    );
-
-    let mut exact = s3_decl("synthetic", "utterance", "utterance");
-    exact["required_delivery_guarantee"] = json!("exactly_once");
-    assert!(validate_operations(&json!([exact]), &no_reserved).is_ok());
-}
-
-#[test]
-fn s3_runtime_capabilities_are_digest_covered() {
+fn s3_final_delivery_is_digest_covered() {
     let declarations = validate_operations(
-        &json!([s3_decl("synthetic", "inline", "read_only")]),
+        &json!([s3_decl("synthetic", "utterance", "utterance")]),
         &no_reserved,
     )
     .unwrap();
     assert_ne!(
-        runtime_declaration_digest(
-            &declarations,
-            FinalDelivery::Automatic,
-            DeliveryGuarantee::AtMostOnceIndeterminate,
-        ),
-        runtime_declaration_digest(
-            &declarations,
-            FinalDelivery::Automatic,
-            DeliveryGuarantee::ExactlyOnce,
-        )
+        runtime_declaration_digest(&declarations, FinalDelivery::Automatic),
+        runtime_declaration_digest(&declarations, FinalDelivery::OperationDriven)
     );
 }
 

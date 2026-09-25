@@ -1,0 +1,351 @@
+   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.85s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_gate_client-5c78c38c2de53c9a)
+
+running 2 tests
+test wire::tests::s3_invoke_requires_digest_dispatch_and_effect ... ok
+test client::completed_tests::s3_invoke_snapshot_rejects_stale_undeclared_and_mismatched_metadata ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.00s
+
+     Running tests/turn_origins.rs (target/debug/deps/turn_origins-c94d305cc89c6b83)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
+   Compiling opencrab-discord-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/discord-gateway)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 40.59s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_discord_gateway-c81ebf297fcda212)
+
+running 74 tests
+test attachment::tests::size_is_integrity_equality_not_an_opencrab_cap ... ok
+test attachment::tests::filename_is_metadata_not_a_path ... ok
+test attachment::tests::accepts_only_discord_https_cdn_sources ... ok
+test config::tests::multiple_instances_are_rejected_before_starting_receivers ... ok
+test config::tests::empty_addresses_fail_loud ... ok
+test config::tests::bad_delivery_mode_fails ... ok
+test config::tests::partial_system_reactions_fall_back_per_field ... ok
+test config::tests::access_ids_are_gateway_owned_and_validated ... ok
+test config::tests::non_snowflake_self_bot_id_fails ... ok
+test config::tests::dm_address_with_empty_guild_component_is_accepted ... ok
+test config::tests::empty_system_reaction_emoji_fails ... ok
+test config::tests::system_reactions_can_be_overridden_via_profile_data ... ok
+test config::tests::s5_secret_shaped_unknown_config_fields_are_rejected ... ok
+test config::tests::system_reactions_default_to_legacy_emojis ... ok
+test config::tests::valid_placement_passes_and_has_no_token_field ... ok
+test daemon::tests::s5_discord_runtime_config_rejects_core_and_legacy_database_paths ... ok
+test harness::tests::is_active_when_any_override_set ... ok
+test harness::tests::default_is_all_off ... ok
+test map::tests::address_of_uses_empty_guild_for_dm ... ok
+test map::tests::address_roundtrip_guild_and_dm ... ok
+test map::tests::map_excludes_only_self ... ok
+test map::tests::map_rejects_non_snowflake_ids ... ok
+test map::tests::author_label_prefers_nickname_then_global_name_then_username ... ok
+test map::tests::origin_roundtrip ... ok
+test map::tests::parse_event_line_reads_message_json ... ok
+test model::tests::success_and_stable_errors_use_exact_discord_text ... ok
+test model_interaction_contract_tests::model_autocomplete_orders_case_insensitive_matches_and_returns_canonical_values ... ok
+test model::tests::dynamic_model_ids_cannot_break_out_of_inline_code ... ok
+test model_interaction_contract_tests::model_autocomplete_caps_at_25_and_omits_overlong_canonical_values ... ok
+test model::tests::slash_command_definition_has_only_the_three_model_subcommands ... ok
+test model_interaction_contract_tests::model_interaction_maps_to_command_and_never_to_said ... ok
+test ops::tests::missing_fields_are_rejected_without_io ... ok
+test ops::tests::declarations_are_sorted_and_three_callback_free ... ok
+test ops::tests::only_successful_reply_registers_completed_target ... ok
+test ops::tests::long_reply_first_chunk_is_reply_rest_are_plain_and_last_id_returned ... ok
+test ops::tests::short_ref_fields_are_marked ... ok
+test ops::tests::long_reply_fail_fast_stops_on_mid_chunk_error ... ok
+test ops::tests::short_reply_is_single_reply_call ... ok
+test post::tests::dry_run_say_is_posted_with_own_message_id ... ok
+test ops::tests::utterance_descriptions_match_914_english ... ok
+test ops::tests::valid_reply_reaction_resolve_reach_transport ... ok
+test post::tests::indeterminate_chunk_is_reported_as_failed ... ok
+test post::tests::short_say_sends_single_message_and_returns_its_id ... ok
+test post::tests::split_for_discord_under_limit_is_single_verbatim_chunk ... ok
+test post::tests::long_say_splits_sequentially_and_returns_last_chunk_id ... ok
+test post::tests::split_message_exact_boundary_no_empty_chunk ... ok
+test post::tests::split_for_discord_over_limit_splits ... ok
+test post::tests::long_say_fail_fast_stops_and_keeps_earlier_chunks ... ok
+test post::tests::split_message_long ... ok
+test post::tests::split_message_short ... ok
+test post::tests::split_message_multiline_line_preferred ... ok
+test post::tests::split_message_long_japanese_no_corruption ... ok
+test run::caller_tests::gateway_classifies_authenticated_author_from_its_access_config ... ok
+test secret::tests::empty_is_none_and_still_removed ... ok
+test secret::tests::redact_blanks_token_shaped_words ... ok
+test secret::tests::redact_keeps_normal_text ... ok
+test secret::tests::take_removes_from_process_env ... ok
+test transport::tests::dry_run_reply_and_reaction_are_ok_without_network ... ok
+test model::tests::list_truncation_keeps_complete_lines_and_suffix ... ok
+test typing::tests::keepalive_reticks_on_interval ... ok
+test typing::tests::apply_activity_started_broadcasts_then_ended_stops ... ok
+test typing::tests::keepalive_ticks_immediately_then_stops_on_drop ... ok
+test admin::tests::s5_discord_admin_is_exact_scoped_mode_0600_and_redacts_secret ... ok
+test store::tests::s5_discord_disabled_and_nonready_instances_never_eligible ... ok
+test daemon::tests::s5_discord_reconciliation_failure_is_durable_and_does_not_kill_daemon ... ok
+test daemon::tests::s5_discord_malformed_readiness_reaps_child_and_persists_retry ... ok
+test daemon::tests::s5_discord_disabled_recovery_removes_daemon_owned_placement_and_control_socket ... ok
+test daemon::tests::s5_discord_disabled_and_nonready_instances_never_spawn ... ok
+test daemon::tests::s5_discord_restart_starts_persisted_ready_child_while_server_is_stopped ... ok
+test store::tests::s5_discord_store_encrypts_secret_and_persists_lifecycle_restart ... ok
+test daemon::tests::s5_discord_running_loss_and_stale_process_are_reaped_to_durable_error ... ok
+test daemon::tests::s5_discord_daemon_startup_recovery_matrix_uses_process_and_core_observations ... ok
+test run::silent_origin_tests::event_loop_reacts_to_a_visible_b_silent_and_completion_without_extras ... ok
+test daemon::tests::s5_discord_daemon_runs_and_crash_state_persists_while_server_is_stopped ... ok
+
+test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s
+
+   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
+   Compiling opencrab-nostr-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/nostr-gateway)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.64s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_nostr_gateway-ea8cf54f52989c88)
+
+running 69 tests
+test config::tests::empty_kinds_mean_kind_1_and_dm_kinds_are_stripped ... ok
+test admission::tests::rejects_self_dm_and_unknown_before_core ... ok
+test config::tests::empty_relays_fail_loud ... ok
+test config::tests::non_positive_max_items_is_fail_loud ... ok
+test config::tests::empty_name_is_fail_loud ... ok
+test config::tests::mention_lane_filter_adds_name_not_hex ... ok
+test admission::tests::maps_gateway_owned_roles_to_generic_caller ... ok
+test config::tests::explicit_max_items_is_kept ... ok
+test config::tests::omitted_max_items_defaults_to_50 ... ok
+test config::tests::watch_filter_json_is_the_effective_filter ... ok
+test config::tests::rejects_http_listen_fields_by_absence ... ok
+test config::tests::s5_secret_shaped_unknown_config_fields_are_rejected ... ok
+test daemon::tests::s5_nostr_runtime_config_rejects_core_and_legacy_database_paths ... ok
+test dedup::tests::first_claim_wins_second_is_dup ... ok
+test dedup::tests::claim_evicts_expired_entries ... ok
+test dedup::tests::expired_entry_can_be_reclaimed ... ok
+test dedup::tests::released_claim_can_be_reclaimed_by_other_lane ... ok
+test harness::tests::default_is_all_off ... ok
+test harness::tests::is_active_when_any_override_set ... ok
+test map::tests::beyond_self_uses_watch_config_not_p_self ... ok
+test map::tests::dm_kind_is_immediate_not_discard ... ok
+test map::tests::is_self_p_tag_mention_matches_only_self_p_tag ... ok
+test map::tests::bundle_fields_and_deterministic_id ... ok
+test map::tests::jsonl_skips_non_object ... ok
+test map::tests::mention_lane_said_is_immediate ... ok
+test map::tests::origin_convention ... ok
+test map::tests::parent_event_id_prefers_reply_marker_else_last_e ... ok
+test map::tests::reject_non_hex_author ... ok
+test map::tests::v1_anchor_key_order_and_nulls ... ok
+test post::tests::delivery_kind_drives_dry_run_log_kind ... ok
+test post::tests::event_id_from_default_and_watch_origins ... ok
+test post::tests::event_id_rejects_non_event_or_bad_hex ... ok
+test post::tests::dry_run_distinguishes_reply_and_standalone_without_spawning ... ok
+test post::tests::event_id_rejects_malformed_origin_lanes ... ok
+test ops::tests::declarations_are_sorted_and_eight ... ok
+test ops::tests::utterance_descriptions_match_914_english ... ok
+test post::tests::post_argv_terminates_options ... ok
+test post::tests::redact_blanks_nsec ... ok
+test run::tests::bundle_window_keeps_all_when_at_or_under_max ... ok
+test run::tests::bundle_discarded_count_is_recorded ... ok
+test run::tests::bundle_window_keeps_newest_50_when_over_max ... ok
+test run::tests::claim_or_skip_dedups_hex_ids_and_counts ... ok
+test run::tests::claim_or_skip_passes_non_hex_without_dedup ... ok
+test run::tests::dedup_ttl_covers_max_watch_interval ... ok
+test run::tests::store_error_and_bad_request_are_counted ... ok
+test run::tests::watch_lane_defers_self_p_tag_only ... ok
+test run::tests::watches_present_still_spawns_mention_keyword_lane ... ok
+test run::tests::capped_bundle_manifest_matches_coordinator_contract ... ok
+test watch::tests::args_never_contain_secret ... ok
+test post::tests::relays_config_has_relays_no_secret ... ok
+test post::tests::invalid_explicit_target_fails_without_spawning ... ok
+test admin::tests::s5_nostr_admin_is_exact_scoped_mode_0600_and_redacts_secret ... ok
+test watch::tests::mention_lane_spawn_argv_has_mention_keywords ... ok
+test watch::tests::mention_lane_spawn_argv_never_empty_net ... ok
+test store::tests::s5_nostr_disabled_and_nonready_instances_never_eligible ... ok
+test daemon::tests::s5_nostr_restart_starts_persisted_ready_child_while_server_is_stopped ... ok
+test store::tests::s5_nostr_store_encrypts_secret_and_persists_lifecycle_restart ... ok
+test daemon::tests::s5_nostr_disabled_and_nonready_instances_never_spawn ... ok
+test daemon::tests::s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error ... ok
+test watch::tests::fake_watch_streams_initial_lines_then_tails_appends ... ok
+test daemon::tests::s5_nostr_daemon_startup_recovery_matrix_uses_process_and_core_observations ... ok
+test watch::tests::fake_watch_holds_partial_line_until_newline ... ok
+test post::tests::explicit_raw_target_replies_and_terminates_text_options ... ok
+test post::tests::no_target_say_is_published_as_standalone_post ... ok
+test post::tests::nonzero_exit_is_failed_and_redacted ... ok
+test daemon::tests::s5_nostr_daemon_runs_and_crash_state_persists_while_server_is_stopped ... ok
+test secret::tests::take_removes_from_process_env ... ok
+test post::tests::origin_target_invokes_nostaro_reply_with_env_secret ... ok
+test watch::tests::child_receives_env_secret_not_argv ... ok
+
+test result: ok. 69 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.75s
+
+   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/db)
+   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
+   Compiling opencrab-web-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/web-gateway)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 52.68s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_web_gateway-5d0ffe01320b6c88)
+
+running 9 tests
+test v3::config::tests::rejects_non_loopback ... ok
+test owner::tests::s5_web_owner_config_rejects_core_and_legacy_database_paths ... ok
+test v3::config::tests::accepts_loopback ... ok
+test v3::http::auth_tests::s5_web_routes_require_web_owned_bearer_credential ... ok
+test store::tests::s5_web_store_rejects_non_loopback_bind ... ok
+test store::tests::s5_web_agent_collision_is_rejected_and_identical_rerun_converges ... ok
+test owner::tests::s5_web_owner_runs_without_server_and_refuses_a_second_store_owner ... ok
+test store::tests::s5_web_store_owns_identity_policy_and_redacted_credentials ... ok
+test admin::tests::s5_web_local_admin_is_scoped_redacted_and_rerunnable_without_server ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_process_supervisor-dd497ff7b2daf684)
+
+running 17 tests
+test tests::consecutive_resets_when_child_stuck_long_enough ... ok
+test tests::escalations_fire ... ok
+test lifecycle::tests::s5_only_enabled_verified_ready_can_start ... ok
+test tests::generic_spawner_injects_only_the_selected_secret_env ... ok
+test tests::backoff_doubles_and_caps ... ok
+test tests::backoff_never_below_base_even_if_cap_is_smaller ... ok
+test tests::crash_loop_predicate ... ok
+test lifecycle::tests::s5_startup_recovery_covers_every_persisted_state ... ok
+test tests::already_shutdown_never_spawns ... ok
+test tests::shutdown_is_terminal_against_concurrent_or_later_start ... ok
+test tests::s5_process_supervisor_has_no_concrete_gateway_vocabulary ... ok
+test lock::tests::s5_store_lock_refuses_second_daemon ... ok
+test tests::concurrent_reconfig_leaves_one_owned_child ... ok
+test tests::shutdown_terminates_child_and_does_not_restart ... ok
+test tests::cancelled_reconfig_does_not_leave_an_untracked_owner ... ok
+test tests::abnormal_exit_triggers_respawn ... ok
+test tests::shutdown_all_bounds_hung_supervisor_join_and_aborts_owner ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_gate_client-5c78c38c2de53c9a)
+
+running 31 tests
+test json::tests::rejects_array ... ok
+test wire::tests::invoke_ok_frame_carries_result ... ok
+test wire::tests::hello_always_carries_versioned_runtime_capabilities_and_operations ... ok
+test wire::tests::command_replies_preserve_result_and_old_core_unknown_message ... ok
+test json::tests::accepts_object ... ok
+test wire::tests::config_bytes_are_compact_author_id ... ok
+test wire::tests::command_frame_round_trips_all_contract_fields ... ok
+test wire::tests::duplicate_member_is_bad_request ... ok
+test json::tests::rejects_duplicate_member ... ok
+test wire::tests::malformed_present_say_reply_target_is_bad_request ... ok
+test wire::tests::config_digest_is_sha256_lowerhex ... ok
+test wire::tests::parse_activity_ended_carries_completed_target ... ok
+test wire::tests::malformed_silent_origins_is_bad_request ... ok
+test wire::tests::parse_activity_distinguishes_absent_empty_and_present_silent_origins ... ok
+test wire::tests::parse_activity_read_carries_origin ... ok
+test client::completed_tests::completed_target_and_completed_no_reply_are_exclusive ... ok
+test wire::tests::parse_bind_ok ... ok
+test client::completed_tests::malformed_present_reply_target_never_reaches_live_delivery ... ok
+test wire::tests::parse_invoke_missing_payload_is_bad_request ... ok
+test wire::tests::parse_invoke_ok ... ok
+test wire::tests::parse_turn_failed_missing_origin_is_bad_request ... ok
+test wire::tests::parse_turn_failed_ok ... ok
+test client::completed_tests::s3_invoke_snapshot_rejects_stale_undeclared_and_mismatched_metadata ... ok
+test wire::tests::said_author_label_is_additive_and_optional ... ok
+test wire::tests::parse_activity_without_origin_is_none ... ok
+test wire::tests::say_reply_target_reads_optional_origin ... ok
+test wire::tests::say_text_ignores_unknown_and_rejects_empty ... ok
+test wire::tests::unknown_noid_notification_is_ignorable_unknown ... ok
+test wire::tests::s3_invoke_requires_digest_dispatch_and_effect ... ok
+test admin::tests::s5_gate_admin_client_reconciles_generic_instance_and_binding_over_protected_uds ... ok
+test client::completed_tests::command_timeout_removes_pending_and_ignores_late_reply ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+test_arbitrary_core_import_is_not_mislabeled_as_sqlite_open (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_arbitrary_core_import_is_not_mislabeled_as_sqlite_open) ... ok
+test_baseline_cannot_relabel_production_db_open_as_valid_store (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_baseline_cannot_relabel_production_db_open_as_valid_store) ... ok
+test_baseline_expiry_must_match_normative_metadata (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_baseline_expiry_must_match_normative_metadata) ... ok
+test_baseline_owner_must_match_normative_metadata (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_baseline_owner_must_match_normative_metadata) ... ok
+test_baseline_violation_must_match_normative_metadata (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_baseline_violation_must_match_normative_metadata) ... ok
+test_borrowed_qualified_gateway_name_match_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_borrowed_qualified_gateway_name_match_is_rejected) ... ok
+test_cargo_metadata_allows_reviewed_server_dev_qc_edge (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_cargo_metadata_allows_reviewed_server_dev_qc_edge) ... ok
+test_cargo_metadata_rejects_server_gateway_build_edge (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_cargo_metadata_rejects_server_gateway_build_edge) ... ok
+test_cargo_metadata_rejects_server_gateway_normal_edge (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_cargo_metadata_rejects_server_gateway_normal_edge) ... ok
+test_concrete_route_mutation_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_concrete_route_mutation_is_rejected) ... ok
+test_cross_module_chained_sqlite_alias_open_is_inventoried (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_cross_module_chained_sqlite_alias_open_is_inventoried) ... ok
+test_cross_module_renamed_sqlite_import_is_inventoried (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_cross_module_renamed_sqlite_import_is_inventoried) ... ok
+test_cross_module_sqlite_connection_alias_open_is_inventoried (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_cross_module_sqlite_connection_alias_open_is_inventoried) ... ok
+test_dev_gateway_edge_outside_reviewed_server_qc_scope_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_dev_gateway_edge_outside_reviewed_server_qc_scope_is_rejected) ... ok
+test_dev_only_qc_dependency_is_not_production (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_dev_only_qc_dependency_is_not_production) ... ok
+test_direct_aliased_sqlite_open_is_inventoried (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_direct_aliased_sqlite_open_is_inventoried) ... ok
+test_gateway_build_dependency_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_gateway_build_dependency_is_rejected) ... ok
+test_gateway_core_path_acceptance_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_gateway_core_path_acceptance_is_rejected) ... ok
+test_gateway_kind_branch_mutation_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_gateway_kind_branch_mutation_is_rejected) ... ok
+test_gateway_kind_non_equality_branch_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_gateway_kind_non_equality_branch_is_rejected) ... ok
+test_gateway_normal_dependency_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_gateway_normal_dependency_is_rejected) ... ok
+test_gateway_owned_store_open_is_explicit_inventory_not_silent (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_gateway_owned_store_open_is_explicit_inventory_not_silent) ... ok
+test_generated_baseline_requires_explicit_line_review (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_generated_baseline_requires_explicit_line_review) ... ok
+test_grouped_arbitrary_sqlite_alias_open_is_inventoried (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_grouped_arbitrary_sqlite_alias_open_is_inventoried) ... ok
+test_helper_mediated_core_store_open_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_helper_mediated_core_store_open_is_rejected) ... ok
+test_legitimate_generic_platform_value_and_kind_branch_are_not_broadly_banned (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_legitimate_generic_platform_value_and_kind_branch_are_not_broadly_banned) ... ok
+test_multi_hop_grouped_renamed_sqlite_reexport_is_inventoried (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_multi_hop_grouped_renamed_sqlite_reexport_is_inventoried) ... ok
+test_operation_name_branch_mutation_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_operation_name_branch_mutation_is_rejected) ... ok
+test_platform_dto_field_mutation_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_platform_dto_field_mutation_is_rejected) ... ok
+test_platform_dto_qualified_lowercase_type_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_platform_dto_qualified_lowercase_type_is_rejected) ... ok
+test_production_file_with_cfg_test_module_is_not_excluded (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_production_file_with_cfg_test_module_is_not_excluded) ... ok
+test_protected_uds_only_admin_router_is_allowed (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_protected_uds_only_admin_router_is_allowed) ... ok
+test_pub_crate_sqlite_connection_type_alias_open_is_inventoried (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_pub_crate_sqlite_connection_type_alias_open_is_inventoried) ... ok
+test_pub_in_sqlite_connection_type_alias_chain_is_inventoried (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_pub_in_sqlite_connection_type_alias_chain_is_inventoried) ... ok
+test_public_reachability_ignores_mutation_after_served_alias (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_public_reachability_ignores_mutation_after_served_alias) ... ok
+test_public_reachability_rejects_direct_six_operation_registration (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_public_reachability_rejects_direct_six_operation_registration) ... ok
+test_public_reachability_rejects_public_merge (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_public_reachability_rejects_public_merge) ... ok
+test_public_reachability_rejects_renamed_admin_factory (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_public_reachability_rejects_renamed_admin_factory) ... ok
+test_public_reachability_traces_direct_served_factory_expression (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_public_reachability_traces_direct_served_factory_expression) ... ok
+test_public_reachability_traces_function_item_alias (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_public_reachability_traces_function_item_alias) ... ok
+test_public_reachability_traces_mutation_and_alias_into_serve (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_public_reachability_traces_mutation_and_alias_into_serve) ... ok
+test_public_reachability_traces_qualified_function_item_alias (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_public_reachability_traces_qualified_function_item_alias) ... ok
+test_public_reachability_traces_split_listener_binding_helper (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_public_reachability_traces_split_listener_binding_helper) ... ok
+test_qualified_operation_name_match_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_qualified_operation_name_match_is_rejected) ... ok
+test_reverse_build_concrete_gateway_dependency_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_reverse_build_concrete_gateway_dependency_is_rejected) ... ok
+test_reverse_normal_concrete_gateway_dependency_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_reverse_normal_concrete_gateway_dependency_is_rejected) ... ok
+test_s3_generic_caller_role_deferral_requires_exact_finding_identity (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_s3_generic_caller_role_deferral_requires_exact_finding_identity) ... ok
+test_s4_live_heartbeat_paths_reject_platform_destinations_and_session_watches (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_s4_live_heartbeat_paths_reject_platform_destinations_and_session_watches) ... ok
+test_s5_gateway_store_open_allowlist_is_exact_and_complete (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_s5_gateway_store_open_allowlist_is_exact_and_complete) ... ok
+test_s5_reviewed_boundary_burn_down_has_exactly_275_findings (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_s5_reviewed_boundary_burn_down_has_exactly_275_findings) ... ok
+test_s5_runtime_gateway_sources_have_no_core_db_or_legacy_import (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_s5_runtime_gateway_sources_have_no_core_db_or_legacy_import) ... ok
+test_s5_server_has_no_concrete_identity_configuration_routes (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_s5_server_has_no_concrete_identity_configuration_routes) ... ok
+test_schema_identifier_mutation_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_schema_identifier_mutation_is_rejected) ... ok
+test_session_watch_singular_query_symbol_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_session_watch_singular_query_symbol_is_rejected) ... ok
+test_session_watches_plural_camel_symbol_is_rejected (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_session_watches_plural_camel_symbol_is_rejected) ... ok
+test_shared_concrete_vocabulary_excludes_nonproduction_sources (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_shared_concrete_vocabulary_excludes_nonproduction_sources) ... ok
+test_sqlite_aliases_do_not_leak_across_gateway_crates (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_sqlite_aliases_do_not_leak_across_gateway_crates) ... ok
+test_sqlite_connection_type_alias_open_is_inventoried (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_sqlite_connection_type_alias_open_is_inventoried) ... ok
+test_test_only_rust_file_is_excluded_from_production_findings (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_test_only_rust_file_is_excluded_from_production_findings) ... ok
+test_unclassified_and_stale_burn_down_entries_fail_closed (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_unclassified_and_stale_burn_down_entries_fail_closed) ... ok
+test_valid_gateway_db_open_requires_exact_finding_identity (scripts.tests.test_gateway_boundary_audit.GatewayBoundaryMutationTests.test_valid_gateway_db_open_requires_exact_finding_identity) ... ok
+
+----------------------------------------------------------------------
+Ran 61 tests in 1.460s
+
+OK
+gateway boundary audit FAILED
+UNCLASSIFIED shared-concrete-schema crates/extgate/src/protocol.rs:222: TrustedUser,
+UNCLASSIFIED shared-concrete-schema crates/extgate/src/protocol.rs:516: Some("trusted_user") => Ok(SaidCaller::TrustedUser),
+UNCLASSIFIED shared-concrete-schema crates/gate-client/src/wire.rs:244: TrustedUser,
+STALE baseline entry (remove/review it): ('shared-concrete-schema', 'crates/extgate/src/protocol.rs', 225, 'TrustedUser,')
+STALE baseline entry (remove/review it): ('shared-concrete-schema', 'crates/extgate/src/protocol.rs', 521, 'Some("trusted_user") => Ok(SaidCaller::TrustedUser),')
+STALE baseline entry (remove/review it): ('shared-concrete-schema', 'crates/gate-client/src/wire.rs', 274, 'TrustedUser,')
+coverage anchor changed: V15 /Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/docs/design-gateway-process-ownership.md:105
+   Compiling opencrab-server v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 43.78s
+     Running tests/webgate_static_audit.rs (target/debug/deps/webgate_static_audit-dc9a0f13330d7e5a)
+
+running 9 tests
+test public_gate_admin_route_detector_rejects_an_added_route ... ok
+test route_inventory_has_no_withdrawn_conversation_post ... ok
+test public_gate_admin_routes_are_absent_after_s1 ... ok
+test server_cargo_has_no_web_gateway_dependency ... ok
+test withdrawn_posts_do_not_create_bindings ... ok
+test ui_has_exactly_one_create_web_conversation_client ... ok
+test ui_call_sites_have_no_unknown_conversation_post ... ok
+test operator_bearer_is_absent_from_gateway_and_browser ... ok
+test forbidden_production_references_are_zero ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+gateway boundary audit OK: 275 classified findings; {'gateway-db-open': 6, 'reviewed-gateway-dev-dependency': 2, 'shared-concrete-schema': 163, 'shared-concrete-vocabulary': 91, 'shared-platform-dto': 13}
+cargo metadata allowed dev-only QC edges: ['opencrab-server -> opencrab-discord-gateway', 'opencrab-server -> opencrab-nostr-gateway']

@@ -69,39 +69,14 @@ impl FinalDelivery {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeliveryGuarantee {
-    ExactlyOnce,
-    AtMostOnceIndeterminate,
-}
-
-impl DeliveryGuarantee {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ExactlyOnce => "exactly_once",
-            Self::AtMostOnceIndeterminate => "at_most_once_indeterminate",
-        }
-    }
-
-    fn parse(raw: &str) -> Option<Self> {
-        match raw {
-            "exactly_once" => Some(Self::ExactlyOnce),
-            "at_most_once_indeterminate" => Some(Self::AtMostOnceIndeterminate),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeCapabilities {
     pub final_delivery: FinalDelivery,
-    pub delivery_guarantee: DeliveryGuarantee,
 }
 
 impl Default for RuntimeCapabilities {
     fn default() -> Self {
         Self {
             final_delivery: FinalDelivery::Automatic,
-            delivery_guarantee: DeliveryGuarantee::AtMostOnceIndeterminate,
         }
     }
 }
@@ -151,7 +126,6 @@ pub fn hello_frame_with_capabilities(
         "config_digest": config_digest,
         "operation_protocol": 1,
         "final_delivery": capabilities.final_delivery.as_str(),
-        "delivery_guarantee": capabilities.delivery_guarantee.as_str(),
         "operations": operations.cloned().unwrap_or_else(|| json!([])),
     })
 }
@@ -192,15 +166,11 @@ pub(crate) fn runtime_declaration_digest_from_value(
         for field in ["dispatch", "sub_engine", "sharing", "effect"] {
             canonical.insert(field.to_string(), source.get(field)?.clone());
         }
-        if let Some(required) = source.get("required_delivery_guarantee") {
-            canonical.insert("required_delivery_guarantee".to_string(), required.clone());
-        }
         canonical_operations.push(Value::Object(canonical));
     }
     let snapshot = json!({
         "version": 1,
         "final_delivery": capabilities.final_delivery.as_str(),
-        "delivery_guarantee": capabilities.delivery_guarantee.as_str(),
         "operations": canonical_operations,
     });
     let bytes = serde_json::to_vec(&snapshot).ok()?;
@@ -424,7 +394,6 @@ pub struct Invoke {
     pub operation: String,
     pub dispatch: String,
     pub effect: String,
-    pub required_delivery_guarantee: DeliveryGuarantee,
     pub continuation_id: Option<String>,
     pub payload: Value,
 }
@@ -645,9 +614,6 @@ fn parse_invoke(obj: &Value) -> Result<Invoke, FrameError> {
     if !matches!(effect.as_str(), "read_only" | "state_change" | "utterance") {
         return Err(FrameError::BadRequest);
     }
-    let required_delivery_guarantee =
-        DeliveryGuarantee::parse(&nonempty_str(obj, "required_delivery_guarantee")?)
-            .ok_or(FrameError::BadRequest)?;
     let payload = obj.get("payload").cloned().ok_or(FrameError::BadRequest)?;
     // context.continuation_id は第一段では常に null（callback 無し）。
     let continuation_id = match obj.get("context") {
@@ -666,7 +632,6 @@ fn parse_invoke(obj: &Value) -> Result<Invoke, FrameError> {
         operation,
         dispatch,
         effect,
-        required_delivery_guarantee,
         continuation_id,
         payload,
     })

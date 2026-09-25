@@ -7,7 +7,7 @@ use tokio::net::unix::OwnedWriteHalf;
 use crate::error::{ErrorCode, GateError};
 use crate::ids::{parse_digest, parse_request_id, parse_uuid};
 use crate::json::parse_object_no_dup;
-use crate::operations::{DeliveryGuarantee, GatewayOperationDeclaration};
+use crate::operations::GatewayOperationDeclaration;
 
 /// LF 込み上限。
 pub const MAX_FRAME: usize = 1_048_576;
@@ -120,7 +120,6 @@ pub fn invoke_frame(
     declaration_digest: &str,
     declaration: &GatewayOperationDeclaration,
     continuation_id: Option<&str>,
-    required_delivery_guarantee: Option<DeliveryGuarantee>,
     payload: &Value,
 ) -> Value {
     json!({
@@ -132,7 +131,6 @@ pub fn invoke_frame(
         "operation": declaration.name,
         "dispatch": declaration.policy.dispatch.as_str(),
         "effect": declaration.policy.effect.as_str(),
-        "required_delivery_guarantee": required_delivery_guarantee.map(DeliveryGuarantee::as_str),
         "context": {"continuation_id": continuation_id},
         "payload": payload,
     })
@@ -197,7 +195,6 @@ pub struct Hello {
     /// Versioned dynamic-operation declaration envelope.
     pub operation_protocol: u64,
     pub final_delivery: String,
-    pub delivery_guarantee: String,
     pub operations: Value,
 }
 
@@ -406,7 +403,6 @@ fn parse_hello(obj: &Value) -> Result<Hello, GateError> {
     let config_digest = parse_digest(&require_str(obj, "config_digest")?)?;
     let operation_protocol = require_u64(obj, "operation_protocol")?;
     let final_delivery = require_str(obj, "final_delivery")?;
-    let delivery_guarantee = require_str(obj, "delivery_guarantee")?;
     let operations = obj
         .get("operations")
         .cloned()
@@ -419,7 +415,6 @@ fn parse_hello(obj: &Value) -> Result<Hello, GateError> {
         config_digest,
         operation_protocol,
         final_delivery,
-        delivery_guarantee,
         operations,
     })
 }

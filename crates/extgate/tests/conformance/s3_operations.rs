@@ -6,7 +6,6 @@ async fn s3_hello_with_capabilities(
     config_digest: &str,
     operations: &Value,
     final_delivery: &str,
-    delivery_guarantee: &str,
 ) -> Value {
     write_frame(
         stream,
@@ -19,7 +18,6 @@ async fn s3_hello_with_capabilities(
             "revision": 1,
             "config_digest": config_digest,
             "final_delivery": final_delivery,
-            "delivery_guarantee": delivery_guarantee,
             "operations": operations,
         }),
     )
@@ -40,7 +38,6 @@ async fn s3_hello_final_delivery_rejects_both_legacy_config_mismatch_directions(
         &config_digest(),
         &ops_reply(),
         "operation_driven",
-        "at_most_once_indeterminate",
     )
     .await;
     assert_eq!(operation_driven["m"], "err");
@@ -67,113 +64,10 @@ async fn s3_hello_final_delivery_rejects_both_legacy_config_mismatch_directions(
         &driven_digest,
         &ops_reply(),
         "automatic",
-        "at_most_once_indeterminate",
     )
     .await;
     assert_eq!(automatic["m"], "err");
     assert_eq!(automatic["code"], "operation_declaration_invalid");
-}
-
-/// S3: an invocation may independently raise the delivery requirement. A live runtime that
-/// only offers at-most-once-indeterminate must reject exactly-once before creating a call row or
-/// writing an invoke frame.
-#[tokio::test]
-async fn s3_raised_exactly_once_is_rejected_before_db_and_wire() {
-    let h = Harness::start().await;
-    let instance_id = uuid();
-    let binding_id = uuid();
-    put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "s3-guarantee").await;
-    let mut s = h.connect().await;
-    assert_eq!(
-        hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await["m"],
-        "ok"
-    );
-    assert_eq!(ack_bind(&mut s).await, binding_id);
-    wait_acked(&h, &instance_id, &binding_id).await;
-
-    let out = invoke_and_wait_with_requirement(
-        &h.state,
-        &instance_id,
-        &binding_id,
-        "reply",
-        Some(DeliveryGuarantee::ExactlyOnce),
-        &json!({"event": "e1", "text": "must not send"}),
-    )
-    .await;
-    assert_eq!(out.unwrap_err().code.as_str(), "operation_rejected");
-
-    let count: i64 = h
-        .state
-        .db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM gateway_operation_calls WHERE binding_id = ?1",
-            [&binding_id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(count, 0, "incompatible guarantee wrote a call row");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), read_frame(&mut s))
-            .await
-            .is_err(),
-        "incompatible guarantee wrote an invoke frame"
-    );
-}
-
-#[tokio::test]
-async fn s3_exact_runtime_rejects_explicit_weaker_invocation_before_db_and_wire() {
-    let h = Harness::start().await;
-    let instance_id = uuid();
-    let binding_id = uuid();
-    put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "s3-no-downgrade").await;
-    let mut stream = h.connect().await;
-    assert_eq!(
-        s3_hello_with_capabilities(
-            &mut stream,
-            &instance_id,
-            &config_digest(),
-            &ops_reply(),
-            "automatic",
-            "exactly_once",
-        )
-        .await["m"],
-        "ok"
-    );
-    assert_eq!(ack_bind(&mut stream).await, binding_id);
-    wait_acked(&h, &instance_id, &binding_id).await;
-
-    let out = invoke_and_wait_with_requirement(
-        &h.state,
-        &instance_id,
-        &binding_id,
-        "reply",
-        Some(DeliveryGuarantee::AtMostOnceIndeterminate),
-        &json!({"event": "e1", "text": "must not downgrade"}),
-    )
-    .await;
-    assert_eq!(out.unwrap_err().code.as_str(), "operation_rejected");
-    let count: i64 = h
-        .state
-        .db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM gateway_operation_calls WHERE binding_id = ?1",
-            [&binding_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(count, 0, "guarantee downgrade wrote a call row");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), read_frame(&mut stream))
-            .await
-            .is_err(),
-        "guarantee downgrade wrote an invoke frame"
-    );
 }
 
 #[tokio::test]

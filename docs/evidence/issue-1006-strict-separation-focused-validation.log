@@ -1,0 +1,460 @@
+   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/extgate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 35.14s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_extgate-272058eb52f7d3f0)
+
+running 71 tests
+test admin_socket::tests::manifest_and_socket_paths_use_directory_fd_no_follow_operations ... ok
+test completion::tests::final_callback_speech_uses_its_delivery_id_as_completed_target ... ok
+test completion::tests::no_reply_after_continuation_reacts_to_the_previous_say ... ok
+test completion::tests::exhausted_turn_reacts_to_the_last_post_instead_of_posting_a_message ... ok
+test completion::tests::subtask_settled_during_parent_turn_allows_final_completed_target ... ok
+test delivery_mode::tests::tool_driven_does_not_dispatch_v3_say ... ok
+test delivery_mode::tests::tool_driven_replaces_text_only ... ok
+test error::tests::plain_store_has_null_detail ... ok
+test commands::tests::duplicate_registration_is_rejected ... ok
+test delivery_mode::tests::missing_member_is_say ... ok
+test delivery_mode::tests::tool_driven_is_explicit ... ok
+test completion::tests::v3_run_request_always_attaches_dispatch ... ok
+test delivery_mode::tests::unknown_enum_is_invalid ... ok
+test error::tests::store_logged_carries_category_detail_not_raw_cause ... ok
+test gate_admin_security::tests::credential_manifest_debug_redacts_plaintext_bearer ... ok
+test gate_admin_security::tests::strict_manifest_rejects_unknown_duplicate_and_weak_token_fields ... ok
+test admin_socket::tests::socket_rejects_insecure_or_symlinked_parent ... ok
+test gate_admin_security::tests::manifest_path_requires_regular_private_core_euid_owned_inode_without_symlinks ... ok
+test admin_socket::tests::socket_parent_fd_survives_component_replacement_and_cleanup_preserves_replacement ... ok
+test inbound::attachments::tests::text_and_image_classification_is_conservative ... ok
+test inbound::attachments::tests::rejects_symlink_even_when_target_is_under_root ... ok
+test operations::tests::bad_name_grammar_rejected ... ok
+test operations::tests::callback_capable_flag_follows_schema ... ok
+test operations::tests::class_unknown_enum_rejected ... ok
+test operations::tests::digest_changes_with_declaration ... ok
+test operations::tests::digest_stable_across_member_order ... ok
+test operations::tests::duplicate_name_rejected ... ok
+test operations::tests::empty_array_is_valid_zero_tools ... ok
+test operations::tests::empty_description_rejected ... ok
+test operations::tests::missing_field_rejected ... ok
+test operations::tests::nested_properties_recurse_and_allow ... ok
+test operations::tests::reserved_name_is_bad_request ... ok
+test operations::tests::s3_all_policy_metadata_changes_the_declaration_digest ... ok
+test operations::tests::s3_arbitrary_operation_name_is_classified_only_by_complete_metadata ... ok
+test operations::tests::s3_dispatch_utterance_if_and_only_if_effect_utterance ... ok
+test operations::tests::s3_final_delivery_is_digest_covered ... ok
+test operations::tests::s3_missing_or_unknown_required_metadata_is_rejected ... ok
+test operations::tests::s3_runtime_compatibility_rejects_operation_driven_without_utterance ... ok
+test operations::tests::schema_disallowed_keyword_rejected ... ok
+test operations::tests::schema_must_be_object ... ok
+test operations::tests::sorted_names_ok_unsorted_rejected ... ok
+test protocol::activity_tests::author_label_is_optional_display_metadata ... ok
+test protocol::activity_tests::authoritative_ended_always_carries_silent_origins_and_can_coexist ... ok
+test protocol::activity_tests::command_requires_an_object_caller ... ok
+test protocol::activity_tests::completed_target_is_additive_and_conditional ... ok
+test protocol::activity_tests::parses_provider_neutral_local_attachment ... ok
+test protocol::activity_tests::rejects_local_attachment_path_traversal ... ok
+test inbound::attachments::tests::validates_exact_size_and_hash_under_root ... ok
+test admin_socket::tests::socket_is_private_refuses_stale_path_and_cleanup_is_inode_safe ... ok
+test inbound::attachments::tests::detects_source_replacement_after_verified_copy ... ok
+test gate_admin_security::tests::authentication_requires_exactly_one_current_match_and_never_unions_scope ... ok
+test registry::folded_seq_tests::is_folded_only_for_marked_seqs ... ok
+test gate_admin_security::tests::rotation_overlap_and_immediate_revocation_are_current_state_checks ... ok
+test turn_queue::tests::capacity_is_32 ... ok
+test gate_admin_security::tests::audit_is_sanitized_and_append_only ... ok
+test turn_queue::tests::reserve_rejects_at_capacity ... ok
+test turn_queue::tests::queued_job_runs_after_current ... ok
+test gate_admin_security::tests::bootstrap_is_atomic_exact_idempotent_and_full_scan_duplicate_safe ... ok
+test gate_admin_security::tests::handler_followup::handlers_authenticate_before_parsing_or_lookup_and_audit_denials_and_authorized_errors ... ok
+test gate_admin_security::tests::manifest_component_replacement_race_never_opens_through_symlink ... ok
+test gate_admin_security::tests::handler_followup::handler_mutation_and_required_audit_commit_atomically_and_conflicts_are_audited ... ok
+test registry::folded_seq_tests::prune_below_keeps_unfolded_not_skipped ... ok
+test gate_admin_security::tests::mutation_and_audit_are_atomic_and_rejected_savepoint_commits_only_audit ... ok
+test gate_admin_security::tests::handler_followup::real_http11_over_private_uds_enforces_auth_and_keeps_public_routes_absent ... ok
+test gate_admin_security::tests::handler_followup::protected_router_serves_all_six_scoped_operations_with_database_credential ... ok
+test gate_admin_security::tests::synthetic_multiple_credential_matches_are_unauthorized_without_scope_union ... ok
+test gate_admin_security::tests::creation_namespace_is_bounded_to_a_scoped_existing_subject ... ok
+test registry::folded_seq_tests::is_folded_is_non_consuming ... ok
+test registry::folded_seq_tests::is_folded_is_per_session ... ok
+test registry::folded_seq_tests::unfolded_other_speaker_seq_not_skipped_even_if_higher_folded ... ok
+test registry::folded_seq_tests::two_said_fold_both_marked ... ok
+
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+
+     Running tests/conformance.rs (target/debug/deps/conformance-1748002750a6d3d5)
+
+running 91 tests
+test bearer_equal_reaches_operation ... ok
+test client_hello_failure_logs_reason_code ... ok
+test coagent_model_command_is_forbidden_before_handler_invocation ... ok
+test di_generic_mechanism_has_no_platform_vocab ... ok
+test address_in_use_and_binding_closed_reuse ... ok
+test database_backed_bearer_rejections_are_exact_401 ... ok
+test closed_instance_put_does_not_revive ... ok
+test bind_timeout_is_bind_failed ... ok
+test agent_has_live_gateway_reflects_v3_liveness ... ok
+test binding_put_reuse_membership_mismatch_conflicts ... ok
+test author_label_is_persisted_and_reaches_live_turn ... ok
+test binding_put_reuses_existing_session_and_said_writes_there ... ok
+test bind_err_closes ... ok
+test delivery_failure_injection_rolls_back_and_says_zero ... ok
+test budget_failure_none_emits_no_authoritative_ended ... ok
+test delivery_disconnect_is_indeterminate_and_no_resend ... ok
+test di_hello_invalid_operations_rejected ... ok
+test di_hello_operations_accepted_and_digest_not_persisted ... ok
+test di_invoke_round_trip_success ... ok
+test di_invoke_indeterminate_on_gateway_disconnect ... ok
+test di_hello_operations_change_accepted_on_reconnect ... ok
+test di_invoke_undeclared_operation_is_unknown ... ok
+test di_invoke_round_trip_rejected ... ok
+test di_projection_reply_is_utterance_fire_and_forget ... ok
+test di_recover_stale_calls_marks_indeterminate ... ok
+test di_revision_bump_reestablishes_declaration ... ok
+test di_projection_reply_utterance_rejection_emits_turn_failed_and_keeps_speech ... ok
+test delivery_ok_rejected_and_disconnect ... ok
+test di_short_ref_resolution_targets_declared_fields ... ok
+test double_live_hello_is_instance_active ... ok
+test framing_invalid_utf8_json_non_object_and_duplicates_close ... ok
+test dynamic_binding_put_keeps_old_said_and_new_not_ready ... ok
+test listen_socket_rejects_relative_and_nonsocket ... ok
+test every_non_owner_model_caller_is_forbidden ... ok
+test empty_said_is_bad_request_no_record ... ok
+test e2e_omoikane_flow ... ok
+test err_without_detail_is_response_invalid ... ok
+test hello_accepts_description_change_without_mismatch ... ok
+test gateway_context_and_reply_target_reach_storage_and_turn ... ok
+test hello_config_digest_mismatch_logs_server_warn ... ok
+test hello_failures_do_not_register ... ok
+test framing_max_size_ok_and_too_large_closes ... ok
+test hello_accepts_schema_change_and_reflects_new_declaration ... ok
+test completion_none_and_error_emit_no_authoritative_ended ... ok
+test hello_unknown_fields_ignored_and_missing_fields_fail ... ok
+test hello_timeout_is_protocol_order ... ok
+test image_only_said_is_recorded_and_starts_turn ... ok
+test instance_put_idempotent_and_conflict ... ok
+test live_binding_delete_stops_said ... ok
+test live_revision_and_delete_are_409 ... ok
+test lookups_unknown_address_is_false ... ok
+test malformed_response_is_response_invalid_and_closes ... ok
+test mixed_local_attachments_reach_turn_in_declared_order ... ok
+test local_html_is_verified_recorded_and_promoted ... ok
+test non_nostr_said_records_external_origin_for_e_numbering ... ok
+test owner_model_commands_dispatch_and_correlate_results ... ok
+test protocol_order_before_hello_and_second_hello ... ok
+test no_reply_turn_emits_ended_without_say ... ok
+test registry_starts_empty ... ok
+test noreply_empty_failed_make_zero_say ... ok
+test response_invalid_unknown_and_consumed_ids ... ok
+test reply_turn_emits_say_before_ended ... ok
+test running_reverse_and_unknown_without_id_keep ... ok
+test s2_new_first_instance_association_without_grant_is_forbidden ... ok
+test s2_runtime_and_admin_binding_creation_delegate_to_one_idempotent_authority ... ok
+test running_unknown_message_keeps_connection ... ok
+test s2_subject_grant_is_consumed_once_and_exact_retry_needs_no_second_grant ... ok
+test s3_hello_final_delivery_rejects_both_legacy_config_mismatch_directions ... ok
+test s4_gate_admin_binding_rejects_platform_destination_fields_without_partial_targets ... ok
+test s3_arbitrary_synthetic_operation_projects_and_authorizes_from_metadata ... ok
+test s3_subtask_continuation_routes_by_exact_generic_session_without_prefix ... ok
+test said_before_ack_is_instance_not_ready ... ok
+test said_during_detached_tool_starts_next_turn ... ok
+test said_during_turn_is_recorded_and_runs_after ... ok
+test said_dedup_same_origin_and_separate_bindings ... ok
+test s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_continuation ... ok
+test s3_projection_rejects_stale_live_declaration_digest_before_db_and_wire ... ok
+test said_seq_null_when_not_recorded_and_lookups_are_real ... ok
+test startup_recover_stale_sending ... ok
+test settlement_is_consumed_on_next_turn ... ok
+test session_queue_overflow_is_seq_null_and_counted ... ok
+test strict_separation_hello_has_no_delivery_guarantee_contract ... ok
+test settlement_during_active_parent_does_not_start_another_resume ... ok
+test strict_separation_co_agent_admission_uses_the_historical_role_snapshot ... ok
+test staged_said_records_without_turn_until_batch_trigger ... ok
+test visible_a_and_folded_b_share_ended_with_completion_and_only_b_silent ... ok
+test v3_turn_returns_before_slow_tool_finishes ... ok
+test s2_grandfathered_association_exact_put_needs_no_grant_and_changes_no_bytes ... ok
+test turn_failed_emits_frame_with_origin ... ok
+test tool_driven_inbound_is_no_reply_without_say ... ok
+test s3_timed_continuation_routes_generic_binding_session_once_after_reconnect_ack ... ok
+
+test result: ok. 91 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.56s
+
+     Running tests/gate_admin_production_boundary.rs (target/debug/deps/gate_admin_production_boundary-6f392e9c05ee6df8)
+
+running 1 test
+test production_features_cannot_reach_plaintext_legacy_gate_admin_authorizer ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/no_platform_branch.rs (target/debug/deps/no_platform_branch-0f976b834c6641f8)
+
+running 8 tests
+test external_test_source_paths_match_file_size_gate_convention ... ok
+test detector_flags_kind_id_platform_branch ... ok
+test detector_flags_concrete_web_identifiers_sql_and_routes ... ok
+test detector_flags_platform_identifier ... ok
+test detector_allows_generic_web_terms ... ok
+test detector_flags_kind_id_field_and_web_platform ... ok
+test detector_ignores_doc_comments_and_tests ... ok
+test gateway_shared_layer_has_no_platform_branch ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.09s
+
+     Running tests/s3_static_boundary.rs (target/debug/deps/s3_static_boundary-80854c0c446816a3)
+
+running 3 tests
+test s3_shared_timed_fire_envelope_has_only_generic_binding_and_session_ids ... ok
+test s3_shared_and_server_production_have_no_concrete_lifecycle_registry ... ok
+test s3_gateway_operation_projection_has_no_name_classification_fallback ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_gate_client-5c78c38c2de53c9a)
+
+running 31 tests
+test wire::tests::config_bytes_are_compact_author_id ... ok
+test json::tests::rejects_array ... ok
+test wire::tests::hello_always_carries_versioned_runtime_capabilities_and_operations ... ok
+test wire::tests::command_replies_preserve_result_and_old_core_unknown_message ... ok
+test wire::tests::duplicate_member_is_bad_request ... ok
+test wire::tests::malformed_present_say_reply_target_is_bad_request ... ok
+test json::tests::rejects_duplicate_member ... ok
+test client::completed_tests::completed_target_and_completed_no_reply_are_exclusive ... ok
+test client::completed_tests::malformed_present_reply_target_never_reaches_live_delivery ... ok
+test wire::tests::command_frame_round_trips_all_contract_fields ... ok
+test wire::tests::invoke_ok_frame_carries_result ... ok
+test json::tests::accepts_object ... ok
+test wire::tests::config_digest_is_sha256_lowerhex ... ok
+test wire::tests::malformed_silent_origins_is_bad_request ... ok
+test client::completed_tests::s3_invoke_snapshot_rejects_stale_undeclared_and_mismatched_metadata ... ok
+test wire::tests::parse_activity_distinguishes_absent_empty_and_present_silent_origins ... ok
+test wire::tests::parse_activity_ended_carries_completed_target ... ok
+test wire::tests::parse_activity_read_carries_origin ... ok
+test wire::tests::parse_activity_without_origin_is_none ... ok
+test wire::tests::parse_bind_ok ... ok
+test wire::tests::parse_invoke_missing_payload_is_bad_request ... ok
+test wire::tests::parse_turn_failed_missing_origin_is_bad_request ... ok
+test wire::tests::parse_invoke_ok ... ok
+test wire::tests::parse_turn_failed_ok ... ok
+test wire::tests::said_author_label_is_additive_and_optional ... ok
+test wire::tests::say_reply_target_reads_optional_origin ... ok
+test wire::tests::say_text_ignores_unknown_and_rejects_empty ... ok
+test wire::tests::unknown_noid_notification_is_ignorable_unknown ... ok
+test wire::tests::s3_invoke_requires_digest_dispatch_and_effect ... ok
+test admin::tests::s5_gate_admin_client_reconciles_generic_instance_and_binding_over_protected_uds ... ok
+test client::completed_tests::command_timeout_removes_pending_and_ignores_late_reply ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/turn_origins.rs (target/debug/deps/turn_origins-c94d305cc89c6b83)
+
+running 7 tests
+test absent_field_keeps_legacy_standalone_fallback ... ok
+test overflowing_ended_batch_is_atomic_and_disconnects ... ok
+test malformed_silent_origins_is_rejected_without_legacy_fallback ... ok
+test authoritative_empty_suppresses_legacy_inference ... ok
+test completed_target_and_silent_origins_coexist_in_stable_order ... ok
+test one_execution_two_inbounds_reports_only_authoritative_silent_origin ... ok
+test ended_batch_at_exact_capacity_is_complete_and_ordered ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+   Compiling opencrab-web-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/web-gateway)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 52.56s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_web_gateway-5d0ffe01320b6c88)
+
+running 9 tests
+test v3::config::tests::rejects_non_loopback ... ok
+test owner::tests::s5_web_owner_config_rejects_core_and_legacy_database_paths ... ok
+test v3::config::tests::accepts_loopback ... ok
+test v3::http::auth_tests::s5_web_routes_require_web_owned_bearer_credential ... ok
+test store::tests::s5_web_agent_collision_is_rejected_and_identical_rerun_converges ... ok
+test store::tests::s5_web_store_rejects_non_loopback_bind ... ok
+test store::tests::s5_web_store_owns_identity_policy_and_redacted_credentials ... ok
+test owner::tests::s5_web_owner_runs_without_server_and_refuses_a_second_store_owner ... ok
+test admin::tests::s5_web_local_admin_is_scoped_redacted_and_rerunnable_without_server ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
+
+     Running unittests src/main.rs (target/debug/deps/web_gateway-3f5174e5dda1c48e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (target/debug/deps/conformance-9a24a29c555359b4)
+
+running 1 test
+test fixtures ... FAILED
+
+failures:
+
+---- fixtures stdout ----
+
+thread 'fixtures' panicked at crates/web-gateway/tests/conformance.rs:405:9:
+sse status 401 Unauthorized
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    fixtures
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.88s
+
+error: test failed, to rerun pass `-p opencrab-web-gateway --test conformance`
+     Running tests/core_process_e2e.rs (target/debug/deps/core_process_e2e-501d1be602fc4114)
+
+running 1 test
+test send_said_turn_say_sse_over_real_processes ... FAILED
+
+failures:
+
+---- send_said_turn_say_sse_over_real_processes stdout ----
+
+thread 'send_said_turn_say_sse_over_real_processes' panicked at crates/web-gateway/tests/core_process_e2e.rs:413:5:
+core HTTP did not start: [2m2026-09-25T02:14:42.847685Z[0m [32m INFO[0m [2mopencrab_server::bootstrap[0m[2m:[0m Starting OpenCrab server...
+Error: [gate_admin] listen_socket and bootstrap_credential_file are required
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    send_said_turn_say_sse_over_real_processes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.23s
+
+error: test failed, to rerun pass `-p opencrab-web-gateway --test core_process_e2e`
+     Running tests/rust-unit/main.rs (target/debug/deps/rust_unit-55a9044aca2240a7)
+
+running 14 tests
+test invariants::harness_discovers_fixtures_by_directory_scan ... ok
+test rust_unit_frame_grammar_unit ... ok
+test invariants::harness_does_not_import_sut_internals ... ok
+test rust_unit_bind_same_address_different_binding_closes ... ok
+test rust_unit_conversation_status_is_owned_by_web_gateway ... FAILED
+test rust_unit_say_ok_external_rejected_close ... ok
+test rust_unit_hello_bind_said_dedup ... ok
+test rust_unit_disconnect_and_unacked_503 ... FAILED
+test rust_unit_created_binding_is_provisioning_before_bind ... FAILED
+test rust_unit_activity_started_ended ... ok
+test invariants::fixture_name_field_matches_filename ... ok
+test rust_unit_frame_too_large_and_duplicate_close ... ok
+test harvest::harvest_canon_pending_values_prints ... ok
+test rust_unit_http_post_202_not_admitted_busy_and_old_routes_404 ... FAILED
+
+failures:
+
+---- rust_unit_conversation_status_is_owned_by_web_gateway stdout ----
+
+thread 'rust_unit_conversation_status_is_owned_by_web_gateway' panicked at crates/web-gateway/tests/rust-unit/main.rs:221:5:
+assertion `left == right` failed
+  left: 401
+ right: 200
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- rust_unit_disconnect_and_unacked_503 stdout ----
+
+thread 'rust_unit_disconnect_and_unacked_503' panicked at crates/web-gateway/tests/rust-unit/main.rs:587:5:
+assertion `left == right` failed
+  left: 401
+ right: 503
+
+---- rust_unit_created_binding_is_provisioning_before_bind stdout ----
+
+thread 'rust_unit_created_binding_is_provisioning_before_bind' panicked at crates/web-gateway/tests/rust-unit/main.rs:271:5:
+assertion `left == right` failed
+  left: 401
+ right: 200
+
+---- rust_unit_http_post_202_not_admitted_busy_and_old_routes_404 stdout ----
+
+thread 'rust_unit_http_post_202_not_admitted_busy_and_old_routes_404' panicked at crates/web-gateway/tests/rust-unit/main.rs:90:14:
+recv timeout: Elapsed(())
+
+
+failures:
+    rust_unit_conversation_status_is_owned_by_web_gateway
+    rust_unit_created_binding_is_provisioning_before_bind
+    rust_unit_disconnect_and_unacked_503
+    rust_unit_http_post_202_not_admitted_busy_and_old_routes_404
+
+test result: FAILED. 10 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.12s
+
+error: test failed, to rerun pass `-p opencrab-web-gateway --test rust-unit`
+     Running tests/web_conversation_create_e2e.rs (target/debug/deps/web_conversation_create_e2e-70e1629f2d273cc6)
+
+running 3 tests
+test connected_create_is_201_then_sse_said_turn_say ... FAILED
+test core_restart_gateway_reconnects_then_create_201_message_say ... FAILED
+test creation_is_owned_by_gateway_and_requires_its_live_instance ... FAILED
+
+failures:
+
+---- connected_create_is_201_then_sse_said_turn_say stdout ----
+
+thread 'connected_create_is_201_then_sse_said_turn_say' panicked at crates/web-gateway/tests/web_conversation_create_e2e/support.rs:378:5:
+core HTTP did not start
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- core_restart_gateway_reconnects_then_create_201_message_say stdout ----
+
+thread 'core_restart_gateway_reconnects_then_create_201_message_say' panicked at crates/web-gateway/tests/web_conversation_create_e2e/support.rs:378:5:
+core HTTP did not start
+
+---- creation_is_owned_by_gateway_and_requires_its_live_instance stdout ----
+
+thread 'creation_is_owned_by_gateway_and_requires_its_live_instance' panicked at crates/web-gateway/tests/web_conversation_create_e2e/support.rs:378:5:
+core HTTP did not start
+
+
+failures:
+    connected_create_is_201_then_sse_said_turn_say
+    core_restart_gateway_reconnects_then_create_201_message_say
+    creation_is_owned_by_gateway_and_requires_its_live_instance
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.50s
+
+error: test failed, to rerun pass `-p opencrab-web-gateway --test web_conversation_create_e2e`
+     Running tests/web_mock_contracts_e2e.rs (target/debug/deps/web_mock_contracts_e2e-7cf1c3ef8428aeea)
+
+running 4 tests
+test no_reply_is_withheld_not_said ... FAILED
+test unauthorized_shell_command_is_rejected ... FAILED
+test reply_turn_does_not_emit_completed_no_reply ... FAILED
+test second_request_not_blocked_during_long_op ... FAILED
+
+failures:
+
+---- no_reply_is_withheld_not_said stdout ----
+
+thread 'no_reply_is_withheld_not_said' panicked at crates/web-gateway/tests/web_mock_contracts_e2e/support.rs:417:5:
+core HTTP did not start
+
+---- unauthorized_shell_command_is_rejected stdout ----
+
+thread 'unauthorized_shell_command_is_rejected' panicked at crates/web-gateway/tests/web_mock_contracts_e2e/support.rs:417:5:
+core HTTP did not start
+
+---- reply_turn_does_not_emit_completed_no_reply stdout ----
+
+thread 'reply_turn_does_not_emit_completed_no_reply' panicked at crates/web-gateway/tests/web_mock_contracts_e2e/support.rs:417:5:
+core HTTP did not start
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- second_request_not_blocked_during_long_op stdout ----
+
+thread 'second_request_not_blocked_during_long_op' panicked at crates/web-gateway/tests/web_mock_contracts_e2e/support.rs:417:5:
+core HTTP did not start
+
+
+failures:
+    no_reply_is_withheld_not_said
+    reply_turn_does_not_emit_completed_no_reply
+    second_request_not_blocked_during_long_op
+    unauthorized_shell_command_is_rejected
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.15s
+
+error: test failed, to rerun pass `-p opencrab-web-gateway --test web_mock_contracts_e2e`
+error: 5 targets failed:
+    `-p opencrab-web-gateway --test conformance`
+    `-p opencrab-web-gateway --test core_process_e2e`
+    `-p opencrab-web-gateway --test rust-unit`
+    `-p opencrab-web-gateway --test web_conversation_create_e2e`
+    `-p opencrab-web-gateway --test web_mock_contracts_e2e`

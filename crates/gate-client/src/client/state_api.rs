@@ -381,24 +381,10 @@ impl InstanceClient {
                 != Some(&invoke.dispatch)
             || declaration.get("effect").and_then(serde_json::Value::as_str)
                 != Some(&invoke.effect)
-            || invoke.required_delivery_guarantee
-                != self.runtime_capabilities.delivery_guarantee
         {
             return Err("operation_rejected");
         }
-        match declaration
-            .get("required_delivery_guarantee")
-            .and_then(serde_json::Value::as_str)
-        {
-            None => Ok(()),
-            Some("exactly_once")
-                if invoke.required_delivery_guarantee
-                    == super::wire::DeliveryGuarantee::ExactlyOnce =>
-            {
-                Ok(())
-            }
-            Some(_) => Err("operation_rejected"),
-        }
+        Ok(())
     }
 
     pub async fn binding_for_address(&self, address: &str) -> Option<String> {

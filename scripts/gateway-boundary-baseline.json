@@ -1430,7 +1430,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 225,
+      "line": 222,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -1440,7 +1440,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 521,
+      "line": 516,
       "snippet": "Some(\"trusted_user\") => Ok(SaidCaller::TrustedUser),",
       "classification": "production-violation",
       "violation": "V11",
@@ -1450,7 +1450,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/gate-client/src/wire.rs",
-      "line": 274,
+      "line": 244,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -2808,7 +2808,7 @@
       "violation": "V15",
       "classification": "persisted-history",
       "path": "docs/design-gateway-process-ownership.md",
-      "line": 105,
+      "line": 104,
       "needle": "persisted conversation history",
       "owner_stage": "S8/S11",
       "expires_when": "never delete or rewrite persisted conversation/history evidence during boundary cleanup"

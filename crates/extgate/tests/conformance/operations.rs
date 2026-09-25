@@ -43,7 +43,6 @@ async fn hello_with_ops(
             "id": "h1", "m": "hello", "protocol": 3,
             "operation_protocol": 1,
             "final_delivery": "automatic",
-            "delivery_guarantee": "at_most_once_indeterminate",
             "operations": [], "instance_id": instance_id,
             "revision": revision, "config_digest": config_digest(), "operations": ops,
         }),

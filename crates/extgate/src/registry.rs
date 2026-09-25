@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 
 use crate::commands::CommandRegistry;
 use crate::error::{ErrorCode, GateError};
-use crate::operations::{DeliveryGuarantee, FinalDelivery, GatewayOperationDeclaration};
+use crate::operations::{FinalDelivery, GatewayOperationDeclaration};
 use crate::turn_queue::SessionTurnQueues;
 
 /// hello 済みで未 close の接続。
@@ -29,7 +29,6 @@ pub struct LiveEntry {
     /// Digest of the full versioned runtime capability snapshot.
     pub declaration_digest: String,
     pub final_delivery: FinalDelivery,
-    pub delivery_guarantee: DeliveryGuarantee,
 }
 
 impl LiveEntry {

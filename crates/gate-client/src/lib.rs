@@ -6,4 +6,4 @@ pub mod json;
 pub mod wire;
 
 pub use client::{InvokeHandler, InvokeOutcome, SayPolicy};
-pub use wire::{DeliveryGuarantee, FinalDelivery, RuntimeCapabilities};
+pub use wire::{FinalDelivery, RuntimeCapabilities};

@@ -184,33 +184,6 @@ impl FinalDelivery {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeliveryGuarantee {
-    ExactlyOnce,
-    AtMostOnceIndeterminate,
-}
-
-impl DeliveryGuarantee {
-    pub fn parse(raw: &str) -> Option<Self> {
-        Some(match raw {
-            "exactly_once" => Self::ExactlyOnce,
-            "at_most_once_indeterminate" => Self::AtMostOnceIndeterminate,
-            _ => return None,
-        })
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ExactlyOnce => "exactly_once",
-            Self::AtMostOnceIndeterminate => "at_most_once_indeterminate",
-        }
-    }
-
-    pub fn satisfies(self, required: Self) -> bool {
-        matches!(self, Self::ExactlyOnce) || self == required
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationPolicy {
     pub allowed_callers: Vec<AllowedCaller>,
@@ -218,7 +191,6 @@ pub struct OperationPolicy {
     pub sub_engine: SubEngine,
     pub sharing: Sharing,
     pub effect: OperationEffect,
-    pub required_delivery_guarantee: Option<DeliveryGuarantee>,
 }
 
 /// hello で宣言される 1 能力。immutable snapshot として live entry に保持する。
@@ -285,12 +257,6 @@ impl GatewayOperationDeclaration {
             "effect".to_string(),
             Value::String(self.policy.effect.as_str().to_string()),
         );
-        if let Some(required) = self.policy.required_delivery_guarantee {
-            obj.insert(
-                "required_delivery_guarantee".to_string(),
-                Value::String(required.as_str().to_string()),
-            );
-        }
         Value::Object(obj)
     }
 }
@@ -433,21 +399,12 @@ fn parse_policy(obj: &Map<String, Value>) -> Result<OperationPolicy, GateError> 
     {
         return Err(invalid());
     }
-    let required_delivery_guarantee = match obj.get("required_delivery_guarantee") {
-        None => None,
-        Some(Value::String(raw)) if raw == "exactly_once" => Some(DeliveryGuarantee::ExactlyOnce),
-        Some(_) => return Err(invalid()),
-    };
-    if required_delivery_guarantee.is_some() && !matches!(dispatch, OperationDispatch::Utterance) {
-        return Err(invalid());
-    }
     Ok(OperationPolicy {
         allowed_callers,
         dispatch,
         sub_engine,
         sharing,
         effect,
-        required_delivery_guarantee,
     })
 }
 
@@ -575,17 +532,12 @@ pub fn declaration_digest(decls: &[GatewayOperationDeclaration]) -> String {
 pub fn runtime_declaration_digest(
     decls: &[GatewayOperationDeclaration],
     final_delivery: FinalDelivery,
-    delivery_guarantee: DeliveryGuarantee,
 ) -> String {
     let mut value = Map::new();
     value.insert("version".to_string(), Value::Number(1u64.into()));
     value.insert(
         "final_delivery".to_string(),
         Value::String(final_delivery.as_str().to_string()),
-    );
-    value.insert(
-        "delivery_guarantee".to_string(),
-        Value::String(delivery_guarantee.as_str().to_string()),
     );
     value.insert(
         "operations".to_string(),
@@ -597,7 +549,6 @@ pub fn runtime_declaration_digest(
 pub fn validate_runtime_compatibility(
     decls: &[GatewayOperationDeclaration],
     final_delivery: FinalDelivery,
-    delivery_guarantee: DeliveryGuarantee,
 ) -> Result<(), GateError> {
     if matches!(final_delivery, FinalDelivery::OperationDriven)
         && !decls
@@ -605,15 +556,6 @@ pub fn validate_runtime_compatibility(
             .any(|declaration| matches!(declaration.policy.dispatch, OperationDispatch::Utterance))
     {
         return Err(invalid());
-    }
-    for declaration in decls {
-        if declaration
-            .policy
-            .required_delivery_guarantee
-            .is_some_and(|required| !delivery_guarantee.satisfies(required))
-        {
-            return Err(invalid());
-        }
     }
     Ok(())
 }

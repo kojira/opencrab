@@ -1,7 +1,7 @@
     use super::*;
 
     #[test]
-    fn s3_invoke_snapshot_rejects_stale_undeclared_metadata_and_guarantee_downgrade() {
+    fn s3_invoke_snapshot_rejects_stale_undeclared_and_mismatched_metadata() {
         let operations = serde_json::json!([{
             "name": "quasar.synthetic-v7",
             "description": "synthetic",
@@ -16,7 +16,6 @@
         }]);
         let capabilities = crate::wire::RuntimeCapabilities {
             final_delivery: crate::wire::FinalDelivery::Automatic,
-            delivery_guarantee: crate::wire::DeliveryGuarantee::ExactlyOnce,
         };
         let client = InstanceClient::blank(
             "instance".into(),
@@ -33,7 +32,7 @@
         .unwrap();
         assert_eq!(
             digest,
-            "e7c4edf813fbe34fc420ec1e859e342cc3295b1598983bf3dff9c3580df596db"
+            "ae3998f8b460f71a2555ee1760ff82408162e4444a3a1d5dc5decac5020b889f"
         );
         let valid = Invoke {
             id: "call".into(),
@@ -42,7 +41,6 @@
             operation: "quasar.synthetic-v7".into(),
             dispatch: "background".into(),
             effect: "state_change".into(),
-            required_delivery_guarantee: crate::wire::DeliveryGuarantee::ExactlyOnce,
             continuation_id: None,
             payload: serde_json::json!({}),
         };
@@ -57,10 +55,6 @@
         let mut metadata = valid.clone();
         metadata.dispatch = "inline".into();
         assert_eq!(client.validate_invocation(&metadata), Err("operation_rejected"));
-        let mut downgrade = valid;
-        downgrade.required_delivery_guarantee =
-            crate::wire::DeliveryGuarantee::AtMostOnceIndeterminate;
-        assert_eq!(client.validate_invocation(&downgrade), Err("operation_rejected"));
     }
 
     #[tokio::test]

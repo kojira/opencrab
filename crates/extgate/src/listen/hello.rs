@@ -6,8 +6,8 @@ use rusqlite::params;
 use crate::close::close_live;
 use crate::error::{ErrorCode, GateError};
 use crate::operations::{
-    runtime_declaration_digest, validate_operations, validate_runtime_compatibility,
-    DeliveryGuarantee, FinalDelivery, GatewayOperationDeclaration,
+    runtime_declaration_digest, validate_operations, validate_runtime_compatibility, FinalDelivery,
+    GatewayOperationDeclaration,
 };
 use crate::protocol::{bind_frame, ok_frame, write_json};
 use crate::registry::{ExtgateState, LiveEntry, Pending};
@@ -66,10 +66,9 @@ pub(crate) async fn handle_hello(
                     state,
                     &hello.operations,
                     &hello.final_delivery,
-                    &hello.delivery_guarantee,
                 ) {
                     Err(code) => Err(code),
-                    Ok((declarations, declaration_digest, final_delivery, delivery_guarantee)) => {
+                    Ok((declarations, declaration_digest, final_delivery)) => {
                         match open_bindings(&state.db, &hello.instance_id) {
                             Err(_) => Err(ErrorCode::StoreError),
                             Ok(bindings) => {
@@ -95,7 +94,6 @@ pub(crate) async fn handle_hello(
                                         declarations: Arc::new(declarations),
                                         declaration_digest,
                                         final_delivery,
-                                        delivery_guarantee,
                                     },
                                 );
                                 Ok(bindings)
@@ -273,26 +271,14 @@ fn validate_hello_declarations(
     state: &ExtgateState,
     operations: &serde_json::Value,
     final_delivery: &str,
-    delivery_guarantee: &str,
-) -> Result<
-    (
-        Vec<GatewayOperationDeclaration>,
-        String,
-        FinalDelivery,
-        DeliveryGuarantee,
-    ),
-    ErrorCode,
-> {
+) -> Result<(Vec<GatewayOperationDeclaration>, String, FinalDelivery), ErrorCode> {
     let decls = validate_operations(operations, &|name| state.is_reserved_tool_name(name))
         .map_err(|error| error.code)?;
     let final_delivery =
         FinalDelivery::parse(final_delivery).ok_or(ErrorCode::OperationDeclarationInvalid)?;
-    let delivery_guarantee = DeliveryGuarantee::parse(delivery_guarantee)
-        .ok_or(ErrorCode::OperationDeclarationInvalid)?;
-    validate_runtime_compatibility(&decls, final_delivery, delivery_guarantee)
-        .map_err(|error| error.code)?;
-    let digest = runtime_declaration_digest(&decls, final_delivery, delivery_guarantee);
-    Ok((decls, digest, final_delivery, delivery_guarantee))
+    validate_runtime_compatibility(&decls, final_delivery).map_err(|error| error.code)?;
+    let digest = runtime_declaration_digest(&decls, final_delivery);
+    Ok((decls, digest, final_delivery))
 }
 
 fn open_bindings(

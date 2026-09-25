@@ -53,7 +53,6 @@ async fn hello_ok_digest(s: &mut UnixStream, instance_id: &str, revision: u64, d
             "protocol": 3,
             "operation_protocol": 1,
             "final_delivery": "operation_driven",
-            "delivery_guarantee": "at_most_once_indeterminate",
             "operations": ops_reply(),
             "instance_id": instance_id,
             "revision": revision,

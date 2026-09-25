@@ -16,7 +16,6 @@ use uuid::Uuid;
 
 use crate::error::{ErrorCode, GateError};
 use crate::ids::now_nanos;
-use crate::operations::DeliveryGuarantee;
 use crate::protocol::{invoke_frame, write_json};
 use crate::registry::{ExtgateState, OperationOutcome, Pending};
 
@@ -31,21 +30,6 @@ impl InvokeError {
     fn new(code: ErrorCode) -> Self {
         Self { code, detail: None }
     }
-}
-
-/// Always put the live transport guarantee on the wire. An explicit invocation requirement may
-/// neither exceed the live capability nor lower it.
-fn effective_delivery_guarantee(
-    live: DeliveryGuarantee,
-    declared: Option<DeliveryGuarantee>,
-    invoked: Option<DeliveryGuarantee>,
-) -> Result<DeliveryGuarantee, InvokeError> {
-    if declared.is_some_and(|required| !live.satisfies(required))
-        || invoked.is_some_and(|guarantee| guarantee != live)
-    {
-        return Err(InvokeError::new(ErrorCode::OperationRejected));
-    }
-    Ok(live)
 }
 
 /// 背景 subtask 内で呼ぶ（§5.2 / §10.6・option B）。call を `sending` で insert → commit →
@@ -63,16 +47,7 @@ pub async fn invoke_and_wait(
     operation: &str,
     payload: &Value,
 ) -> Result<Value, InvokeError> {
-    invoke_and_wait_checked(
-        state,
-        instance_id,
-        binding_id,
-        operation,
-        None,
-        None,
-        payload,
-    )
-    .await
+    invoke_and_wait_checked(state, instance_id, binding_id, operation, None, payload).await
 }
 
 pub(crate) async fn invoke_and_wait_for_digest(
@@ -89,28 +64,6 @@ pub(crate) async fn invoke_and_wait_for_digest(
         binding_id,
         operation,
         Some(expected_digest),
-        None,
-        payload,
-    )
-    .await
-}
-
-/// Versioned invocation with an optional independently raised delivery requirement.
-pub async fn invoke_and_wait_with_requirement(
-    state: &Arc<ExtgateState>,
-    instance_id: &str,
-    binding_id: &str,
-    operation: &str,
-    invocation_requirement: Option<DeliveryGuarantee>,
-    payload: &Value,
-) -> Result<Value, InvokeError> {
-    invoke_and_wait_checked(
-        state,
-        instance_id,
-        binding_id,
-        operation,
-        None,
-        invocation_requirement,
         payload,
     )
     .await
@@ -122,11 +75,10 @@ async fn invoke_and_wait_checked(
     binding_id: &str,
     operation: &str,
     expected_digest: Option<&str>,
-    invocation_requirement: Option<DeliveryGuarantee>,
     payload: &Value,
 ) -> Result<Value, InvokeError> {
     // §10.6 step 1: live + acknowledged binding + live declaration を再検査。
-    let (writer, declaration, declaration_digest, required_delivery_guarantee) = {
+    let (writer, declaration, declaration_digest) = {
         let reg = state
             .lock_registry()
             .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
@@ -143,16 +95,10 @@ async fn invoke_and_wait_checked(
             .declaration(operation)
             .cloned()
             .ok_or_else(|| InvokeError::new(ErrorCode::OperationUnknown))?;
-        let required = effective_delivery_guarantee(
-            live.delivery_guarantee,
-            declaration.policy.required_delivery_guarantee,
-            invocation_requirement,
-        )?;
         (
             live.writer.clone(),
             declaration,
             live.declaration_digest.clone(),
-            required,
         )
     };
 
@@ -227,7 +173,6 @@ async fn invoke_and_wait_checked(
             &declaration_digest,
             &declaration,
             None,
-            Some(required_delivery_guarantee),
             payload,
         ),
     )
@@ -355,7 +300,7 @@ async fn invoke_utterance_checked(
     expected_digest: Option<&str>,
 ) -> Result<(), InvokeError> {
     // live + acknowledged binding + live declaration を再検査（invoke_and_wait と同じ）。
-    let (writer, declaration, declaration_digest, required_delivery_guarantee) = {
+    let (writer, declaration, declaration_digest) = {
         let reg = state
             .lock_registry()
             .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
@@ -372,16 +317,10 @@ async fn invoke_utterance_checked(
             .declaration(operation)
             .cloned()
             .ok_or_else(|| InvokeError::new(ErrorCode::OperationUnknown))?;
-        let required = effective_delivery_guarantee(
-            live.delivery_guarantee,
-            declaration.policy.required_delivery_guarantee,
-            None,
-        )?;
         (
             live.writer.clone(),
             declaration,
             live.declaration_digest.clone(),
-            required,
         )
     };
 
@@ -495,7 +434,6 @@ async fn invoke_utterance_checked(
             &declaration_digest,
             &declaration,
             None,
-            Some(required_delivery_guarantee),
             payload,
         ),
     )

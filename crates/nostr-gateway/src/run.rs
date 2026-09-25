@@ -106,7 +106,6 @@ pub fn spawn_instance(
         Some(crate::ops::operation_declarations()),
         opencrab_gate_client::RuntimeCapabilities {
             final_delivery: opencrab_gate_client::FinalDelivery::OperationDriven,
-            delivery_guarantee: opencrab_gate_client::DeliveryGuarantee::ExactlyOnce,
         },
         invoke_handler,
     );
