@@ -18,6 +18,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Clone)]
 pub struct VerifyArgs<'a> {
     pub core_path: &'a Path,
     pub approval_path: &'a Path,

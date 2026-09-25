@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod canonical;
+pub mod cleanup;
 pub mod command;
 #[rustfmt::skip]
 pub mod destination;

@@ -57,8 +57,8 @@ fn run() -> Result<()> {
                 )?,
             })?;
         }
-        "verify-freeze" => {
-            opencrab_gateway_migrate::freeze::verify(VerifyArgs {
+        "verify-freeze" | "clean-legacy-state" => {
+            let freeze_args = VerifyArgs {
                 core_path: &one_path(&options, "core-db")?,
                 approval_path: &one_path(&options, "approval")?,
                 import_report_path: &one_path(&options, "import-report")?,
@@ -68,7 +68,12 @@ fn run() -> Result<()> {
                 destination_paths: command::parse_destination_paths(
                     options.get("destination").map(Vec::as_slice).unwrap_or(&[]),
                 )?,
-            })?;
+            };
+            if command == "verify-freeze" {
+                opencrab_gateway_migrate::freeze::verify(freeze_args)?;
+            } else {
+                opencrab_gateway_migrate::cleanup::run(freeze_args)?;
+            }
         }
         _ => bail!("unknown command"),
     }

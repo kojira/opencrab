@@ -114,7 +114,7 @@ fn source_profile_refuses_neighbor_versions_and_missing_required_column() {
 
 include!("s8_support/projected.rs");
 
-fn projected_discord_fixture(verify_freeze: bool, advance_heartbeat: bool, cleanup: bool) {
+fn projected_discord_fixture(freeze: bool, fired: bool, cleanup: bool, changed: bool) {
     let temp = tempfile::tempdir().unwrap();
     let core_path = temp.path().join("core.db");
     let discord_path = temp.path().join("discord.db");
@@ -380,10 +380,10 @@ fn projected_discord_fixture(verify_freeze: bool, advance_heartbeat: bool, clean
         "tool-produced artifacts must not expose raw agent/external identifiers or credential plaintext: {leaking_artifacts:?}"
     );
 
-    if !verify_freeze {
+    if !freeze {
         return;
     }
-    if advance_heartbeat {
+    if fired {
         advance_projected_heartbeat(&core_path);
     }
     // S10 RED: the same fully projected disposable fixture is frozen as one
@@ -489,7 +489,7 @@ fn projected_discord_fixture(verify_freeze: bool, advance_heartbeat: bool, clean
         "read-only freeze preflight changed the participating gateway"
     );
     if cleanup {
-        assert_frozen_cleanup(temp.path());
+        assert_frozen_cleanup(temp.path(), changed);
     }
 }
 

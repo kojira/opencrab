@@ -2,22 +2,27 @@ use std::path::Path;
 
 #[test]
 fn s8_import_and_project_are_offline_idempotent_and_preserve_core_rows() {
-    projected_discord_fixture(false, false, false);
+    projected_discord_fixture(false, false, false, false);
 }
 
 #[test]
 fn s10_verify_freeze_is_read_only_for_projected_discord_fixture() {
-    projected_discord_fixture(true, false, false);
+    projected_discord_fixture(true, false, false, false);
 }
 
 #[test]
 fn s10_verify_freeze_accepts_post_qc_heartbeat_last_fired_advance() {
-    projected_discord_fixture(true, true, false);
+    projected_discord_fixture(true, true, false, false);
 }
 
 #[test]
 fn s10_cleanup_after_freeze_preserves_retained_core_state() {
-    projected_discord_fixture(true, true, true);
+    projected_discord_fixture(true, true, true, false);
+}
+
+#[test]
+fn s10_cleanup_refuses_gateway_identity_change_after_freeze() {
+    projected_discord_fixture(true, true, true, true);
 }
 
 fn advance_projected_heartbeat(path: &Path) {
@@ -42,7 +47,7 @@ fn advance_projected_heartbeat(path: &Path) {
     );
 }
 
-fn assert_frozen_cleanup(root: &Path) {
+fn assert_frozen_cleanup(root: &Path, mutate_gateway: bool) {
     let core_path = &root.join("core.db");
     let discord_path = &root.join("discord.db");
     let approval_path = &root.join("approval.json");
@@ -71,6 +76,12 @@ fn assert_frozen_cleanup(root: &Path) {
     ).unwrap();
     drop(gateway);
     drop(core);
+    let core_before = source::file_sha256(core_path).unwrap();
+    if mutate_gateway {
+        let gateway = Connection::open(discord_path).unwrap();
+        gateway.execute("UPDATE legacy_identity_sources SET display_name='changed-after-freeze' WHERE id='tu-discord'", []).unwrap();
+        drop(gateway);
+    }
 
     let cleanup = std::process::Command::new(env!("CARGO_BIN_EXE_opencrab-gateway-migrate"))
         .arg("clean-legacy-state")
@@ -83,6 +94,15 @@ fn assert_frozen_cleanup(root: &Path) {
         .args(["--destination", &format!("discord=discord-primary={}", discord_path.display())])
         .output()
         .unwrap();
+    if mutate_gateway {
+        assert!(!cleanup.status.success(), "cleanup must reject changed gateway data");
+        assert_eq!(source::file_sha256(core_path).unwrap(), core_before,
+            "rejected cleanup must not modify the retained core");
+        let core = Connection::open(core_path).unwrap();
+        let still_present: i64 = core.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='trusted_users'", [], |row| row.get(0)).unwrap();
+        assert_eq!(still_present, 1, "legacy identity must remain after rejected cleanup");
+        return;
+    }
     assert!(
         cleanup.status.success(),
         "S10 guarded cleanup must accept the unchanged full-field source and valid post-QC freeze: {}",
