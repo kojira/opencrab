@@ -197,17 +197,13 @@ pub fn verify(args: VerifyArgs<'_>) -> Result<()> {
         command::source_rows_proof(&rows)? == report.source_rows,
         "freeze source rows mismatch"
     );
-    ensure!(
-        projection::verify_already_applied(
-            core,
-            &rows,
-            &approval,
-            &report.backup_set_sha256,
-            &report.destination_manifest_sha256
-        )?
-        .is_some(),
-        "projection marker missing"
-    );
+    projection::verify_immutable_marker_for_freeze(
+        core,
+        &rows,
+        &approval,
+        &report.backup_set_sha256,
+        &report.destination_manifest_sha256,
+    )?;
     let marker = core.query_row(
         "SELECT operation_id,approval_sha256,backup_set_sha256,source_core_sha256,\
          source_fingerprint_sha256,subject_lineage_sha256,heartbeat_lineage_sha256,\

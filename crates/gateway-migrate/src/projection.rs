@@ -104,6 +104,38 @@ pub fn verify_already_applied(
     }))
 }
 
+/// Post-QC verification binds the initial target fingerprint through the persisted marker,
+/// not a recomputation from heartbeat fields that legitimately advanced while QC ran.
+pub fn verify_immutable_marker_for_freeze(
+    conn: &Connection,
+    rows: &[SourceRow],
+    approval: &Approval,
+    backup_set_sha256: &str,
+    destination_manifest_sha256: &str,
+) -> Result<()> {
+    ensure!(
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? == 56,
+        "core schema must be 56"
+    );
+    let existing =
+        read_marker(conn, &approval.operation_id)?.context("projection marker missing")?;
+    let heartbeat_targets = build_heartbeat_targets(conn, rows, approval)?;
+    let heartbeat = heartbeat_proof(conn, &heartbeat_targets, &BTreeSet::new())?;
+    let expected = Marker {
+        operation_id: approval.operation_id.clone(),
+        approval_sha256: approval.sha256()?,
+        backup_set_sha256: backup_set_sha256.into(),
+        source_core_sha256: approval.source_core_sha256.clone(),
+        source_fingerprint_sha256: all_source_fingerprint_hash(rows)?,
+        subject_lineage_sha256: subject_lineage(conn)?,
+        heartbeat_lineage_sha256: heartbeat.lineage_sha256,
+        initial_projection_sha256: existing.initial_projection_sha256.clone(),
+        destination_manifest_sha256: destination_manifest_sha256.into(),
+    };
+    ensure!(existing == expected, "projection marker mismatch");
+    Ok(())
+}
+
 pub fn project(
     conn: &mut Connection,
     rows: &[SourceRow],
