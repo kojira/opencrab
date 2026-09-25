@@ -259,7 +259,7 @@ fn expected_keys(conn: &Connection, plans: &[&InstancePlan], identities: &[Ident
     let mut out = Vec::new();
     for plan in plans {
         validate_instance_progress(conn, plan)?;
-        let expected = instance_semantic(plan);
+        let expected = instance_semantic(plan)?;
         out.push(expected_key(conn, "instances", vec![plan.instance_id.clone()], expected)?);
     }
     for item in identities {
@@ -378,7 +378,7 @@ fn validate_current_against_artifact(conn: &Connection, artifact: &PartialRecord
 }
 
 fn apply_instance(tx: &Transaction<'_>, plan: &InstancePlan, key: &[u8; 32]) -> Result<(bool, String, String)> {
-    let expected = instance_semantic(plan);
+    let expected = instance_semantic(plan)?;
     let expected_hash = row_hash("instances", &[plan.instance_id.clone()], &expected)?;
     if let Some(existing) = current_semantic(tx, "instances", &[plan.instance_id.clone()])? {
         ensure!(existing == expected, "instance conflict");
@@ -452,8 +452,14 @@ fn validate_instance_progress(conn: &Connection, plan: &InstancePlan) -> Result<
     Ok(())
 }
 
-fn instance_semantic(plan: &InstancePlan) -> Value {
-    json!({"agent_id":plan.agent_id,"addresses":plan.addresses,"config_b64":plan.config_b64,"enabled":plan.enabled,"instance_id":plan.instance_id,"revision":plan.revision,"subject_id":plan.subject_id})
+fn instance_semantic(plan: &InstancePlan) -> Result<Value> {
+    if plan.destination.kind_id == "web" {
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&plan.config_b64)?;
+        let config: Value = serde_json::from_slice(&decoded)?;
+        let author_id = config.get("author_id").and_then(Value::as_str).filter(|id| !id.is_empty()).context("Web core config author_id missing")?;
+        return Ok(json!({"agent_id":plan.agent_id,"author_id":author_id,"enabled":plan.enabled,"instance_id":plan.instance_id,"revision":plan.revision}));
+    }
+    Ok(json!({"agent_id":plan.agent_id,"addresses":plan.addresses,"config_b64":plan.config_b64,"enabled":plan.enabled,"instance_id":plan.instance_id,"revision":plan.revision,"subject_id":plan.subject_id}))
 }
 fn identity_semantic(item: &IdentityPlan) -> Value {
     json!({"external_id":item.external_id,"instance_id":item.instance_id,"relationship_id":item.relationship_id,"relationship_revision":null,"role":item.role})
@@ -466,7 +472,7 @@ fn current_semantic(conn: &Connection, table: &str, key: &[String]) -> Result<Op
  "instances"=>{let common=conn.query_row("SELECT agent_id,subject_id,config_b64,addresses_json,enabled,core_revision FROM instances WHERE instance_id=?1",[&key[0]],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,bool>(4)?,r.get::<_,Option<i64>>(5)?))).optional();match common{Ok(Some((agent,subject,config,addresses,enabled,core_revision)))=>Ok(Some(json!({"agent_id":agent,"addresses":serde_json::from_str::<Vec<String>>(&addresses)?,"config_b64":config,"enabled":enabled,"instance_id":key[0],"revision":core_revision.unwrap_or(1),"subject_id":subject}))),Ok(None)=>Ok(None),Err(_)=>{let web=conn.query_row("SELECT agent_id,revision,enabled,author_id FROM instances WHERE instance_id=?1",[&key[0]],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,bool>(2)?,r.get::<_,String>(3)?))).optional()?;web.map(|(agent,revision,enabled,author_id)|{
     let roles=conn.prepare("SELECT role FROM identity_projections WHERE instance_id=?1 AND external_id='bearer'")?.query_map([&key[0]],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
     ensure!(roles.len()==1,"Web bearer caller role must be unique");
-    Ok(json!({"agent_id":agent,"author_id":author_id,"caller_role":roles[0],"enabled":enabled,"instance_id":key[0],"revision":revision}))
+    Ok(json!({"agent_id":agent,"author_id":author_id,"enabled":enabled,"instance_id":key[0],"revision":revision}))
 }).transpose()}}},
  "identity_projections"=>Ok(conn.query_row("SELECT relationship_id,relationship_revision FROM identity_projections WHERE instance_id=?1 AND role=?2 AND external_id=?3",params![key[0],key[1],key[2]],|r|Ok(json!({"external_id":key[2],"instance_id":key[0],"relationship_id":r.get::<_,Option<String>>(0)?,"relationship_revision":r.get::<_,Option<i64>>(1)?,"role":key[1]}))).optional()?),
  "endpoints"=>Ok(conn.query_row("SELECT guild_id,readable,writable,policy_json FROM endpoints WHERE instance_id=?1 AND channel_id=?2",params![key[0],key[1]],|r|Ok(json!({"channel_id":key[1],"guild_id":r.get::<_,Option<String>>(0)?,"instance_id":key[0],"policy_json":r.get::<_,String>(3)?,"readable":r.get::<_,bool>(1)?,"writable":r.get::<_,bool>(2)?}))).optional()?), _=>bail!("unsupported expected table")}
@@ -645,7 +651,7 @@ mod s8_review_red_tests {
         let conn = Connection::open(&db).unwrap();
         let row = current_semantic(&conn, "instances", &["web-i".into()]).unwrap().unwrap();
         assert_eq!(row["author_id"], "author-42");
-        assert_eq!(row["caller_role"], "trusted_user");
+        assert_eq!(opencrab_web_gateway::store::WebStore::open(&db).unwrap().caller_role("web-i").unwrap(), "trusted_user");
     }
 
     #[test]
