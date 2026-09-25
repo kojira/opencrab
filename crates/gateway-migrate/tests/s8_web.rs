@@ -1,9 +1,9 @@
 use base64::Engine as _;
 use opencrab_gateway_migrate::{
-    canonical,
+    backup, canonical,
     command::{self, ImportArgs, ProjectArgs},
     destination::Inputs,
-    manifest::{Approval, CredentialSource, Destination, IdentityDisposition, IdentityEdge},
+    manifest::{Approval, Destination, IdentityDisposition, IdentityEdge},
     source,
 };
 use rusqlite::{params, Connection};
@@ -27,21 +27,15 @@ fn d_1006_web_01_credential_free_owner_preserves_unrelated_source_identity() {
     seed_web_core(&core_path);
     let store = opencrab_web_gateway::store::WebStore::open(&web_path).unwrap();
     store
-        .upsert(
-            INSTANCE_ID,
-            "agent-web",
-            1,
-            "web-author",
-            None,
-            true,
-            &WEB_KEY,
-        )
+        .upsert(INSTANCE_ID, "agent-web", 1, "web-author", true)
         .unwrap();
     drop(store);
     Connection::open(&web_path).unwrap().execute(
         "INSERT INTO identity_projections(instance_id,role,external_id) VALUES (?1,'owner','web-local')",
         [INSTANCE_ID],
     ).unwrap();
+    let before_core = backup::logical_sha256(&core_path).unwrap();
+    let before_web = backup::logical_sha256(&web_path).unwrap();
 
     let rows = source::validate(&source::open_read_only(&core_path).unwrap()).unwrap();
     let row = rows
@@ -96,6 +90,26 @@ fn d_1006_web_01_credential_free_owner_preserves_unrelated_source_identity() {
     };
     let report = command::run_import(import_args())
         .expect("existing Web instance must accept an approved identity without a Web credential");
+    assert_eq!(
+        report.backups.len(),
+        2,
+        "core and Web must be backed up as one set"
+    );
+    backup::verify_record_set(&backup_dir, &report.backups).unwrap();
+    let restored_core = temp.path().join("restored-core.db");
+    let restored_web = temp.path().join("restored-web.db");
+    fs::copy(
+        backup::database_path(&backup_dir, "core", "core"),
+        &restored_core,
+    )
+    .unwrap();
+    fs::copy(
+        backup::database_path(&backup_dir, "web", "web-primary"),
+        &restored_web,
+    )
+    .unwrap();
+    assert_eq!(backup::logical_sha256(&restored_core).unwrap(), before_core);
+    assert_eq!(backup::logical_sha256(&restored_web).unwrap(), before_web);
     let store = opencrab_web_gateway::store::WebStore::open(&web_path).unwrap();
     let owner_marker: i64 = Connection::open(&web_path).unwrap().query_row(
         "SELECT COUNT(*) FROM identity_projections WHERE instance_id=?1 AND role='owner' AND external_id='web-local'",
@@ -140,6 +154,7 @@ fn d_1006_web_01_credential_free_owner_preserves_unrelated_source_identity() {
         "rerun must not invent a Web credential"
     );
     assert_eq!(report.destinations[0]["counts"]["identity_projections"], 1);
+    assert_eq!(report.destinations[0]["counts"]["credentials"], 0);
 }
 
 #[test]
@@ -189,7 +204,6 @@ fn assert_web_mapping(
     let approval_path = temp.path().join("approval.json");
     let report_path = temp.path().join("report.json");
     let backup_dir = temp.path().join("backups");
-    let key_path = temp.path().join("web.key");
     seed_web_core(&core_path);
     let conn = Connection::open(&core_path).unwrap();
     conn.execute("DELETE FROM trusted_users", []).unwrap();
@@ -205,31 +219,26 @@ fn assert_web_mapping(
     drop(conn);
     let store = opencrab_web_gateway::store::WebStore::open(&web_path).unwrap();
     store
-        .upsert(
-            INSTANCE_ID,
-            "agent-web",
-            1,
-            "web-author",
-            Some(CREDENTIAL),
-            true,
-            &WEB_KEY,
-        )
+        .upsert(INSTANCE_ID, "agent-web", 1, "web-author", true)
         .unwrap();
-    store.set_caller_role(INSTANCE_ID, bearer_role).unwrap();
-    assert_eq!(store.caller_role(INSTANCE_ID).unwrap(), bearer_role);
+    store.set_local_owner(INSTANCE_ID).unwrap();
     drop(store);
-    Connection::open(&web_path).unwrap().execute(
-        "INSERT INTO identity_projections(instance_id,role,external_id) VALUES (?1,'owner','web-local')",
-        [INSTANCE_ID],
-    ).unwrap();
+    let conn = Connection::open(&web_path).unwrap();
+    let old_envelope =
+        opencrab_web_gateway::secret_store::encrypt(CREDENTIAL.as_bytes(), &WEB_KEY).unwrap();
+    conn.execute(
+        "UPDATE instances SET credential_envelope=?2 WHERE instance_id=?1",
+        params![INSTANCE_ID, old_envelope],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO identity_projections(instance_id,role,external_id) VALUES (?1,?2,'bearer')",
+        params![INSTANCE_ID, bearer_role],
+    )
+    .unwrap();
+    drop(conn);
     let before_web = fs::read(&web_path).unwrap();
     let before_core = fs::read(&core_path).unwrap();
-    write_secure(
-        &key_path,
-        base64::engine::general_purpose::STANDARD
-            .encode(WEB_KEY)
-            .as_bytes(),
-    );
     let rows = source::validate(&source::open_read_only(&core_path).unwrap()).unwrap();
     let mut dispositions = rows
         .iter()
@@ -258,10 +267,7 @@ fn assert_web_mapping(
         identity_dispositions: dispositions,
         channel_edges: vec![],
         watch_edges: vec![],
-        credential_sources: vec![CredentialSource {
-            instance_id: INSTANCE_ID.into(),
-            source: format!("existing-destination:web:{INSTANCE_ID}"),
-        }],
+        credential_sources: vec![],
     };
     write_secure(&approval_path, &canonical::bytes(&approval).unwrap());
     let outcome = command::run_import(ImportArgs {
@@ -271,13 +277,24 @@ fn assert_web_mapping(
         report_path: &report_path,
         inputs: Inputs {
             paths: BTreeMap::from([(("web".into(), "web-primary".into()), web_path.clone())]),
-            master_keys: BTreeMap::from([("web".into(), key_path)]),
+            master_keys: BTreeMap::new(),
             credential_files: BTreeMap::new(),
         },
     });
     if should_import {
         outcome.expect("explicit Web source rows are inert and must not change Owner admission");
         let conn = Connection::open(&web_path).unwrap();
+        let envelope: String = conn
+            .query_row(
+                "SELECT credential_envelope FROM instances WHERE instance_id=?1",
+                [INSTANCE_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            envelope, old_envelope,
+            "existing inert S5 credential bytes must remain unchanged"
+        );
         for (user_id, permission) in source_users {
             let role = match *permission {
                 "owner" => "owner",

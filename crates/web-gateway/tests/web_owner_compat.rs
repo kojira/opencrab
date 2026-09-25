@@ -1,5 +1,5 @@
 use opencrab_web_gateway::{
-    owner::{run, OwnerConfig, MASTER_KEY_ENV},
+    owner::{run, OwnerConfig},
     store::WebStore,
 };
 use std::time::Duration;
@@ -19,9 +19,7 @@ async fn d_1006_web_01_existing_instance_starts_without_bearer_or_web_master_key
             "agent-web",
             1,
             "web-author",
-            None,
             true,
-            &[7; 32],
         )
         .unwrap();
     drop(store);
@@ -30,7 +28,7 @@ async fn d_1006_web_01_existing_instance_starts_without_bearer_or_web_master_key
         ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
     ).unwrap();
     assert!(
-        std::env::var(MASTER_KEY_ENV).is_err(),
+        std::env::var("OPENCRAB_WEB_MASTER_KEY").is_err(),
         "fixture must have no Web master key"
     );
     let config = OwnerConfig {

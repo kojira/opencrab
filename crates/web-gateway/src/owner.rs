@@ -2,15 +2,12 @@
 
 use crate::store::WebStore;
 use crate::v3::client::InstanceClient;
-use crate::v3::http::{router, HttpState, WebAdmission, WebAuth};
+use crate::v3::http::{router, HttpState};
 use crate::v3::wire::config_digest;
-use crate::v3::wire::SaidCaller;
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-
-pub const MASTER_KEY_ENV: &str = "OPENCRAB_WEB_MASTER_KEY";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,38 +36,20 @@ pub async fn run(config: OwnerConfig) -> Result<()> {
         &config.database_path.with_extension("lock"),
     )
     .context("another Web owner owns this store")?;
-    let encoded = std::env::var(MASTER_KEY_ENV).context("web master key required")?;
-    std::env::remove_var(MASTER_KEY_ENV);
-    let key = crate::secret_store::parse_master_key(&encoded)?;
-    let mut raw = [0_u8; 32];
-    raw.copy_from_slice(&key[..]);
     let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));
-    let (bind, socket, rows, auth) = {
+    let (bind, socket, rows) = {
         let locked = store
             .lock()
             .map_err(|_| anyhow::anyhow!("store unavailable"))?;
         let (bind, socket) = locked.settings()?;
         let rows = locked.list_enabled()?;
-        let mut auth = WebAuth::default();
         for row in &rows {
-            let credential = locked.decrypt_credential(&row.instance_id, &raw)?;
-            let caller = match locked.caller_role(&row.instance_id)?.as_str() {
-                "owner" => SaidCaller::Owner,
-                "trusted_user" => SaidCaller::TrustedUser,
-                _ => anyhow::bail!("unsupported persisted caller role"),
-            };
-            auth.insert(
-                &credential,
-                WebAdmission {
-                    instance_id: row.instance_id.clone(),
-                    caller,
-                },
-            );
+            locked.require_local_owner(&row.instance_id)?;
         }
-        (bind, socket, rows, auth)
+        (bind, socket, rows)
     };
     let admin_scope = Arc::new(config.admin_instance_ids.iter().cloned().collect());
-    let _admin = crate::admin::spawn(config.admin_socket, admin_scope, store, Arc::new(raw));
+    let _admin = crate::admin::spawn(config.admin_socket, admin_scope, store);
     let mut instances = Vec::new();
     let mut agent_clients = std::collections::HashMap::new();
     for row in rows {
@@ -96,7 +75,6 @@ pub async fn run(config: OwnerConfig) -> Result<()> {
         router(HttpState {
             instances,
             agent_clients,
-            auth,
         }),
     )
     .await?;
@@ -106,8 +84,6 @@ pub async fn run(config: OwnerConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
-
     #[test]
     fn s5_web_owner_config_rejects_core_and_legacy_database_paths() {
         for forbidden in ["core_database_path", "legacy_database_path"] {
@@ -136,8 +112,6 @@ mod tests {
             admin_socket: admin_socket.clone(),
             admin_instance_ids: Vec::new(),
         };
-        let key = base64::engine::general_purpose::STANDARD.encode([7_u8; 32]);
-        std::env::set_var(MASTER_KEY_ENV, &key);
         let owner = tokio::spawn(run(config.clone()));
         for _ in 0..100 {
             if admin_socket.exists() || owner.is_finished() {
@@ -147,11 +121,7 @@ mod tests {
         }
         assert!(admin_socket.exists());
         assert!(!owner.is_finished());
-        assert!(std::env::var(MASTER_KEY_ENV).is_err());
-
-        std::env::set_var(MASTER_KEY_ENV, &key);
         let collision = run(config).await.unwrap_err();
-        std::env::remove_var(MASTER_KEY_ENV);
         assert!(collision.to_string().contains("another Web owner"));
         owner.abort();
         let _ = owner.await;

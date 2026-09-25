@@ -1,4 +1,5 @@
 fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approval, inputs: &Inputs) -> Result<Vec<InstancePlan>> {
+    ensure!(inputs.credential_files.is_empty(), "Web credential files are not supported");
     let mut statement = core.prepare(
         "SELECT i.instance_id,i.kind_id,a.agent_id,i.subject_id,i.revision,i.enabled,i.config_b64,i.config_digest
          FROM gate_instances i JOIN agents a ON a.subject_id=i.subject_id
@@ -42,9 +43,17 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
             .query_map([&instance_id], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let destination_path = inputs.paths.get(&(kind.clone(), destination.path_id.clone())).context("missing destination")?;
-        let key_path = inputs.master_keys.get(&kind).context("missing master key")?;
-        let key = read_master_key(key_path, &kind)?;
-        let (credential, source) = select_credential(rows, approval, inputs, destination_path, &kind, &instance_id, &agent_id, &key)?;
+        let (credential, source) = if kind == "web" {
+            ensure!(
+                !approval.credential_sources.iter().any(|item| item.instance_id == instance_id),
+                "Web credential is not part of historical admission"
+            );
+            (Zeroizing::new(Vec::new()), String::new())
+        } else {
+            let key_path = inputs.master_keys.get(&kind).context("missing master key")?;
+            let key = read_master_key(key_path, &kind)?;
+            select_credential(rows, approval, destination_path, &kind, &instance_id, &agent_id, &key)?
+        };
         plans.push(InstancePlan {
             destination,
             instance_id,
@@ -63,7 +72,7 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
     Ok(plans)
 }
 
-fn select_credential(rows: &[SourceRow], approval: &Approval, inputs: &Inputs, path: &Path, kind: &str, instance_id: &str, agent_id: &str, key: &[u8; 32]) -> Result<(Zeroizing<Vec<u8>>, String)> {
+fn select_credential(rows: &[SourceRow], approval: &Approval, path: &Path, kind: &str, instance_id: &str, agent_id: &str, key: &[u8; 32]) -> Result<(Zeroizing<Vec<u8>>, String)> {
     let descriptor = approval.credential_sources.iter().find(|item| item.instance_id == instance_id).context("credential source missing")?;
     let legacy = match kind {
         "discord" => rows
@@ -76,7 +85,6 @@ fn select_credential(rows: &[SourceRow], approval: &Approval, inputs: &Inputs, p
             .find(|row| row.table == "agent_nostr_config" && row.text("agent_id").ok() == Some(agent_id))
             .map(|row| row.text("secret_key").map(|value| Zeroizing::new(value.as_bytes().to_vec())))
             .transpose()?,
-        "web" => inputs.credential_files.get(instance_id).map(|file| read_secret_file(file)).transpose()?,
         _ => None,
     }
     .filter(|value| !value.is_empty());
@@ -88,7 +96,6 @@ fn select_credential(rows: &[SourceRow], approval: &Approval, inputs: &Inputs, p
     let legacy_source = match kind {
         "discord" => format!("legacy-core:agent_discord_config:{agent_id}"),
         "nostr" => format!("legacy-core:agent_nostr_config:{agent_id}"),
-        "web" => format!("operator-file:{instance_id}"),
         _ => unreachable!(),
     };
     let existing_source = format!("existing-destination:{kind}:{instance_id}");
@@ -142,7 +149,11 @@ fn build_identity_plans(rows: &[SourceRow], approval: &Approval, plans: &[Instan
                         .find(|plan| &plan.instance_id == instance_id && &plan.destination.kind_id == kind_id)
                         .context("identity target instance missing")?;
                     ensure!(plan.agent_id == row.text("agent_id")?, "identity agent mismatch");
-                    prove_access_config(plan, row.text("user_id")?, role)?;
+                    if kind_id == "web" {
+                        ensure!(row.text("user_id")? != "web-local", "Web source identity conflicts with local Owner policy");
+                    } else {
+                        prove_access_config(plan, row.text("user_id")?, role)?;
+                    }
                     output.entry((plan.destination.kind_id.clone(), plan.destination.path_id.clone())).or_default().push(IdentityPlan {
                         instance_id: instance_id.clone(),
                         role: role.into(),
@@ -178,7 +189,6 @@ fn prove_access_config(plan: &InstancePlan, external_id: &str, role: &str) -> Re
                 _ => cfg.access.trusted_users.iter().any(|v| v == external_id),
             }
         }
-        "web" => matches!(role, "owner" | "trusted_user"),
         _ => false,
     };
     ensure!(matches, "identity is not represented by gateway config");

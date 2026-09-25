@@ -8,10 +8,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use opencrab_web_gateway::v3::client::InstanceClient;
-use opencrab_web_gateway::v3::http::{router, HttpState, WebAdmission, WebAuth};
+use opencrab_web_gateway::v3::http::{router, HttpState};
 use opencrab_web_gateway::v3::wire::{
     config_digest, hello_frame, ok_frame, parse_frame_bytes, read_frame, write_json, CoreMsg,
-    FrameError, SaidCaller, MAX_FRAME,
+    FrameError, MAX_FRAME,
 };
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -205,7 +205,6 @@ async fn rust_unit_conversation_status_is_owned_by_web_gateway() {
     let app = router(HttpState {
         instances: vec![client],
         agent_clients: std::collections::HashMap::new(),
-        auth: Default::default(),
     });
 
     let ready = app
@@ -240,7 +239,6 @@ async fn d_1006_web_01_existing_routes_do_not_require_bearer() {
     let app = router(HttpState {
         instances: Vec::new(),
         agent_clients: std::collections::HashMap::new(),
-        auth: Default::default(),
     });
     for (method, uri, body, expected) in [
         (
@@ -296,23 +294,13 @@ async fn d_1006_web_01_http_message_keeps_historical_owner_frame() {
     hello_and_bind(&mut mock).await;
     let client = connect.await.unwrap();
     wait_bound(&client).await;
-    let mut auth = WebAuth::default();
-    auth.insert(
-        b"temporary-test-bearer",
-        WebAdmission {
-            instance_id: INSTANCE.into(),
-            caller: SaidCaller::TrustedUser,
-        },
-    );
     let app = router(HttpState {
         instances: vec![client],
         agent_clients: std::collections::HashMap::new(),
-        auth,
     });
     let request = Request::builder()
         .method("POST")
         .uri(format!("/api/web-conversations/{ADDRESS}/messages"))
-        .header("Authorization", "Bearer temporary-test-bearer")
         .header("content-type", "application/json")
         .body(Body::from(post_body()))
         .unwrap();
@@ -353,7 +341,6 @@ async fn rust_unit_created_binding_is_provisioning_before_bind() {
     let app = router(HttpState {
         instances: vec![client],
         agent_clients: std::collections::HashMap::new(),
-        auth: Default::default(),
     });
     let response = app
         .oneshot(
@@ -557,7 +544,6 @@ async fn rust_unit_http_post_202_not_admitted_busy_and_old_routes_404() {
     let app = router(HttpState {
         instances: vec![client.clone()],
         agent_clients: std::collections::HashMap::new(),
-        auth: Default::default(),
     });
 
     let req_null = Request::builder()
@@ -671,7 +657,6 @@ async fn rust_unit_disconnect_and_unacked_503() {
     let app = router(HttpState {
         instances: vec![client.clone()],
         agent_clients: std::collections::HashMap::new(),
-        auth: Default::default(),
     });
     let res = app
         .clone()

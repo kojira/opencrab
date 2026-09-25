@@ -37,17 +37,11 @@ pub fn spawn(
     socket: PathBuf,
     scope: AdminScope,
     store: Arc<Mutex<WebStore>>,
-    key: Arc<[u8; 32]>,
 ) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(async move { serve(&socket, scope, store, key).await })
+    tokio::spawn(async move { serve(&socket, scope, store).await })
 }
 
-pub async fn serve(
-    socket: &Path,
-    scope: AdminScope,
-    store: Arc<Mutex<WebStore>>,
-    key: Arc<[u8; 32]>,
-) -> Result<()> {
+pub async fn serve(socket: &Path, scope: AdminScope, store: Arc<Mutex<WebStore>>) -> Result<()> {
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -63,24 +57,18 @@ pub async fn serve(
         let (stream, _) = listener.accept().await?;
         let scope = scope.clone();
         let store = store.clone();
-        let key = key.clone();
         tokio::spawn(async move {
-            let _ = handle(stream, scope, store, key).await;
+            let _ = handle(stream, scope, store).await;
         });
     }
 }
 
-async fn handle(
-    stream: UnixStream,
-    scope: AdminScope,
-    store: Arc<Mutex<WebStore>>,
-    key: Arc<[u8; 32]>,
-) -> Result<()> {
+async fn handle(stream: UnixStream, scope: AdminScope, store: Arc<Mutex<WebStore>>) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => apply(request, &scope, &store, &key),
+            Ok(request) => apply(request, &scope, &store),
             Err(_) => json!({"id":"","ok":false,"error":"bad_request"}),
         };
         write.write_all(format!("{response}\n").as_bytes()).await?;
@@ -92,37 +80,46 @@ fn apply(
     request: Request,
     scope: &std::collections::BTreeSet<String>,
     store: &Mutex<WebStore>,
-    key: &[u8; 32],
 ) -> Value {
-    let result =
-        (|| -> Result<Value> {
-            anyhow::ensure!(
-                request.scope_instance_id == request.instance_id
-                    && scope.contains(&request.instance_id),
-                "scope_denied"
-            );
-            let store = store
-                .lock()
-                .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
-            match request.op.as_str(){
-            "get"=>Ok(store.get(&request.instance_id)?.map_or(Value::Null,|row|json!({
-                "instance_id":row.instance_id,"agent_id":row.agent_id,"revision":row.revision,
-                "author_id":row.author_id,"enabled":row.enabled,
-                "credential_configured":row.credential_envelope.is_some()
-            }))),
-            "upsert"=>{store.upsert(&request.instance_id,
-                request.agent_id.as_deref().context("agent_id required")?,
-                request.revision.context("revision required")?,
-                request.author_id.as_deref().context("author_id required")?,
-                request.credential.as_deref(),request.enabled.context("enabled required")?,key)?;
-                store.set_caller_role(
+    let result = (|| -> Result<Value> {
+        anyhow::ensure!(
+            request.scope_instance_id == request.instance_id
+                && scope.contains(&request.instance_id),
+            "scope_denied"
+        );
+        let store = store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
+        match request.op.as_str() {
+            "get" => Ok(store.get(&request.instance_id)?.map_or(Value::Null, |row| {
+                json!({
+                    "instance_id":row.instance_id,"agent_id":row.agent_id,"revision":row.revision,
+                    "author_id":row.author_id,"enabled":row.enabled,
+                    "credential_configured":row.credential_envelope.is_some()
+                })
+            })),
+            "upsert" => {
+                anyhow::ensure!(request.credential.is_none(), "Web credential not supported");
+                anyhow::ensure!(
+                    request
+                        .caller_role
+                        .as_deref()
+                        .is_none_or(|role| role == "owner"),
+                    "Web caller must be Owner"
+                );
+                store.upsert(
                     &request.instance_id,
-                    request.caller_role.as_deref().context("caller_role required")?,
+                    request.agent_id.as_deref().context("agent_id required")?,
+                    request.revision.context("revision required")?,
+                    request.author_id.as_deref().context("author_id required")?,
+                    request.enabled.context("enabled required")?,
                 )?;
-                Ok(json!({"saved":true}))},
-            _=>anyhow::bail!("unknown_operation"),
+                store.set_local_owner(&request.instance_id)?;
+                Ok(json!({"saved":true}))
+            }
+            _ => anyhow::bail!("unknown_operation"),
         }
-        })();
+    })();
     match result {
         Ok(value) => json!({"id":request.id,"ok":true,"result":value}),
         Err(error) => json!({"id":request.id,"ok":false,"error":error.to_string()}),
@@ -160,7 +157,7 @@ mod tests {
         let scope = Arc::new(std::collections::BTreeSet::from([
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
         ]));
-        let task = spawn(socket.clone(), scope, store, Arc::new([3; 32]));
+        let task = spawn(socket.clone(), scope, store);
         while !socket.exists() {
             tokio::task::yield_now().await;
         }
@@ -197,7 +194,7 @@ mod tests {
             let mut stream = UnixStream::connect(&socket).await.unwrap();
             let request = json!({"id":id,"op":"upsert","scope_instance_id":instance_id,
                 "instance_id":instance_id,"agent_id":"a","revision":1,"author_id":"author",
-                "credential":"secret-web","caller_role":"owner","enabled":true});
+                "caller_role":"owner","enabled":true});
             stream
                 .write_all(format!("{request}\n").as_bytes())
                 .await
@@ -207,8 +204,10 @@ mod tests {
             assert!(line.contains("\"ok\":true"));
             assert!(!line.contains("secret-web"));
         }
-        let row = inspect.lock().unwrap().get(instance_id).unwrap().unwrap();
-        assert!(!row.credential_envelope.unwrap().contains("secret-web"));
+        let locked = inspect.lock().unwrap();
+        let row = locked.get(instance_id).unwrap().unwrap();
+        assert!(row.credential_envelope.is_none());
+        locked.require_local_owner(instance_id).unwrap();
         task.abort();
     }
 }

@@ -130,7 +130,9 @@ pub fn import(
     let mut outputs = Vec::new();
     for destination in &approval.destinations {
         let path = inputs.paths.get(&(destination.kind_id.clone(), destination.path_id.clone())).unwrap();
-        let key = read_master_key(inputs.master_keys.get(&destination.kind_id).context("missing master key")?, &destination.kind_id)?;
+        let key = (destination.kind_id != "web")
+            .then(|| read_master_key(inputs.master_keys.get(&destination.kind_id).context("missing master key")?, &destination.kind_id))
+            .transpose()?;
         let destination_plans = plans.iter().filter(|plan| plan.destination == *destination).collect::<Vec<_>>();
         let destination_identities = identities.get(&(destination.kind_id.clone(), destination.path_id.clone())).cloned().unwrap_or_default();
         let destination_endpoints = endpoints.get(&(destination.kind_id.clone(), destination.path_id.clone())).cloned().unwrap_or_default();
@@ -150,13 +152,15 @@ pub fn import(
         let mut accepted = Vec::new();
         let mut credentials = Vec::new();
         for plan in destination_plans {
-            let outcome = apply_instance(&tx, plan, &key)?;
+            let outcome = apply_instance(&tx, plan, key.as_deref())?;
             if outcome.0 {
                 inserted.push(key_value("instances", vec![plan.instance_id.clone()], outcome.1.clone())?);
             } else {
                 accepted.push(key_value("instances", vec![plan.instance_id.clone()], outcome.1.clone())?);
             }
-            credentials.push(json!({"instance_sha256":canonical::hash(&plan.instance_id)?,"source":credential_source_category(&plan.credential_source, &destination.kind_id)?,"envelope_sha256":outcome.2,"credential_configured":true}));
+            if let Some(envelope_sha256) = outcome.2 {
+                credentials.push(json!({"instance_sha256":canonical::hash(&plan.instance_id)?,"source":credential_source_category(&plan.credential_source, &destination.kind_id)?,"envelope_sha256":envelope_sha256,"credential_configured":true}));
+            }
         }
         for identity in &destination_identities {
             let (was_inserted, hash) = apply_identity(&tx, identity)?;
@@ -195,10 +199,8 @@ fn credential_source_category(source: &str, kind: &str) -> Result<&'static str> 
     match kind {
         "discord" if source.starts_with("legacy-core:agent_discord_config:") => Ok("legacy-core:agent_discord_config"),
         "nostr" if source.starts_with("legacy-core:agent_nostr_config:") => Ok("legacy-core:agent_nostr_config"),
-        "web" if source.starts_with("operator-file:") => Ok("operator-file"),
         "discord" if source.starts_with("existing-destination:discord:") => Ok("existing-destination:discord"),
         "nostr" if source.starts_with("existing-destination:nostr:") => Ok("existing-destination:nostr"),
-        "web" if source.starts_with("existing-destination:web:") => Ok("existing-destination:web"),
         _ => anyhow::bail!("credential source category mismatch"),
     }
 }
@@ -377,36 +379,29 @@ fn validate_current_against_artifact(conn: &Connection, artifact: &PartialRecord
     Ok(())
 }
 
-fn apply_instance(tx: &Transaction<'_>, plan: &InstancePlan, key: &[u8; 32]) -> Result<(bool, String, String)> {
+fn apply_instance(tx: &Transaction<'_>, plan: &InstancePlan, key: Option<&[u8; 32]>) -> Result<(bool, String, Option<String>)> {
     let expected = instance_semantic(plan)?;
     let expected_hash = row_hash("instances", &[plan.instance_id.clone()], &expected)?;
     if let Some(existing) = current_semantic(tx, "instances", &[plan.instance_id.clone()])? {
         ensure!(existing == expected, "instance conflict");
         validate_instance_progress(tx, plan)?;
-        let existing_envelope: Option<String> = tx.query_row("SELECT credential_envelope FROM instances WHERE instance_id=?1", [&plan.instance_id], |r| r.get(0))?;
-        let envelope = match existing_envelope {
-            Some(envelope) => {
-                ensure!(decrypt(&plan.destination.kind_id, &envelope, key)?.as_slice() == plan.credential.as_slice(), "credential conflict");
-                envelope
-            }
-            None if plan.destination.kind_id == "web" => {
-                let envelope = encrypt("web", &plan.credential, key)?;
-                tx.execute("UPDATE instances SET credential_envelope=?2 WHERE instance_id=?1", params![plan.instance_id, envelope])?;
-                envelope
-            }
-            None => bail!("credential missing"),
-        };
-        return Ok((false, expected_hash, canonical::hex(&Sha256::digest(envelope.as_bytes()))));
+        if plan.destination.kind_id == "web" {
+            return Ok((false, expected_hash, None));
+        }
+        let envelope: String = tx.query_row("SELECT credential_envelope FROM instances WHERE instance_id=?1", [&plan.instance_id], |r| r.get(0))?;
+        ensure!(decrypt(&plan.destination.kind_id, &envelope, key.context("missing destination key")?)?.as_slice() == plan.credential.as_slice(), "credential conflict");
+        return Ok((false, expected_hash, Some(canonical::hex(&Sha256::digest(envelope.as_bytes())))));
+
     }
     ensure!(plan.destination.kind_id != "web", "Web instance must already exist");
-    let envelope = encrypt(&plan.destination.kind_id, &plan.credential, key)?;
+    let envelope = encrypt(&plan.destination.kind_id, &plan.credential, key.context("missing destination key")?)?;
     match plan.destination.kind_id.as_str() {
         "discord" | "nostr" => {
             tx.execute("INSERT INTO instances(instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,subject_grant_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,core_digest,binding_inventory_json,process_id,process_nonce,failure_count,retry_at_unix_ms,last_exit,updated_at) VALUES (?1,?2,?3,?4,?5,?6,NULL,?7,1,NULL,'pending',NULL,NULL,'[]',NULL,NULL,0,NULL,NULL,?8)",params![plan.instance_id,plan.agent_id,plan.subject_id,plan.config_b64,serde_json::to_string(&plan.addresses)?,envelope,plan.enabled,plan.created_at])?;
         }
         _ => bail!("unknown destination"),
     }
-    Ok((true, expected_hash, canonical::hex(&Sha256::digest(envelope.as_bytes()))))
+    Ok((true, expected_hash, Some(canonical::hex(&Sha256::digest(envelope.as_bytes())))))
 }
 fn apply_identity(tx: &Transaction<'_>, item: &IdentityPlan) -> Result<(bool, String)> {
     let expected = identity_semantic(item);
@@ -481,8 +476,8 @@ fn endpoint_semantic(item: &EndpointPlan) -> Value {
 fn current_semantic(conn: &Connection, table: &str, key: &[String]) -> Result<Option<Value>> {
     match table{
  "instances"=>{let common=conn.query_row("SELECT agent_id,subject_id,config_b64,addresses_json,enabled,core_revision FROM instances WHERE instance_id=?1",[&key[0]],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,bool>(4)?,r.get::<_,Option<i64>>(5)?))).optional();match common{Ok(Some((agent,subject,config,addresses,enabled,core_revision)))=>Ok(Some(json!({"agent_id":agent,"addresses":serde_json::from_str::<Vec<String>>(&addresses)?,"config_b64":config,"enabled":enabled,"instance_id":key[0],"revision":core_revision.unwrap_or(1),"subject_id":subject}))),Ok(None)=>Ok(None),Err(_)=>{let web=conn.query_row("SELECT agent_id,revision,enabled,author_id FROM instances WHERE instance_id=?1",[&key[0]],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,bool>(2)?,r.get::<_,String>(3)?))).optional()?;web.map(|(agent,revision,enabled,author_id)|{
-    let roles=conn.prepare("SELECT role FROM identity_projections WHERE instance_id=?1 AND external_id='bearer'")?.query_map([&key[0]],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
-    ensure!(roles.len()==1,"Web bearer caller role must be unique");
+    let roles=conn.prepare("SELECT role FROM identity_projections WHERE instance_id=?1 AND external_id='web-local'")?.query_map([&key[0]],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
+    ensure!(roles == ["owner"],"Web local Owner policy missing or conflicting");
     Ok(json!({"agent_id":agent,"author_id":author_id,"enabled":enabled,"instance_id":key[0],"revision":revision}))
 }).transpose()}}},
  "identity_projections"=>Ok(conn.query_row("SELECT relationship_id,relationship_revision FROM identity_projections WHERE instance_id=?1 AND role=?2 AND external_id=?3",params![key[0],key[1],key[2]],|r|Ok(json!({"external_id":key[2],"instance_id":key[0],"relationship_id":r.get::<_,Option<String>>(0)?,"relationship_revision":r.get::<_,Option<i64>>(1)?,"role":key[1]}))).optional()?),
@@ -506,7 +501,6 @@ fn read_master_key(path: &Path, kind: &str) -> Result<Zeroizing<[u8; 32]>> {
     match kind {
         "discord" => opencrab_discord_gateway::secret_store::parse_master_key(&value),
         "nostr" => opencrab_nostr_gateway::secret_store::parse_master_key(&value),
-        "web" => opencrab_web_gateway::secret_store::parse_master_key(&value),
         _ => bail!("unknown key kind"),
     }
 }
@@ -514,7 +508,6 @@ fn encrypt(kind: &str, clear: &[u8], key: &[u8; 32]) -> Result<String> {
     match kind {
         "discord" => opencrab_discord_gateway::secret_store::encrypt(clear, key),
         "nostr" => opencrab_nostr_gateway::secret_store::encrypt(clear, key),
-        "web" => opencrab_web_gateway::secret_store::encrypt(clear, key),
         _ => bail!("unknown key kind"),
     }
 }
@@ -522,7 +515,6 @@ fn decrypt(kind: &str, envelope: &str, key: &[u8; 32]) -> Result<Zeroizing<Vec<u
     match kind {
         "discord" => opencrab_discord_gateway::secret_store::decrypt(envelope, key),
         "nostr" => opencrab_nostr_gateway::secret_store::decrypt(envelope, key),
-        "web" => opencrab_web_gateway::secret_store::decrypt(envelope, key),
         _ => bail!("unknown key kind"),
     }
 }
@@ -581,24 +573,7 @@ pub fn prevalidate(core: &Connection, rows: &[SourceRow], approval: &Approval, i
         let destination_plans = plans.iter().filter(|plan| plan.destination == *destination).collect::<Vec<_>>();
         let ids = identities.get(&(destination.kind_id.clone(), destination.path_id.clone())).cloned().unwrap_or_default();
         let eps = endpoints.get(&(destination.kind_id.clone(), destination.path_id.clone())).cloned().unwrap_or_default();
-        if destination.kind_id == "web" {
-            prevalidate_web_identity_mapping(&conn, &ids)?;
-        }
         let _ = expected_keys(&conn, &destination_plans, &ids, &eps)?;
-    }
-    Ok(())
-}
-
-fn prevalidate_web_identity_mapping(conn: &Connection, identities: &[IdentityPlan]) -> Result<()> {
-    let mut mapped_instances = BTreeSet::new();
-    for identity in identities {
-        ensure!(mapped_instances.insert(&identity.instance_id), "multiple Web source identities for one bearer");
-        let roles = conn
-            .prepare("SELECT role FROM identity_projections WHERE instance_id=?1 AND external_id='bearer'")?
-            .query_map([&identity.instance_id], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        ensure!(roles.len() == 1, "Web bearer caller role must be unique");
-        ensure!(roles[0] == identity.role, "Web source role conflicts with bearer caller role");
     }
     Ok(())
 }
@@ -669,17 +644,17 @@ mod s8_review_red_tests {
     }
 
     #[test]
-    fn existing_web_instance_uses_persisted_author_and_role_without_creation() {
+    fn existing_web_instance_uses_persisted_author_and_local_owner_without_creation() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("web.db");
         let store = opencrab_web_gateway::store::WebStore::open(&db).unwrap();
-        store.upsert("web-i", "agent-a", 3, "author-42", Some("secret"), true, &[9u8; 32]).unwrap();
-        store.set_caller_role("web-i", "trusted_user").unwrap();
+        store.upsert("web-i", "agent-a", 3, "author-42", true).unwrap();
+        store.set_local_owner("web-i").unwrap();
         drop(store);
         let conn = Connection::open(&db).unwrap();
         let row = current_semantic(&conn, "instances", &["web-i".into()]).unwrap().unwrap();
         assert_eq!(row["author_id"], "author-42");
-        assert_eq!(opencrab_web_gateway::store::WebStore::open(&db).unwrap().caller_role("web-i").unwrap(), "trusted_user");
+        opencrab_web_gateway::store::WebStore::open(&db).unwrap().require_local_owner("web-i").unwrap();
     }
 
     #[test]
@@ -695,7 +670,7 @@ mod s8_review_red_tests {
             credential_source:"x".into(),created_at:"2026".into()
         };
         let tx = conn.transaction().unwrap();
-        assert!(apply_instance(&tx, &plan, &[9;32]).is_err());
+        assert!(apply_instance(&tx, &plan, None).is_err());
         assert_eq!(tx.query_row("SELECT COUNT(*) FROM instances", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
     }
 

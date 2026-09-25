@@ -78,7 +78,6 @@ async fn run() -> anyhow::Result<()> {
     let app = router(HttpState {
         instances,
         agent_clients,
-        auth: Default::default(),
     });
     axum::serve(listener, app).await.context("serve")?;
     Ok(())
