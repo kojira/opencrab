@@ -8,10 +8,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use opencrab_web_gateway::v3::client::InstanceClient;
-use opencrab_web_gateway::v3::http::{router, HttpState};
+use opencrab_web_gateway::v3::http::{router, HttpState, WebAdmission, WebAuth};
 use opencrab_web_gateway::v3::wire::{
     config_digest, hello_frame, ok_frame, parse_frame_bytes, read_frame, write_json, CoreMsg,
-    FrameError, MAX_FRAME,
+    FrameError, SaidCaller, MAX_FRAME,
 };
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -233,6 +233,102 @@ async fn rust_unit_conversation_status_is_owned_by_web_gateway() {
         .await
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn d_1006_web_01_existing_routes_do_not_require_bearer() {
+    let app = router(HttpState {
+        instances: Vec::new(),
+        agent_clients: std::collections::HashMap::new(),
+        auth: Default::default(),
+    });
+    for (method, uri, body, expected) in [
+        (
+            "POST",
+            "/api/web-conversations",
+            r#"{"agent_id":"agent"}"#,
+            StatusCode::CONFLICT,
+        ),
+        (
+            "GET",
+            "/api/web-conversations/missing",
+            "",
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "POST",
+            "/api/web-conversations/missing/messages",
+            r#"{"client_message_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","text":"hello","attachments":[]}"#,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            "/api/web-conversations/missing/events",
+            "",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            expected,
+            "historical no-bearer route: {method} {uri}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn d_1006_web_01_http_message_keeps_historical_owner_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("core.sock");
+    let mut mock = MockCore::spawn(sock.clone());
+    let connect = tokio::spawn(async move { connect_client(&sock).await });
+    hello_and_bind(&mut mock).await;
+    let client = connect.await.unwrap();
+    wait_bound(&client).await;
+    let mut auth = WebAuth::default();
+    auth.insert(
+        b"temporary-test-bearer",
+        WebAdmission {
+            instance_id: INSTANCE.into(),
+            caller: SaidCaller::TrustedUser,
+        },
+    );
+    let app = router(HttpState {
+        instances: vec![client],
+        agent_clients: std::collections::HashMap::new(),
+        auth,
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/web-conversations/{ADDRESS}/messages"))
+        .header("Authorization", "Bearer temporary-test-bearer")
+        .header("content-type", "application/json")
+        .body(Body::from(post_body()))
+        .unwrap();
+    let pending = tokio::spawn(app.oneshot(request));
+    let said = mock.recv().await;
+    assert_eq!(said["author_id"], AUTHOR);
+    assert_eq!(
+        said["caller"]["role"], "owner",
+        "Web HTTP input must retain the old Owner caller, not token-assigned authority"
+    );
+    mock.send(&json!({"id": said["id"], "m": "ok", "seq": 1}))
+        .await;
+    assert_eq!(
+        pending.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
 }
 
 #[tokio::test]
@@ -490,6 +586,11 @@ async fn rust_unit_http_post_202_not_admitted_busy_and_old_routes_404() {
     let said = mock.recv().await;
     assert_eq!(said["m"], "said");
     assert_eq!(said["origin"], origin());
+    assert_eq!(said["author_id"], AUTHOR);
+    assert_eq!(
+        said["caller"]["role"], "owner",
+        "Web admitted caller must match the pre-#1006 Owner frame"
+    );
     mock.send(&json!({"id": said["id"], "m": "ok", "seq": 7}))
         .await;
     let res = pending.await.unwrap().unwrap();

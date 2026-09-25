@@ -1,0 +1,12 @@
+# D-1006-WEB-01 forward RED (HEAD `17fa832`)
+
+Baseline `1e8fc85` Web HTTP accepted the existing loopback routes without a bearer and sent `SaidCaller::Owner` for an admitted message. Only test/evidence files were edited after the approved design checkpoint; no Web runtime or migrator production source changed. These failures are **RED, not completion evidence**.
+
+| Focused command | Assertion-level failure on unchanged production source |
+| --- | --- |
+| `cargo test -p opencrab-web-gateway --test rust-unit d_1006_web_01_existing_routes_do_not_require_bearer -- --exact --test-threads=1` | Existing `POST /api/web-conversations` without Authorization returned `401`, expected pre-separation downstream `409` (no configured instance). Same test specifies existing GET/message/events routes after this first assertion; they are not yet individually proven RED. |
+| `cargo test -p opencrab-web-gateway --test rust-unit d_1006_web_01_http_message_keeps_historical_owner_frame -- --exact --test-threads=1` | A synthetic token was supplied only to get past current middleware; the emitted frame contained `caller.role=trusted_user`, expected historical `owner`. `author_id` matched the configured author. |
+| `cargo test -p opencrab-web-gateway --test web_owner_compat d_1006_web_01_existing_instance_starts_without_bearer_or_web_master_key -- --exact --test-threads=1` | Existing Web store instance, fixed Owner marker and no Web credential: startup failed `web master key required: environment variable not found`, before local admin socket creation. |
+| `cargo test -p opencrab-gateway-migrate --test s8_web d_1006_web_01 -- --test-threads=1` | Four acceptance assertions failed independently: no-Web-credential instance → `missing master key`; explicitly mapped unrelated co-agent → `identity is not represented by gateway config`; two independently mapped source IDs → `multiple Web source identities for one bearer`; source trusted-user role with fixed Web Owner → `Web source role conflicts with bearer caller role`. |
+
+The fifth S8 test, reserved `web-local` source collision rejection, passed under the old bearer-role restriction; it does **not** yet prove the final reserved-marker guard. No success or completed migration is claimed. The GREEN implementation must replace contradictory legacy bearer-required assertions (including the existing Web unit test) rather than retaining two incompatible Web contracts. Before any source identity deletion at S10, separately resolve the legacy row ID/metadata preservation blocker in the design.

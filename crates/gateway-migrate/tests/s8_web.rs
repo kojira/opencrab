@@ -15,7 +15,7 @@ const CREDENTIAL: &str = "web-test-credential";
 const WEB_KEY: [u8; 32] = [9; 32];
 
 #[test]
-fn s8_web_existing_bearer_preserves_independent_source_identity_and_installs_credential() {
+fn d_1006_web_01_credential_free_owner_preserves_unrelated_source_identity() {
     let temp = tempfile::tempdir().unwrap();
     let core_path = temp.path().join("core.db");
     let web_path = temp.path().join("web.db");
@@ -23,8 +23,6 @@ fn s8_web_existing_bearer_preserves_independent_source_identity_and_installs_cre
     let report_path = temp.path().join("report.json");
     let verification_path = temp.path().join("verification.json");
     let backup_dir = temp.path().join("backups");
-    let key_path = temp.path().join("web.key");
-    let credential_path = temp.path().join("web.credential");
 
     seed_web_core(&core_path);
     let store = opencrab_web_gateway::store::WebStore::open(&web_path).unwrap();
@@ -39,21 +37,11 @@ fn s8_web_existing_bearer_preserves_independent_source_identity_and_installs_cre
             &WEB_KEY,
         )
         .unwrap();
-    store.set_caller_role(INSTANCE_ID, "trusted_user").unwrap();
-    assert!(store
-        .get(INSTANCE_ID)
-        .unwrap()
-        .unwrap()
-        .credential_envelope
-        .is_none());
     drop(store);
-    write_secure(
-        &key_path,
-        base64::engine::general_purpose::STANDARD
-            .encode(WEB_KEY)
-            .as_bytes(),
-    );
-    write_secure(&credential_path, CREDENTIAL.as_bytes());
+    Connection::open(&web_path).unwrap().execute(
+        "INSERT INTO identity_projections(instance_id,role,external_id) VALUES (?1,'owner','web-local')",
+        [INSTANCE_ID],
+    ).unwrap();
 
     let rows = source::validate(&source::open_read_only(&core_path).unwrap()).unwrap();
     let row = rows
@@ -81,16 +69,13 @@ fn s8_web_existing_bearer_preserves_independent_source_identity_and_installs_cre
         }],
         channel_edges: vec![],
         watch_edges: vec![],
-        credential_sources: vec![CredentialSource {
-            instance_id: INSTANCE_ID.into(),
-            source: format!("operator-file:{INSTANCE_ID}"),
-        }],
+        credential_sources: vec![],
     };
     write_secure(&approval_path, &canonical::bytes(&approval).unwrap());
     let inputs = || Inputs {
         paths: BTreeMap::from([(("web".into(), "web-primary".into()), web_path.clone())]),
-        master_keys: BTreeMap::from([("web".into(), key_path.clone())]),
-        credential_files: BTreeMap::from([(INSTANCE_ID.into(), credential_path.clone())]),
+        master_keys: BTreeMap::new(),
+        credential_files: BTreeMap::new(),
     };
     let import_args = || ImportArgs {
         core_path: &core_path,
@@ -109,29 +94,27 @@ fn s8_web_existing_bearer_preserves_independent_source_identity_and_installs_cre
             web_path.clone(),
         )]),
     };
-    let report = command::run_import(import_args()).expect(
-        "existing Web instance and bearer must accept approved source identity and credential",
-    );
+    let report = command::run_import(import_args())
+        .expect("existing Web instance must accept an approved identity without a Web credential");
     let store = opencrab_web_gateway::store::WebStore::open(&web_path).unwrap();
-    assert_eq!(store.caller_role(INSTANCE_ID).unwrap(), "trusted_user");
+    let owner_marker: i64 = Connection::open(&web_path).unwrap().query_row(
+        "SELECT COUNT(*) FROM identity_projections WHERE instance_id=?1 AND role='owner' AND external_id='web-local'",
+        [INSTANCE_ID], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(
+        owner_marker, 1,
+        "historical Web admission must remain Owner without a bearer"
+    );
     assert_eq!(
         store.get(INSTANCE_ID).unwrap().unwrap().author_id,
         "web-author"
     );
-    assert_eq!(
-        store
-            .decrypt_credential(INSTANCE_ID, &WEB_KEY)
-            .unwrap()
-            .as_slice(),
-        CREDENTIAL.as_bytes()
-    );
-    let envelope = store
+    assert!(store
         .get(INSTANCE_ID)
         .unwrap()
         .unwrap()
         .credential_envelope
-        .unwrap();
-    assert!(!envelope.contains(CREDENTIAL));
+        .is_none());
     let identity_count: i64 = Connection::open(&web_path).unwrap().query_row(
         "SELECT COUNT(*) FROM identity_projections WHERE instance_id=?1 AND role='trusted_user' AND external_id='source-user-not-author'",
         [INSTANCE_ID], |r| r.get(0),
@@ -144,52 +127,60 @@ fn s8_web_existing_bearer_preserves_independent_source_identity_and_installs_cre
     command::run_project(project_args())
         .expect("Web-owned identity migration must project the core marker");
     command::run_import(import_args()).expect("the completed Web import must be idempotent");
-    assert_eq!(
+    assert!(
         Connection::open(&web_path)
             .unwrap()
             .query_row(
                 "SELECT credential_envelope FROM instances WHERE instance_id=?1",
                 [INSTANCE_ID],
-                |r| r.get::<_, String>(0),
+                |r| r.get::<_, Option<String>>(0),
             )
-            .unwrap(),
-        envelope,
-        "rerun must keep the original encrypted credential envelope"
+            .unwrap()
+            .is_none(),
+        "rerun must not invent a Web credential"
     );
     assert_eq!(report.destinations[0]["counts"]["identity_projections"], 1);
 }
 
 #[test]
-fn s8_web_rejects_co_agent_source_before_backup() {
-    assert_web_mapping_refused(
-        &[("source-coagent", "co-agent")],
-        "trusted_user",
-        Some("identity is not represented by gateway config"),
-    );
+fn d_1006_web_01_co_agent_source_remains_inert() {
+    assert_web_mapping_imports(&[("source-coagent", "co-agent")], "trusted_user");
 }
 
 #[test]
-fn s8_web_rejects_two_source_rows_for_one_bearer_before_backup() {
-    assert_web_mapping_refused(
+fn d_1006_web_01_multiple_source_ids_remain_inert() {
+    assert_web_mapping_imports(
         &[("source-one", "user"), ("source-two", "user")],
         "trusted_user",
-        None,
     );
 }
 
 #[test]
-fn s8_web_rejects_source_role_conflicting_with_bearer_before_backup() {
-    assert_web_mapping_refused(&[("source-owner", "owner")], "trusted_user", None);
+fn d_1006_web_01_source_role_does_not_select_admitted_owner() {
+    assert_web_mapping_imports(&[("source-user", "user")], "owner");
 }
 
 #[test]
-fn s8_web_rejects_literal_bearer_role_collision_before_backup() {
-    assert_web_mapping_refused(&[("bearer", "owner")], "trusted_user", None);
+fn d_1006_web_01_rejects_reserved_web_local_identity_before_backup() {
+    assert_web_mapping_refused(&[("web-local", "owner")], "trusted_user", None);
+}
+
+fn assert_web_mapping_imports(source_users: &[(&str, &str)], bearer_role: &str) {
+    assert_web_mapping(source_users, bearer_role, true, None);
 }
 
 fn assert_web_mapping_refused(
     source_users: &[(&str, &str)],
     bearer_role: &str,
+    expected_error: Option<&str>,
+) {
+    assert_web_mapping(source_users, bearer_role, false, expected_error);
+}
+
+fn assert_web_mapping(
+    source_users: &[(&str, &str)],
+    bearer_role: &str,
+    should_import: bool,
     expected_error: Option<&str>,
 ) {
     let temp = tempfile::tempdir().unwrap();
@@ -227,6 +218,10 @@ fn assert_web_mapping_refused(
     store.set_caller_role(INSTANCE_ID, bearer_role).unwrap();
     assert_eq!(store.caller_role(INSTANCE_ID).unwrap(), bearer_role);
     drop(store);
+    Connection::open(&web_path).unwrap().execute(
+        "INSERT INTO identity_projections(instance_id,role,external_id) VALUES (?1,'owner','web-local')",
+        [INSTANCE_ID],
+    ).unwrap();
     let before_web = fs::read(&web_path).unwrap();
     let before_core = fs::read(&core_path).unwrap();
     write_secure(
@@ -280,27 +275,53 @@ fn assert_web_mapping_refused(
             credential_files: BTreeMap::new(),
         },
     });
-    assert!(
-        outcome.is_err(),
-        "unapproved Web identity mapping was accepted"
-    );
-    let error = outcome.unwrap_err();
-    if let Some(expected) = expected_error {
-        assert!(
-            format!("{error:#}").contains(expected),
-            "wrong refusal: {error:#}"
+    if should_import {
+        outcome.expect("explicit Web source rows are inert and must not change Owner admission");
+        let conn = Connection::open(&web_path).unwrap();
+        for (user_id, permission) in source_users {
+            let role = match *permission {
+                "owner" => "owner",
+                "co-agent" => "co_agent",
+                _ => "trusted_user",
+            };
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM identity_projections WHERE instance_id=?1 AND role=?2 AND external_id=?3",
+                params![INSTANCE_ID, role, user_id], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(
+                count, 1,
+                "source identity {user_id} must remain separate from Web admission"
+            );
+        }
+        let marker: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM identity_projections WHERE instance_id=?1 AND role='owner' AND external_id='web-local'",
+            [INSTANCE_ID], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(marker, 1);
+        assert_eq!(
+            fs::read(&core_path).unwrap(),
+            before_core,
+            "import must retain source identity IDs"
         );
+    } else {
+        let error = outcome.expect_err("reserved Web identity collision was accepted");
+        if let Some(expected) = expected_error {
+            assert!(
+                format!("{error:#}").contains(expected),
+                "wrong refusal: {error:#}"
+            );
+        }
+        assert!(
+            !backup_dir.exists(),
+            "mapping must fail before matched backup: {error:#}"
+        );
+        assert!(
+            !report_path.exists(),
+            "mapping must not produce an import report"
+        );
+        assert_eq!(fs::read(&web_path).unwrap(), before_web);
+        assert_eq!(fs::read(&core_path).unwrap(), before_core);
     }
-    assert!(
-        !backup_dir.exists(),
-        "mapping must fail before matched backup: {error:#}"
-    );
-    assert!(
-        !report_path.exists(),
-        "mapping must not produce an import report"
-    );
-    assert_eq!(fs::read(&web_path).unwrap(), before_web);
-    assert_eq!(fs::read(&core_path).unwrap(), before_core);
 }
 
 fn seed_web_core(path: &Path) {
