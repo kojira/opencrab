@@ -442,6 +442,19 @@ CREATE TABLE IF NOT EXISTS trusted_users (
 );
 CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);
 
+-- REST/API caller principals retained in core after gateway-owned identities move out.
+CREATE TABLE IF NOT EXISTS api_principals (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  permission TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  UNIQUE(user_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_api_principals_agent ON api_principals(agent_id);
+
 -- ============================================
 -- エージェント別メモリインデックス設定
 -- ============================================

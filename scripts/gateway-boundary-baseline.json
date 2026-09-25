@@ -3,7 +3,7 @@
   "purpose": "Issue #1006 S0 line-specific reviewed burn-down; entries are debts or explicit gateway-store provenance, never wildcard exceptions",
   "review": {
     "status": "line-by-line-reviewed",
-    "finding_count": 275,
+    "finding_count": 282,
     "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance"
   },
   "entries": [
@@ -326,6 +326,36 @@
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
       "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/api_principals.rs",
+      "line": 4,
+      "snippet": "use super::TrustedUserPermission;",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/api_principals.rs",
+      "line": 18,
+      "snippet": "pub fn parsed_permission(&self) -> TrustedUserPermission {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/api_principals.rs",
+      "line": 19,
+      "snippet": "TrustedUserPermission::from_db_str(&self.permission)",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-schema",
@@ -710,7 +740,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/mod.rs",
-      "line": 13,
+      "line": 14,
       "snippet": "mod channel_config;",
       "classification": "production-violation",
       "violation": "V06",
@@ -720,7 +750,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/mod.rs",
-      "line": 27,
+      "line": 28,
       "snippet": "mod session_watches;",
       "classification": "production-violation",
       "violation": "V06",
@@ -730,7 +760,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/mod.rs",
-      "line": 34,
+      "line": 35,
       "snippet": "mod trusted_users;",
       "classification": "production-violation",
       "violation": "V06",
@@ -740,7 +770,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/mod.rs",
-      "line": 43,
+      "line": 45,
       "snippet": "pub use channel_config::*;",
       "classification": "production-violation",
       "violation": "V06",
@@ -750,7 +780,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/mod.rs",
-      "line": 57,
+      "line": 59,
       "snippet": "pub use session_watches::*;",
       "classification": "production-violation",
       "violation": "V06",
@@ -760,7 +790,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/queries/mod.rs",
-      "line": 64,
+      "line": 66,
       "snippet": "pub use trusted_users::*;",
       "classification": "production-violation",
       "violation": "V06",
@@ -1350,7 +1380,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 684,
+      "line": 697,
       "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
       "classification": "production-violation",
       "violation": "V06",
@@ -1360,7 +1390,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 693,
+      "line": 706,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -1530,7 +1560,37 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/server/src/caller_identity.rs",
-      "line": 32,
+      "line": 37,
+      "snippet": "use opencrab_db::queries::TrustedUserPermission;",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/caller_identity.rs",
+      "line": 40,
+      "snippet": "Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/caller_identity.rs",
+      "line": 43,
+      "snippet": "Some(TrustedUserPermission::Owner | TrustedUserPermission::User) => {",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/caller_identity.rs",
+      "line": 44,
       "snippet": "CallerIdentity::TrustedUser",
       "classification": "production-violation",
       "violation": "V11",
@@ -1541,6 +1601,16 @@
       "rule": "shared-concrete-schema",
       "path": "crates/server/src/caller_identity.rs",
       "line": 49,
+      "snippet": "CallerIdentity::TrustedUser",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/caller_identity.rs",
+      "line": 66,
       "snippet": "use opencrab_db::queries::{get_trusted_user, TrustedUserPermission};",
       "classification": "production-violation",
       "violation": "V11",
@@ -1550,7 +1620,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/server/src/caller_identity.rs",
-      "line": 58,
+      "line": 75,
       "snippet": "get_trusted_user(conn, source, user_id, agent_id).map(|row| row.permission)",
       "classification": "production-violation",
       "violation": "V11",
@@ -1560,7 +1630,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/server/src/caller_identity.rs",
-      "line": 60,
+      "line": 77,
       "snippet": "Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {",
       "classification": "production-violation",
       "violation": "V11",
@@ -1570,7 +1640,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/server/src/caller_identity.rs",
-      "line": 63,
+      "line": 80,
       "snippet": "Some(TrustedUserPermission::Owner | TrustedUserPermission::User) => {",
       "classification": "production-violation",
       "violation": "V11",
@@ -1580,7 +1650,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/server/src/caller_identity.rs",
-      "line": 64,
+      "line": 81,
       "snippet": "CallerIdentity::TrustedUser",
       "classification": "production-violation",
       "violation": "V11",
@@ -2370,7 +2440,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 553,
+      "line": 566,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",

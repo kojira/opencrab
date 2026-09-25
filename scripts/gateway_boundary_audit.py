@@ -68,6 +68,17 @@ VALID_GATEWAY_DB_OPEN_IDENTITIES = {
 }
 # These three exact sites are a generic caller-role naming debt, not operation-name routing.
 # Exact finding identities prevent a moved or duplicated occurrence from inheriting the deferral.
+# Gateway-legacy core state may have exactly these two stopped/offline writers.
+# S8 implements `project-core-state`; S10 may later add `destructive-cleanup`.
+# A source marker for any other offline writer fails this audit immediately.
+GATEWAY_LEGACY_OFFLINE_WRITER_ALLOWLIST = frozenset({
+    "project-core-state",
+    "destructive-cleanup",
+})
+OFFLINE_WRITER_MARKER = re.compile(
+    r"gateway-legacy offline writer:\s*([a-z][a-z0-9-]*)"
+)
+
 DEFERRED_GENERIC_CALLER_ROLE_IDENTITIES = {
     ("shared-concrete-schema", "crates/gateway/src/traits.rs", 19, "TrustedUser,"),
     (
@@ -119,6 +130,10 @@ class RustFunction(NamedTuple):
         return "\n".join(line for _, line in self.lines)
 
 
+def _is_offline_gateway_migrator_manifest(path: str) -> bool:
+    return path == "crates/gateway-migrate/Cargo.toml"
+
+
 def _is_gateway_manifest(path: str) -> bool:
     parts = pathlib.PurePosixPath(path).parts
     return len(parts) == 3 and parts[0] == "crates" and parts[1].endswith("-gateway") and parts[2] == "Cargo.toml"
@@ -164,7 +179,11 @@ def _manifest_findings(path: str, text: str) -> list[Finding]:
             line, snippet = _dependency_line(lines, key)
             if table_name != "dev-dependencies" and is_gateway and package in FORBIDDEN_GATEWAY_DEPENDENCIES:
                 findings.append(Finding("gateway-production-dependency", path, line, snippet))
-            if not is_gateway and _is_concrete_gateway_package(package):
+            if (
+                not is_gateway
+                and not _is_offline_gateway_migrator_manifest(path)
+                and _is_concrete_gateway_package(package)
+            ):
                 if table_name != "dev-dependencies":
                     findings.append(Finding("platform-production-gateway-dependency", path, line, snippet))
                 elif pathlib.PurePosixPath(path).parts[1] == "server":
@@ -582,6 +601,24 @@ def audit_texts(files: Mapping[str, str]) -> list[Finding]:
     return sorted(set(findings), key=lambda item: item.key)
 
 
+def gateway_legacy_offline_writer_errors(files: Mapping[str, str]) -> list[str]:
+    found: dict[str, list[str]] = {}
+    for path, text in sorted(files.items()):
+        if not path.endswith(".rs"):
+            continue
+        for match in OFFLINE_WRITER_MARKER.finditer(text):
+            found.setdefault(match.group(1), []).append(path)
+    errors = []
+    for name, paths in sorted(found.items()):
+        if name not in GATEWAY_LEGACY_OFFLINE_WRITER_ALLOWLIST:
+            errors.append(f"unapproved gateway-legacy offline writer {name}: {paths}")
+        if len(paths) != 1:
+            errors.append(f"gateway-legacy offline writer {name} has {len(paths)} markers")
+    if "project-core-state" not in found:
+        errors.append("approved project-core-state offline writer marker is missing")
+    return errors
+
+
 def repository_texts(root: pathlib.Path) -> dict[str, str]:
     files: dict[str, str] = {}
     for crate in sorted(root.joinpath("crates").iterdir()):
@@ -656,7 +693,12 @@ def cargo_metadata_evidence(root: pathlib.Path) -> tuple[set[tuple[str, str, str
             kind = dependency.get("kind") or "normal"
             if kind != "dev" and is_gateway and name in FORBIDDEN_GATEWAY_DEPENDENCIES:
                 production.add(("gateway-production-dependency", rel_manifest, name))
-            if kind != "dev" and not is_gateway and _is_concrete_gateway_package(name):
+            if (
+                kind != "dev"
+                and not is_gateway
+                and package["name"] != "opencrab-gateway-migrate"
+                and _is_concrete_gateway_package(name)
+            ):
                 production.add(("platform-production-gateway-dependency", rel_manifest, name))
             if kind == "dev" and _is_concrete_gateway_package(name):
                 if package["name"] == "opencrab-server":
@@ -798,6 +840,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"gateway boundary audit: cannot read baseline: {error}", file=sys.stderr)
         return 2
     errors = check_baseline(findings, document, root)
+    errors.extend(gateway_legacy_offline_writer_errors(repository_texts(root)))
     try:
         metadata_edges, dev_only_edges = cargo_metadata_evidence(root)
     except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:

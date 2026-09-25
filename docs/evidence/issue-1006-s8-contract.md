@@ -24,7 +24,7 @@ CREATE INDEX idx_api_principals_agent ON api_principals(agent_id);
 
 `permission` deliberately remains raw text: the existing `TrustedUserPermission::from_db_str` mapping (`owner`, `user`, `co-agent`; unknown -> `user`) remains the authorization rule and preserves old malformed-row behavior. S8 preserves `id`, `user_id`, `agent_id`, `permission`, `created_by`, `created_at`, and `display_name` byte-for-byte for a `trusted_users.platform == "rest"` row. Other platforms cannot target `api_principals`; doing so is a manifest error. An absent identical row is inserted by `project-core-state`; an identical row is an idempotent no-op; either primary-key or `(user_id,agent_id)` collision with different bytes is a conflict. Runtime/admin code never reads `trusted_users` after S10.
 
-Assertion vectors: `permission='owner'` still resolves to `TrustedUser` through REST; `co-agent` resolves to the existing co-agent caller; an unknown permission still resolves to `TrustedUser`; an otherwise identical `platform='web'` row never resolves through this table.
+Assertion vectors: `permission='owner'` still resolves to `TrustedUser` through REST; `co-agent` is parsed as today and then likewise downgraded to `TrustedUser` because it is owner-equivalent; an unknown permission still resolves to `TrustedUser`; an otherwise identical `platform='web'` row never resolves through this table.
 
 ## S8-D2 — strict approval and verification manifests
 

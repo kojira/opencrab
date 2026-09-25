@@ -41,12 +41,18 @@ fn v56_creates_api_principals_on_fresh_and_upgraded_databases() {
         ],
         "api_principals columns must match the approved S8 contract exactly"
     );
-    let unique_index_count: i64 = upgraded
+    // `id TEXT PRIMARY KEY` has its own SQLite auto-index. Count only indexes whose
+    // origin is an explicit UNIQUE constraint so this assertion targets exactly the
+    // approved `(user_id, agent_id)` constraint.
+    let composite_unique_count: i64 = upgraded
         .query_row(
-            "SELECT COUNT(*) FROM pragma_index_list('api_principals') WHERE \"unique\"=1",
+            "SELECT COUNT(*) FROM pragma_index_list('api_principals') WHERE origin='u'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(unique_index_count, 1, "(user_id,agent_id) must be unique");
+    assert_eq!(
+        composite_unique_count, 1,
+        "(user_id,agent_id) must have exactly one explicit UNIQUE constraint"
+    );
 }

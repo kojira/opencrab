@@ -47,13 +47,13 @@ class GatewayBoundaryMutationTests(unittest.TestCase):
             findings,
         )
 
-    def test_s5_reviewed_boundary_burn_down_has_exactly_275_findings(self):
+    def test_s8_reviewed_boundary_burn_down_has_exactly_282_findings(self):
         root = pathlib.Path(__file__).parents[2]
         baseline = json.loads((root / "scripts/gateway-boundary-baseline.json").read_text())
         findings = AUDIT.audit_texts(AUDIT.repository_texts(root))
-        self.assertEqual(len(findings), 275)
-        self.assertEqual(len(baseline["entries"]), 275)
-        self.assertEqual(baseline["review"]["finding_count"], 275)
+        self.assertEqual(len(findings), 282)
+        self.assertEqual(len(baseline["entries"]), 282)
+        self.assertEqual(baseline["review"]["finding_count"], 282)
         self.assertFalse(
             [finding for finding in findings if finding.rule == "public-gate-admin-reachable"]
         )
@@ -96,6 +96,27 @@ class GatewayBoundaryMutationTests(unittest.TestCase):
                 and "channel_id" in finding.snippet
             ],
             "the S4 static boundary must fail on a reintroduced platform destination",
+        )
+
+    def test_gateway_legacy_offline_writer_allowlist_rejects_third_writer(self):
+        approved = {
+            "crates/gateway-migrate/src/command.rs":
+                "// gateway-legacy offline writer: project-core-state\n",
+        }
+        self.assertEqual(AUDIT.gateway_legacy_offline_writer_errors(approved), [])
+        mutated = dict(approved)
+        mutated["crates/rogue/src/main.rs"] = (
+            "// gateway-legacy offline writer: emergency-repair\n"
+        )
+        self.assertTrue(
+            any(
+                "unapproved gateway-legacy offline writer emergency-repair" in error
+                for error in AUDIT.gateway_legacy_offline_writer_errors(mutated)
+            )
+        )
+        self.assertEqual(
+            AUDIT.GATEWAY_LEGACY_OFFLINE_WRITER_ALLOWLIST,
+            frozenset({"project-core-state", "destructive-cleanup"}),
         )
 
     def rules(self, files):

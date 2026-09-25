@@ -1667,6 +1667,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "opencrab-gateway-migrate"
+version = "0.2.17"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "libc",
+ "opencrab-db",
+ "opencrab-discord-gateway",
+ "opencrab-nostr-gateway",
+ "opencrab-web-gateway",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "opencrab-llm"
 version = "0.2.17"
 dependencies = [

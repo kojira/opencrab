@@ -21,13 +21,30 @@ pub fn resolve_rest_caller_identity(
     user_id: &str,
     agent_id: &str,
 ) -> CallerIdentity {
-    let identity = resolve_caller_identity_with_owner(
-        conn,
-        opencrab_db::queries::TRUSTED_PLATFORM_REST,
-        &[user_id],
-        agent_id,
-        "",
-    );
+    resolve_rest_api_principal(
+        opencrab_db::queries::get_api_principal(conn, user_id, agent_id),
+        user_id,
+    )
+}
+
+/// Preserve the historical REST permission mapping after the storage cutover.
+/// REST `user_id` remains self-asserted, so owner-equivalent permissions are
+/// deliberately downgraded to `TrustedUser` exactly as before S8.
+pub fn resolve_rest_api_principal(
+    principal: Option<opencrab_db::queries::ApiPrincipalRow>,
+    user_id: &str,
+) -> CallerIdentity {
+    use opencrab_db::queries::TrustedUserPermission;
+
+    let identity = match principal.map(|row| row.parsed_permission()) {
+        Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {
+            agent_id: user_id.to_string(),
+        },
+        Some(TrustedUserPermission::Owner | TrustedUserPermission::User) => {
+            CallerIdentity::TrustedUser
+        }
+        None => CallerIdentity::Agent,
+    };
     if identity.is_owner_equivalent() {
         CallerIdentity::TrustedUser
     } else {
@@ -143,18 +160,58 @@ mod tests {
         );
     }
 
+    fn register_api_principal(conn: &mut rusqlite::Connection, permission: &str) {
+        let tx = conn.transaction().unwrap();
+        opencrab_db::queries::insert_api_principal_in_tx(
+            &tx,
+            &opencrab_db::queries::ApiPrincipalRow {
+                id: format!("api-{permission}"),
+                user_id: permission.to_string(),
+                agent_id: "agent-1".into(),
+                permission: permission.to_string(),
+                created_by: "owner".into(),
+                created_at: "2026-01-01".into(),
+                display_name: String::new(),
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
     #[test]
-    fn rest_co_agent_row_is_downgraded() {
+    fn rest_api_principal_preserves_fail_closed_permission_mapping() {
+        let mut conn = opencrab_db::init_memory().unwrap();
+        for permission in ["owner", "co-agent", "unknown", "user"] {
+            register_api_principal(&mut conn, permission);
+            assert_eq!(
+                resolve_rest_caller_identity(&conn, permission, "agent-1"),
+                CallerIdentity::TrustedUser,
+                "permission={permission}"
+            );
+        }
+        assert_eq!(
+            resolve_rest_caller_identity(&conn, "missing", "agent-1"),
+            CallerIdentity::Agent
+        );
+    }
+
+    #[test]
+    fn legacy_rest_or_web_trusted_user_does_not_feed_api_principals() {
         let conn = opencrab_db::init_memory().unwrap();
         register(
             &conn,
             TRUSTED_PLATFORM_REST,
-            "self-asserted",
-            TrustedUserPermission::CoAgent,
+            "legacy-rest",
+            TrustedUserPermission::User,
+        );
+        register(&conn, "web", "legacy-web", TrustedUserPermission::Owner);
+        assert_eq!(
+            resolve_rest_caller_identity(&conn, "legacy-rest", "agent-1"),
+            CallerIdentity::Agent
         );
         assert_eq!(
-            resolve_rest_caller_identity(&conn, "self-asserted", "agent-1"),
-            CallerIdentity::TrustedUser
+            resolve_rest_caller_identity(&conn, "legacy-web", "agent-1"),
+            CallerIdentity::Agent
         );
     }
 }

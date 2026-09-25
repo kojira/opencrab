@@ -344,20 +344,20 @@ pub async fn send_agent_message(
     let user_id = req.user_id.trim();
     let session_id = format!("{}{}-{}", REST_SESSION_PREFIX, id, user_id);
 
-    // 1. Determine caller identity from trusted_users table.
-    //    引く経路は `rest`（#214）。#214 が残していた互換読み（自経路の行が無ければ
-    //    従来の `discord` 経路も見る）は #159 で撤去した。**`platform='rest'` の行を
-    //    持たない既存の REST 利用者はここで信頼を失う**。
+    // 1. Determine caller identity from the generic REST/API principal table.
+    //    S8 moved only existing `platform='rest'` rows out of the mixed legacy
+    //    identity table; caller mapping remains unchanged.
     //
     //    #848: REST のボディ `user_id` は**自称値**（認証済みチャネルが刻む識別子ではない）。
     //    自称値を owner 識別子と平文照合して owner へ昇格させると、owner 識別子を知る到達者が
     //    ボディに書くだけで owner 専用アクション（`execute_shell` 等）へ届く。owner 判定は
     //    「認証済み識別子」経由のみに限定する（案A）ため、REST 専用の
-    //    `resolve_rest_caller_identity` を通す（owner 等価へは昇格させない）。gateway 車線
+    //    `resolve_rest_api_principal` を通す（owner 等価へは昇格させない）。gateway 車線
     //    （Nostr / Discord）は認証済み識別子を刻む正しい形なので従来どおり。
     let caller = {
         let conn = state.db.lock().unwrap();
-        crate::caller_identity::resolve_rest_caller_identity(&conn, user_id, &id)
+        let principal = opencrab_db::queries::get_api_principal(&conn, user_id, &id);
+        crate::caller_identity::resolve_rest_api_principal(principal, user_id)
     };
 
     let caller_type = match &caller {
