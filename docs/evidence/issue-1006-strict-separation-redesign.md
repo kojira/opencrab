@@ -103,9 +103,9 @@ The future design must state the exact guarantee for each adapter, every durable
 **This follow-up is not a completion, merge, release, QC, or deployment gate for Issue #1006.** #1006 is complete when strict behavior-preserving separation and its own S0–S11 evidence pass. This issue begins only after #1006 acceptance and cannot be used to expand #1006 scope retroactively.
 ```
 
-## Ready-to-file security follow-up GitHub Issue
+## Deferred security scope owned by Issue #1015
 
-Do not file this from the design-correction task. The parent session will review and file it separately from the delivery-durability issue.
+Filed as Issue #1015, separately from delivery-durability Issue #1013. Both are explicitly non-gating for #1006.
 
 **Title**
 
@@ -114,6 +114,8 @@ Do not file this from the design-correction task. The parent session will review
 **Body**
 
 ```markdown
+Issue #1015, **Design immediate co-agent revocation and relationship-revision revalidation**, owns the following deferred scope.
+
 ## Context
 
 Issue #1006 is limited to strict behavior-preserving gateway ownership/process/storage separation. Its authorization reference is commit `1c3b7821a46ad1dfdacfd5640cd8943cc211dc41`: a gateway-authenticated generic caller-role snapshot authorizes admitted work; core does not re-query the current co-agent relationship/revision before every later model, queue, tool, continuation, or delivery boundary.
@@ -178,5 +180,5 @@ These artifacts are not approved future implementation and must not be reapplied
 - Strict parity cannot coexist with the former claim that process separation also closes every external-delivery crash window. This redesign chooses parity and removes that claim.
 - Strict parity cannot coexist with the former `exactly_once`/`at_most_once_indeterminate` negotiation API. This redesign removes it rather than leaving unused labels.
 - Zero-core-change extensibility does not require negotiated external-delivery guarantees. It requires a platform-neutral frame and opaque IDs; the replacement S7 satisfies that weaker contract.
-- S6 immediate co-agent revocation is stricter than the historical snapshot behavior and therefore leaves #1006. The separate security follow-up below owns any future current-relationship/revision revalidation and is explicitly non-gating.
+- S6 immediate co-agent revocation is stricter than the historical snapshot behavior and therefore leaves #1006. Issue #1015 owns any future current-relationship/revision revalidation and is explicitly non-gating.
 - No owner decision is required to remove the superseded two-ledger work: the owner already directed separation-only. A future stronger-delivery issue requires a new design and approval.
