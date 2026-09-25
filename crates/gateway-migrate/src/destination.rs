@@ -581,7 +581,24 @@ pub fn prevalidate(core: &Connection, rows: &[SourceRow], approval: &Approval, i
         let destination_plans = plans.iter().filter(|plan| plan.destination == *destination).collect::<Vec<_>>();
         let ids = identities.get(&(destination.kind_id.clone(), destination.path_id.clone())).cloned().unwrap_or_default();
         let eps = endpoints.get(&(destination.kind_id.clone(), destination.path_id.clone())).cloned().unwrap_or_default();
+        if destination.kind_id == "web" {
+            prevalidate_web_identity_mapping(&conn, &ids)?;
+        }
         let _ = expected_keys(&conn, &destination_plans, &ids, &eps)?;
+    }
+    Ok(())
+}
+
+fn prevalidate_web_identity_mapping(conn: &Connection, identities: &[IdentityPlan]) -> Result<()> {
+    let mut mapped_instances = BTreeSet::new();
+    for identity in identities {
+        ensure!(mapped_instances.insert(&identity.instance_id), "multiple Web source identities for one bearer");
+        let roles = conn
+            .prepare("SELECT role FROM identity_projections WHERE instance_id=?1 AND external_id='bearer'")?
+            .query_map([&identity.instance_id], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ensure!(roles.len() == 1, "Web bearer caller role must be unique");
+        ensure!(roles[0] == identity.role, "Web source role conflicts with bearer caller role");
     }
     Ok(())
 }
