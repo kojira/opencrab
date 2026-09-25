@@ -383,8 +383,19 @@ fn apply_instance(tx: &Transaction<'_>, plan: &InstancePlan, key: &[u8; 32]) -> 
     if let Some(existing) = current_semantic(tx, "instances", &[plan.instance_id.clone()])? {
         ensure!(existing == expected, "instance conflict");
         validate_instance_progress(tx, plan)?;
-        let envelope: String = tx.query_row("SELECT credential_envelope FROM instances WHERE instance_id=?1", [&plan.instance_id], |r| r.get(0))?;
-        ensure!(decrypt(&plan.destination.kind_id, &envelope, key)?.as_slice() == plan.credential.as_slice(), "credential conflict");
+        let existing_envelope: Option<String> = tx.query_row("SELECT credential_envelope FROM instances WHERE instance_id=?1", [&plan.instance_id], |r| r.get(0))?;
+        let envelope = match existing_envelope {
+            Some(envelope) => {
+                ensure!(decrypt(&plan.destination.kind_id, &envelope, key)?.as_slice() == plan.credential.as_slice(), "credential conflict");
+                envelope
+            }
+            None if plan.destination.kind_id == "web" => {
+                let envelope = encrypt("web", &plan.credential, key)?;
+                tx.execute("UPDATE instances SET credential_envelope=?2 WHERE instance_id=?1", params![plan.instance_id, envelope])?;
+                envelope
+            }
+            None => bail!("credential missing"),
+        };
         return Ok((false, expected_hash, canonical::hex(&Sha256::digest(envelope.as_bytes()))));
     }
     ensure!(plan.destination.kind_id != "web", "Web instance must already exist");

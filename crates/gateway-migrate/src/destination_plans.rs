@@ -81,7 +81,7 @@ fn select_credential(rows: &[SourceRow], approval: &Approval, inputs: &Inputs, p
     }
     .filter(|value| !value.is_empty());
     let existing_envelope: Option<String> = Connection::open(path)?
-        .query_row("SELECT credential_envelope FROM instances WHERE instance_id=?1", [instance_id], |row| row.get(0))
+        .query_row("SELECT credential_envelope FROM instances WHERE instance_id=?1", [instance_id], |row| row.get::<_, Option<String>>(0))
         .optional()?
         .flatten();
     let existing = existing_envelope.as_deref().map(|value| decrypt(kind, value, key)).transpose()?;
