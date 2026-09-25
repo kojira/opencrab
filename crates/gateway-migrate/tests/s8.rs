@@ -114,6 +114,15 @@ fn source_profile_refuses_neighbor_versions_and_missing_required_column() {
 
 #[test]
 fn s8_import_and_project_are_offline_idempotent_and_preserve_core_rows() {
+    projected_discord_fixture(false);
+}
+
+#[test]
+fn s10_verify_freeze_is_read_only_for_projected_discord_fixture() {
+    projected_discord_fixture(true);
+}
+
+fn projected_discord_fixture(verify_freeze: bool) {
     let temp = tempfile::tempdir().unwrap();
     let core_path = temp.path().join("core.db");
     let discord_path = temp.path().join("discord.db");
@@ -373,6 +382,92 @@ fn s8_import_and_project_are_offline_idempotent_and_preserve_core_rows() {
     assert!(
         leaking_artifacts.is_empty(),
         "tool-produced artifacts must not expose raw agent/external identifiers or credential plaintext: {leaking_artifacts:?}"
+    );
+
+    if !verify_freeze {
+        return;
+    }
+    // S10 RED: the same fully projected disposable fixture is frozen as one
+    // matched core-plus-participating-gateway set before cleanup can be offered.
+    let freeze_dir = temp.path().join("post-qc-freeze");
+    let records = opencrab_gateway_migrate::backup::create_or_load_set(
+        &core_path,
+        &[(approval.destinations[0].clone(), discord_path.clone())],
+        &freeze_dir,
+    )
+    .unwrap();
+    let marker_conn = source::open_read_only(&core_path).unwrap();
+    let marker = marker_conn
+        .query_row(
+            "SELECT operation_id,approval_sha256,backup_set_sha256,source_core_sha256,\
+             source_fingerprint_sha256,subject_lineage_sha256,heartbeat_lineage_sha256,\
+             initial_projection_sha256,destination_manifest_sha256 \
+             FROM separation_migrations WHERE operation_id=?1",
+            [&approval.operation_id],
+            |row| {
+                (0..9)
+                    .map(|index| row.get::<_, String>(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            },
+        )
+        .unwrap();
+    drop(marker_conn);
+    let freeze_manifest_path = temp.path().join("freeze.json");
+    let freeze_manifest = serde_json::json!({
+        "version": 1,
+        "freeze_id": "00000000-0000-4000-8000-000000000010",
+        "approval_sha256": report.approval_sha256,
+        "projection_manifest_sha256": verification["manifest_sha256"],
+        "projection_marker_sha256": canonical::hash(&marker).unwrap(),
+        "identity_dispositions_sha256": canonical::hash(&approval.identity_dispositions).unwrap(),
+        "snapshots": records,
+    });
+    write_secure(
+        &freeze_manifest_path,
+        &canonical::value_bytes(&freeze_manifest).unwrap(),
+    );
+    let core_before_freeze = (
+        source::file_sha256(&core_path).unwrap(),
+        opencrab_gateway_migrate::backup::logical_sha256(&core_path).unwrap(),
+    );
+    let gateway_before_freeze = (
+        source::file_sha256(&discord_path).unwrap(),
+        opencrab_gateway_migrate::backup::logical_sha256(&discord_path).unwrap(),
+    );
+    let preflight = std::process::Command::new(env!("CARGO_BIN_EXE_opencrab-gateway-migrate"))
+        .arg("verify-freeze")
+        .args(["--core-db", core_path.to_str().unwrap()])
+        .args(["--approval", approval_path.to_str().unwrap()])
+        .args(["--import-report", report_path.to_str().unwrap()])
+        .args(["--verification", verification_path.to_str().unwrap()])
+        .args(["--freeze-dir", freeze_dir.to_str().unwrap()])
+        .args(["--freeze-manifest", freeze_manifest_path.to_str().unwrap()])
+        .args([
+            "--destination",
+            &format!("discord=discord-primary={}", discord_path.display()),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        preflight.status.success(),
+        "S10 verify-freeze must accept a matched projected fixture without writing: {}",
+        String::from_utf8_lossy(&preflight.stderr)
+    );
+    assert_eq!(
+        (
+            source::file_sha256(&core_path).unwrap(),
+            opencrab_gateway_migrate::backup::logical_sha256(&core_path).unwrap(),
+        ),
+        core_before_freeze,
+        "read-only freeze preflight changed core"
+    );
+    assert_eq!(
+        (
+            source::file_sha256(&discord_path).unwrap(),
+            opencrab_gateway_migrate::backup::logical_sha256(&discord_path).unwrap(),
+        ),
+        gateway_before_freeze,
+        "read-only freeze preflight changed the participating gateway"
     );
 }
 
