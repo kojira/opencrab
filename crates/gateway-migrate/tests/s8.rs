@@ -208,6 +208,61 @@ fn s8_import_and_project_are_offline_idempotent_and_preserve_core_rows() {
         "import must keep core read-only"
     );
     assert_eq!(report.destinations[0]["counts"]["instances"], 1);
+    let destination = Connection::open(&discord_path).unwrap();
+    let has_legacy_identity_sources: bool = destination
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_identity_sources')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        has_legacy_identity_sources,
+        "S8 must retain the gateway identity's original ID and metadata before S10 may delete its source"
+    );
+    let original_row: (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = destination
+        .query_row(
+            "SELECT id,user_id,agent_id,permission,created_by,created_at,display_name,platform \
+             FROM legacy_identity_sources WHERE instance_id=?1 AND id='tu-discord'",
+            ["11111111-1111-4111-8111-111111111111"],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        original_row,
+        (
+            "tu-discord".into(),
+            "42".into(),
+            "agent-a".into(),
+            "owner".into(),
+            "owner".into(),
+            "2026".into(),
+            "Crab".into(),
+            "discord".into(),
+        ),
+        "the destination must retain all original source identity fields verbatim"
+    );
+    drop(destination);
     let rerun_report = command::run_import(ImportArgs {
         core_path: &core_path,
         approval_path: &approval_path,
