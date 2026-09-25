@@ -796,3 +796,93 @@ pub fn prevalidate(core: &Connection, rows: &[SourceRow], approval: &Approval, i
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod s8_review_red_tests {
+    use super::*;
+    use crate::manifest::{Approval, IdentityDisposition};
+
+    fn approval(destination: Destination) -> Approval {
+        Approval { version:1, operation_id:"00000000-0000-4000-8000-000000000008".into(), created_at:"2026-01-01T00:00:00Z".into(), core_user_version:56, source_core_sha256:"a".repeat(64), destinations:vec![destination], identity_dispositions:vec![], channel_edges:vec![], watch_edges:vec![], credential_sources:vec![] }
+    }
+
+    #[test]
+    fn destination_schema_identifier_is_exact() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("discord.db");
+        drop(opencrab_discord_gateway::store::DiscordStore::open(&db).unwrap());
+        let destination = Destination { kind_id:"discord".into(), path_id:"main".into(), schema:"wrong".into() };
+        let inputs = Inputs { paths:BTreeMap::from([(("discord".into(),"main".into()),db)]), master_keys:BTreeMap::new(), credential_files:BTreeMap::new() };
+        assert!(initialize_destinations(&approval(destination), &inputs).is_err());
+    }
+
+    #[test]
+    fn rest_identity_has_exactly_one_api_principal_edge() {
+        let row = SourceRow { table:"trusted_users".into(), fingerprint:"1".repeat(64), columns:vec![
+            ("user_id".into(), crate::source::Cell::Text("123456789012345678".into())),
+            ("agent_id".into(), crate::source::Cell::Text("agent-a".into())),
+            ("permission".into(), crate::source::Cell::Text("user".into())),
+            ("platform".into(), crate::source::Cell::Text("rest".into())),
+        ]};
+        let cfg = serde_json::json!({"agent_id":"agent-a","self_bot_id":"99","access":{"owners":[],"co_agents":{},"trusted_users":["123456789012345678"]},"system_reactions":{}});
+        let raw = serde_json::to_vec(&cfg).unwrap();
+        let config_b64 = opencrab_discord_gateway::config::canonicalize_config_b64(&base64::engine::general_purpose::STANDARD.encode(raw)).unwrap();
+        let destination = Destination { kind_id:"discord".into(), path_id:"main".into(), schema:"s5-discord-v1".into() };
+        let plan = InstancePlan { destination:destination.clone(), instance_id:"i".into(), agent_id:"agent-a".into(), subject_id:1, revision:1, config_b64, addresses:vec![], enabled:true, credential:Zeroizing::new(vec![1]), credential_source:"x".into(), created_at:"2026-01-01T00:00:00Z".into() };
+        let mut approval = approval(destination);
+        approval.identity_dispositions.push(IdentityDisposition { source_fingerprint:row.fingerprint.clone(), edges:vec![IdentityEdge::Gateway { kind_id:"discord".into(), instance_id:"i".into() }] });
+        assert!(build_identity_plans(&[row], &approval, &[plan]).is_err());
+    }
+
+    #[test]
+    fn progressed_instance_semantic_includes_lifecycle_lineage() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("discord.db");
+        drop(opencrab_discord_gateway::store::DiscordStore::open(&db).unwrap());
+        let conn = Connection::open(&db).unwrap();
+        conn.execute("INSERT INTO instances(instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,core_digest,binding_inventory_json,failure_count,updated_at) VALUES ('i','a',1,'e30=','[]','enc:v1:x',1,2,2,'running',7,'digest','[\"b\"]',0,'t')", []).unwrap();
+        let row = current_semantic(&conn, "instances", &["i".into()]).unwrap().unwrap();
+        assert_eq!(row["desired_generation"], 2);
+        assert_eq!(row["core_revision"], 7);
+        assert_eq!(row["binding_inventory"], json!(["b"]));
+    }
+
+    #[test]
+    fn existing_web_instance_uses_persisted_author_and_role_without_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("web.db");
+        let store = opencrab_web_gateway::store::WebStore::open(&db).unwrap();
+        store.upsert("web-i", "agent-a", 3, "author-42", Some("secret"), true, &[9u8; 32]).unwrap();
+        store.set_caller_role("web-i", "trusted_user").unwrap();
+        drop(store);
+        let conn = Connection::open(&db).unwrap();
+        let row = current_semantic(&conn, "instances", &["web-i".into()]).unwrap().unwrap();
+        assert_eq!(row["author_id"], "author-42");
+        assert_eq!(row["caller_role"], "trusted_user");
+    }
+
+    #[test]
+    fn complete_channel_binding_edge_set_is_validated() {
+        let source = include_str!("destination.rs");
+        assert!(source.contains("validate_complete_channel_edges"), "all eligible open bindings require exact edge-set validation");
+    }
+
+    #[test]
+    fn each_watch_row_has_exactly_one_edge() {
+        let row = SourceRow { table:"session_watches".into(), fingerprint:"2".repeat(64), columns:vec![] };
+        let destination = Destination { kind_id:"nostr".into(), path_id:"main".into(), schema:"s5-nostr-v1".into() };
+        let mut approval = approval(destination);
+        approval.watch_edges = vec![
+            crate::manifest::WatchEdge{source_fingerprint:row.fingerprint.clone(),instance_id:"i".into()},
+            crate::manifest::WatchEdge{source_fingerprint:row.fingerprint.clone(),instance_id:"i".into()},
+        ];
+        assert!(validate_source_coverage(&[row], &approval, &[]).is_err());
+    }
+
+    #[test]
+    fn secret_files_are_loaded_once_before_planning() {
+        let source = include_str!("destination.rs");
+        assert!(source.contains("struct LoadedSecrets"), "inputs must own read-once zeroizing secret bytes");
+        assert_eq!(source.matches("read_master_key(").count(), 2, "one definition plus one loader call only");
+    }
+}

@@ -1,0 +1,67 @@
+   Compiling opencrab-gateway-migrate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gateway-migrate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.48s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_gateway_migrate-639abb0bdea7c711)
+
+running 11 tests
+test backup::s8_review_red_tests::backup_preflight_checks_free_space ... ok
+
+thread 'destination::s8_review_red_tests::each_watch_row_has_exactly_one_edge' panicked at crates/gateway-migrate/src/destination.rs:879:9:
+assertion failed: validate_source_coverage(&[row], &approval, &[]).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test destination::s8_review_red_tests::complete_channel_binding_edge_set_is_validated ... ok
+
+thread 'destination::s8_review_red_tests::secret_files_are_loaded_once_before_planning' panicked at crates/gateway-migrate/src/destination.rs:886:9:
+assertion `left == right` failed: one definition plus one loader call only
+  left: 4
+ right: 2
+
+thread 'command::s8_review_red_tests::import_report_rejects_unknown_destination_fields' panicked at crates/gateway-migrate/src/command.rs:311:9:
+unknown destination fields must fail typed decoding
+test destination::s8_review_red_tests::secret_files_are_loaded_once_before_planning ... FAILED
+
+thread 'destination::s8_review_red_tests::rest_identity_has_exactly_one_api_principal_edge' panicked at crates/gateway-migrate/src/destination.rs:829:140:
+called `Result::unwrap()` on an `Err` value: access user ids must be decimal snowflakes
+test destination::s8_review_red_tests::each_watch_row_has_exactly_one_edge ... FAILED
+test command::s8_review_red_tests::import_report_rejects_unknown_destination_fields ... FAILED
+test destination::s8_review_red_tests::rest_identity_has_exactly_one_api_principal_edge ... FAILED
+
+thread 'destination::s8_review_red_tests::destination_schema_identifier_is_exact' panicked at crates/gateway-migrate/src/destination.rs:816:9:
+assertion failed: initialize_destinations(&approval(destination), &inputs).is_err()
+test destination::s8_review_red_tests::destination_schema_identifier_is_exact ... FAILED
+
+thread 'destination::s8_review_red_tests::progressed_instance_semantic_includes_lifecycle_lineage' panicked at crates/gateway-migrate/src/destination.rs:845:9:
+assertion `left == right` failed
+  left: Null
+ right: 2
+test destination::s8_review_red_tests::progressed_instance_semantic_includes_lifecycle_lineage ... FAILED
+
+thread 'destination::s8_review_red_tests::existing_web_instance_uses_persisted_author_and_role_without_creation' panicked at crates/gateway-migrate/src/destination.rs:860:9:
+assertion `left == right` failed
+  left: Null
+ right: "author-42"
+test destination::s8_review_red_tests::existing_web_instance_uses_persisted_author_and_role_without_creation ... FAILED
+
+thread 'backup::s8_review_red_tests::stale_existing_backup_cannot_bind_to_changed_input' panicked at crates/gateway-migrate/src/backup.rs:249:14:
+stale backup must fail: [BackupRecord { kind_id: "core", path_id: "core", schema: "core-v56", file_sha256: "feaefb854a01e03297d44130698426eb24db8f0fd26b2d7fe1212819fc4f46c4", logical_sha256: "1d2143e95cfc153d5cf4cb7e21448d287f2a1be0dadb98721c7f6da6ec60b7f9" }, BackupRecord { kind_id: "discord", path_id: "main", schema: "s5-discord-v1", file_sha256: "a042c3ba79313edc5fa9715a753e4a0c03625c484e4a3668fbbbd09c59cdd0b9", logical_sha256: "9273d689038ec14f8603aba621dbe4b9c9fa19831f9ed63f40b97a41452eb1f2" }]
+test backup::s8_review_red_tests::stale_existing_backup_cannot_bind_to_changed_input ... FAILED
+
+thread 'source::s8_review_red_tests::required_core_table_shape_is_exact' panicked at crates/gateway-migrate/src/source.rs:302:37:
+unknown required-table column must fail: []
+test source::s8_review_red_tests::required_core_table_shape_is_exact ... FAILED
+
+failures:
+
+failures:
+    backup::s8_review_red_tests::stale_existing_backup_cannot_bind_to_changed_input
+    command::s8_review_red_tests::import_report_rejects_unknown_destination_fields
+    destination::s8_review_red_tests::destination_schema_identifier_is_exact
+    destination::s8_review_red_tests::each_watch_row_has_exactly_one_edge
+    destination::s8_review_red_tests::existing_web_instance_uses_persisted_author_and_role_without_creation
+    destination::s8_review_red_tests::progressed_instance_semantic_includes_lifecycle_lineage
+    destination::s8_review_red_tests::rest_identity_has_exactly_one_api_principal_edge
+    destination::s8_review_red_tests::secret_files_are_loaded_once_before_planning
+    source::s8_review_red_tests::required_core_table_shape_is_exact
+
+test result: FAILED. 2 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p opencrab-gateway-migrate --lib`

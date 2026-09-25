@@ -277,8 +277,8 @@ fn s8_import_and_project_are_offline_idempotent_and_preserve_core_rows() {
         "already_applied rerun must keep core byte-identical"
     );
     assert_eq!(
-        replay["core_projection"]["accepted_existing_api_principal_ids"],
-        serde_json::json!(["tu-rest"])
+        replay, verification,
+        "lost-response replay must reconstruct byte-identical inserted/accepted provenance"
     );
 }
 

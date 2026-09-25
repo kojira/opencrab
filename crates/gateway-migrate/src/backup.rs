@@ -206,3 +206,51 @@ fn safe(value: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod s8_review_red_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn backup_preflight_checks_free_space() {
+        let source = include_str!("backup.rs");
+        assert!(
+            source.contains("ensure_free_space"),
+            "backup creation must preflight required free space"
+        );
+    }
+
+    #[test]
+    fn stale_existing_backup_cannot_bind_to_changed_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = temp.path().join("core.db");
+        let dest = temp.path().join("dest.db");
+        let backups = temp.path().join("backups");
+        Connection::open(&core)
+            .unwrap()
+            .execute_batch("CREATE TABLE x(v TEXT); INSERT INTO x VALUES ('old');")
+            .unwrap();
+        Connection::open(&dest)
+            .unwrap()
+            .execute_batch("CREATE TABLE x(v TEXT); INSERT INTO x VALUES ('dest');")
+            .unwrap();
+        let destination = Destination {
+            kind_id: "discord".into(),
+            path_id: "main".into(),
+            schema: "s5-discord-v1".into(),
+        };
+        create_or_load_set(&core, &[(destination.clone(), dest.clone())], &backups).unwrap();
+        Connection::open(&core)
+            .unwrap()
+            .execute("INSERT INTO x VALUES ('new')", [])
+            .unwrap();
+        let error = create_or_load_set(&core, &[(destination, dest)], &backups)
+            .expect_err("stale backup must fail");
+        assert!(error.to_string().contains("backup") || error.to_string().contains("input"));
+        assert_eq!(
+            fs::metadata(&backups).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+}

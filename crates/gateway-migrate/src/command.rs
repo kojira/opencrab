@@ -293,3 +293,24 @@ pub fn parse_destination_paths(values: &[String]) -> Result<BTreeMap<(String, St
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod s8_review_red_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn import_report_rejects_unknown_destination_fields() {
+        let value = json!({
+            "version":1,
+            "approval":{"version":1,"operation_id":"00000000-0000-4000-8000-000000000008","created_at":"2026-01-01T00:00:00Z","core_user_version":56,"source_core_sha256":"a".repeat(64),"destinations":[],"identity_dispositions":[],"channel_edges":[],"watch_edges":[],"credential_sources":[]},
+            "approval_sha256":"b".repeat(64),"backup_set_sha256":"c".repeat(64),"backups":[],"source_rows":[],
+            "destinations":[{"kind_id":"discord","path_id":"main","schema":"s5-discord-v1","before_logical_sha256":"d".repeat(64),"after_logical_sha256":"e".repeat(64),"counts":{"instances":0,"endpoints":0,"identity_projections":0,"policies":0,"credentials":0},"inserted_keys":[],"accepted_existing_keys":[],"credentials":[],"plaintext":"forbidden"}],
+            "destination_manifest_sha256":"f".repeat(64)
+        });
+        assert!(
+            serde_json::from_value::<ImportReport>(value).is_err(),
+            "unknown destination fields must fail typed decoding"
+        );
+    }
+}

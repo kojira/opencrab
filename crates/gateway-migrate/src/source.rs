@@ -289,3 +289,17 @@ impl SourceRow {
         }
     }
 }
+
+#[cfg(test)]
+mod s8_review_red_tests {
+    use super::*;
+
+    #[test]
+    fn required_core_table_shape_is_exact() {
+        let conn = opencrab_db::init_memory().unwrap();
+        conn.execute_batch("ALTER TABLE agents ADD COLUMN s8_surprise TEXT;")
+            .unwrap();
+        let error = validate(&conn).expect_err("unknown required-table column must fail");
+        assert!(error.to_string().contains("agents") && error.to_string().contains("shape"));
+    }
+}
