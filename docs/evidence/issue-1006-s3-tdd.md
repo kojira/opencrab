@@ -1,5 +1,7 @@
 # Issue #1006 S3 TDD evidence — dynamic operations and platform-neutral routing
 
+> **Strict-separation supersession (2026-09-25):** This document remains #1006 evidence only for dynamic `authorization`/`dispatch`/`sub_engine`/`sharing`/`effect`/`final_delivery` metadata, declaration-digest enforcement, arbitrary operation names, generic binding/session routing, exact/global fan-out, and removal of concrete lifecycle/name fallbacks. Every RED/GREEN assertion involving `DeliveryGuarantee`, `delivery_guarantee`, `required_delivery_guarantee`, guarantee downgrade/upgrade, or effective guarantee is historical category-C evidence and is **not** an Issue #1006 execution, QC, release, or deployment gate. The corrected S3 checklist and required removal are authoritative in `docs/evidence/issue-1006-strict-separation-redesign.md`.
+
 Date: 2026-09-24
 Stage: S3 only
 Starting and rollback checkpoint: `f33424c26f29a4de0e30aef763a75f1f1d0fea6a`

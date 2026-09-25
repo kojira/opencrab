@@ -1,4 +1,6 @@
-# Issue #1006 S6 TDD evidence
+# Issue #1006 S6 TDD evidence (superseded)
+
+> **Superseded/non-gating (2026-09-25):** All behavior proved by this document—the seven immediate current co-agent relationship/revision rechecks introduced by `f707fe2`, `10bd57e`, and `cffff1d`—is absent at reference `1c3b782` and has been reclassified as category B. Issue #1006 must fully unwind it to historical admitted caller-role snapshot semantics while preserving gateway-owned external identity classification and generic role transport. This evidence is retained only as input to the separate immediate-revocation security follow-up; it is **not** an Issue #1006 execution, QC, release, or deployment gate.
 
 ## Scope and design-impact map
 

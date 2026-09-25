@@ -37,7 +37,7 @@
 - エージェント、subject、session、membership、会話履歴
 - エージェント実行パイプラインとセッション単位の直列化
 - バックグラウンド実行、subtask、完了通知
-- 汎用 schedule / heartbeat（明示的に決定されたもの）、generic gate row、inbound dedup と pending-delivery/ack ledger
+- 汎用 schedule / heartbeat（明示的に決定されたもの）、generic gate row、inbound dedup と既存の単一 core delivery ledger
 - 現行の正の INTEGER `subject_id`、単調 allocator/high-water、永続 tombstone、hashed single-use association grant
 - LLM / tool など gateway 非依存の core 設定と、動的 capability metadata による実行分類
 
@@ -50,9 +50,9 @@
 
 「transport は送受信だけ」は「汎用会話実行を持たない」という意味であり、platform policy・storage・authentication・lifecycle まで stateless にする意味ではない。generic な外部サービス supervision utility は共有してよいが、`server` は具象 gateway daemon を spawn / supervise / configure / proxy しない。各独立 daemon が自分の instance child を監督する。
 
-Issue #1006 の外部送信は分離前の observable behavior をそのまま generic process boundary へ移す。core は既存の `deliveries` table と `sending` / `delivered` / `failed` / `indeterminate` state machine を保持し、live acknowledged binding へ generic frame を一度送る。gateway adapter は既存の platform send を一度実行し、同じ結果 mapping を返す。disconnect と startup の stale `sending` は従来どおり terminal `indeterminate` となり、自動 replay しない。gateway emission ledger、prepared request/protocol digest、guarantee negotiation、retention handshake、Nostr signed-event replay、Discord durable nonce retry は追加しない。send-before-receipt ambiguity は既存のまま残し、分離 issue の中で強化したと主張しない。これらの category-B 強化は `docs/evidence/issue-1006-strict-separation-redesign.md` に記載した単一の follow-up Issue へ全て移し、その Issue は #1006 の完了 gate にしない。
+Issue #1006 の外部送信は分離前の observable behavior をそのまま generic process boundary へ移す。core は既存の `deliveries` table と `sending` / `delivered` / `failed` / `indeterminate` state machine を保持し、live acknowledged binding へ generic frame を一度送り、gateway delivery handler を一度だけ起動する。platform API call 数は handler 数とは別で、Discord は生成された chunk ごとに `create_message` を順番に呼び、全成功または最初の失敗で終了する既存挙動を保ち、Nostr は一度だけ post/reply command を試行する。disconnect と startup の stale `sending` は従来どおり terminal `indeterminate` となり、自動 replay しない。gateway emission ledger、prepared request/protocol digest、guarantee negotiation、retention handshake、Nostr signed-event replay、Discord durable nonce retry は追加しない。send-before-receipt ambiguity は既存のまま残し、分離 issue の中で強化したと主張しない。これらの category-B 強化は `docs/evidence/issue-1006-strict-separation-redesign.md` に記載した単一の follow-up Issue へ全て移し、その Issue は #1006 の完了 gate にしない。
 
-`co_agent` の権限は caller snapshot だけでは継続しない。core は initial model turn、queue の dequeue/retry、各 tool invocation、各 continuation（automatic / operation-driven / timed / subtask を含む）と outbound-delivery commit の直前に現在の relationship/revision を再検証し、revocation/mismatch なら以後の model/tool 実行も外部送信もなく pending work を generic に終了する。
+Issue #1006 の `co_agent` authorization は `1c3b782` の admitted caller-role snapshot semantics を維持する。gateway は外部 identity を認証・分類して generic role を渡し、core はその role snapshot を work と共に運ぶが、既に admission 済みの work について model/queue/tool/continuation/delivery 各境界で current relationship/revision を新規再検証しない。即時 revocation/revision revalidation は別 security Issue へ移し、#1006 の gate にしない。
 
 external identity は `trusted_users.platform/source` の既知値だけでなく `rest`、`extgate`、Web、任意 opaque 値を含む全 row を canonical source-row fingerprint で disposition する。Discord/Nostr は導出可能な store、genuine REST/API は `api_principals`、その他は operator が fingerprint-bound に 1 個以上の gateway instance store または `api_principals` へ明示 mapping する。global `extgate` fan-out も edge ごとの確認が必要で、Web edge があれば Web-owned durable store/local admin と `--web-db` が必須である。snapshot/rollback は core と manifest 内の全 participating gateway DB を対象にし、guess/drop/silent duplicate/unmapped row を許さない。
 
@@ -114,11 +114,11 @@ server ---------------- generic core APIs only --------------------------> core
 - **状態の owner を data class で決めたか**
   判定: gateway 間で共有する汎用会話・実行状態なら core。endpoint/account ID、credential、外部 identity、platform policy/subscription/display/lifecycle なら具象 gateway。再起動後も必要という理由だけで platform state を core へ置かない。
 - **分離に紛れて挙動を強化していないか**
-  判定: `1c3b782` と同じ core delivery row/state、外部 I/O 回数、Discord chunk、Nostr command、disconnect/startup `indeterminate` を保つか。emission ledger、prepared digest、guarantee label、reconnect replay、retention handshake を Issue #1006 に追加していないか。
+  判定: `1c3b782` と同じ core delivery row/state、generic frame/handler 数、Discord の生成 chunk ごとの ordered `create_message` API call 数、Nostr command 数、disconnect/startup `indeterminate` を保つか。handler/frame 数と platform API call 数を混同していないか。emission ledger、prepared digest、guarantee label、reconnect replay、retention handshake を Issue #1006 に追加していないか。
 - **identity と admin socket を lossless/fail-closed に分離したか**
   判定: 全 source fingerprint に明示 disposition/destination proof があり、Web を含む participating store 全体を snapshot/rollback するか。public TCP は gate-admin 全 6 path が 404 で、protected core UDS と gateway-local UDS が別か。
-- **revocation と subject non-reuse を全境界で守るか**
-  判定: co-agent は各 model/tool/queue/continuation の直前に再検証するか。現行 INTEGER subject ID を書換えず、tombstone-before-delete と first-association grant を generic に強制するか。
+- **分離と将来の revocation 強化を混同していないか／subject non-reuse を守るか**
+  判定: #1006 は gateway-owned classification と admitted generic role snapshot を維持し、current relationship/revision の七境界再検証を追加していないか。現行 INTEGER subject ID を書換えず、tombstone-before-delete と first-association grant を generic に強制するか。即時 revocation は別 security Issue だけで扱う。
 - その変更は 3（プロセス境界）へ進む余地を **狭めていないか**
   判定: gateway と core の呼び出しが generic gate-admin/runtime protocol の**値／メッセージ**だけか。core DB handle や上位共有状態を渡さず、`server` に具象 daemon の config/supervision を足さない。新 gateway の追加で core source/schema/migration/redeploy が一切変わらないか。
 
