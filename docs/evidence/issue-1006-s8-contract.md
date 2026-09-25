@@ -1,6 +1,6 @@
-# Issue #1006 S8 implementation contract (schema 55 only)
+# Issue #1006 S8 implementation contract (schema 56 only)
 
-This document closes S8-D1 through S8-D7. It is intentionally a one-release offline cutover contract, not a reusable migration framework. `opencrab-gateway-migrate` accepts only the current core lineage at `PRAGMA user_version=55`, the exact named source columns below, and the S5 destination schemas at this branch. Unknown versions, missing required tables/columns, unknown columns in a concrete legacy table, or an unlisted destination fail before any write.
+This document closes S8-D1 through S8-D7. It is intentionally a one-release offline cutover contract, not a reusable migration framework. The ordinary v56 core migration creates `api_principals` without reading or projecting gateway legacy state; legacy source tables remain present until S10. `opencrab-gateway-migrate` accepts only that current core lineage at `PRAGMA user_version=56`, the exact named source columns below, and the S5 destination schemas at this branch. Unknown versions, missing required tables/columns, unknown columns in a concrete legacy table, or an unlisted destination fail before any write.
 
 ## S8-D1 — existing REST principal behavior
 
@@ -37,7 +37,7 @@ Approval input:
   "version": 1,
   "operation_id": "00000000-0000-4000-8000-000000000008",
   "created_at": "2026-01-01T00:00:00Z",
-  "core_user_version": 55,
+  "core_user_version": 56,
   "source_core_sha256": "<64 lowercase hex>",
   "destinations": [
     {"kind_id":"discord","path_id":"discord-primary","schema":"s5-discord-v1"},
@@ -71,7 +71,7 @@ The strict verification output has exactly this shape. `approval` is the complet
     "version": 1,
     "operation_id": "00000000-0000-4000-8000-000000000008",
     "created_at": "2026-01-01T00:00:00Z",
-    "core_user_version": 55,
+    "core_user_version": 56,
     "source_core_sha256": "<64 lowercase hex>",
     "destinations": [
       {"kind_id":"discord","path_id":"discord-primary","schema":"s5-discord-v1"},
@@ -93,7 +93,7 @@ The strict verification output has exactly this shape. `approval` is the complet
   "approval_sha256": "<64 lowercase hex>",
   "backup_set_sha256": "<64 lowercase hex>",
   "backups": [
-    {"kind_id":"core","path_id":"core","schema":"core-v55","file_sha256":"<64 lowercase hex>","logical_sha256":"<64 lowercase hex>"},
+    {"kind_id":"core","path_id":"core","schema":"core-v56","file_sha256":"<64 lowercase hex>","logical_sha256":"<64 lowercase hex>"},
     {"kind_id":"discord","path_id":"discord-primary","schema":"s5-discord-v1","file_sha256":"<64 lowercase hex>","logical_sha256":"<64 lowercase hex>"}
   ],
   "source_rows": [
@@ -139,19 +139,19 @@ Source-row fingerprint encoding is exact. `LP(x) = u64 big-endian byte length ||
 ```text
 "opencrab/s8/source-row/v1\0"
 || LP(UTF8 table name)
-|| u64be(55)
+|| u64be(56)
 || u32be(column count)
 || for each column in the committed order:
      LP(UTF8 column name) || (0x00 for SQL NULL; otherwise 0x01 || LP(canonical value))
 ```
 
-TEXT canonical value is its exact UTF-8 bytes; INTEGER is minimal base-10 ASCII (`0`, never `+0`); BLOB is raw bytes. The committed schema-55 column orders and published vectors are:
+TEXT canonical value is its exact UTF-8 bytes; INTEGER is minimal base-10 ASCII (`0`, never `+0`); BLOB is raw bytes. The committed schema-56 column orders and published vectors are:
 
-- `trusted_users`: `id,user_id,agent_id,permission,created_by,created_at,display_name,platform`. Values `tu-1,42,agent-a,co-agent,owner,2026-01-01T00:00:00Z,Crab,rest` hash to `305663d4de781bff3c1135332815824a7fdc7144e572fd948604d0ba7b973de7`.
-- `channel_config`: `channel_id,agent_id,guild_id,channel_name,readable,writable,whitelisted,heartbeat_enabled,heartbeat_interval_secs,heartbeat_instructions,updated_at`. Values `chan-1,agent-a,guild-1,General,1,0,1,1,NULL,Ping,2026-01-01T00:00:00Z` hash to `904c8c785753302cffae7a08f400edda1d8d9df3fdc297403777d1afc584f353`.
-- `session_watches`: `id,session_id,agent_id,interval_secs,filter_json,created_at`. Values `7,session-a,agent-a,600,{"authors":["abc"]},2026-01-01T00:00:00Z` hash to `2c87da39373755aee7b70a82a252e08616b3245ce3eb96c36e2140fe4f3c9112`.
-- `agent_discord_config`: `agent_id,bot_token,owner_discord_id,enabled,updated_at,bot_user_id`. Values `agent-a,test-token,42,1,2026-01-01T00:00:00Z,99` hash to `92b4b896c91741936beec342d33309bf8d75d735f917146398f57f7ed21c0e0e`.
-- `agent_nostr_config`: `agent_id,secret_key,relays_json,filter_json,enabled,updated_at,owner_pubkey,self_pubkey`. Values `agent-a,test-secret,["wss://relay.example"],{"kinds":[1]},1,2026-01-01T00:00:00Z,owner-pub,self-pub` hash to `7a53322d7be632793b25223b77597d03239e97aa4f97abafb15b002752dfbe0e`.
+- `trusted_users`: `id,user_id,agent_id,permission,created_by,created_at,display_name,platform`. Values `tu-1,42,agent-a,co-agent,owner,2026-01-01T00:00:00Z,Crab,rest` hash to `2c6850f418281b0b4ede33a1a3ab379cef850e7a85dfd7d2679ee9209a5526a7`.
+- `channel_config`: `channel_id,agent_id,guild_id,channel_name,readable,writable,whitelisted,heartbeat_enabled,heartbeat_interval_secs,heartbeat_instructions,updated_at`. Values `chan-1,agent-a,guild-1,General,1,0,1,1,NULL,Ping,2026-01-01T00:00:00Z` hash to `e9099467f8ece3abb668571cab576378cf02d894f2eaf911005c85c5c50f6348`.
+- `session_watches`: `id,session_id,agent_id,interval_secs,filter_json,created_at`. Values `7,session-a,agent-a,600,{"authors":["abc"]},2026-01-01T00:00:00Z` hash to `8150c628708b328fe4c4dfdf816caa806738fda29ea2fac1304532c62ae8911d`.
+- `agent_discord_config`: `agent_id,bot_token,owner_discord_id,enabled,updated_at,bot_user_id`. Values `agent-a,test-token,42,1,2026-01-01T00:00:00Z,99` hash to `0db7c5133b00d98943329f5fa1cb9fff1bc6f262f37a111875246f831da5514e`.
+- `agent_nostr_config`: `agent_id,secret_key,relays_json,filter_json,enabled,updated_at,owner_pubkey,self_pubkey`. Values `agent-a,test-secret,["wss://relay.example"],{"kinds":[1]},1,2026-01-01T00:00:00Z,owner-pub,self-pub` hash to `f37159af0363c135d48435ed493b34f05ecea5ae3869294712ec82a6214cc788`.
 
 Comma separation above is explanatory only; the fingerprint always uses the typed LP encoding. `NULL` is the SQL NULL marker, JSON-looking TEXT is hashed byte-for-byte without JSON recanonicalization, and dummy token/secret strings are test vectors only.
 
@@ -159,16 +159,16 @@ Every source row has exactly one disposition record and at least one edge. Dupli
 
 ## S8-D3 — supported source profile
 
-The only accepted core is initialized schema version 55. Required tables are `agents`, `sessions`, `agent_sessions`, `gate_instances`, `gate_bindings`, `deliveries`, `trusted_users`, `channel_config`, `session_watches`, `session_heartbeat_config`, and `session_heartbeat_instructions`. Their named columns must match schema 55; absence fails even when empty.
+The only accepted core is initialized schema version 56. Required tables are `agents`, `sessions`, `agent_sessions`, `gate_instances`, `gate_bindings`, `deliveries`, `trusted_users`, `channel_config`, `session_watches`, `session_heartbeat_config`, `session_heartbeat_instructions`, and `api_principals`. Their named columns must match schema 56; absence fails even when empty.
 
-Two historical concrete tables are optional because fresh v55 omits them while upgraded v55 retains them:
+Two historical concrete tables are optional because fresh v56 omits them while upgraded v56 retains them:
 
 - `agent_discord_config(agent_id,bot_token,owner_discord_id,enabled,updated_at,bot_user_id)`;
 - `agent_nostr_config(agent_id,secret_key,relays_json,filter_json,enabled,updated_at,owner_pubkey,self_pubkey)`.
 
 If present, every named column must exist and no additional non-SQLite column is accepted; every row is fingerprinted. If absent, there must be no Discord/Nostr instance whose required credential/config cannot be proven from an already populated S5 destination plus its existing core `gate_instances` row. There is no support for `agent_discord_config`/`agent_nostr_config` with another shape, old user_version, or runtime import fallback.
 
-`trusted_users` uses its actual v55 eight columns; there is no fictional `source` column. `channel_config` uses all eleven columns including `updated_at`; `session_watches` uses all six columns. Histories, agents, positive subject IDs, sessions, memberships, generic instances/bindings, inbound dedup, and the single `deliveries` table are read for proof only and remain byte/logically unchanged.
+`trusted_users` uses its actual v56 eight columns; there is no fictional `source` column. `channel_config` uses all eleven columns including `updated_at`; `session_watches` uses all six columns. Histories, agents, positive subject IDs, sessions, memberships, generic instances/bindings, inbound dedup, and the single `deliveries` table are read for proof only and remain byte/logically unchanged.
 
 ## S8-D4 — exact current-store mapping
 
