@@ -212,11 +212,6 @@ impl SkillEngine {
         Ok(())
     }
 
-    fn authorize_continuation_speech(&self) -> Result<()> {
-        self.authorize(crate::authorization::AuthorizationBoundary::AutomaticContinuation)?;
-        self.authorize(crate::authorization::AuthorizationBoundary::OutboundDeliveryCommit)
-    }
-
     /// Set the resolved assistant display identity used by canonical in-turn history rendering.
     pub fn set_assistant_history_name(&mut self, name: impl Into<String>) {
         let name = name.into();

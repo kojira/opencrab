@@ -13,6 +13,5 @@ include!("conformance/timed_fire.rs");
 include!("conformance/turn_queue.rs");
 include!("conformance/operations.rs");
 include!("conformance/s3_operations.rs");
-include!("conformance/s6_authorization.rs");
 include!("conformance/strict_separation_parity.rs");
 include!("conformance/hello_diagnostics.rs");

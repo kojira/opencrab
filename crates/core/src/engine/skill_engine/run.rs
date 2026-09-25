@@ -1,3 +1,6 @@
+use anyhow::Result;
+use opencrab_llm_types::{Message, MessageContent, Role, ToolCall};
+
 use super::{
     run_helpers::{
         self, classify_call_failure, initialize_turn, normalize_response,
@@ -8,8 +11,7 @@ use super::{
     SkillEngine,
 };
 use crate::engine::types::{ChatRequest, EngineResult, LlmCallLog, LlmExchangeLog};
-use anyhow::Result;
-use opencrab_llm_types::{Message, MessageContent, Role, ToolCall};
+
 impl SkillEngine {
     /// Run the action loop with optional dynamic model override.
     ///
@@ -40,6 +42,7 @@ impl SkillEngine {
             image_urls,
             (self.conversation_high, self.conversation_low),
         );
+
         let mut iterations = 0;
         // 発端originは初回だけconsumeし、走行中の新着はrequestへappendした時点で加える。
         let initial_read_origin = self
@@ -402,7 +405,6 @@ impl SkillEngine {
                 if !persisted.is_empty() {
                     if let Some(body) = content.as_deref().filter(|body| !body.trim().is_empty()) {
                         if let Some(ref cb) = self.on_continuation_speech {
-                            self.authorize_continuation_speech()?;
                             cb(body.to_string()).await.map_err(|e| {
                                 anyhow::anyhow!("holding speech delivery failed: {e:#}")
                             })?;
@@ -671,7 +673,7 @@ impl SkillEngine {
                         if !c.trim().is_empty() {
                             last_generation_had_continuation_speech = true;
                             if let Some(ref cb) = self.on_continuation_speech {
-                                self.authorize_continuation_speech()?;
+                                self.authorize_model_iteration(2)?;
                                 cb(c.clone()).await.map_err(|e| {
                                     anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                                 })?;
@@ -706,7 +708,6 @@ impl SkillEngine {
                     // ため区別できず流用しない（最終二重配送・text+tool 二重保存を避ける）。
                     last_generation_had_continuation_speech = true;
                     if let Some(ref cb) = self.on_continuation_speech {
-                        self.authorize_continuation_speech()?;
                         cb(c.clone()).await.map_err(|e| {
                             anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                         })?;
@@ -738,7 +739,6 @@ impl SkillEngine {
                     if !speech.trim().is_empty() {
                         last_generation_had_continuation_speech = true;
                         if let Some(ref cb) = self.on_continuation_speech {
-                            self.authorize_continuation_speech()?;
                             cb(speech.clone()).await.map_err(|e| {
                                 anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                             })?;

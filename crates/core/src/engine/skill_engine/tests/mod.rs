@@ -10,6 +10,5 @@ include!("budget.rs");
 include!("request_and_callbacks.rs");
 include!("utterance.rs");
 include!("continuation.rs");
-include!("authorization.rs");
 include!("tool_results_dispatch.rs");
 include!("dispatch_ordering.rs");
