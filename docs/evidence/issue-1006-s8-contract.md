@@ -36,6 +36,7 @@ Approval input:
 {
   "version": 1,
   "operation_id": "00000000-0000-4000-8000-000000000008",
+  "created_at": "2026-01-01T00:00:00Z",
   "core_user_version": 55,
   "source_core_sha256": "<64 lowercase hex>",
   "destinations": [
@@ -59,7 +60,79 @@ Approval input:
 }
 ```
 
-Gateway identity edges use `{"target":"gateway","kind_id":"discord|nostr|web","instance_id":"<existing UUID>"}`. `destinations` sort by `(kind_id,path_id)`; dispositions sort by source fingerprint; each edge list sorts by its canonical JSON bytes; channel/watch/credential arrays sort by their displayed key tuple. The verification output repeats the approved data and adds source/destination backup hashes, before/after logical digests, per-class counts, exact inserted/accepted-existing destination keys, core delivery-table count/digest, heartbeat initial/lineage digests, and `manifest_sha256`. It contains no plaintext credential, master-key path, external identifier, config bytes, or raw source row; those values appear only through row fingerprints and destination-key digests.
+`created_at` is a fixed operator-approved UTC timestamp in exactly `YYYY-MM-DDTHH:MM:SSZ` form (no fraction or offset); it is the only timestamp S8 may copy into new destination rows. Gateway identity edges use `{"target":"gateway","kind_id":"discord|nostr|web","instance_id":"<existing UUID>"}`. `destinations` sort by `(kind_id,path_id)`; dispositions sort by source fingerprint; each edge list sorts by its canonical JSON bytes; channel/watch/credential arrays sort by their displayed key tuple.
+
+The strict verification output has exactly this shape. `approval` is the complete `ApprovalInput` object above, with the same field values and array order, not a path or a partial copy:
+
+```json
+{
+  "version": 1,
+  "approval": {
+    "version": 1,
+    "operation_id": "00000000-0000-4000-8000-000000000008",
+    "created_at": "2026-01-01T00:00:00Z",
+    "core_user_version": 55,
+    "source_core_sha256": "<64 lowercase hex>",
+    "destinations": [
+      {"kind_id":"discord","path_id":"discord-primary","schema":"s5-discord-v1"},
+      {"kind_id":"nostr","path_id":"nostr-primary","schema":"s5-nostr-v1"}
+    ],
+    "identity_dispositions": [
+      {"source_fingerprint":"<64 lowercase hex>","edges":[{"target":"api_principal"}]}
+    ],
+    "channel_edges": [
+      {"source_fingerprint":"<64 lowercase hex>","instance_id":"<existing UUID>","binding_id":"<existing ID>","session_id":"<existing ID>"}
+    ],
+    "watch_edges": [
+      {"source_fingerprint":"<64 lowercase hex>","instance_id":"<existing UUID>"}
+    ],
+    "credential_sources": [
+      {"instance_id":"<existing UUID>","source":"legacy-core:agent_discord_config:<agent_id>"}
+    ]
+  },
+  "approval_sha256": "<64 lowercase hex>",
+  "backup_set_sha256": "<64 lowercase hex>",
+  "backups": [
+    {"kind_id":"core","path_id":"core","schema":"core-v55","file_sha256":"<64 lowercase hex>","logical_sha256":"<64 lowercase hex>"},
+    {"kind_id":"discord","path_id":"discord-primary","schema":"s5-discord-v1","file_sha256":"<64 lowercase hex>","logical_sha256":"<64 lowercase hex>"}
+  ],
+  "source_rows": [
+    {"table":"channel_config","row_count":1,"fingerprint_set_sha256":"<64 lowercase hex>"},
+    {"table":"trusted_users","row_count":1,"fingerprint_set_sha256":"<64 lowercase hex>"}
+  ],
+  "destinations": [
+    {
+      "kind_id":"discord",
+      "path_id":"discord-primary",
+      "schema":"s5-discord-v1",
+      "before_logical_sha256":"<64 lowercase hex>",
+      "after_logical_sha256":"<64 lowercase hex>",
+      "counts":{"instances":1,"endpoints":1,"identity_projections":1,"policies":0,"credentials":1},
+      "inserted_keys":[{"table":"instances","key":["<instance UUID>"],"row_sha256":"<64 lowercase hex>"}],
+      "accepted_existing_keys":[],
+      "credentials":[{"instance_id":"<instance UUID>","source":"legacy-core:agent_discord_config:<agent_id>","envelope_sha256":"<64 lowercase hex>","credential_configured":true}]
+    }
+  ],
+  "core_projection": {
+    "before_logical_sha256":"<64 lowercase hex>",
+    "after_logical_sha256":"<64 lowercase hex>",
+    "inserted_api_principal_ids":["<id>"],
+    "accepted_existing_api_principal_ids":[],
+    "deliveries":{"row_count":0,"logical_sha256":"<64 lowercase hex>"},
+    "heartbeat":{
+      "inserted_keys":[{"agent_id":"<agent ID>","session_id":"<session ID>"}],
+      "accepted_existing_keys":[],
+      "initial_sha256":"<64 lowercase hex>",
+      "lineage_sha256":"<64 lowercase hex>"
+    }
+  },
+  "manifest_sha256": "<64 lowercase hex>"
+}
+```
+
+All shown fields are required; unknown or duplicate fields fail. `version`, `core_user_version`, every `row_count`, and every fixed `counts` value are nonnegative JSON integers; `credential_configured` is JSON boolean; all other leaves are strings or the displayed arrays/objects. The `counts` object always contains exactly `instances,endpoints,identity_projections,policies,credentials`, using zero for a class absent from that destination schema. `backups` sort by `(kind_id,path_id)` with core first by ordinary bytewise string order; `source_rows` sort by `table`; verification `destinations` sort by `(kind_id,path_id)`; `inserted_keys` and `accepted_existing_keys` sort by `(table,key elements)`; `credentials` sort by `instance_id`; API-principal ID arrays sort bytewise; heartbeat keys sort by `(agent_id,session_id)`. A key is an array of the destination table's TEXT primary-key components in declared primary-key order. `row_sha256` is SHA-256 of RFC-8785 canonical JSON `{"table":<table>,"key":[...],"row":<semantic mapped row object>}`; randomized ciphertext and nonsemantic timestamps are excluded as required by D4/D5. `fingerprint_set_sha256` is SHA-256 of the concatenated raw 32-byte source fingerprints in lowercase-hex bytewise order. `backup_set_sha256` is SHA-256 of RFC-8785 canonical JSON of the complete sorted `backups` array. `approval_sha256` hashes canonical `approval`. `manifest_sha256` hashes the RFC-8785 canonical complete verification object with only the `manifest_sha256` member omitted. Unsorted arrays are rejected before hashing, and the file itself is emitted as RFC-8785 canonical UTF-8 JSON.
+
+The output contains no plaintext credential, master-key path, external identifier, config bytes, or raw source row; those values appear only through row fingerprints, semantic row hashes, and credential-envelope hashes.
 
 Source-row fingerprint encoding is exact. `LP(x) = u64 big-endian byte length || x`. Encode:
 
@@ -72,7 +145,15 @@ Source-row fingerprint encoding is exact. `LP(x) = u64 big-endian byte length ||
      LP(UTF8 column name) || (0x00 for SQL NULL; otherwise 0x01 || LP(canonical value))
 ```
 
-TEXT canonical value is its exact UTF-8 bytes; INTEGER is minimal base-10 ASCII (`0`, never `+0`); BLOB is raw bytes. Committed `trusted_users` order is `id,user_id,agent_id,permission,created_by,created_at,display_name,platform`. Vector row `tu-1,42,agent-a,co-agent,owner,2026-01-01T00:00:00Z,Crab,rest` at version 55 hashes to `305663d4de781bff3c1135332815824a7fdc7144e572fd948604d0ba7b973de7`.
+TEXT canonical value is its exact UTF-8 bytes; INTEGER is minimal base-10 ASCII (`0`, never `+0`); BLOB is raw bytes. The committed schema-55 column orders and published vectors are:
+
+- `trusted_users`: `id,user_id,agent_id,permission,created_by,created_at,display_name,platform`. Values `tu-1,42,agent-a,co-agent,owner,2026-01-01T00:00:00Z,Crab,rest` hash to `305663d4de781bff3c1135332815824a7fdc7144e572fd948604d0ba7b973de7`.
+- `channel_config`: `channel_id,agent_id,guild_id,channel_name,readable,writable,whitelisted,heartbeat_enabled,heartbeat_interval_secs,heartbeat_instructions,updated_at`. Values `chan-1,agent-a,guild-1,General,1,0,1,1,NULL,Ping,2026-01-01T00:00:00Z` hash to `904c8c785753302cffae7a08f400edda1d8d9df3fdc297403777d1afc584f353`.
+- `session_watches`: `id,session_id,agent_id,interval_secs,filter_json,created_at`. Values `7,session-a,agent-a,600,{"authors":["abc"]},2026-01-01T00:00:00Z` hash to `2c87da39373755aee7b70a82a252e08616b3245ce3eb96c36e2140fe4f3c9112`.
+- `agent_discord_config`: `agent_id,bot_token,owner_discord_id,enabled,updated_at,bot_user_id`. Values `agent-a,test-token,42,1,2026-01-01T00:00:00Z,99` hash to `92b4b896c91741936beec342d33309bf8d75d735f917146398f57f7ed21c0e0e`.
+- `agent_nostr_config`: `agent_id,secret_key,relays_json,filter_json,enabled,updated_at,owner_pubkey,self_pubkey`. Values `agent-a,test-secret,["wss://relay.example"],{"kinds":[1]},1,2026-01-01T00:00:00Z,owner-pub,self-pub` hash to `7a53322d7be632793b25223b77597d03239e97aa4f97abafb15b002752dfbe0e`.
+
+Comma separation above is explanatory only; the fingerprint always uses the typed LP encoding. `NULL` is the SQL NULL marker, JSON-looking TEXT is hashed byte-for-byte without JSON recanonicalization, and dummy token/secret strings are test vectors only.
 
 Every source row has exactly one disposition record and at least one edge. Duplicate edges, an unlisted target DB, a missing row, a changed fingerprint, or zero edges fails before backup/write.
 
@@ -120,9 +201,44 @@ Exactly one nonempty candidate is selected. If both legacy and destination candi
 
 There is no distributed-transaction claim. Before writes, the tool validates all source shapes, fingerprints, edges, configs, credentials, destination schemas/conflicts, and free backup space, then creates SQLite backup-API snapshots of core and every listed destination and verifies their logical/file digests.
 
-Import writes one transaction per destination in sorted `(kind_id,path_id)` order. A transaction inserts only absent rows and commits only after rereading its complete expected key set. Failure rolls back that destination and stops; already committed earlier destinations remain exact partial progress covered by the matched backup set. Core remains read-only. Rerun with the same `operation_id`, source hash, approval digest, and backup-set digest accepts exact earlier rows without writing and continues missing destinations. Any non-identical row fails; a different operation cannot adopt partial rows. Operator rollback restores the entire matched set, never one DB. Only after all destinations verify does the separate `project-core-state` command open core read-write.
+The S5 Discord, Nostr, and Web stores have no suitable immutable migration-operation metadata seam: their `instances`, endpoint/policy, and identity tables are runtime-owned semantic state and cannot be overloaded. S8 therefore uses one external immutable partial-operation artifact per destination. Artifacts live beside the approval manifest under a mode-`0700`, effective-UID-owned, non-symlink directory named `<approval filename>.partials`. The filename is `<locator_sha256>.json`, where `locator_sha256` hashes canonical JSON `{"operation_id":<UUID>,"kind_id":<kind>,"path_id":<path>}`. Each file is a regular non-symlink effective-UID-owned mode-`0600` file created with exclusive create, fsynced before opening the destination write transaction, and never rewritten or deleted by S8.
 
-`project-core-state` prevalidates the unchanged source/approval/destination digests, starts one immediate core transaction, inserts absent `api_principals`, invokes existing S2 safeguard and S4 heartbeat projection seams, and writes one immutable projection marker. Any error rolls back all core changes. A lost-response rerun opens core read-only: exact marker identity/digests/fingerprint returns `already_applied`; any mismatch fails. It never reruns destination import, deletes a legacy row, or changes `deliveries`.
+The artifact has exactly this strict JSON shape:
+
+```json
+{
+  "version":1,
+  "record_type":"opencrab-s8-partial-destination",
+  "operation_id":"00000000-0000-4000-8000-000000000008",
+  "approval_sha256":"<64 lowercase hex>",
+  "backup_set_sha256":"<64 lowercase hex>",
+  "source_core_sha256":"<64 lowercase hex>",
+  "destination":{
+    "kind_id":"discord",
+    "path_id":"discord-primary",
+    "schema":"s5-discord-v1",
+    "before_file_sha256":"<64 lowercase hex>",
+    "before_logical_sha256":"<64 lowercase hex>"
+  },
+  "expected_keys":[
+    {
+      "table":"instances",
+      "key":["<instance UUID>"],
+      "before_row_sha256":null,
+      "expected_row_sha256":"<64 lowercase hex>"
+    }
+  ],
+  "record_sha256":"<64 lowercase hex>"
+}
+```
+
+All fields are required and unknown/duplicate fields fail. `expected_keys` sorts by `(table,key elements)` and contains every row the destination transaction will verify, including exact rows already present in the matched before-backup. `before_row_sha256` is either JSON null when that key was absent in the bound backup or the semantic row hash defined in D2 when present; `expected_row_sha256` is always that hash for the approved mapped row. `record_sha256` hashes RFC-8785 canonical JSON of the whole record with only `record_sha256` omitted. The tool validates the hash, ownership, mode, regular-file type, filename locator, approval/source/backup identities, destination before-backup hashes, and complete expected-key equality before accepting any current destination row.
+
+Import writes one transaction per destination in sorted `(kind_id,path_id)` order. After global prevalidation and matched backups, it exclusively creates and fsyncs that destination's artifact, then opens the destination transaction. The transaction inserts only an expected absent key whose artifact has `before_row_sha256:null`; it accepts an already present key only when the current semantic row hash equals `expected_row_sha256` and either (a) the bound before-backup proves the same `before_row_sha256`, or (b) `before_row_sha256` is null and this exact same-operation artifact owns the interrupted insertion. It commits only after rereading its complete expected key set. Failure rolls back that destination and stops; already committed earlier destinations remain exact partial progress covered by the matched backup set. Core remains read-only.
+
+A lost response after artifact fsync but before destination commit reruns with the same artifact and inserts still-absent approved keys. A lost response after commit accepts the exact rows without writing and continues. Every rerun must supply the same `operation_id`, canonical approval/`approval_sha256`, original matched backup set/`backup_set_sha256`, source hash, destination identity, and byte-identical artifact; missing, changed, newly generated, or non-identical material fails. Before any acceptance, S8 scans all valid artifacts in the partials directory. Another `operation_id` whose artifact overlaps any `(kind_id,path_id,table,key)` conflicts even when the current row bytes are exact, so a new backup cannot adopt another interrupted operation's rows. This one-release cutover does not supersede an operation: rollback restores the entire matched database set, never one DB, and any retry continues with the original operation identity and artifacts. Only after all destinations verify does the separate `project-core-state` command open core read-write; partial artifacts remain immutable audit inputs through S10 and matched rollback.
+
+`project-core-state` prevalidates the unchanged source/approval/destination/partial-artifact digests, starts one immediate core transaction, inserts absent `api_principals`, invokes existing S2 safeguard and S4 heartbeat projection seams, and writes one immutable projection marker. Any error rolls back all core changes. A lost-response rerun opens core read-only: exact marker identity/digests/fingerprint returns `already_applied`; any mismatch fails. It never reruns destination import, deletes a legacy row, or changes `deliveries`.
 
 ## S8-D7 — heartbeat edges
 
