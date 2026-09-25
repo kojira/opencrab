@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 pub struct Placement {
     pub core_socket: String,
     pub nostaro_bin: String,
-    #[serde(default)]
-    pub gateway_store_path: Option<String>,
     pub instances: Vec<InstancePlacement>,
 }
 
@@ -287,7 +285,6 @@ mod tests {
     #[test]
     fn rejects_http_listen_fields_by_absence() {
         let p = Placement {
-            gateway_store_path: None,
             core_socket: "/tmp/g.sock".into(),
             nostaro_bin: "nostaro".into(),
             instances: vec![InstancePlacement {

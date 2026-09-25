@@ -11,7 +11,6 @@ use std::time::Duration;
 use opencrab_gate_client::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
 use opencrab_gate_client::wire::{LiveInboundScope, SaidContext};
 use opencrab_gate_client::SayPolicy;
-use sha2::{Digest as _, Sha256};
 use tokio::sync::Notify;
 
 use crate::config::{
@@ -46,7 +45,6 @@ fn dedup_ttl(cfg: &InstanceConfig) -> Duration {
 }
 
 #[derive(Default)]
-#[allow(dead_code)]
 struct SaidMetrics {
     store_error: AtomicU64,
     bad_request: AtomicU64,
@@ -70,7 +68,6 @@ pub fn spawn_instance(
     secret: Option<Arc<String>>,
     nostaro_bin: PathBuf,
     overrides: HarnessOverrides,
-    emission_ledger: Arc<opencrab_gate_client::emission::EmissionLedger>,
 ) -> anyhow::Result<Arc<InstanceClient>> {
     if overrides.is_active() {
         tracing::warn!(
@@ -126,7 +123,6 @@ pub fn spawn_instance(
         metrics,
         seen,
         overrides,
-        emission_ledger,
     );
     Ok(client)
 }
@@ -142,7 +138,6 @@ fn supervise_lanes(
     metrics: Arc<SaidMetrics>,
     seen: Arc<SeenEvents>,
     overrides: HarnessOverrides,
-    emission_ledger: Arc<opencrab_gate_client::emission::EmissionLedger>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -169,8 +164,6 @@ fn supervise_lanes(
                 secret.clone(),
                 metrics.clone(),
                 overrides.dry_run,
-                cfg.relays.clone(),
-                Arc::clone(&emission_ledger),
             ));
             wait_until_unbound(&client, &address).await;
             tracing::info!(address = %address, "binding lost; stopping watch");
@@ -185,8 +178,63 @@ fn supervise_lanes(
 /// core からの say を live queue から取り出し、発端イベントへの e-tag reply として nostaro で
 /// 投稿する。返信先があれば e-tag reply、無ければ（bundle/曖昧）新規ノート（standalone post）で
 /// publish する（row292/#843: drop しない）。
-
-include!("run/delivery.rs");
+fn spawn_say_consumer(
+    client: Arc<InstanceClient>,
+    address: String,
+    nostaro_bin: PathBuf,
+    post_config: PathBuf,
+    secret: Option<Arc<String>>,
+    metrics: Arc<SaidMetrics>,
+    dry_run: bool,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match client.next_live(&address).await {
+                Some(LiveEvent::Message {
+                    text, reply_origin, ..
+                }) => {
+                    let secret_ref = secret.as_ref().map(|s| s.as_str());
+                    match post::deliver_say(
+                        &nostaro_bin,
+                        &post_config,
+                        secret_ref,
+                        reply_origin,
+                        &text,
+                        dry_run,
+                    )
+                    .await
+                    {
+                        SayDelivery::Posted => {
+                            let n = metrics.say_posted.fetch_add(1, Ordering::Relaxed) + 1;
+                            tracing::info!(address = %address, say_posted = n, "say posted as reply");
+                        }
+                        SayDelivery::PostedStandalone => {
+                            let n = metrics
+                                .say_posted_standalone
+                                .fetch_add(1, Ordering::Relaxed)
+                                + 1;
+                            tracing::info!(
+                                address = %address,
+                                say_posted_standalone = n,
+                                "say posted as standalone (no single reply target)"
+                            );
+                        }
+                        SayDelivery::Failed(e) => {
+                            let n = metrics.say_post_failed.fetch_add(1, Ordering::Relaxed) + 1;
+                            tracing::warn!(address = %address, say_post_failed = n, error = %e, "say post failed");
+                        }
+                    }
+                }
+                // 切断。少し待って再試行（再接続後 next_live が再びブロックする）。
+                Some(LiveEvent::Error { .. }) | None => {
+                    tokio::time::sleep(BIND_POLL).await;
+                }
+                // Activity / CompletedNoReply は投稿対象ではない。
+                Some(_) => {}
+            }
+        }
+    })
+}
 
 async fn wait_until_bound(client: &InstanceClient, address: &str) {
     loop {

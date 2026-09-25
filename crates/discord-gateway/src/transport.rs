@@ -22,16 +22,6 @@ pub const DRY_RUN_LOG_TARGET: &str = "opencrab_discordgate::dry_run";
 pub trait DiscordTransport: Send + Sync {
     /// channel への通常投稿（say）。
     async fn create_message(&self, channel_id: &str, content: &str) -> TransportOutcome;
-    async fn create_message_with_nonce(
-        &self,
-        channel_id: &str,
-        content: &str,
-        nonce: &str,
-        enforce_nonce: bool,
-    ) -> TransportOutcome {
-        let _ = (nonce, enforce_nonce);
-        self.create_message(channel_id, content).await
-    }
     /// message への返信（reply DI）。
     async fn reply_message(
         &self,
@@ -104,18 +94,6 @@ impl DiscordTransport for DryRunTransport {
         Self::log("say", channel_id, &message_id, "", content);
         TransportOutcome::Ok(json!({"dry_run": true, "kind": "say", "message_id": message_id}))
     }
-    async fn create_message_with_nonce(
-        &self,
-        channel_id: &str,
-        content: &str,
-        nonce: &str,
-        enforce_nonce: bool,
-    ) -> TransportOutcome {
-        let message_id = next_dry_run_message_id();
-        tracing::info!(target: DRY_RUN_LOG_TARGET, kind="say", channel=channel_id,
-            message=%message_id, nonce, enforce_nonce, body=%content, "DRY_RUN discord op (not sent)");
-        TransportOutcome::Ok(json!({"message_id":message_id}))
-    }
     async fn reply_message(
         &self,
         channel_id: &str,
@@ -172,7 +150,7 @@ impl DiscordTransport for DryRunTransport {
 
 // ==================== real serenity transport ====================
 
-use serenity::all::{ChannelId, CreateMessage, MessageId, Nonce, ReactionType, UserId};
+use serenity::all::{ChannelId, CreateMessage, MessageId, ReactionType, UserId};
 use serenity::http::Http;
 use std::sync::Arc;
 
@@ -222,26 +200,6 @@ impl DiscordTransport for SerenityTransport {
             return TransportOutcome::Rejected;
         };
         match ch.say(&self.http, content).await {
-            Ok(m) => TransportOutcome::Ok(json!({"message_id": m.id.get().to_string()})),
-            Err(e) => classify_write_err(&e),
-        }
-    }
-
-    async fn create_message_with_nonce(
-        &self,
-        channel_id: &str,
-        content: &str,
-        nonce: &str,
-        enforce_nonce: bool,
-    ) -> TransportOutcome {
-        let Some(ch) = channel(channel_id) else {
-            return TransportOutcome::Rejected;
-        };
-        let builder = CreateMessage::new()
-            .content(content)
-            .nonce(Nonce::String(nonce.to_string()))
-            .enforce_nonce(enforce_nonce);
-        match ch.send_message(&self.http, builder).await {
             Ok(m) => TransportOutcome::Ok(json!({"message_id": m.id.get().to_string()})),
             Err(e) => classify_write_err(&e),
         }
@@ -345,7 +303,6 @@ pub(crate) mod testfake {
     pub(crate) struct RecordingTransport {
         /// (kind, body) の呼び出し列。kind は "say"（create_message）/ "reply"（reply_message）。
         pub calls: Mutex<Vec<(String, String)>>,
-        pub nonce_calls: Mutex<Vec<(String, bool)>>,
         /// この index（0 始まり）の write を失敗させる。None なら全成功。
         pub fail_at: Option<usize>,
         /// 失敗時に Rejected でなく Indeterminate を返す。
@@ -387,10 +344,6 @@ pub(crate) mod testfake {
                 .collect()
         }
 
-        pub(crate) fn nonces(&self) -> Vec<(String, bool)> {
-            self.nonce_calls.lock().unwrap().clone()
-        }
-
         pub(crate) fn typing_count(&self) -> usize {
             self.typing_count.load(Ordering::SeqCst)
         }
@@ -399,19 +352,6 @@ pub(crate) mod testfake {
     #[async_trait]
     impl DiscordTransport for RecordingTransport {
         async fn create_message(&self, _channel_id: &str, content: &str) -> TransportOutcome {
-            self.record_write("say", content)
-        }
-        async fn create_message_with_nonce(
-            &self,
-            _channel_id: &str,
-            content: &str,
-            nonce: &str,
-            enforce_nonce: bool,
-        ) -> TransportOutcome {
-            self.nonce_calls
-                .lock()
-                .unwrap()
-                .push((nonce.to_string(), enforce_nonce));
             self.record_write("say", content)
         }
         async fn reply_message(

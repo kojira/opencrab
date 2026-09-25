@@ -384,7 +384,12 @@ pub struct Bind {
     pub address: String,
 }
 
-include!("wire/delivery_types.rs");
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Say {
+    pub id: String,
+    pub binding_id: String,
+    pub payload: Value,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Activity {
@@ -442,7 +447,6 @@ pub struct WireResponse {
 pub enum CoreMsg {
     Bind(Bind),
     Say(Say),
-    DeliveryAck(DeliveryAck),
     Activity(Activity),
     TurnFailed(TurnFailed),
     Invoke(Invoke),
@@ -565,14 +569,6 @@ fn parse_core_msg(obj: &Value) -> CoreMsg {
                 m,
             },
         },
-        "delivery_ack" => match parse_delivery_ack(obj) {
-            Ok(ack) => CoreMsg::DeliveryAck(ack),
-            Err(_) => CoreMsg::Invalid {
-                id: opt_id(obj),
-                code: "bad_request",
-                m,
-            },
-        },
         "activity" => match parse_activity(obj) {
             Ok(a) => CoreMsg::Activity(a),
             Err(_) => CoreMsg::Invalid {
@@ -621,7 +617,20 @@ fn parse_bind(obj: &Value) -> Result<Bind, FrameError> {
     })
 }
 
-include!("wire/delivery_parse.rs");
+fn parse_say(obj: &Value) -> Result<Say, FrameError> {
+    let id = parse_request_id(&require_str(obj, "id")?)?;
+    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
+    let payload = obj.get("payload").cloned().ok_or(FrameError::BadRequest)?;
+    if !payload.is_object() {
+        return Err(FrameError::BadRequest);
+    }
+    say_reply_target(&payload)?;
+    Ok(Say {
+        id,
+        binding_id,
+        payload,
+    })
+}
 
 fn parse_invoke(obj: &Value) -> Result<Invoke, FrameError> {
     let id = parse_request_id(&require_str(obj, "id")?)?;

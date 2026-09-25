@@ -99,13 +99,6 @@ async fn event_loop_reacts_to_a_visible_b_silent_and_completion_without_extras()
     let transport: Arc<dyn DiscordTransport> = recording.clone();
     let targets: BindingDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-    let emission_dir = tempfile::tempdir().unwrap();
-    let emission_ledger = Arc::new(
-        opencrab_gate_client::emission::EmissionLedger::open(
-            &emission_dir.path().join("discord.db"),
-        )
-        .unwrap(),
-    );
     let consumer = spawn_say_consumer(
         client,
         address,
@@ -118,7 +111,6 @@ async fn event_loop_reacts_to_a_visible_b_silent_and_completion_without_extras()
             no_reply: "🤐".into(),
         },
         targets,
-        emission_ledger,
     );
     let activity_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     for frame in [

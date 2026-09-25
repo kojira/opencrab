@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize)]
 pub struct Placement {
     pub core_socket: String,
-    #[serde(default)]
-    pub gateway_store_path: Option<String>,
     /// Core-owned inbox shared by this co-located gateway. Optional only for
     /// backward-compatible attachment-free placements.
     #[serde(default)]
@@ -285,7 +283,6 @@ mod tests {
     #[test]
     fn valid_placement_passes_and_has_no_token_field() {
         let p = Placement {
-            gateway_store_path: None,
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
             instances: vec![InstancePlacement {
@@ -306,7 +303,6 @@ mod tests {
     #[test]
     fn empty_addresses_fail_loud() {
         let p = Placement {
-            gateway_store_path: None,
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
             instances: vec![InstancePlacement {
@@ -348,7 +344,6 @@ mod tests {
     fn dm_address_with_empty_guild_component_is_accepted() {
         // DM は guild 成分が空（discord-{agent}--{channel}）。address 非空なら通す（設計 §3.2/D17-03）。
         let p = Placement {
-            gateway_store_path: None,
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
             instances: vec![InstancePlacement {
@@ -419,7 +414,6 @@ mod tests {
             config_b64: encode(&sample_config()),
         };
         let p = Placement {
-            gateway_store_path: None,
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
             instances: vec![

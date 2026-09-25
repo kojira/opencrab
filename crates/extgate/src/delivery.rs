@@ -7,13 +7,11 @@ use std::sync::Arc;
 use opencrab_actions::{DeliveryEffect, TranscriptSource};
 use opencrab_db::queries::{insert_session_log, SessionLogRow};
 use rusqlite::{params, TransactionBehavior};
-use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::error::{ErrorCode, GateError};
 use crate::ids::now_nanos;
 use crate::listen::emit_turn_failed;
-use crate::operations::DeliveryGuarantee;
 use crate::protocol::{say_frame, write_json};
 use crate::registry::{ExtgateState, Pending};
 
@@ -128,7 +126,7 @@ async fn send_text(
     body: &str,
     reply_target: Option<&str>,
 ) -> Result<String, GateError> {
-    let (writer, delivery_guarantee, adapter_protocol_digest) = {
+    let writer = {
         let reg = state.lock_registry()?;
         let live = reg
             .get(instance_id)
@@ -136,34 +134,12 @@ async fn send_text(
         if !live.acknowledged.contains(binding_id) {
             return Err(GateError::new(ErrorCode::NotConnected));
         }
-        (
-            live.writer.clone(),
-            live.delivery_guarantee,
-            live.declaration_digest.clone(),
-        )
+        live.writer.clone()
     };
 
     let delivery_id = Uuid::new_v4().to_string();
     let now = now_nanos();
-    let mut payload_value = serde_json::json!({"text": body});
-    if let Some(target) = reply_target {
-        payload_value["reply_target"] = serde_json::json!(target);
-    }
-    let payload = payload_value.to_string();
-    let payload_digest = Sha256::digest(payload.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let prepared_frame = say_frame(
-        &delivery_id,
-        binding_id,
-        body,
-        reply_target,
-        &payload_digest,
-        delivery_guarantee,
-        &adapter_protocol_digest,
-    );
-    let prepared_frame_json = prepared_frame.to_string();
+    let payload = serde_json::json!({"text": body}).to_string();
     {
         let mut conn = state.db.lock().map_err(|_| GateError::store())?;
         let tx = conn
@@ -213,21 +189,9 @@ async fn send_text(
             return Err(GateError::store());
         }
         tx.execute(
-            "INSERT INTO deliveries
-             (delivery_id, binding_id, payload_json, state, error, created_at, updated_at,
-              payload_digest, delivery_guarantee, prepared_protocol_digest, frame_kind,
-              prepared_frame_json)
-             VALUES (?1, ?2, ?3, 'sending', NULL, ?4, ?4, ?5, ?6, ?7, 'say', ?8)",
-            params![
-                delivery_id,
-                binding_id,
-                payload,
-                now,
-                payload_digest,
-                delivery_guarantee.as_str(),
-                adapter_protocol_digest,
-                prepared_frame_json,
-            ],
+            "INSERT INTO deliveries (delivery_id, binding_id, payload_json, state, error, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'sending', NULL, ?4, ?4)",
+            params![delivery_id, binding_id, payload, now],
         )
         .map_err(|_| GateError::store())?;
         tx.commit().map_err(|_| GateError::store())?;
@@ -247,7 +211,12 @@ async fn send_text(
         );
     }
 
-    let write_err = write_json(&writer, &prepared_frame).await.is_err();
+    let write_err = write_json(
+        &writer,
+        &say_frame(&delivery_id, binding_id, body, reply_target),
+    )
+    .await
+    .is_err();
     #[cfg(any(test, feature = "extgate-probe"))]
     let write_err = write_err || state.probe.fail_say_write.load(Ordering::SeqCst);
     if write_err {
@@ -266,104 +235,6 @@ async fn send_text(
     Ok(delivery_id)
 }
 
-pub(crate) async fn replay_pending_for_binding(
-    state: &Arc<ExtgateState>,
-    instance_id: &str,
-    binding_id: &str,
-) -> Result<(), GateError> {
-    let (writer, live_guarantee) = {
-        let reg = state.lock_registry()?;
-        let live = reg
-            .get(instance_id)
-            .ok_or_else(|| GateError::new(ErrorCode::NotConnected))?;
-        (live.writer.clone(), live.delivery_guarantee)
-    };
-    let rows = {
-        let conn = state.db.lock().map_err(|_| GateError::store())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT delivery_id,payload_json,payload_digest,delivery_guarantee,
-                        prepared_protocol_digest,frame_kind,prepared_frame_json
-                 FROM deliveries WHERE binding_id=?1 AND state='sending'
-                 ORDER BY created_at,delivery_id",
-            )
-            .map_err(|_| GateError::store())?;
-        let rows = stmt
-            .query_map([binding_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                ))
-            })
-            .map_err(|_| GateError::store())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| GateError::store())?;
-        rows
-    };
-    for (
-        delivery_id,
-        payload_json,
-        payload_digest,
-        guarantee,
-        protocol_digest,
-        frame_kind,
-        prepared_frame_json,
-    ) in rows
-    {
-        let Some(required) = DeliveryGuarantee::parse(&guarantee) else {
-            continue;
-        };
-        if !live_guarantee.satisfies(required) {
-            continue;
-        }
-        let payload: serde_json::Value =
-            serde_json::from_str(&payload_json).map_err(|_| GateError::store())?;
-        let _payload_digest = payload_digest.ok_or_else(GateError::store)?;
-        let _protocol_digest = protocol_digest.ok_or_else(GateError::store)?;
-        let prepared_frame: serde_json::Value = serde_json::from_str(
-            prepared_frame_json
-                .as_deref()
-                .ok_or_else(GateError::store)?,
-        )
-        .map_err(|_| GateError::store())?;
-        let pending_id = prepared_frame
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(GateError::store)?
-            .to_string();
-        let pending = match frame_kind.as_str() {
-            "say" => Pending::Say {
-                delivery_id: delivery_id.clone(),
-            },
-            "invoke" => Pending::Utterance {
-                delivery_id: delivery_id.clone(),
-                binding_id: binding_id.to_string(),
-                reply_target: payload
-                    .get("reply_target")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-            },
-            _ => return Err(GateError::store()),
-        };
-        {
-            let mut reg = state.lock_registry()?;
-            let live = reg
-                .get_mut(instance_id)
-                .ok_or_else(|| GateError::new(ErrorCode::NotConnected))?;
-            live.pending.insert(pending_id, pending);
-        }
-        if write_json(&writer, &prepared_frame).await.is_err() {
-            return Err(GateError::new(ErrorCode::Disconnect));
-        }
-    }
-    Ok(())
-}
-
 pub fn mark_indeterminate(state: &ExtgateState, delivery_ids: &[String]) -> Result<(), GateError> {
     if delivery_ids.is_empty() {
         return Ok(());
@@ -376,8 +247,7 @@ pub fn mark_indeterminate(state: &ExtgateState, delivery_ids: &[String]) -> Resu
     for id in delivery_ids {
         tx.execute(
             "UPDATE deliveries
-             SET state = 'indeterminate', error = 'disconnect', updated_at = ?2,
-             acknowledged_at = ?2
+             SET state = 'indeterminate', error = 'disconnect', updated_at = ?2
              WHERE delivery_id = ?1 AND state = 'sending'",
             params![id, now],
         )
@@ -392,8 +262,7 @@ pub fn mark_delivered(state: &ExtgateState, delivery_id: &str) -> Result<(), Gat
     let now = now_nanos();
     conn.execute(
         "UPDATE deliveries
-         SET state = 'delivered', error = NULL, updated_at = ?2,
-             acknowledged_at = ?2
+         SET state = 'delivered', error = NULL, updated_at = ?2
          WHERE delivery_id = ?1 AND state = 'sending'",
         params![delivery_id, now],
     )
@@ -406,8 +275,7 @@ pub fn mark_failed(state: &ExtgateState, delivery_id: &str) -> Result<(), GateEr
     let now = now_nanos();
     conn.execute(
         "UPDATE deliveries
-         SET state = 'failed', error = 'external_rejected', updated_at = ?2,
-             acknowledged_at = ?2
+         SET state = 'failed', error = 'external_rejected', updated_at = ?2
          WHERE delivery_id = ?1 AND state = 'sending'",
         params![delivery_id, now],
     )

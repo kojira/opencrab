@@ -7,57 +7,12 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 
 use crate::transport::{DiscordTransport, TransportOutcome};
 
 /// Discord の 1 メッセージ最大文字数（コードポイント数）。超過分は分割送信する。
 pub(crate) const DISCORD_MAX_CHARS: usize = 2000;
-
-pub fn delivery_nonce(delivery_id: &str) -> String {
-    delivery_id
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .take(25)
-        .collect()
-}
-
-fn delivery_chunk_nonce(delivery_id: &str, chunk_index: usize) -> String {
-    Sha256::digest(format!("{delivery_id}:{chunk_index}").as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
-        .chars()
-        .take(25)
-        .collect()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PreparedSayRequest {
-    pub channel: String,
-    pub text: String,
-    pub nonce: String,
-    pub enforce_nonce: bool,
-}
-
-pub(crate) fn prepare_say_requests(
-    delivery_id: &str,
-    channel_id: &str,
-    text: &str,
-) -> Vec<PreparedSayRequest> {
-    split_for_discord(text)
-        .into_iter()
-        .enumerate()
-        .map(|(index, text)| PreparedSayRequest {
-            channel: channel_id.to_string(),
-            text,
-            nonce: delivery_chunk_nonce(delivery_id, index),
-            enforce_nonce: true,
-        })
-        .collect()
-}
 
 /// say の配送結果（観測性用）。
 #[derive(Debug, PartialEq, Eq)]
@@ -81,53 +36,11 @@ pub async fn deliver_say(
     channel_id: &str,
     text: &str,
 ) -> SayDelivery {
-    deliver_say_with_nonce(transport, channel_id, text, None).await
-}
-
-pub(crate) async fn deliver_prepared_say(
-    transport: &Arc<dyn DiscordTransport>,
-    requests: &[PreparedSayRequest],
-) -> SayDelivery {
-    let mut last_id = None;
-    for request in requests {
-        match transport
-            .create_message_with_nonce(
-                &request.channel,
-                &request.text,
-                &request.nonce,
-                request.enforce_nonce,
-            )
-            .await
-        {
-            TransportOutcome::Ok(value) => last_id = message_id_of(&value),
-            TransportOutcome::Rejected => return SayDelivery::Failed("rejected".into()),
-            TransportOutcome::Indeterminate => return SayDelivery::Failed("indeterminate".into()),
-        }
-    }
-    SayDelivery::Posted {
-        message_id: last_id,
-    }
-}
-
-pub async fn deliver_say_with_nonce(
-    transport: &Arc<dyn DiscordTransport>,
-    channel_id: &str,
-    text: &str,
-    nonce: Option<&str>,
-) -> SayDelivery {
     // create_message の Ok は投稿できたメッセージ id を載せる（production=serenity 実 id・
     // dry-run=合成 id）。分割時は最後の成功チャンクの id を対応表へ返す。
     let mut last_id = None;
     for chunk in split_for_discord(text) {
-        let outcome = match nonce {
-            Some(nonce) => {
-                transport
-                    .create_message_with_nonce(channel_id, &chunk, nonce, true)
-                    .await
-            }
-            None => transport.create_message(channel_id, &chunk).await,
-        };
-        match outcome {
+        match transport.create_message(channel_id, &chunk).await {
             TransportOutcome::Ok(v) => last_id = message_id_of(&v),
             TransportOutcome::Rejected => return SayDelivery::Failed("rejected".into()),
             TransportOutcome::Indeterminate => return SayDelivery::Failed("indeterminate".into()),
@@ -216,70 +129,6 @@ mod tests {
     use crate::transport::DryRunTransport;
 
     // ---- split_message（旧 discord::gateway のテストを移植） ----
-
-    #[test]
-    fn s7_discord_nonce_is_stable_and_at_most_25_characters() {
-        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-        assert_eq!(delivery_nonce(id), delivery_nonce(id));
-        assert_eq!(delivery_nonce(id).len(), 25);
-        assert!(delivery_nonce(id)
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric()));
-    }
-
-    #[tokio::test]
-    async fn s7_long_delivery_persists_and_sends_exact_distinct_nonce_sequence() {
-        let delivery_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-        let requests = prepare_say_requests(delivery_id, "100", &"あ".repeat(2500));
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].text.chars().count(), 2000);
-        assert_eq!(requests[1].text.chars().count(), 500);
-        assert_ne!(requests[0].nonce, requests[1].nonce);
-        assert!(requests
-            .iter()
-            .all(|request| request.nonce.len() <= 25 && request.enforce_nonce));
-
-        let prepared = serde_json::to_vec(&requests).unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let ledger =
-            opencrab_gate_client::emission::EmissionLedger::open(&temp.path().join("discord.db"))
-                .unwrap();
-        ledger
-            .prepare(
-                "binding",
-                delivery_id,
-                &"a".repeat(64),
-                "at_most_once_indeterminate",
-                &requests[0].nonce,
-                &prepared,
-                &"b".repeat(64),
-                1,
-                Some(2),
-            )
-            .unwrap();
-        let persisted = ledger.get("binding", delivery_id).unwrap().unwrap();
-        assert_eq!(persisted.prepared_request, prepared);
-        let persisted_requests: Vec<PreparedSayRequest> =
-            serde_json::from_slice(&persisted.prepared_request).unwrap();
-
-        let rec = Arc::new(RecordingTransport::default());
-        let transport: Arc<dyn DiscordTransport> = rec.clone();
-        assert!(matches!(
-            deliver_prepared_say(&transport, &persisted_requests).await,
-            SayDelivery::Posted { .. }
-        ));
-        assert_eq!(
-            rec.bodies(),
-            requests.iter().map(|r| r.text.clone()).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            rec.nonces(),
-            requests
-                .iter()
-                .map(|r| (r.nonce.clone(), true))
-                .collect::<Vec<_>>()
-        );
-    }
 
     #[test]
     fn split_message_short() {

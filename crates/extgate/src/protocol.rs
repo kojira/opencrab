@@ -73,14 +73,6 @@ pub fn command_err_frame(id: &str, code: &str, message: &str) -> Value {
     json!({"id": id, "m": "err", "code": code, "message": message})
 }
 
-pub fn delivery_ack_frame(delivery_id: &str, outcome: &str) -> Value {
-    json!({
-        "id": delivery_id,
-        "m": "delivery_ack",
-        "outcome": outcome,
-    })
-}
-
 pub fn err_frame(id: &str, code: ErrorCode, detail: Option<&str>) -> Value {
     json!({
         "id": id,
@@ -107,9 +99,6 @@ pub fn say_frame(
     binding_id: &str,
     body: &str,
     reply_target: Option<&str>,
-    payload_digest: &str,
-    delivery_guarantee: DeliveryGuarantee,
-    adapter_protocol_digest: &str,
 ) -> Value {
     let mut payload = json!({ "text": body });
     if let Some(target) = reply_target {
@@ -120,9 +109,6 @@ pub fn say_frame(
         "m": "say",
         "binding_id": binding_id,
         "payload": payload,
-        "payload_digest": payload_digest,
-        "delivery_guarantee": delivery_guarantee.as_str(),
-        "adapter_protocol_digest": adapter_protocol_digest,
     })
 }
 

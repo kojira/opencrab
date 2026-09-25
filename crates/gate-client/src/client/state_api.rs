@@ -35,13 +35,8 @@ struct WriteOut {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveEvent {
     Message {
-        /// Core-assigned stable key and immutable two-ledger evidence.
+        /// core が say に載せた既存 delivery id。gateway は platform message id との対応に使う。
         delivery_id: String,
-        binding_id: String,
-        payload_digest: String,
-        delivery_guarantee: super::wire::DeliveryGuarantee,
-        adapter_protocol_digest: String,
-        current_adapter_protocol_digest: String,
         text: String,
         /// この say が**特定の inbound イベントへの返信**なら、その said の origin。
         ///
@@ -51,7 +46,6 @@ pub enum LiveEvent {
         /// 対象返信、`None`を「返信先無し」として扱う。返信先を使わないconsumerは無視してよい。
         reply_origin: Option<String>,
     },
-    DeliveryAcknowledged { delivery_id: String, outcome: String },
     Activity {
         activity_id: String,
         state: String,
@@ -204,7 +198,6 @@ struct Inner {
     pending_commands: HashMap<String, PendingCommand>,
     expired_commands: HashSet<String>,
     pending_turn: HashMap<String, PendingTurn>,
-    delivery_addresses: HashMap<String, String>,
     live: HashMap<String, LiveQueue>,
     closed: bool,
     generation: u64,
@@ -250,7 +243,6 @@ impl InstanceClient {
                 pending_commands: HashMap::new(),
                 expired_commands: HashSet::new(),
                 pending_turn: HashMap::new(),
-                delivery_addresses: HashMap::new(),
                 live: HashMap::new(),
                 closed: true,
                 generation: 0,
