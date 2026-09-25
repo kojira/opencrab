@@ -71,14 +71,29 @@ impl Approval {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read(path).context("read approval")?;
         let mut de = serde_json::Deserializer::from_slice(&raw);
-        let approval = Approval::deserialize(&mut de).context("strict approval JSON")?;
+        let mut approval = Approval::deserialize(&mut de).context("strict approval JSON")?;
         de.end().context("trailing approval JSON")?;
-        approval.validate()?;
         ensure!(
             raw == canonical::bytes(&approval)?,
             "approval is not RFC-8785 canonical JSON"
         );
+        approval.normalize();
+        approval.validate()?;
         Ok(approval)
+    }
+
+    fn normalize(&mut self) {
+        self.destinations.sort();
+        self.identity_dispositions
+            .sort_by(|left, right| left.source_fingerprint.cmp(&right.source_fingerprint));
+        for disposition in &mut self.identity_dispositions {
+            disposition.edges.sort_by_cached_key(|edge| {
+                canonical::bytes(edge).expect("typed identity edge is canonical JSON")
+            });
+        }
+        self.channel_edges.sort();
+        self.watch_edges.sort();
+        self.credential_sources.sort();
     }
 
     pub fn validate(&self) -> Result<()> {
