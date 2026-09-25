@@ -413,14 +413,24 @@ fn projected_discord_fixture(verify_freeze: bool) {
         .unwrap();
     drop(marker_conn);
     let freeze_manifest_path = temp.path().join("freeze.json");
+    let freeze_id = "00000000-0000-4000-8000-000000000010";
+    let snapshots = records
+        .iter()
+        .map(|record| {
+            let mut entry = serde_json::to_value(record).unwrap();
+            entry["freeze_id"] = serde_json::json!(freeze_id);
+            assert_eq!(entry["freeze_id"], freeze_id);
+            entry
+        })
+        .collect::<Vec<_>>();
     let freeze_manifest = serde_json::json!({
         "version": 1,
-        "freeze_id": "00000000-0000-4000-8000-000000000010",
+        "freeze_id": freeze_id,
         "approval_sha256": report.approval_sha256,
         "projection_manifest_sha256": verification["manifest_sha256"],
         "projection_marker_sha256": canonical::hash(&marker).unwrap(),
         "identity_dispositions_sha256": canonical::hash(&approval.identity_dispositions).unwrap(),
-        "snapshots": records,
+        "snapshots": snapshots,
     });
     write_secure(
         &freeze_manifest_path,
