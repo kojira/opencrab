@@ -42,6 +42,65 @@ The safest implementation unwind starts with a full revert of `f25d51a`, because
 - S4 heartbeat, S5 ownership/lifecycle, and S6 authorization evidence remains valid but must be rerun after the unwind.
 - Replacement S7 evidence must compare observable outcomes with `1c3b782`: one core row, one external attempt, the same delivered/failed/indeterminate mapping, sequential Discord chunks, one Nostr command, disconnect terminalization, and startup stale-send terminalization.
 
+## Ready-to-file follow-up GitHub Issue
+
+Do not file this from the design-correction task. The parent session will review and file it. Copy the title and body exactly unless review finds an evidence error.
+
+**Title**
+
+`Design and implement crash-safe external-delivery durability after gateway separation`
+
+**Body**
+
+```markdown
+## Context
+
+Issue #1006 is intentionally limited to strict behavior-preserving gateway ownership/process/storage separation. Its reference behavior is commit `1c3b7821a46ad1dfdacfd5640cd8943cc211dc41`: one core `deliveries` ledger; one external send attempt; disconnect/startup ambiguity becomes terminal `indeterminate`; no automatic reconnect replay; Discord sequential fail-fast chunks; one Nostr post/reply command attempt.
+
+During #1006 S3/S7, a stronger two-ledger external-delivery design was proposed and partially implemented. Owner direction removed every enhancement absent before separation from #1006. Evidence and the unwind map are in `docs/evidence/issue-1006-strict-separation-redesign.md` at commit `6faf26eef425fbd17400dc9d49a4c5ca66682405` (plus the follow-up clarification commit that files this issue text).
+
+## Deferred scope
+
+Design as one coherent protocol, then implement only after separate approval:
+
+- a gateway-owned durable emission ledger keyed by `(binding_id, delivery_id)`;
+- immutable payload/request identity and prepared request material;
+- adapter protocol/capability digest and compatibility rules;
+- explicit external-delivery guarantee labels and declaration/invocation negotiation;
+- core receipt acknowledgement and gateway retention/high-water handshake;
+- ordered reconnect drain and all prepare/send/receipt/ack crash windows;
+- terminal outcome replay without external I/O;
+- downgrade/upgrade/unknown-protocol behavior without silent relabeling;
+- Discord persisted per-delivery/per-chunk nonce, bounded `enforce_nonce`, external reference persistence, and durable ambiguity policy;
+- Nostr persist/sign-once event bytes and same-event-ID reconciliation/republication;
+- migration rules for existing terminal, stale `sending`, and ambiguous rows without fabricated receipts;
+- matched core/gateway snapshot, rollback, QC, and retention evidence.
+
+## Existing partial evidence to reuse only as design input
+
+- superseded checkpoint `f25d51af849ea8b80984103c32a669a5bbb3fa19`;
+- deferred uncommitted patch `issue-1006-s7-two-ledger-deferred-20260925.patch`, SHA-256 `de260afa4009a31627dbfaa4bb5aa3bb941faae405bedc23ed84ce541e4a1be9`;
+- original S3 guarantee additions in `2f0ad32` and `2afe535`;
+- proposed v57 delivery-evidence schema, `gate-client::emission`, reconnect replay, Discord nonce, and Nostr delivery modules inventoried in the redesign evidence.
+
+These artifacts are not approved implementation and must not be applied wholesale. Obtain assertion-level RED before new production edits.
+
+## Dependencies
+
+- #1006 ownership/process/storage separation is completed and independently accepted first.
+- The stable post-#1006 generic delivery parity protocol and schemas are the design baseline.
+- A new design ID/architecture approval is required because this changes product behavior, wire protocol, schemas, migration, and external-delivery guarantees.
+- Deployment tooling must validate migrations on clones and preserve matched core plus all participating gateway snapshots.
+
+## Acceptance direction
+
+The future design must state the exact guarantee for each adapter, every durable state/transition, all crash windows, reconnect compatibility, migration semantics, retention authorization, and rollback set. It must not call external delivery exactly-once unless the adapter primitive closes ambiguity for the entire supported recovery period. It must preserve the zero-core-change new-gateway rule by using platform-neutral protocol capabilities rather than concrete kind branches.
+
+## Explicit non-gate statement
+
+**This follow-up is not a completion, merge, release, QC, or deployment gate for Issue #1006.** #1006 is complete when strict behavior-preserving separation and its own S0–S11 evidence pass. This issue begins only after #1006 acceptance and cannot be used to expand #1006 scope retroactively.
+```
+
 ## Revised stages
 
 1. **S3 correction:** assertion-level RED that dynamic metadata/routing still works without guarantee fields; minimal GREEN removes guarantee negotiation only. Rerun all retained S3 routing/operation tests and S0 static audits.
