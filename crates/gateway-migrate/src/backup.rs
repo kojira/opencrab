@@ -103,7 +103,7 @@ pub fn set_sha256(records: &[BackupRecord]) -> Result<String> {
 }
 
 pub fn logical_sha256(path: &Path) -> Result<String> {
-    let conn = Connection::open(path)?;
+    let conn = source::open_read_only(path)?;
     let quick: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     ensure!(quick == "ok", "backup quick_check failed");
     let mut tables = conn

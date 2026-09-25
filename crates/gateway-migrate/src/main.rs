@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use opencrab_gateway_migrate::{
     command::{self, ImportArgs, ProjectArgs},
     destination::Inputs,
+    freeze::VerifyArgs,
 };
 use std::{collections::BTreeMap, env, path::PathBuf};
 
@@ -51,6 +52,19 @@ fn run() -> Result<()> {
                 approval_path: &one_path(&options, "approval")?,
                 import_report_path: &one_path(&options, "import-report")?,
                 verification_path: &one_path(&options, "verification")?,
+                destination_paths: command::parse_destination_paths(
+                    options.get("destination").map(Vec::as_slice).unwrap_or(&[]),
+                )?,
+            })?;
+        }
+        "verify-freeze" => {
+            opencrab_gateway_migrate::freeze::verify(VerifyArgs {
+                core_path: &one_path(&options, "core-db")?,
+                approval_path: &one_path(&options, "approval")?,
+                import_report_path: &one_path(&options, "import-report")?,
+                verification_path: &one_path(&options, "verification")?,
+                freeze_dir: &one_path(&options, "freeze-dir")?,
+                freeze_manifest_path: &one_path(&options, "freeze-manifest")?,
                 destination_paths: command::parse_destination_paths(
                     options.get("destination").map(Vec::as_slice).unwrap_or(&[]),
                 )?,

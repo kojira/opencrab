@@ -402,7 +402,7 @@ pub fn run_project(args: ProjectArgs<'_>) -> Result<Value> {
     Ok(value)
 }
 
-fn source_rows_proof(rows: &[source::SourceRow]) -> Result<Vec<SourceRowsProof>> {
+pub(crate) fn source_rows_proof(rows: &[source::SourceRow]) -> Result<Vec<SourceRowsProof>> {
     let mut output = Vec::new();
     for (table, _) in source::CONCRETE_TABLES {
         let selected = rows

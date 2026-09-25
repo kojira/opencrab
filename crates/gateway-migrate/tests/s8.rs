@@ -419,7 +419,17 @@ fn projected_discord_fixture(verify_freeze: bool) {
         .map(|record| {
             let mut entry = serde_json::to_value(record).unwrap();
             entry["freeze_id"] = serde_json::json!(freeze_id);
+            let live_path = if record.kind_id == "core" {
+                &core_path
+            } else {
+                &discord_path
+            };
+            entry["live_file_sha256"] = serde_json::json!(source::file_sha256(live_path).unwrap());
             assert_eq!(entry["freeze_id"], freeze_id);
+            assert_eq!(
+                record.logical_sha256,
+                opencrab_gateway_migrate::backup::logical_sha256(live_path).unwrap()
+            );
             entry
         })
         .collect::<Vec<_>>();

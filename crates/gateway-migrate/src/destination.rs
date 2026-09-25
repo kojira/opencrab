@@ -572,7 +572,7 @@ fn validate_secure(path: &Path, mode: u32) -> Result<()> {
     Ok(())
 }
 
-fn require_destination_shape(conn: &Connection, destination: &Destination) -> Result<()> {
+pub(crate) fn require_destination_shape(conn: &Connection, destination: &Destination) -> Result<()> {
     let common_identity = &["instance_id", "role", "external_id", "relationship_id", "relationship_revision"];
     let tables: &[(&str, &[&str])] = match (destination.kind_id.as_str(), destination.schema.as_str()) {
         ("discord" | "nostr", "s5-discord-v1" | "s5-nostr-v1") if destination.schema == format!("s5-{}-v1", destination.kind_id) => &[
