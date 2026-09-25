@@ -30,10 +30,14 @@ fn d_1006_web_01_credential_free_owner_preserves_unrelated_source_identity() {
         .upsert(INSTANCE_ID, "agent-web", 1, "web-author", true)
         .unwrap();
     drop(store);
-    Connection::open(&web_path).unwrap().execute(
+    let web = Connection::open(&web_path).unwrap();
+    web.execute_batch("DROP TABLE legacy_identity_sources;")
+        .unwrap();
+    web.execute(
         "INSERT INTO identity_projections(instance_id,role,external_id) VALUES (?1,'owner','web-local')",
         [INSTANCE_ID],
     ).unwrap();
+    drop(web);
     let before_core = backup::logical_sha256(&core_path).unwrap();
     let before_web = backup::logical_sha256(&web_path).unwrap();
 
@@ -154,6 +158,10 @@ fn d_1006_web_01_credential_free_owner_preserves_unrelated_source_identity() {
         "rerun must not invent a Web credential"
     );
     assert_eq!(report.destinations[0]["counts"]["identity_projections"], 1);
+    assert_eq!(
+        report.destinations[0]["counts"]["legacy_identity_sources"],
+        1
+    );
     assert_eq!(report.destinations[0]["counts"]["credentials"], 0);
 }
 
@@ -282,7 +290,12 @@ fn assert_web_mapping(
         },
     });
     if should_import {
-        outcome.expect("explicit Web source rows are inert and must not change Owner admission");
+        let report = outcome
+            .expect("explicit Web source rows are inert and must not change Owner admission");
+        assert_eq!(
+            report.destinations[0]["counts"]["legacy_identity_sources"],
+            source_users.len()
+        );
         let conn = Connection::open(&web_path).unwrap();
         let envelope: String = conn
             .query_row(
@@ -295,7 +308,26 @@ fn assert_web_mapping(
             envelope, old_envelope,
             "existing inert S5 credential bytes must remain unchanged"
         );
-        for (user_id, permission) in source_users {
+        for (index, (user_id, permission)) in source_users.iter().enumerate() {
+            let original: (String, String, String, String, String, String, String, String) = conn.query_row(
+                "SELECT id,user_id,agent_id,permission,created_by,created_at,display_name,platform \
+                 FROM legacy_identity_sources WHERE instance_id=?1 AND id=?2",
+                params![INSTANCE_ID, format!("tu-web-{index}")],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)),
+            ).unwrap();
+            assert_eq!(
+                original,
+                (
+                    format!("tu-web-{index}"),
+                    (*user_id).into(),
+                    "agent-web".into(),
+                    (*permission).into(),
+                    "owner".into(),
+                    "2026".into(),
+                    "Web".into(),
+                    "web".into()
+                )
+            );
             let role = match *permission {
                 "owner" => "owner",
                 "co-agent" => "co_agent",

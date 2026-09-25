@@ -163,6 +163,17 @@ fn build_identity_plans(rows: &[SourceRow], approval: &Approval, plans: &[Instan
                         role: role.into(),
                         external_id: row.text("user_id")?.into(),
                         relationship_id: (role == "co_agent").then(|| row.text("user_id").unwrap().to_string()),
+                        source: LegacyIdentitySource {
+                            instance_id: instance_id.clone(),
+                            id: row.text("id")?.into(),
+                            user_id: row.text("user_id")?.into(),
+                            agent_id: row.text("agent_id")?.into(),
+                            permission: row.text("permission")?.into(),
+                            created_by: row.text("created_by")?.into(),
+                            created_at: row.text("created_at")?.into(),
+                            display_name: row.text("display_name")?.into(),
+                            platform: row.text("platform")?.into(),
+                        },
                     });
                 }
             }

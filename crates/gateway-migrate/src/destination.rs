@@ -47,6 +47,19 @@ struct IdentityPlan {
     role: String,
     external_id: String,
     relationship_id: Option<String>,
+    source: LegacyIdentitySource,
+}
+#[derive(Debug, Clone)]
+struct LegacyIdentitySource {
+    instance_id: String,
+    id: String,
+    user_id: String,
+    agent_id: String,
+    permission: String,
+    created_by: String,
+    created_at: String,
+    display_name: String,
+    platform: String,
 }
 #[derive(Debug, Clone)]
 struct EndpointPlan {
@@ -148,6 +161,7 @@ pub fn import(
         let mut conn = Connection::open(path)?;
         validate_current_against_artifact(&conn, &artifact)?;
         let tx = conn.transaction()?;
+        create_legacy_identity_sources(&tx)?;
         let mut inserted = Vec::new();
         let mut accepted = Vec::new();
         let mut credentials = Vec::new();
@@ -165,6 +179,13 @@ pub fn import(
         for identity in &destination_identities {
             let (was_inserted, hash) = apply_identity(&tx, identity)?;
             let item = key_value("identity_projections", vec![identity.instance_id.clone(), identity.role.clone(), identity.external_id.clone()], hash)?;
+            if was_inserted {
+                inserted.push(item);
+            } else {
+                accepted.push(item);
+            }
+            let (was_inserted, hash) = apply_legacy_identity_source(&tx, &identity.source)?;
+            let item = key_value("legacy_identity_sources", vec![identity.source.instance_id.clone(), identity.source.id.clone()], hash)?;
             if was_inserted {
                 inserted.push(item);
             } else {
@@ -188,7 +209,7 @@ pub fn import(
         outputs.push(json!({
             "kind_id":destination.kind_id,"path_id":destination.path_id,"schema":destination.schema,
             "before_logical_sha256":backup.logical_sha256,"after_logical_sha256":crate::backup::logical_sha256(path)?,
-            "counts":{"instances":plans.iter().filter(|p| p.destination == *destination).count(),"endpoints":destination_endpoints.len(),"identity_projections":destination_identities.len(),"policies":0,"credentials":credentials.len()},
+            "counts":{"instances":plans.iter().filter(|p| p.destination == *destination).count(),"endpoints":destination_endpoints.len(),"identity_projections":destination_identities.len(),"legacy_identity_sources":destination_identities.len(),"policies":0,"credentials":credentials.len()},
             "inserted_keys":inserted,"accepted_existing_keys":accepted,"credentials":credentials
         }));
     }
@@ -256,6 +277,7 @@ pub fn validate_project_artifacts(
 }
 
 include!("destination_plans.rs");
+include!("destination_identity_sources.rs");
 
 fn expected_keys(conn: &Connection, plans: &[&InstancePlan], identities: &[IdentityPlan], endpoints: &[EndpointPlan]) -> Result<Vec<ExpectedKey>> {
     let mut out = Vec::new();
@@ -270,6 +292,12 @@ fn expected_keys(conn: &Connection, plans: &[&InstancePlan], identities: &[Ident
             "identity_projections",
             vec![item.instance_id.clone(), item.role.clone(), item.external_id.clone()],
             identity_semantic(item),
+        )?);
+        out.push(expected_key(
+            conn,
+            "legacy_identity_sources",
+            vec![item.source.instance_id.clone(), item.source.id.clone()],
+            legacy_identity_source_semantic(&item.source),
         )?);
     }
     for item in endpoints {
@@ -490,7 +518,9 @@ fn current_semantic(conn: &Connection, table: &str, key: &[String]) -> Result<Op
     Ok(json!({"agent_id":agent,"author_id":author_id,"enabled":enabled,"instance_id":key[0],"revision":revision}))
 }).transpose()}}},
  "identity_projections"=>Ok(conn.query_row("SELECT relationship_id,relationship_revision FROM identity_projections WHERE instance_id=?1 AND role=?2 AND external_id=?3",params![key[0],key[1],key[2]],|r|Ok(json!({"external_id":key[2],"instance_id":key[0],"relationship_id":r.get::<_,Option<String>>(0)?,"relationship_revision":r.get::<_,Option<i64>>(1)?,"role":key[1]}))).optional()?),
- "endpoints"=>Ok(conn.query_row("SELECT guild_id,readable,writable,policy_json FROM endpoints WHERE instance_id=?1 AND channel_id=?2",params![key[0],key[1]],|r|Ok(json!({"channel_id":key[1],"guild_id":r.get::<_,Option<String>>(0)?,"instance_id":key[0],"policy_json":r.get::<_,String>(3)?,"readable":r.get::<_,bool>(1)?,"writable":r.get::<_,bool>(2)?}))).optional()?), _=>bail!("unsupported expected table")}
+ "endpoints"=>Ok(conn.query_row("SELECT guild_id,readable,writable,policy_json FROM endpoints WHERE instance_id=?1 AND channel_id=?2",params![key[0],key[1]],|r|Ok(json!({"channel_id":key[1],"guild_id":r.get::<_,Option<String>>(0)?,"instance_id":key[0],"policy_json":r.get::<_,String>(3)?,"readable":r.get::<_,bool>(1)?,"writable":r.get::<_,bool>(2)?}))).optional()?),
+ "legacy_identity_sources"=>current_legacy_identity_source(conn,key),
+ _=>bail!("unsupported expected table")}
 }
 fn row_hash(table: &str, key: &[String], row: &Value) -> Result<String> {
     canonical::hash(&json!({"table":table,"key":key,"row":row}))
@@ -560,7 +590,7 @@ fn require_destination_shape(conn: &Connection, destination: &Destination) -> Re
     for (table, columns) in tables {
         source::require_columns(conn, table, columns)?;
     }
-    Ok(())
+    validate_legacy_identity_sources_if_present(conn)
 }
 
 pub fn prevalidate(core: &Connection, rows: &[SourceRow], approval: &Approval, inputs: &Inputs) -> Result<()> {

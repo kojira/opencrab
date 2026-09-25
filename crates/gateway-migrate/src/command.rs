@@ -92,6 +92,7 @@ fn validate_destination_reports(value: &Value) -> Result<()> {
                 "instances",
                 "endpoints",
                 "identity_projections",
+                "legacy_identity_sources",
                 "policies",
                 "credentials",
             ],

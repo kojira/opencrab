@@ -48,6 +48,18 @@ CREATE TABLE IF NOT EXISTS identity_projections (
   relationship_revision INTEGER,
   PRIMARY KEY(instance_id, role, external_id)
 );
+CREATE TABLE IF NOT EXISTS legacy_identity_sources (
+  instance_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  permission TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  PRIMARY KEY(instance_id, id)
+);
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
