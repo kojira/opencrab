@@ -52,7 +52,7 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
         } else {
             let key_path = inputs.master_keys.get(&kind).context("missing master key")?;
             let key = read_master_key(key_path, &kind)?;
-            select_credential(rows, approval, destination_path, &kind, &instance_id, &agent_id, &key)?
+            select_credential(rows, approval, destination_path, &kind, &instance_id, &agent_id, enabled, &key)?
         };
         plans.push(InstancePlan {
             destination,
@@ -72,8 +72,8 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
     Ok(plans)
 }
 
-fn select_credential(rows: &[SourceRow], approval: &Approval, path: &Path, kind: &str, instance_id: &str, agent_id: &str, key: &[u8; 32]) -> Result<(Zeroizing<Vec<u8>>, String)> {
-    let descriptor = approval.credential_sources.iter().find(|item| item.instance_id == instance_id).context("credential source missing")?;
+fn select_credential(rows: &[SourceRow], approval: &Approval, path: &Path, kind: &str, instance_id: &str, agent_id: &str, enabled: bool, key: &[u8; 32]) -> Result<(Zeroizing<Vec<u8>>, String)> {
+    let descriptor = approval.credential_sources.iter().find(|item| item.instance_id == instance_id);
     let legacy = match kind {
         "discord" => rows
             .iter()
@@ -92,7 +92,11 @@ fn select_credential(rows: &[SourceRow], approval: &Approval, path: &Path, kind:
         .query_row("SELECT credential_envelope FROM instances WHERE instance_id=?1", [instance_id], |row| row.get::<_, Option<String>>(0))
         .optional()?
         .flatten();
-    let existing = existing_envelope.as_deref().map(|value| decrypt(kind, value, key)).transpose()?;
+    let existing = existing_envelope.as_deref().filter(|value| !value.is_empty()).map(|value| decrypt(kind, value, key)).transpose()?;
+    if !enabled && descriptor.is_none() && legacy.is_none() && existing.is_none() {
+        return Ok((Zeroizing::new(Vec::new()), String::new()));
+    }
+    let descriptor = descriptor.context("credential source missing")?;
     let legacy_source = match kind {
         "discord" => format!("legacy-core:agent_discord_config:{agent_id}"),
         "nostr" => format!("legacy-core:agent_nostr_config:{agent_id}"),

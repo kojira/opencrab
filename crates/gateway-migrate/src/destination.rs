@@ -389,19 +389,28 @@ fn apply_instance(tx: &Transaction<'_>, plan: &InstancePlan, key: Option<&[u8; 3
             return Ok((false, expected_hash, None));
         }
         let envelope: String = tx.query_row("SELECT credential_envelope FROM instances WHERE instance_id=?1", [&plan.instance_id], |r| r.get(0))?;
+        if plan.credential.is_empty() {
+            ensure!(!plan.enabled && envelope.is_empty(), "credential conflict");
+            return Ok((false, expected_hash, None));
+        }
         ensure!(decrypt(&plan.destination.kind_id, &envelope, key.context("missing destination key")?)?.as_slice() == plan.credential.as_slice(), "credential conflict");
         return Ok((false, expected_hash, Some(canonical::hex(&Sha256::digest(envelope.as_bytes())))));
-
     }
     ensure!(plan.destination.kind_id != "web", "Web instance must already exist");
-    let envelope = encrypt(&plan.destination.kind_id, &plan.credential, key.context("missing destination key")?)?;
+    let envelope = if plan.credential.is_empty() {
+        ensure!(!plan.enabled, "enabled instance requires credential");
+        String::new()
+    } else {
+        encrypt(&plan.destination.kind_id, &plan.credential, key.context("missing destination key")?)?
+    };
     match plan.destination.kind_id.as_str() {
         "discord" | "nostr" => {
             tx.execute("INSERT INTO instances(instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,subject_grant_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,core_digest,binding_inventory_json,process_id,process_nonce,failure_count,retry_at_unix_ms,last_exit,updated_at) VALUES (?1,?2,?3,?4,?5,?6,NULL,?7,1,NULL,'pending',NULL,NULL,'[]',NULL,NULL,0,NULL,NULL,?8)",params![plan.instance_id,plan.agent_id,plan.subject_id,plan.config_b64,serde_json::to_string(&plan.addresses)?,envelope,plan.enabled,plan.created_at])?;
         }
         _ => bail!("unknown destination"),
     }
-    Ok((true, expected_hash, Some(canonical::hex(&Sha256::digest(envelope.as_bytes())))))
+    let envelope_sha256 = (!envelope.is_empty()).then(|| canonical::hex(&Sha256::digest(envelope.as_bytes())));
+    Ok((true, expected_hash, envelope_sha256))
 }
 fn apply_identity(tx: &Transaction<'_>, item: &IdentityPlan) -> Result<(bool, String)> {
     let expected = identity_semantic(item);
