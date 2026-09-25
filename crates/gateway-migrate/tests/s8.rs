@@ -283,6 +283,32 @@ fn s8_import_and_project_are_offline_idempotent_and_preserve_core_rows() {
         replay["core_projection"]["deliveries"], verification["core_projection"]["deliveries"],
         "rerun preserves delivery evidence"
     );
+    let credential_source = report.destinations[0]["credentials"][0]["source"]
+        .as_str()
+        .expect("credential source descriptor");
+    assert!(
+        credential_source.starts_with("legacy-core:agent_discord_config"),
+        "credential provenance category remains available for audit"
+    );
+    let leaking_artifacts = [
+        ("import report", fs::read_to_string(&report_path).unwrap()),
+        (
+            "verification",
+            fs::read_to_string(&verification_path).unwrap(),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, contents)| {
+        ["agent-a", "rest-user", "test-token"]
+            .iter()
+            .any(|forbidden| contents.contains(forbidden))
+    })
+    .map(|(artifact, _)| artifact)
+    .collect::<Vec<_>>();
+    assert!(
+        leaking_artifacts.is_empty(),
+        "tool-produced artifacts must not expose raw agent/external identifiers or credential plaintext: {leaking_artifacts:?}"
+    );
 }
 
 fn seed_core(path: &std::path::Path) {
