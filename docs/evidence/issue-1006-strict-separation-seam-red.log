@@ -1,0 +1,28 @@
+   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/extgate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.04s
+     Running tests/conformance.rs (target/debug/deps/conformance-73bd4b8e22776fa0)
+
+running 2 tests
+
+thread 'strict_separation_hello_has_no_delivery_guarantee_contract' panicked at crates/extgate/tests/conformance/strict_separation_parity.rs:23:5:
+assertion `left == right` failed: {"code":"bad_request","detail":null,"id":"strict-hello","m":"err"}
+  left: String("err")
+ right: "ok"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test strict_separation_hello_has_no_delivery_guarantee_contract ... FAILED
+
+thread 'strict_separation_co_agent_admission_uses_the_historical_role_snapshot' panicked at crates/extgate/tests/conformance/strict_separation_parity.rs:46:5:
+assertion `left == right` failed: {"code":"bad_request","detail":null,"id":"strict-co-agent","m":"err"}
+  left: String("err")
+ right: "ok"
+test strict_separation_co_agent_admission_uses_the_historical_role_snapshot ... FAILED
+
+failures:
+
+failures:
+    strict_separation_co_agent_admission_uses_the_historical_role_snapshot
+    strict_separation_hello_has_no_delivery_guarantee_contract
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 93 filtered out; finished in 0.09s
+
+error: test failed, to rerun pass `-p opencrab-extgate --test conformance`

@@ -95,7 +95,7 @@ async fn delivery_ok_rejected_and_disconnect() {
 }
 
 #[tokio::test]
-async fn s7_delivery_disconnect_remains_pending_and_replays_in_order() {
+async fn delivery_disconnect_is_indeterminate_and_no_resend() {
     let h = Harness::start().await;
     let (mut s, instance_id, binding_id) = ready_pair(&h).await;
     write_frame(
@@ -125,28 +125,24 @@ async fn s7_delivery_disconnect_remains_pending_and_replays_in_order() {
     drop(s);
     tokio::time::sleep(Duration::from_millis(80)).await;
     let conn = h.state.db.lock().unwrap();
-    let (st, err): (String, Option<String>) = conn
+    let (st, err): (String, String) = conn
         .query_row(
             "SELECT state, error FROM deliveries WHERE delivery_id = ?1",
             [&delivery_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(st, "sending");
-    assert_eq!(err, None);
+    assert_eq!(st, "indeterminate");
+    assert_eq!(err, "disconnect");
     drop(conn);
 
     let mut s = h.connect().await;
     hello_ok(&mut s, &instance_id, 1).await;
     let _ = ack_bind(&mut s).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let replay = read_frame(&mut s).await;
-    assert_eq!(replay["m"], "say");
-    assert_eq!(replay["id"], delivery_id);
-    assert_eq!(replay["delivery_guarantee"], "at_most_once_indeterminate");
-    write_frame(&mut s, &json!({"id": delivery_id, "m": "ok"})).await;
-    let ack = read_frame(&mut s).await;
-    assert_eq!(ack["m"], "delivery_ack");
+    if let Some(v) = read_frame_opt(&mut s).await {
+        assert_ne!(v["id"], delivery_id);
+    }
 }
 
 #[tokio::test]
@@ -177,7 +173,7 @@ async fn delivery_failure_injection_rolls_back_and_says_zero() {
 }
 
 #[tokio::test]
-async fn s7_startup_retains_pending_for_reconnect() {
+async fn startup_recover_stale_sending() {
     let db = opencrab_db::Db::memory().unwrap();
     {
         let conn = db.lock().unwrap();
@@ -231,15 +227,15 @@ async fn s7_startup_retains_pending_for_reconnect() {
     {
         let mut conn = db.lock().unwrap();
         recover_stale_deliveries(&mut conn, 99).unwrap();
-        let (st, err): (String, Option<String>) = conn
+        let (st, err): (String, String) = conn
             .query_row(
                 "SELECT state, error FROM deliveries WHERE delivery_id='cccccccc-cccc-cccc-cccc-cccccccccccc'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(st, "sending");
-        assert_eq!(err, None);
+        assert_eq!(st, "indeterminate");
+        assert_eq!(err, "stale sending recovered after restart");
     }
 }
 
