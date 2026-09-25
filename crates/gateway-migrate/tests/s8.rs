@@ -271,9 +271,19 @@ fn s8_import_and_project_are_offline_idempotent_and_preserve_core_rows() {
         1
     );
     drop(conn);
-    fs::remove_file(&verification_path).unwrap();
+    let original_verification = fs::read(&verification_path).unwrap();
     let projected_hash = source::file_sha256(&core_path).unwrap();
-    let replay = command::run_project(project_args()).unwrap();
+    let replay = command::run_project(project_args())
+        .expect("completed project rerun must accept its existing verification");
+    assert_eq!(
+        fs::read(&verification_path).unwrap(),
+        original_verification,
+        "completed rerun must preserve the original verification bytes"
+    );
+    assert_eq!(
+        replay, verification,
+        "completed rerun returns original evidence"
+    );
     assert_eq!(
         source::file_sha256(&core_path).unwrap(),
         projected_hash,
@@ -308,6 +318,93 @@ fn s8_import_and_project_are_offline_idempotent_and_preserve_core_rows() {
     assert!(
         leaking_artifacts.is_empty(),
         "tool-produced artifacts must not expose raw agent/external identifiers or credential plaintext: {leaking_artifacts:?}"
+    );
+}
+
+#[test]
+fn s8_refuses_retained_discord_config_with_only_nostr_instance_before_backup() {
+    let temp = tempfile::tempdir().unwrap();
+    let core_path = temp.path().join("core.db");
+    let nostr_path = temp.path().join("nostr.db");
+    let key_path = temp.path().join("nostr.key");
+    let approval_path = temp.path().join("approval.json");
+    let backup_dir = temp.path().join("backups");
+    seed_core(&core_path);
+    let conn = Connection::open(&core_path).unwrap();
+    conn.execute_batch("DELETE FROM deliveries; DELETE FROM gate_bindings; DELETE FROM channel_config; DELETE FROM trusted_users;").unwrap();
+    let config_b64 = opencrab_nostr_gateway::config::canonicalize_config_b64(
+        &base64::engine::general_purpose::STANDARD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "relays": ["wss://example.invalid"],
+                "self_pubkey": "aa".repeat(32),
+                "name": "test-agent",
+                "access": {"owner": [], "co_agents": {}, "trusted_users": []}
+            }))
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(
+            base64::engine::general_purpose::STANDARD
+                .decode(&config_b64)
+                .unwrap()
+        )
+    );
+    conn.execute(
+        "UPDATE gate_instances SET kind_id='nostr',config_b64=?1,config_digest=?2",
+        params![config_b64, digest],
+    )
+    .unwrap();
+    conn.execute_batch("CREATE TABLE agent_nostr_config(agent_id TEXT,secret_key TEXT,relays_json TEXT,filter_json TEXT,enabled INTEGER,updated_at TEXT,owner_pubkey TEXT,self_pubkey TEXT);").unwrap();
+    conn.execute("INSERT INTO agent_nostr_config VALUES ('agent-a','test-nostr-secret','[]','{}',1,'2026','','')", []).unwrap();
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+        .unwrap();
+    drop(conn);
+    drop(opencrab_nostr_gateway::store::NostrStore::open(&nostr_path).unwrap());
+    write_secret(
+        &key_path,
+        &base64::engine::general_purpose::STANDARD.encode([8u8; 32]),
+    );
+    let approval = Approval {
+        version: 1,
+        operation_id: "00000000-0000-4000-8000-000000000008".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        core_user_version: 56,
+        source_core_sha256: source::file_sha256(&core_path).unwrap(),
+        destinations: vec![Destination {
+            kind_id: "nostr".into(),
+            path_id: "nostr-primary".into(),
+            schema: "s5-nostr-v1".into(),
+        }],
+        identity_dispositions: vec![],
+        channel_edges: vec![],
+        watch_edges: vec![],
+        credential_sources: vec![CredentialSource {
+            instance_id: "11111111-1111-4111-8111-111111111111".into(),
+            source: "legacy-core:agent_nostr_config:agent-a".into(),
+        }],
+    };
+    write_secure(&approval_path, &canonical::bytes(&approval).unwrap());
+    let result = command::run_import(ImportArgs {
+        core_path: &core_path,
+        approval_path: &approval_path,
+        backup_dir: &backup_dir,
+        report_path: &temp.path().join("report.json"),
+        inputs: Inputs {
+            paths: BTreeMap::from([(("nostr".into(), "nostr-primary".into()), nostr_path)]),
+            master_keys: BTreeMap::from([("nostr".into(), key_path)]),
+            credential_files: BTreeMap::new(),
+        },
+    });
+    assert!(
+        result.is_err(),
+        "retained Discord credential/config must not be silently matched to a Nostr plan"
+    );
+    assert!(
+        !backup_dir.exists(),
+        "unmapped legacy config must fail before backup"
     );
 }
 
