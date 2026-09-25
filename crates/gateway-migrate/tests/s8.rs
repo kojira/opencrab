@@ -114,7 +114,7 @@ fn source_profile_refuses_neighbor_versions_and_missing_required_column() {
 
 include!("s8_support/projected.rs");
 
-fn projected_discord_fixture(verify_freeze: bool, advance_heartbeat: bool) {
+fn projected_discord_fixture(verify_freeze: bool, advance_heartbeat: bool, cleanup: bool) {
     let temp = tempfile::tempdir().unwrap();
     let core_path = temp.path().join("core.db");
     let discord_path = temp.path().join("discord.db");
@@ -124,6 +124,10 @@ fn projected_discord_fixture(verify_freeze: bool, advance_heartbeat: bool) {
     let backup_dir = temp.path().join("backups");
     let key_path = temp.path().join("discord.key");
     seed_core(&core_path);
+    if cleanup {
+        let core = Connection::open(&core_path).unwrap();
+        core.execute("INSERT INTO tool_logs(agent_id,session_id,tool_name,args_json,outcome,result_text) VALUES ('agent-a','session-1','history-test','{}','done','retained')", []).unwrap();
+    }
     drop(opencrab_discord_gateway::store::DiscordStore::open(&discord_path).unwrap());
     write_secret(
         &key_path,
@@ -484,6 +488,9 @@ fn projected_discord_fixture(verify_freeze: bool, advance_heartbeat: bool) {
         gateway_before_freeze,
         "read-only freeze preflight changed the participating gateway"
     );
+    if cleanup {
+        assert_frozen_cleanup(temp.path());
+    }
 }
 
 #[test]
