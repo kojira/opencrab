@@ -408,6 +408,148 @@ fn s8_refuses_retained_discord_config_with_only_nostr_instance_before_backup() {
     );
 }
 
+#[test]
+fn s8_disabled_discord_without_credential_imports_and_reruns_unconfigured() {
+    assert_missing_credential_fixture("discord", false);
+}
+
+#[test]
+fn s8_disabled_nostr_without_credential_imports_and_reruns_unconfigured() {
+    assert_missing_credential_fixture("nostr", false);
+}
+
+#[test]
+fn s8_enabled_discord_without_credential_still_fails_closed() {
+    assert_missing_credential_fixture("discord", true);
+}
+
+fn assert_missing_credential_fixture(kind: &str, enabled: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let core_path = temp.path().join("core.db");
+    let destination_path = temp.path().join("gateway.db");
+    let key_path = temp.path().join("gateway.key");
+    let approval_path = temp.path().join("approval.json");
+    let backup_dir = temp.path().join("backups");
+    let report_path = temp.path().join("report.json");
+    seed_core(&core_path);
+    let conn = Connection::open(&core_path).unwrap();
+    conn.execute_batch(
+        "DELETE FROM agent_discord_config; DELETE FROM trusted_users; DELETE FROM channel_config;",
+    )
+    .unwrap();
+    conn.execute("UPDATE gate_instances SET enabled=?1", [enabled])
+        .unwrap();
+    if kind == "nostr" {
+        let config_b64 = opencrab_nostr_gateway::config::canonicalize_config_b64(
+            &base64::engine::general_purpose::STANDARD.encode(
+                serde_json::to_vec(&serde_json::json!({
+                    "relays": ["wss://example.invalid"],
+                    "self_pubkey": "aa".repeat(32),
+                    "name": "test-agent",
+                    "access": {"owner": [], "co_agents": {}, "trusted_users": []}
+                }))
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&config_b64)
+                    .unwrap()
+            )
+        );
+        conn.execute(
+            "UPDATE gate_instances SET kind_id='nostr',config_b64=?1,config_digest=?2",
+            params![config_b64, digest],
+        )
+        .unwrap();
+    }
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+        .unwrap();
+    drop(conn);
+    if kind == "discord" {
+        drop(opencrab_discord_gateway::store::DiscordStore::open(&destination_path).unwrap());
+    } else {
+        drop(opencrab_nostr_gateway::store::NostrStore::open(&destination_path).unwrap());
+    }
+    write_secret(
+        &key_path,
+        &base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+    );
+    let path_id = format!("{kind}-primary");
+    let approval = Approval {
+        version: 1,
+        operation_id: "00000000-0000-4000-8000-000000000008".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        core_user_version: 56,
+        source_core_sha256: source::file_sha256(&core_path).unwrap(),
+        destinations: vec![Destination {
+            kind_id: kind.into(),
+            path_id: path_id.clone(),
+            schema: format!("s5-{kind}-v1"),
+        }],
+        identity_dispositions: vec![],
+        channel_edges: vec![],
+        watch_edges: vec![],
+        credential_sources: vec![],
+    };
+    write_secure(&approval_path, &canonical::bytes(&approval).unwrap());
+    let before = protected_counts(&core_path);
+    let import = || {
+        command::run_import(ImportArgs {
+            core_path: &core_path,
+            approval_path: &approval_path,
+            backup_dir: &backup_dir,
+            report_path: &report_path,
+            inputs: Inputs {
+                paths: BTreeMap::from([((kind.into(), path_id.clone()), destination_path.clone())]),
+                master_keys: BTreeMap::from([(kind.into(), key_path.clone())]),
+                credential_files: BTreeMap::new(),
+            },
+        })
+    };
+    if enabled {
+        assert!(
+            import()
+                .unwrap_err()
+                .to_string()
+                .contains("credential source missing"),
+            "an enabled instance cannot silently start without its credential"
+        );
+        assert!(
+            !backup_dir.exists(),
+            "missing enabled secret fails before backup"
+        );
+        return;
+    }
+    let report = import().expect("disabled instance without a secret must import unconfigured");
+    assert_eq!(
+        protected_counts(&core_path),
+        before,
+        "import must not rewrite core"
+    );
+    assert_eq!(report.destinations[0]["counts"]["credentials"], 0);
+    assert_eq!(report.destinations[0]["credentials"], serde_json::json!([]));
+    let conn = Connection::open(&destination_path).unwrap();
+    let (enabled, envelope): (bool, String) = conn.query_row(
+        "SELECT enabled,credential_envelope FROM instances WHERE instance_id='11111111-1111-4111-8111-111111111111'",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert!(!enabled, "disabled instance must not start a child");
+    assert_eq!(
+        envelope, "",
+        "absence is not an encrypted synthetic credential"
+    );
+    drop(conn);
+    let rerun = import().expect("successful disabled import must rerun without a credential");
+    assert_eq!(
+        rerun.destination_manifest_sha256,
+        report.destination_manifest_sha256
+    );
+}
+
 fn seed_core(path: &std::path::Path) {
     let conn = opencrab_db::init_connection(path.to_str().unwrap()).unwrap();
     conn.execute("INSERT INTO agents(agent_id,name,persona_name,instructions,created_at,updated_at) VALUES ('agent-a','A','A','','2026','2026')",[]).unwrap();
