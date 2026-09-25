@@ -165,7 +165,6 @@ pub async fn run_agent_response(
     let conversation = req.conversation.as_str();
     let gateway = req.gateway.as_str();
     let depth = req.depth;
-    let relationship_authority = req.relationship_authority.clone();
 
     // #665: この run を貫く相関 ID と span。全 gateway（Discord/Nostr/web/時刻発火）がこの
     // 単一チョークポイントを通るので、ここで採番すればターン内の LLM/ツール往復（engine 内の debug）が
@@ -298,7 +297,6 @@ pub async fn run_agent_response(
             gateway_actions: req.gateway_actions.clone(),
             subtask_registry: subtask_registry.clone(),
             completion_sink: req.completion_sink.clone(),
-            relationship_authority: relationship_authority.clone(),
             reply_target: req.reply_target.clone(),
             tool_allowlist: req.tool_allowlist.clone(),
         },
@@ -371,16 +369,6 @@ pub async fn run_agent_response(
         max_iterations,
     );
     engine.set_assistant_history_name(agent_name.to_string());
-    if let Some(authority) = relationship_authority.clone() {
-        let check =
-            crate::authorization::make_check(state.db.clone(), agent_id.to_string(), authority);
-        if depth > 0
-            && !check(opencrab_core::authorization::AuthorizationBoundary::TimedSubtaskContinuation)
-        {
-            anyhow::bail!("authorization_revoked");
-        }
-        engine.set_authorization_check(check);
-    }
 
     // #676（案Y）: 送るプロバイダのモデルは、出力上限（max_output_tokens）を model_pricing から
     // 実能力値で解決して engine に渡す。未登録（NULL / 0 以下 / 行なし）なら fail loud で
@@ -463,9 +451,6 @@ pub async fn run_agent_response(
             // 決着で親会話を resume する sink が、元の権限のまま再開できる
             // （落とすと owner/trusted のツールが resume 後に丸ごと消える）。
             .with_caller(run_caller.clone())
-            .with_authorization_check(relationship_authority.clone().map(|authority| {
-                crate::authorization::make_check(state.db.clone(), agent_id.to_string(), authority)
-            }))
             // 大きい tool_result は inline 経路と同様にワークスペースへ退避する
             // （DB へ無制限に入れると resume 時の会話再構築が context 予算を溢れる）。
             .with_workspace_root(Some(tool_result_workspace.clone()));

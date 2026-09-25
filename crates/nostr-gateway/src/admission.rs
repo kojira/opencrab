@@ -14,15 +14,12 @@ pub fn admit(event: &WatchEvent, self_pubkey: &str, access: &AccessConfig) -> Op
     if contains(&access.owner, &author) {
         return Some(SaidCaller::Owner);
     }
-    if let Some(projection) = access
+    if let Some(agent_id) = access
         .co_agents
         .iter()
-        .find_map(|(key, projection)| (normalized(key) == author).then(|| projection.clone()))
+        .find_map(|(key, agent_id)| (normalized(key) == author).then(|| agent_id.clone()))
     {
-        return Some(SaidCaller::CoAgent {
-            agent_id: projection.agent_id,
-            relationship_revision: projection.relationship_revision,
-        });
+        return Some(SaidCaller::CoAgent { agent_id });
     }
     if contains(&access.trusted_users, &author) {
         return Some(SaidCaller::TrustedUser);
@@ -78,15 +75,7 @@ mod tests {
             owner: vec![owner.clone()],
             trusted_users: vec![trusted.clone()],
             followees: vec![followee.clone()],
-            co_agents: [(
-                co.clone(),
-                crate::config::CoAgentProjection {
-                    agent_id: "agent-b".into(),
-                    relationship_revision: 1,
-                },
-            )]
-            .into_iter()
-            .collect(),
+            co_agents: [(co.clone(), "agent-b".into())].into_iter().collect(),
         };
         assert_eq!(
             admit(&event(&owner, 1), &self_key, &access),
@@ -103,8 +92,7 @@ mod tests {
         assert_eq!(
             admit(&event(&co, 1), &self_key, &access),
             Some(SaidCaller::CoAgent {
-                agent_id: "agent-b".into(),
-                relationship_revision: 1,
+                agent_id: "agent-b".into()
             })
         );
     }

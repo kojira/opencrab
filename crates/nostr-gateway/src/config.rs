@@ -35,13 +35,6 @@ pub struct InstanceConfig {
     pub access: AccessConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CoAgentProjection {
-    pub agent_id: String,
-    pub relationship_revision: u64,
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccessConfig {
@@ -50,7 +43,7 @@ pub struct AccessConfig {
     #[serde(default)]
     pub owner: Vec<String>,
     #[serde(default)]
-    pub co_agents: std::collections::BTreeMap<String, CoAgentProjection>,
+    pub co_agents: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub trusted_users: Vec<String>,
 }
@@ -180,11 +173,6 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
     match cfg.delivery_mode.as_deref() {
         None | Some("say") | Some("tool_driven") => {}
         Some(_) => anyhow::bail!("delivery_mode must be say or tool_driven"),
-    }
-    if cfg.access.co_agents.values().any(|projection| {
-        projection.agent_id.trim().is_empty() || projection.relationship_revision == 0
-    }) {
-        anyhow::bail!("co-agent projection requires agent_id and positive relationship_revision");
     }
     for watch in &cfg.watches {
         if watch.interval_secs <= 0 {

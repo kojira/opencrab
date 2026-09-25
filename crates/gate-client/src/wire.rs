@@ -270,10 +270,7 @@ pub struct SaidContext {
 pub enum SaidCaller {
     Owner,
     Agent,
-    CoAgent {
-        agent_id: String,
-        relationship_revision: u64,
-    },
+    CoAgent { agent_id: String },
     TrustedUser,
 }
 

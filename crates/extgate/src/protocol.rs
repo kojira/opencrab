@@ -221,10 +221,7 @@ pub enum SaidAttachment {
 pub enum SaidCaller {
     Owner,
     Agent,
-    CoAgent {
-        agent_id: String,
-        relationship_revision: u64,
-    },
+    CoAgent { agent_id: String },
     TrustedUser,
 }
 
@@ -524,14 +521,7 @@ fn parse_said_caller(value: Option<&Value>) -> Result<SaidCaller, GateError> {
         Some("trusted_user") => Ok(SaidCaller::TrustedUser),
         Some("co_agent") => {
             let agent_id = nonempty_map_str(obj, "agent_id")?;
-            let relationship_revision = require_map_u64(obj, "relationship_revision")?;
-            if relationship_revision == 0 {
-                return Err(GateError::new(ErrorCode::BadRequest));
-            }
-            Ok(SaidCaller::CoAgent {
-                agent_id,
-                relationship_revision,
-            })
+            Ok(SaidCaller::CoAgent { agent_id })
         }
         _ => Err(GateError::new(ErrorCode::BadRequest)),
     }
@@ -623,12 +613,6 @@ fn nonempty_map_str(obj: &serde_json::Map<String, Value>, key: &str) -> Result<S
         Some(Value::String(value)) if !value.is_empty() => Ok(value.clone()),
         _ => Err(GateError::new(ErrorCode::BadRequest)),
     }
-}
-
-fn require_map_u64(obj: &serde_json::Map<String, Value>, key: &str) -> Result<u64, GateError> {
-    obj.get(key)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| GateError::new(ErrorCode::BadRequest))
 }
 
 fn is_absolute_https(url: &str) -> bool {

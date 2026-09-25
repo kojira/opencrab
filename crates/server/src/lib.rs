@@ -10,7 +10,6 @@ pub mod agent_management;
 pub mod agent_runtime_impl;
 pub mod agent_schedule;
 pub mod api;
-pub mod authorization;
 pub mod caller_identity;
 pub mod config;
 pub mod heartbeat_fire;

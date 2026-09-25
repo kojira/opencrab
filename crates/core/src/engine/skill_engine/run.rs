@@ -123,8 +123,7 @@ impl SkillEngine {
             }
             apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
-            self.authorize_model_iteration(iterations)?;
-
+            // Check for dynamic model override.
             let model = model_override
                 .as_ref()
                 .and_then(|o| o.lock().ok().and_then(|m| m.clone()))
@@ -530,8 +529,9 @@ impl SkillEngine {
                         continue;
                     }
 
+                    // Canonical tool-call arguments are a JSON string; parse to a
+                    // Value for the executor boundary (empty object on malformed).
                     let args = tool_call.arguments_json();
-                    self.authorize_tool_invocation(self.is_utterance_tool(tool_name))?;
 
                     // 照会/道具と混在した発話クラス（§3.3.1 C3/C6）: inline 配送するが、
                     // subtask/settle/resume は起こさず、モデルへ領収書本文を返さない。次の LLM
@@ -620,9 +620,10 @@ impl SkillEngine {
                     }
                 }
 
+                // dispatch 接尾辞（あれば）を 1 本の subtask にまとめて起動する。
+                // inline 接頭辞の同期実行が終わった**後**にここへ来るため、順序保証は保たれる。
                 // 各 tool_call には同じ subtask_id を持つ spawned マーカーを同ターンで返す。
                 if !dispatch_calls.is_empty() {
-                    self.authorize(crate::authorization::AuthorizationBoundary::ToolInvocation)?;
                     let dispatcher = self
                         .tool_dispatcher
                         .as_ref()
@@ -673,7 +674,6 @@ impl SkillEngine {
                         if !c.trim().is_empty() {
                             last_generation_had_continuation_speech = true;
                             if let Some(ref cb) = self.on_continuation_speech {
-                                self.authorize_model_iteration(2)?;
                                 cb(c.clone()).await.map_err(|e| {
                                     anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                                 })?;

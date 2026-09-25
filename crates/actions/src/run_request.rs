@@ -12,7 +12,6 @@ use opencrab_gateway::GatewayActions;
 use crate::subtask::{SubtaskCompletionSink, SubtaskRegistry};
 use crate::subtask_notify::SubtaskRunNotifier;
 use crate::traits::CallerIdentity;
-use opencrab_core::authorization::RelationshipAuthority;
 
 /// #898: 継続分岐の途中発話を配送・保存する非同期フック（core の同名型と一致させる）。
 /// 失敗（Err）は継続を止めてターンを失敗させる（§13.1 j）。
@@ -71,8 +70,6 @@ pub struct RunRequest {
     /// 呼び出し元ゲートウェイ名（"discord" / "rest" / "heartbeat" 等。RuntimeInfo 用）。
     pub gateway: String,
     pub caller: CallerIdentity,
-    /// Gateway-projected generic co-agent relationship evidence. `None` for non-co-agent callers.
-    pub relationship_authority: Option<RelationshipAuthority>,
     pub gateway_actions: Option<Arc<dyn GatewayActions>>,
     pub image_urls: Vec<String>,
     /// sub-engine のネスト深さ（メインエンジン = 0）。
@@ -159,7 +156,6 @@ impl RunRequest {
             conversation: conversation.into(),
             gateway: gateway.into(),
             caller,
-            relationship_authority: None,
             gateway_actions: None,
             image_urls: Vec::new(),
             depth: 0,
@@ -176,11 +172,6 @@ impl RunRequest {
             tool_allowlist: None,
             persist_turn_logs: true,
         }
-    }
-
-    pub fn with_relationship_authority(mut self, authority: RelationshipAuthority) -> Self {
-        self.relationship_authority = Some(authority);
-        self
     }
 
     pub fn with_gateway_actions(mut self, ga: Arc<dyn GatewayActions>) -> Self {

@@ -475,7 +475,7 @@ async fn coagent_model_command_is_forbidden_before_handler_invocation() {
             "m": "command",
             "id": "cmd-coagent-1",
             "binding_id": binding_id,
-            "caller": {"role": "co_agent", "agent_id": "agent-b", "relationship_revision": 1},
+            "caller": {"role": "co_agent", "agent_id": "agent-b"},
             "name": "set_model",
             "args": {"model": "openai:gpt-5"}
         }),
@@ -550,7 +550,7 @@ async fn every_non_owner_model_caller_is_forbidden() {
     let h = Harness::start().await;
     let (mut stream, _, binding_id) = ready_pair(&h).await;
     let callers = [
-        json!({"role": "co_agent", "agent_id": "agent-b", "relationship_revision": 1}),
+        json!({"role": "co_agent", "agent_id": "agent-b"}),
         json!({"role": "trusted_user"}),
         json!({"role": "agent"}),
     ];

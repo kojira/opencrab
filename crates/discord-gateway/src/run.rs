@@ -423,10 +423,9 @@ async fn react_system_on(
 fn caller_for(access: &AccessConfig, author_id: &str) -> SaidCaller {
     if access.owners.iter().any(|id| id == author_id) {
         SaidCaller::Owner
-    } else if let Some(projection) = access.co_agents.get(author_id) {
+    } else if let Some(agent_id) = access.co_agents.get(author_id) {
         SaidCaller::CoAgent {
-            agent_id: projection.agent_id.clone(),
-            relationship_revision: projection.relationship_revision,
+            agent_id: agent_id.clone(),
         }
     } else if access.trusted_users.iter().any(|id| id == author_id) {
         SaidCaller::TrustedUser
@@ -670,23 +669,14 @@ mod caller_tests {
     fn gateway_classifies_authenticated_author_from_its_access_config() {
         let access = AccessConfig {
             owners: vec!["100".into()],
-            co_agents: [(
-                "200".into(),
-                crate::config::CoAgentProjection {
-                    agent_id: "agent-b".into(),
-                    relationship_revision: 1,
-                },
-            )]
-            .into_iter()
-            .collect(),
+            co_agents: [("200".into(), "agent-b".into())].into_iter().collect(),
             trusted_users: vec!["300".into()],
         };
         assert_eq!(caller_for(&access, "100"), SaidCaller::Owner);
         assert_eq!(
             caller_for(&access, "200"),
             SaidCaller::CoAgent {
-                agent_id: "agent-b".into(),
-                relationship_revision: 1,
+                agent_id: "agent-b".into()
             }
         );
         assert_eq!(caller_for(&access, "300"), SaidCaller::TrustedUser);

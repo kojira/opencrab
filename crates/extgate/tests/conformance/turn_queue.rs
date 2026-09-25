@@ -311,7 +311,6 @@ async fn settlement_is_consumed_on_next_turn() {
         speaker_id: "u1".into(),
         delivery_mode: DeliveryMode::Say,
         system_context: String::new(),
-        relationship_authority: None,
     };
     settle_completed(
         &h.runtime.subtask_registry_for(&session_id),
@@ -375,7 +374,6 @@ async fn s3_subtask_continuation_routes_by_exact_generic_session_without_prefix(
         speaker_id: "npub-u1".into(),
         delivery_mode: DeliveryMode::Say,
         system_context: String::new(),
-        relationship_authority: None,
     };
     settle_completed(
         &h.runtime.subtask_registry_for(&session_id),
@@ -430,7 +428,6 @@ async fn settlement_during_active_parent_does_not_start_another_resume() {
         speaker_id: "user-1".into(),
         delivery_mode: DeliveryMode::Say,
         system_context: String::new(),
-        relationship_authority: None,
     };
 
     let locks = h.runtime.session_locks();
@@ -499,7 +496,6 @@ async fn assert_failed_completion_resume_has_no_ended(reply: &str, budget_fails:
         speaker_id: "u1".into(),
         delivery_mode: DeliveryMode::Say,
         system_context: String::new(),
-        relationship_authority: None,
     };
     settle_completed(
         &h.runtime.subtask_registry_for(&session_id),

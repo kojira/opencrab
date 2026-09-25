@@ -66,8 +66,6 @@ pub struct SkillEngine {
     pub max_iterations: usize,
     /// Set of actions declared by active skills. If Some, only declared actions are allowed.
     pub allowed_actions: Option<std::collections::HashSet<String>>,
-    /// Current generic relationship/revision authority check for co-agent work.
-    authorization_check: Option<crate::authorization::AuthorizationCheck>,
     /// Optional callback invoked after each LLM call for logging.
     pub log_callback: Option<LogCallback>,
     /// Additive callback carrying provider-executed tool history.
@@ -158,7 +156,6 @@ impl SkillEngine {
             executor,
             max_iterations,
             allowed_actions: None,
-            authorization_check: None,
             log_callback: None,
             exchange_log_callback: None,
             on_response_text: None,
@@ -177,39 +174,6 @@ impl SkillEngine {
             conversation_high: None,
             conversation_low: None,
         }
-    }
-
-    pub fn set_authorization_check(&mut self, check: crate::authorization::AuthorizationCheck) {
-        self.authorization_check = Some(check);
-    }
-
-    fn authorize(&self, boundary: crate::authorization::AuthorizationBoundary) -> Result<()> {
-        if self
-            .authorization_check
-            .as_ref()
-            .is_some_and(|check| !check(boundary))
-        {
-            anyhow::bail!("authorization_revoked");
-        }
-        Ok(())
-    }
-
-    fn authorize_model_iteration(&self, iteration: usize) -> Result<()> {
-        self.authorize(if iteration == 1 {
-            crate::authorization::AuthorizationBoundary::InitialModelTurn
-        } else {
-            crate::authorization::AuthorizationBoundary::AutomaticContinuation
-        })
-    }
-
-    fn authorize_tool_invocation(&self, operation_driven: bool) -> Result<()> {
-        self.authorize(crate::authorization::AuthorizationBoundary::ToolInvocation)?;
-        if operation_driven {
-            self.authorize(
-                crate::authorization::AuthorizationBoundary::OperationDrivenContinuation,
-            )?;
-        }
-        Ok(())
     }
 
     /// Set the resolved assistant display identity used by canonical in-turn history rendering.

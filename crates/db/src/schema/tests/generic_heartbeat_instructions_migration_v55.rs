@@ -33,7 +33,7 @@ fn s4_v55_upgrade_creates_composite_generic_heartbeat_instructions() {
         vec!["session_heartbeat_config", "sessions"],
         "instructions must be bound to the composite config target and generic session"
     );
-    assert_eq!(latest_version(), 56);
+    assert_eq!(latest_version(), 55);
 }
 
 #[test]

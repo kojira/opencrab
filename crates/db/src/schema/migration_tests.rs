@@ -11,7 +11,6 @@ include!("tests/gpt6_model_budget_migration_v52.rs");
 include!("tests/gate_admin_security_migration_v53.rs");
 include!("tests/subject_safeguards_migration_v54.rs");
 include!("tests/generic_heartbeat_instructions_migration_v55.rs");
-include!("tests/co_agent_relationship_migration_v56.rs");
 include!("tests/impressions_migration_v21.rs");
 include!("tests/late_version_migrations_v41_v42_v46.rs");
 include!("tests/legacy_foundation_migrations.rs");
