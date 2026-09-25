@@ -1,0 +1,11 @@
+   Compiling opencrab-gateway-migrate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gateway-migrate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.32s
+     Running tests/s8.rs (target/debug/deps/s8-6af26bc9b9d546b2)
+
+running 3 tests
+test published_schema_56_source_fingerprints_are_stable ... ok
+test source_profile_refuses_neighbor_versions_and_missing_required_column ... ok
+test s8_import_and_project_are_offline_idempotent_and_preserve_core_rows ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+

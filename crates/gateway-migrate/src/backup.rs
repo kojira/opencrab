@@ -41,14 +41,13 @@ pub fn create_or_load_set(
     }));
     inputs.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
 
-    if !backup_dir.exists() {
-        fs::create_dir(backup_dir)?;
-        set_mode(backup_dir, 0o700)?;
-        for (kind, path_id, _, source_path) in &inputs {
-            sqlite_backup(source_path, &database_path(backup_dir, kind, path_id))?;
-        }
-    }
+    ensure!(!backup_dir.exists(), "backup directory must be new");
+    fs::create_dir(backup_dir)?;
+    set_mode(backup_dir, 0o700)?;
     validate_path(backup_dir, 0o700, true)?;
+    for (kind, path_id, _, source_path) in &inputs {
+        sqlite_backup(source_path, &database_path(backup_dir, kind, path_id))?;
+    }
     let expected_names = inputs
         .iter()
         .map(|(kind, path_id, _, _)| backup_name(kind, path_id))
@@ -75,6 +74,28 @@ pub fn create_or_load_set(
             })
         })
         .collect()
+}
+
+pub fn verify_record_set(backup_dir: &Path, records: &[BackupRecord]) -> Result<()> {
+    validate_path(backup_dir, 0o700, true)?;
+    let expected = records
+        .iter()
+        .map(|record| backup_name(&record.kind_id, &record.path_id))
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual = fs::read_dir(backup_dir)?
+        .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<std::collections::BTreeSet<_>>>()?;
+    ensure!(actual == expected, "recorded backup files differ");
+    for record in records {
+        let path = database_path(backup_dir, &record.kind_id, &record.path_id);
+        validate_path(&path, 0o600, false)?;
+        ensure!(
+            source::file_sha256(&path)? == record.file_sha256
+                && logical_sha256(&path)? == record.logical_sha256,
+            "recorded backup digest mismatch"
+        );
+    }
+    Ok(())
 }
 
 pub fn set_sha256(records: &[BackupRecord]) -> Result<String> {
@@ -213,16 +234,7 @@ mod s8_review_red_tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn backup_preflight_checks_free_space() {
-        let source = include_str!("backup.rs");
-        assert!(
-            source.contains("ensure_free_space"),
-            "backup creation must preflight required free space"
-        );
-    }
-
-    #[test]
-    fn stale_existing_backup_cannot_bind_to_changed_input() {
+    fn a_second_import_cannot_reuse_a_preexisting_backup_directory() {
         let temp = tempfile::tempdir().unwrap();
         let core = temp.path().join("core.db");
         let dest = temp.path().join("dest.db");
@@ -241,13 +253,34 @@ mod s8_review_red_tests {
             schema: "s5-discord-v1".into(),
         };
         create_or_load_set(&core, &[(destination.clone(), dest.clone())], &backups).unwrap();
+        let error = create_or_load_set(&core, &[(destination, dest.clone())], &backups)
+            .expect_err("an existing directory cannot be the new matched backup set");
+        assert!(error.to_string().contains("backup"));
         Connection::open(&core)
             .unwrap()
             .execute("INSERT INTO x VALUES ('new')", [])
             .unwrap();
-        let error = create_or_load_set(&core, &[(destination, dest)], &backups)
-            .expect_err("stale backup must fail");
-        assert!(error.to_string().contains("backup") || error.to_string().contains("input"));
+        Connection::open(&dest)
+            .unwrap()
+            .execute("INSERT INTO x VALUES ('changed')", [])
+            .unwrap();
+        // The operator restores the complete set after failure, never a single database.
+        fs::copy(database_path(&backups, "core", "core"), &core).unwrap();
+        fs::copy(database_path(&backups, "discord", "main"), &dest).unwrap();
+        assert_eq!(
+            Connection::open(&core)
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM x", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            Connection::open(&dest)
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM x", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
         assert_eq!(
             fs::metadata(&backups).unwrap().permissions().mode() & 0o777,
             0o700

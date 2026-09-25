@@ -1,5 +1,5 @@
 use crate::canonical;
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Result};
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -88,19 +88,73 @@ pub const CONCRETE_TABLES: &[(&str, &[&str])] = &[
     ),
 ];
 
-const REQUIRED_TABLES: &[&str] = &[
-    "agents",
-    "sessions",
-    "agent_sessions",
-    "gate_instances",
-    "gate_bindings",
-    "deliveries",
-    "trusted_users",
-    "channel_config",
-    "session_watches",
-    "session_heartbeat_config",
-    "session_heartbeat_instructions",
-    "api_principals",
+const REQUIRED_TABLES: &[(&str, &[&str])] = &[
+    ("agents", &["agent_id", "subject_id"]),
+    ("sessions", &["id"]),
+    ("agent_sessions", &["agent_id", "session_id"]),
+    (
+        "gate_instances",
+        &[
+            "instance_id",
+            "kind_id",
+            "subject_id",
+            "revision",
+            "enabled",
+            "config_b64",
+            "config_digest",
+            "deleted_at",
+        ],
+    ),
+    (
+        "gate_bindings",
+        &[
+            "binding_id",
+            "instance_id",
+            "address",
+            "session_id",
+            "closed_at",
+        ],
+    ),
+    (
+        "deliveries",
+        &[
+            "delivery_id",
+            "binding_id",
+            "payload_json",
+            "state",
+            "error",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "session_heartbeat_config",
+        &[
+            "agent_id",
+            "session_id",
+            "enabled",
+            "interval_secs",
+            "anchor_at",
+            "last_fired_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "session_heartbeat_instructions",
+        &["agent_id", "session_id", "override_text", "updated_at"],
+    ),
+    (
+        "api_principals",
+        &[
+            "id",
+            "user_id",
+            "agent_id",
+            "permission",
+            "created_by",
+            "created_at",
+            "display_name",
+        ],
+    ),
 ];
 
 pub fn open_read_only(path: &Path) -> Result<Connection> {
@@ -116,8 +170,13 @@ pub fn validate(conn: &Connection) -> Result<Vec<SourceRow>> {
         version == SOURCE_VERSION as i64,
         "core schema must be exactly 56"
     );
-    for table in REQUIRED_TABLES {
+    for (table, columns) in REQUIRED_TABLES.iter().chain(
+        CONCRETE_TABLES
+            .iter()
+            .filter(|(name, _)| !matches!(*name, "agent_discord_config" | "agent_nostr_config")),
+    ) {
         ensure!(table_exists(conn, table)?, "missing required table {table}");
+        require_columns(conn, table, columns)?;
     }
     let mut rows = Vec::new();
     for (table, columns) in CONCRETE_TABLES {
@@ -126,11 +185,7 @@ pub fn validate(conn: &Connection) -> Result<Vec<SourceRow>> {
             continue;
         }
         ensure!(exists, "missing required source table {table}");
-        let actual = table_columns(conn, table)?;
-        ensure!(
-            actual == *columns,
-            "source table {table} has unexpected shape"
-        );
+        require_columns(conn, table, columns)?;
         rows.extend(read_rows(conn, table, columns)?);
     }
     rows.sort_by(|left, right| left.fingerprint.cmp(&right.fingerprint));
@@ -227,23 +282,18 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     )?)
 }
 
-fn table_columns(conn: &Connection, table: &str) -> Result<Vec<&'static str>> {
-    let expected = CONCRETE_TABLES
-        .iter()
-        .find(|(name, _)| *name == table)
-        .context("known source table")?
-        .1;
-    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let actual = statement
+pub(crate) fn require_columns(conn: &Connection, table: &str, required: &[&str]) -> Result<()> {
+    let actual = conn
+        .prepare(&format!("PRAGMA table_info({table})"))?
         .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    if actual.len() != expected.len() {
-        bail!("source table {table} has unexpected column count");
+        .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()?;
+    for column in required {
+        ensure!(
+            actual.contains(*column),
+            "{table} missing required column {column}"
+        );
     }
-    for (actual, expected) in actual.iter().zip(expected.iter()) {
-        ensure!(actual == expected, "source table {table} column mismatch");
-    }
-    Ok(expected.to_vec())
+    Ok(())
 }
 
 fn lp(output: &mut Vec<u8>, value: &[u8]) {
@@ -295,11 +345,18 @@ mod s8_review_red_tests {
     use super::*;
 
     #[test]
-    fn required_core_table_shape_is_exact() {
+    fn required_core_column_must_exist_but_extra_columns_are_allowed() {
         let conn = opencrab_db::init_memory().unwrap();
         conn.execute_batch("ALTER TABLE agents ADD COLUMN s8_surprise TEXT;")
             .unwrap();
-        let error = validate(&conn).expect_err("unknown required-table column must fail");
-        assert!(error.to_string().contains("agents") && error.to_string().contains("shape"));
+        validate(&conn).expect("an unrelated extra column is allowed");
+
+        let conn = opencrab_db::init_memory().unwrap();
+        conn.execute_batch(
+            "ALTER TABLE gate_instances RENAME COLUMN config_digest TO missing_digest;",
+        )
+        .unwrap();
+        let error = validate(&conn).expect_err("missing migration input must fail before writing");
+        assert!(error.to_string().contains("gate_instances"));
     }
 }

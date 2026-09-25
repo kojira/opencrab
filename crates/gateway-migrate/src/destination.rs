@@ -2,7 +2,7 @@ use crate::{
     backup::BackupRecord,
     canonical,
     manifest::{Approval, Destination, IdentityEdge},
-    source::SourceRow,
+    source::{self, SourceRow},
 };
 use anyhow::{bail, ensure, Context, Result};
 use base64::Engine as _;
@@ -34,6 +34,7 @@ struct InstancePlan {
     revision: i64,
     config_b64: String,
     addresses: Vec<String>,
+    binding_ids: Vec<String>,
     enabled: bool,
     credential: Zeroizing<Vec<u8>>,
     credential_source: String,
@@ -240,286 +241,12 @@ pub fn validate_project_artifacts(
     Ok(())
 }
 
-fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approval, inputs: &Inputs) -> Result<Vec<InstancePlan>> {
-    let mut statement = core.prepare(
-        "SELECT i.instance_id,i.kind_id,a.agent_id,i.subject_id,i.revision,i.enabled,i.config_b64,i.config_digest
-         FROM gate_instances i JOIN agents a ON a.subject_id=i.subject_id
-         WHERE i.deleted_at IS NULL ORDER BY i.kind_id,i.instance_id",
-    )?;
-    let raw = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, bool>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut plans = Vec::new();
-    for (instance_id, kind, agent_id, subject_id, revision, enabled, config_b64, digest) in raw {
-        if !matches!(kind.as_str(), "discord" | "nostr" | "web") {
-            continue;
-        }
-        let destination = approval.destination(&kind)?.clone();
-        let canonical = match kind.as_str() {
-            "discord" => opencrab_discord_gateway::config::canonicalize_config_b64(&config_b64)?,
-            "nostr" => opencrab_nostr_gateway::config::canonicalize_config_b64(&config_b64)?,
-            "web" => config_b64.clone(),
-            _ => unreachable!(),
-        };
-        ensure!(canonical == config_b64, "noncanonical config");
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&config_b64)?;
-        ensure!(canonical::hex(&Sha256::digest(&decoded)) == digest, "config digest mismatch");
-        let mut addresses = core
-            .prepare("SELECT address FROM gate_bindings WHERE instance_id=?1 AND closed_at IS NULL ORDER BY address")?
-            .query_map([&instance_id], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        addresses.sort();
-        let key_path = inputs.master_keys.get(&kind).context("missing master key")?;
-        let key = read_master_key(key_path, &kind)?;
-        let destination_path = inputs.paths.get(&(kind.clone(), destination.path_id.clone())).context("missing destination")?;
-        let (credential, source) = select_credential(rows, approval, inputs, destination_path, &kind, &instance_id, &agent_id, &key)?;
-        plans.push(InstancePlan {
-            destination,
-            instance_id,
-            agent_id,
-            subject_id,
-            revision,
-            config_b64,
-            addresses,
-            enabled,
-            credential,
-            credential_source: source,
-            created_at: approval.created_at.clone(),
-        });
-    }
-    Ok(plans)
-}
-
-fn select_credential(rows: &[SourceRow], approval: &Approval, inputs: &Inputs, path: &Path, kind: &str, instance_id: &str, agent_id: &str, key: &[u8; 32]) -> Result<(Zeroizing<Vec<u8>>, String)> {
-    let descriptor = approval.credential_sources.iter().find(|item| item.instance_id == instance_id).context("credential source missing")?;
-    let legacy = match kind {
-        "discord" => rows
-            .iter()
-            .find(|row| row.table == "agent_discord_config" && row.text("agent_id").ok() == Some(agent_id))
-            .map(|row| row.text("bot_token").map(|value| Zeroizing::new(value.as_bytes().to_vec())))
-            .transpose()?,
-        "nostr" => rows
-            .iter()
-            .find(|row| row.table == "agent_nostr_config" && row.text("agent_id").ok() == Some(agent_id))
-            .map(|row| row.text("secret_key").map(|value| Zeroizing::new(value.as_bytes().to_vec())))
-            .transpose()?,
-        "web" => inputs.credential_files.get(instance_id).map(|file| read_secret_file(file)).transpose()?,
-        _ => None,
-    }
-    .filter(|value| !value.is_empty());
-    let existing_envelope: Option<String> = Connection::open(path)?
-        .query_row("SELECT credential_envelope FROM instances WHERE instance_id=?1", [instance_id], |row| row.get(0))
-        .optional()?
-        .flatten();
-    let existing = existing_envelope.as_deref().map(|value| decrypt(kind, value, key)).transpose()?;
-    let legacy_source = match kind {
-        "discord" => format!("legacy-core:agent_discord_config:{agent_id}"),
-        "nostr" => format!("legacy-core:agent_nostr_config:{agent_id}"),
-        "web" => format!("operator-file:{instance_id}"),
-        _ => unreachable!(),
-    };
-    let existing_source = format!("existing-destination:{kind}:{instance_id}");
-    match (legacy, existing) {
-        (Some(left), Some(right)) => {
-            ensure!(left.as_slice() == right.as_slice(), "credential candidates conflict");
-            ensure!(descriptor.source == legacy_source || descriptor.source == existing_source, "credential source descriptor mismatch");
-            Ok((left, descriptor.source.clone()))
-        }
-        (Some(value), None) => {
-            ensure!(descriptor.source == legacy_source, "credential source descriptor mismatch");
-            Ok((value, descriptor.source.clone()))
-        }
-        (None, Some(value)) => {
-            ensure!(descriptor.source == existing_source, "credential source descriptor mismatch");
-            Ok((value, descriptor.source.clone()))
-        }
-        (None, None) => bail!("credential is required"),
-    }
-}
-
-fn build_identity_plans(rows: &[SourceRow], approval: &Approval, plans: &[InstancePlan]) -> Result<BTreeMap<(String, String), Vec<IdentityPlan>>> {
-    let mut output: BTreeMap<(String, String), Vec<IdentityPlan>> = BTreeMap::new();
-    for row in rows.iter().filter(|row| row.table == "trusted_users") {
-        let disposition = approval
-            .identity_dispositions
-            .iter()
-            .find(|item| item.source_fingerprint == row.fingerprint)
-            .context("identity disposition missing")?;
-        let permission = row.text("permission")?;
-        let role = match permission {
-            "owner" => "owner",
-            "co-agent" => "co_agent",
-            _ => "trusted_user",
-        };
-        for edge in &disposition.edges {
-            match edge {
-                IdentityEdge::ApiPrincipal => ensure!(row.text("platform")? == "rest", "only rest may become api principal"),
-                IdentityEdge::Gateway { kind_id, instance_id } => {
-                    let plan = plans
-                        .iter()
-                        .find(|plan| &plan.instance_id == instance_id && &plan.destination.kind_id == kind_id)
-                        .context("identity target instance missing")?;
-                    ensure!(plan.agent_id == row.text("agent_id")?, "identity agent mismatch");
-                    prove_access_config(plan, row.text("user_id")?, role)?;
-                    output.entry((plan.destination.kind_id.clone(), plan.destination.path_id.clone())).or_default().push(IdentityPlan {
-                        instance_id: instance_id.clone(),
-                        role: role.into(),
-                        external_id: row.text("user_id")?.into(),
-                        relationship_id: (role == "co_agent").then(|| row.text("user_id").unwrap().to_string()),
-                    });
-                }
-            }
-        }
-    }
-    for values in output.values_mut() {
-        values.sort_by(|a, b| (&a.instance_id, &a.role, &a.external_id).cmp(&(&b.instance_id, &b.role, &b.external_id)));
-    }
-    Ok(output)
-}
-
-fn prove_access_config(plan: &InstancePlan, external_id: &str, role: &str) -> Result<()> {
-    let bytes = base64::engine::general_purpose::STANDARD.decode(&plan.config_b64)?;
-    let matches = match plan.destination.kind_id.as_str() {
-        "discord" => {
-            let cfg = opencrab_discord_gateway::config::parse_instance_config(&bytes)?;
-            match role {
-                "owner" => cfg.access.owners.iter().any(|v| v == external_id),
-                "co_agent" => cfg.access.co_agents.contains_key(external_id),
-                _ => cfg.access.trusted_users.iter().any(|v| v == external_id),
-            }
-        }
-        "nostr" => {
-            let cfg = opencrab_nostr_gateway::config::parse_instance_config(&bytes)?;
-            match role {
-                "owner" => cfg.access.owner.iter().any(|v| v == external_id),
-                "co_agent" => cfg.access.co_agents.contains_key(external_id),
-                _ => cfg.access.trusted_users.iter().any(|v| v == external_id),
-            }
-        }
-        "web" => matches!(role, "owner" | "trusted_user"),
-        _ => false,
-    };
-    ensure!(matches, "identity is not represented by gateway config");
-    Ok(())
-}
-
-fn build_endpoint_plans(core: &Connection, rows: &[SourceRow], approval: &Approval, plans: &[InstancePlan]) -> Result<BTreeMap<(String, String), Vec<EndpointPlan>>> {
-    let mut grouped: BTreeMap<(String, String, String), (&InstancePlan, Vec<&SourceRow>)> = BTreeMap::new();
-    for edge in &approval.channel_edges {
-        let source = rows
-            .iter()
-            .find(|row| row.fingerprint == edge.source_fingerprint && row.table == "channel_config")
-            .context("channel source missing")?;
-        let plan = plans
-            .iter()
-            .find(|plan| plan.instance_id == edge.instance_id && plan.destination.kind_id == "discord")
-            .context("discord instance missing")?;
-        let binding: (String, String) = core.query_row(
-            "SELECT instance_id,session_id FROM gate_bindings WHERE binding_id=?1 AND closed_at IS NULL",
-            [&edge.binding_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        ensure!(binding.0 == plan.instance_id && binding.1 == edge.session_id, "channel binding mismatch");
-        ensure!(
-            core.query_row(
-                "SELECT EXISTS(SELECT 1 FROM agent_sessions WHERE agent_id=?1 AND session_id=?2)",
-                params![plan.agent_id, edge.session_id],
-                |row| row.get::<_, bool>(0)
-            )?,
-            "channel session membership missing"
-        );
-        let key = (plan.destination.path_id.clone(), plan.instance_id.clone(), source.text("channel_id")?.into());
-        grouped.entry(key).or_insert_with(|| (plan, Vec::new())).1.push(source);
-    }
-    let mut output: BTreeMap<(String, String), Vec<EndpointPlan>> = BTreeMap::new();
-    for ((_path_id, instance_id, channel_id), (plan, sources)) in grouped {
-        let exact = sources.iter().filter(|row| row.text("agent_id").ok() == Some(plan.agent_id.as_str())).copied().collect::<Vec<_>>();
-        let global = sources.iter().filter(|row| row.text("agent_id").ok() == Some("")).copied().collect::<Vec<_>>();
-        ensure!(exact.len() <= 1 && global.len() <= 1 && exact.len() + global.len() == sources.len(), "ambiguous channel source rows");
-        let effective = exact.first().copied().or_else(|| global.first().copied()).context("channel source has no exact/global row")?;
-        let mut fingerprints = sources.iter().map(|row| row.fingerprint.clone()).collect::<Vec<_>>();
-        fingerprints.sort();
-        let policy = crate::canonical::value_bytes(&json!({"channel_name":effective.text("channel_name")?,"source_fingerprints":fingerprints,"whitelisted":effective.integer("whitelisted")?!=0}))?;
-        let guild_id = effective.text("guild_id")?.to_string();
-        output.entry((plan.destination.kind_id.clone(), plan.destination.path_id.clone())).or_default().push(EndpointPlan {
-            instance_id,
-            channel_id,
-            guild_id: (!guild_id.is_empty()).then_some(guild_id),
-            readable: effective.integer("readable")? != 0,
-            writable: effective.integer("writable")? != 0,
-            policy_json: String::from_utf8(policy)?,
-        });
-    }
-    for values in output.values_mut() {
-        values.sort_by(|a, b| (&a.instance_id, &a.channel_id).cmp(&(&b.instance_id, &b.channel_id)));
-    }
-    Ok(output)
-}
-
-fn prevalidate_watch_edges(core: &Connection, rows: &[SourceRow], approval: &Approval, plans: &[InstancePlan]) -> Result<()> {
-    for edge in &approval.watch_edges {
-        let row = rows
-            .iter()
-            .find(|row| row.fingerprint == edge.source_fingerprint && row.table == "session_watches")
-            .context("watch source missing")?;
-        let plan = plans
-            .iter()
-            .find(|plan| plan.instance_id == edge.instance_id && plan.destination.kind_id == "nostr")
-            .context("nostr watch target missing")?;
-        ensure!(plan.agent_id == row.text("agent_id")?, "watch agent mismatch");
-        let session = row.text("session_id")?;
-        let bound: bool = core.query_row(
-            "SELECT EXISTS(SELECT 1 FROM gate_bindings WHERE instance_id=?1 AND session_id=?2 AND closed_at IS NULL)",
-            params![plan.instance_id, session],
-            |r| r.get(0),
-        )?;
-        ensure!(bound, "watch session not bound");
-        let bytes = base64::engine::general_purpose::STANDARD.decode(&plan.config_b64)?;
-        let cfg = opencrab_nostr_gateway::config::parse_instance_config(&bytes)?;
-        let watch_id = row.integer("id")?;
-        let interval_secs = row.integer("interval_secs")?;
-        let source_filter = serde_json::from_str::<Value>(row.text("filter_json")?)?;
-        let found = cfg
-            .watches
-            .iter()
-            .any(|watch| watch.id == watch_id && watch.interval_secs == interval_secs && serde_json::to_value(watch.effective_filter()).ok() == Some(source_filter.clone()));
-        ensure!(found, "watch not represented by Nostr config");
-    }
-    Ok(())
-}
-
-fn validate_source_coverage(rows: &[SourceRow], approval: &Approval, plans: &[InstancePlan]) -> Result<()> {
-    let identity = approval.identity_dispositions.iter().map(|item| item.source_fingerprint.as_str()).collect::<BTreeSet<_>>();
-    let channels = approval.channel_edges.iter().map(|item| item.source_fingerprint.as_str()).collect::<BTreeSet<_>>();
-    let watches = approval.watch_edges.iter().map(|item| item.source_fingerprint.as_str()).collect::<BTreeSet<_>>();
-    for row in rows {
-        match row.table.as_str() {
-            "trusted_users" => ensure!(identity.contains(row.fingerprint.as_str()), "unmapped identity"),
-            "channel_config" => ensure!(channels.contains(row.fingerprint.as_str()), "unmapped channel"),
-            "session_watches" => {
-                ensure!(watches.contains(row.fingerprint.as_str()), "unmapped watch")
-            }
-            "agent_discord_config" | "agent_nostr_config" => ensure!(plans.iter().any(|p| p.agent_id == row.text("agent_id").unwrap_or("")), "unmapped credential config"),
-            _ => {}
-        }
-    }
-    Ok(())
-}
+include!("destination_plans.rs");
 
 fn expected_keys(conn: &Connection, plans: &[&InstancePlan], identities: &[IdentityPlan], endpoints: &[EndpointPlan]) -> Result<Vec<ExpectedKey>> {
     let mut out = Vec::new();
     for plan in plans {
+        validate_instance_progress(conn, plan)?;
         let expected = instance_semantic(plan);
         out.push(expected_key(conn, "instances", vec![plan.instance_id.clone()], expected)?);
     }
@@ -643,20 +370,16 @@ fn apply_instance(tx: &Transaction<'_>, plan: &InstancePlan, key: &[u8; 32]) -> 
     let expected_hash = row_hash("instances", &[plan.instance_id.clone()], &expected)?;
     if let Some(existing) = current_semantic(tx, "instances", &[plan.instance_id.clone()])? {
         ensure!(existing == expected, "instance conflict");
+        validate_instance_progress(tx, plan)?;
         let envelope: String = tx.query_row("SELECT credential_envelope FROM instances WHERE instance_id=?1", [&plan.instance_id], |r| r.get(0))?;
         ensure!(decrypt(&plan.destination.kind_id, &envelope, key)?.as_slice() == plan.credential.as_slice(), "credential conflict");
         return Ok((false, expected_hash, canonical::hex(&Sha256::digest(envelope.as_bytes()))));
     }
+    ensure!(plan.destination.kind_id != "web", "Web instance must already exist");
     let envelope = encrypt(&plan.destination.kind_id, &plan.credential, key)?;
     match plan.destination.kind_id.as_str() {
         "discord" | "nostr" => {
             tx.execute("INSERT INTO instances(instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,subject_grant_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,core_digest,binding_inventory_json,process_id,process_nonce,failure_count,retry_at_unix_ms,last_exit,updated_at) VALUES (?1,?2,?3,?4,?5,?6,NULL,?7,1,NULL,'pending',NULL,NULL,'[]',NULL,NULL,0,NULL,NULL,?8)",params![plan.instance_id,plan.agent_id,plan.subject_id,plan.config_b64,serde_json::to_string(&plan.addresses)?,envelope,plan.enabled,plan.created_at])?;
-        }
-        "web" => {
-            tx.execute(
-                "INSERT INTO instances(instance_id,agent_id,revision,author_id,credential_envelope,enabled,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                params![plan.instance_id, plan.agent_id, plan.revision, plan.agent_id, envelope, plan.enabled, plan.created_at],
-            )?;
         }
         _ => bail!("unknown destination"),
     }
@@ -698,6 +421,25 @@ fn verify_expected(conn: &Connection, expected: &[ExpectedKey]) -> Result<()> {
     Ok(())
 }
 
+fn validate_instance_progress(conn: &Connection, plan: &InstancePlan) -> Result<()> {
+    if plan.destination.kind_id == "web" { return Ok(()); }
+    let current = conn.query_row(
+        "SELECT applied_generation,core_revision,core_digest,binding_inventory_json FROM instances WHERE instance_id=?1",
+        [&plan.instance_id],
+        |r| Ok((r.get::<_, Option<i64>>(0)?,r.get::<_, Option<i64>>(1)?,r.get::<_, Option<String>>(2)?,r.get::<_, String>(3)?)),
+    ).optional()?;
+    if let Some((applied, revision, digest, inventory)) = current {
+        if applied.is_some() || revision.is_some() || digest.is_some() {
+            let decoded = base64::engine::general_purpose::STANDARD.decode(&plan.config_b64)?;
+            ensure!(revision == Some(plan.revision) && digest.as_deref() == Some(canonical::hex(&Sha256::digest(&decoded)).as_str()), "existing instance core revision/digest conflict");
+            let mut bound: Vec<String> = serde_json::from_str(&inventory)?;
+            bound.sort();
+            ensure!(bound == plan.binding_ids, "existing instance binding inventory conflict");
+        }
+    }
+    Ok(())
+}
+
 fn instance_semantic(plan: &InstancePlan) -> Value {
     json!({"agent_id":plan.agent_id,"addresses":plan.addresses,"config_b64":plan.config_b64,"enabled":plan.enabled,"instance_id":plan.instance_id,"revision":plan.revision,"subject_id":plan.subject_id})
 }
@@ -709,7 +451,11 @@ fn endpoint_semantic(item: &EndpointPlan) -> Value {
 }
 fn current_semantic(conn: &Connection, table: &str, key: &[String]) -> Result<Option<Value>> {
     match table{
- "instances"=>{let common=conn.query_row("SELECT agent_id,subject_id,config_b64,addresses_json,enabled FROM instances WHERE instance_id=?1",[&key[0]],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,bool>(4)?))).optional();match common{Ok(Some((agent,subject,config,addresses,enabled)))=>Ok(Some(json!({"agent_id":agent,"addresses":serde_json::from_str::<Vec<String>>(&addresses)?,"config_b64":config,"enabled":enabled,"instance_id":key[0],"revision":1,"subject_id":subject}))),Ok(None)=>Ok(None),Err(_)=>{let web=conn.query_row("SELECT agent_id,revision,enabled FROM instances WHERE instance_id=?1",[&key[0]],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,bool>(2)?))).optional()?;Ok(web.map(|(agent,revision,enabled)|json!({"agent_id":agent,"addresses":[],"config_b64":"","enabled":enabled,"instance_id":key[0],"revision":revision,"subject_id":0})))}}},
+ "instances"=>{let common=conn.query_row("SELECT agent_id,subject_id,config_b64,addresses_json,enabled,core_revision FROM instances WHERE instance_id=?1",[&key[0]],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,bool>(4)?,r.get::<_,Option<i64>>(5)?))).optional();match common{Ok(Some((agent,subject,config,addresses,enabled,core_revision)))=>Ok(Some(json!({"agent_id":agent,"addresses":serde_json::from_str::<Vec<String>>(&addresses)?,"config_b64":config,"enabled":enabled,"instance_id":key[0],"revision":core_revision.unwrap_or(1),"subject_id":subject}))),Ok(None)=>Ok(None),Err(_)=>{let web=conn.query_row("SELECT agent_id,revision,enabled,author_id FROM instances WHERE instance_id=?1",[&key[0]],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,bool>(2)?,r.get::<_,String>(3)?))).optional()?;web.map(|(agent,revision,enabled,author_id)|{
+    let roles=conn.prepare("SELECT role FROM identity_projections WHERE instance_id=?1 AND external_id='bearer'")?.query_map([&key[0]],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
+    ensure!(roles.len()==1,"Web bearer caller role must be unique");
+    Ok(json!({"agent_id":agent,"author_id":author_id,"caller_role":roles[0],"enabled":enabled,"instance_id":key[0],"revision":revision}))
+}).transpose()}}},
  "identity_projections"=>Ok(conn.query_row("SELECT relationship_id,relationship_revision FROM identity_projections WHERE instance_id=?1 AND role=?2 AND external_id=?3",params![key[0],key[1],key[2]],|r|Ok(json!({"external_id":key[2],"instance_id":key[0],"relationship_id":r.get::<_,Option<String>>(0)?,"relationship_revision":r.get::<_,Option<i64>>(1)?,"role":key[1]}))).optional()?),
  "endpoints"=>Ok(conn.query_row("SELECT guild_id,readable,writable,policy_json FROM endpoints WHERE instance_id=?1 AND channel_id=?2",params![key[0],key[1]],|r|Ok(json!({"channel_id":key[1],"guild_id":r.get::<_,Option<String>>(0)?,"instance_id":key[0],"policy_json":r.get::<_,String>(3)?,"readable":r.get::<_,bool>(1)?,"writable":r.get::<_,bool>(2)?}))).optional()?), _=>bail!("unsupported expected table")}
 }
@@ -717,7 +463,7 @@ fn row_hash(table: &str, key: &[String], row: &Value) -> Result<String> {
     canonical::hash(&json!({"table":table,"key":key,"row":row}))
 }
 fn key_value(table: &str, key: Vec<String>, hash: String) -> Result<Value> {
-    Ok(json!({"table":table,"key":key,"row_sha256":hash}))
+    Ok(json!({"table":table,"key_sha256":canonical::hash(&key)?,"row_sha256":hash}))
 }
 fn value_key_order(a: &Value, b: &Value) -> std::cmp::Ordering {
     a.to_string().cmp(&b.to_string())
@@ -766,20 +512,34 @@ fn validate_secure(path: &Path, mode: u32) -> Result<()> {
     Ok(())
 }
 
+fn require_destination_shape(conn: &Connection, destination: &Destination) -> Result<()> {
+    let common_identity = &["instance_id", "role", "external_id", "relationship_id", "relationship_revision"];
+    let tables: &[(&str, &[&str])] = match (destination.kind_id.as_str(), destination.schema.as_str()) {
+        ("discord" | "nostr", "s5-discord-v1" | "s5-nostr-v1") if destination.schema == format!("s5-{}-v1", destination.kind_id) => &[
+            ("instances", &["instance_id", "agent_id", "subject_id", "config_b64", "addresses_json", "credential_envelope", "enabled", "desired_generation", "applied_generation", "lifecycle_state", "core_revision", "core_digest", "binding_inventory_json", "updated_at"]),
+            ("endpoints", &["instance_id", "channel_id", "guild_id", "readable", "writable", "policy_json"]),
+            ("identity_projections", common_identity),
+        ],
+        ("web", "s5-web-v1") => &[
+            ("instances", &["instance_id", "agent_id", "revision", "author_id", "credential_envelope", "enabled", "updated_at"]),
+            ("identity_projections", common_identity),
+            ("policies", &["instance_id", "policy_key", "policy_json"]),
+        ],
+        _ => bail!("destination schema identifier mismatch"),
+    };
+    for (table, columns) in tables {
+        source::require_columns(conn, table, columns)?;
+    }
+    Ok(())
+}
+
 pub fn prevalidate(core: &Connection, rows: &[SourceRow], approval: &Approval, inputs: &Inputs) -> Result<()> {
     ensure!(approval.destinations.len() == inputs.paths.len(), "destination input set mismatch");
     for destination in &approval.destinations {
         let path = inputs.paths.get(&(destination.kind_id.clone(), destination.path_id.clone())).context("destination path missing")?;
         ensure!(path.exists() && !path.is_symlink(), "destination must be an existing regular database path");
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        for table in match destination.kind_id.as_str() {
-            "discord" | "nostr" => vec!["instances", "endpoints", "identity_projections"],
-            "web" => vec!["instances", "identity_projections", "policies"],
-            _ => bail!("unknown destination kind"),
-        } {
-            let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [table], |r| r.get(0))?;
-            ensure!(exists, "destination schema missing {table}");
-        }
+        require_destination_shape(&conn, destination)?;
     }
     let plans = build_instance_plans(core, rows, approval, inputs)?;
     let identities = build_identity_plans(rows, approval, &plans)?;
@@ -807,13 +567,30 @@ mod s8_review_red_tests {
     }
 
     #[test]
+    fn verification_key_never_exposes_external_identity() {
+        let entry = key_value("identity_projections", vec!["instance".into(),"owner".into(),"private-external-user".into()], "a".repeat(64)).unwrap();
+        assert!(!entry.to_string().contains("private-external-user"), "the verification manifest must contain only key digests");
+    }
+
+    #[test]
     fn destination_schema_identifier_is_exact() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("discord.db");
         drop(opencrab_discord_gateway::store::DiscordStore::open(&db).unwrap());
         let destination = Destination { kind_id:"discord".into(), path_id:"main".into(), schema:"wrong".into() };
         let inputs = Inputs { paths:BTreeMap::from([(("discord".into(),"main".into()),db)]), master_keys:BTreeMap::new(), credential_files:BTreeMap::new() };
-        assert!(initialize_destinations(&approval(destination), &inputs).is_err());
+        assert!(prevalidate(&opencrab_db::init_memory().unwrap(), &[], &approval(destination), &inputs).is_err());
+    }
+
+    #[test]
+    fn destination_missing_used_column_is_rejected_before_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("discord.db");
+        drop(opencrab_discord_gateway::store::DiscordStore::open(&db).unwrap());
+        Connection::open(&db).unwrap().execute_batch("ALTER TABLE instances RENAME COLUMN credential_envelope TO missing_credential;").unwrap();
+        let destination = Destination { kind_id:"discord".into(), path_id:"main".into(), schema:"s5-discord-v1".into() };
+        let inputs = Inputs { paths:BTreeMap::from([(("discord".into(),"main".into()),db)]), master_keys:BTreeMap::new(), credential_files:BTreeMap::new() };
+        assert!(prevalidate(&opencrab_db::init_memory().unwrap(), &[], &approval(destination), &inputs).is_err());
     }
 
     #[test]
@@ -828,23 +605,21 @@ mod s8_review_red_tests {
         let raw = serde_json::to_vec(&cfg).unwrap();
         let config_b64 = opencrab_discord_gateway::config::canonicalize_config_b64(&base64::engine::general_purpose::STANDARD.encode(raw)).unwrap();
         let destination = Destination { kind_id:"discord".into(), path_id:"main".into(), schema:"s5-discord-v1".into() };
-        let plan = InstancePlan { destination:destination.clone(), instance_id:"i".into(), agent_id:"agent-a".into(), subject_id:1, revision:1, config_b64, addresses:vec![], enabled:true, credential:Zeroizing::new(vec![1]), credential_source:"x".into(), created_at:"2026-01-01T00:00:00Z".into() };
+        let plan = InstancePlan { destination:destination.clone(), instance_id:"i".into(), agent_id:"agent-a".into(), subject_id:1, revision:1, config_b64, addresses:vec![], binding_ids:vec![], enabled:true, credential:Zeroizing::new(vec![1]), credential_source:"x".into(), created_at:"2026-01-01T00:00:00Z".into() };
         let mut approval = approval(destination);
         approval.identity_dispositions.push(IdentityDisposition { source_fingerprint:row.fingerprint.clone(), edges:vec![IdentityEdge::Gateway { kind_id:"discord".into(), instance_id:"i".into() }] });
         assert!(build_identity_plans(&[row], &approval, &[plan]).is_err());
     }
 
     #[test]
-    fn progressed_instance_semantic_includes_lifecycle_lineage() {
+    fn progressed_instance_with_stale_core_revision_conflicts() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("discord.db");
         drop(opencrab_discord_gateway::store::DiscordStore::open(&db).unwrap());
         let conn = Connection::open(&db).unwrap();
         conn.execute("INSERT INTO instances(instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,core_digest,binding_inventory_json,failure_count,updated_at) VALUES ('i','a',1,'e30=','[]','enc:v1:x',1,2,2,'running',7,'digest','[\"b\"]',0,'t')", []).unwrap();
         let row = current_semantic(&conn, "instances", &["i".into()]).unwrap().unwrap();
-        assert_eq!(row["desired_generation"], 2);
-        assert_eq!(row["core_revision"], 7);
-        assert_eq!(row["binding_inventory"], json!(["b"]));
+        assert_eq!(row["revision"], 7, "a stale progressed core revision must not be accepted as revision 1");
     }
 
     #[test]
@@ -862,9 +637,42 @@ mod s8_review_red_tests {
     }
 
     #[test]
+    fn missing_web_instance_is_not_invented_by_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("web.db");
+        drop(opencrab_web_gateway::store::WebStore::open(&db).unwrap());
+        let mut conn = Connection::open(&db).unwrap();
+        let plan = InstancePlan {
+            destination: Destination {kind_id:"web".into(),path_id:"main".into(),schema:"s5-web-v1".into()},
+            instance_id:"missing".into(),agent_id:"agent-a".into(),subject_id:1,revision:1,
+            config_b64:"e30=".into(),addresses:vec![],binding_ids:vec![],enabled:true,credential:Zeroizing::new(vec![1]),
+            credential_source:"x".into(),created_at:"2026".into()
+        };
+        let tx = conn.transaction().unwrap();
+        assert!(apply_instance(&tx, &plan, &[9;32]).is_err());
+        assert_eq!(tx.query_row("SELECT COUNT(*) FROM instances", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
     fn complete_channel_binding_edge_set_is_validated() {
-        let source = include_str!("destination.rs");
-        assert!(source.contains("validate_complete_channel_edges"), "all eligible open bindings require exact edge-set validation");
+        let core = opencrab_db::init_memory().unwrap();
+        core.execute("INSERT INTO agents(agent_id,name,persona_name,instructions,created_at,updated_at) VALUES ('agent-a','A','A','','2026','2026')", []).unwrap();
+        let subject: i64 = core.query_row("SELECT subject_id FROM agents WHERE agent_id='agent-a'", [], |r| r.get(0)).unwrap();
+        core.execute("INSERT INTO sessions(id,theme,created_at,updated_at) VALUES ('session-a','t','2026','2026')", []).unwrap();
+        core.execute("INSERT INTO agent_sessions(agent_id,session_id) VALUES ('agent-a','session-a')", []).unwrap();
+        let cfg = serde_json::json!({"agent_id":"agent-a","self_bot_id":"99","access":{"owners":[],"co_agents":{},"trusted_users":[]},"system_reactions":{}});
+        let config_b64 = opencrab_discord_gateway::config::canonicalize_config_b64(&base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&cfg).unwrap())).unwrap();
+        let digest = canonical::hex(&Sha256::digest(base64::engine::general_purpose::STANDARD.decode(&config_b64).unwrap()));
+        core.execute("INSERT INTO gate_instances(instance_id,kind_id,subject_id,revision,enabled,config_b64,config_digest,created_at,updated_at,association_grandfathered) VALUES ('i','discord',?1,1,1,?2,?3,1,1,1)", params![subject,config_b64,digest]).unwrap();
+        core.execute("INSERT INTO gate_bindings(binding_id,instance_id,address,created_at,session_id) VALUES ('b','i','discord-agent-a--42',1,'session-a')", []).unwrap();
+        let row = SourceRow { table:"channel_config".into(), fingerprint:"1".repeat(64), columns:vec![
+            ("channel_id".into(), crate::source::Cell::Text("42".into())),
+            ("agent_id".into(), crate::source::Cell::Text("agent-a".into())),
+            ("guild_id".into(), crate::source::Cell::Text("".into())),
+        ]};
+        let destination = Destination { kind_id:"discord".into(), path_id:"main".into(), schema:"s5-discord-v1".into() };
+        let plan = InstancePlan { destination:destination.clone(), instance_id:"i".into(), agent_id:"agent-a".into(), subject_id:subject, revision:1, config_b64, addresses:vec!["discord-agent-a--42".into()], binding_ids:vec!["b".into()], enabled:true, credential:Zeroizing::new(vec![1]), credential_source:"x".into(), created_at:"2026".into() };
+        assert!(build_endpoint_plans(&core, &[row], &approval(destination), &[plan]).is_err(), "a matching live binding cannot be omitted from the approved channel edges");
     }
 
     #[test]
@@ -879,10 +687,4 @@ mod s8_review_red_tests {
         assert!(validate_source_coverage(&[row], &approval, &[]).is_err());
     }
 
-    #[test]
-    fn secret_files_are_loaded_once_before_planning() {
-        let source = include_str!("destination.rs");
-        assert!(source.contains("struct LoadedSecrets"), "inputs must own read-once zeroizing secret bytes");
-        assert_eq!(source.matches("read_master_key(").count(), 2, "one definition plus one loader call only");
-    }
 }

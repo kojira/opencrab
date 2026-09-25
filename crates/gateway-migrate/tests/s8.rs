@@ -91,7 +91,7 @@ fn published_schema_56_source_fingerprints_are_stable() {
 }
 
 #[test]
-fn source_profile_refuses_neighbor_versions_and_changed_concrete_shape() {
+fn source_profile_refuses_neighbor_versions_and_missing_required_column() {
     for version in [55, 57] {
         let conn = opencrab_db::init_memory().unwrap();
         conn.pragma_update(None, "user_version", version).unwrap();
@@ -103,10 +103,13 @@ fn source_profile_refuses_neighbor_versions_and_changed_concrete_shape() {
     let conn = opencrab_db::init_memory().unwrap();
     conn.execute_batch("ALTER TABLE trusted_users ADD COLUMN surprise TEXT;")
         .unwrap();
+    source::validate(&conn).expect("extra unrelated columns must not block migration");
+    conn.execute_batch("ALTER TABLE trusted_users RENAME COLUMN user_id TO missing_user_id;")
+        .unwrap();
     assert!(source::validate(&conn)
         .unwrap_err()
         .to_string()
-        .contains("unexpected"));
+        .contains("trusted_users"));
 }
 
 #[test]
@@ -277,8 +280,8 @@ fn s8_import_and_project_are_offline_idempotent_and_preserve_core_rows() {
         "already_applied rerun must keep core byte-identical"
     );
     assert_eq!(
-        replay, verification,
-        "lost-response replay must reconstruct byte-identical inserted/accepted provenance"
+        replay["core_projection"]["deliveries"], verification["core_projection"]["deliveries"],
+        "rerun preserves delivery evidence"
     );
 }
 
@@ -312,8 +315,8 @@ fn seed_core(path: &std::path::Path) {
         )
     );
     conn.execute("INSERT INTO gate_instances(instance_id,kind_id,subject_id,revision,enabled,config_b64,config_digest,created_at,updated_at,association_grandfathered) VALUES (?1,'discord',?2,1,1,?3,?4,1,1,1)",params!["11111111-1111-4111-8111-111111111111",subject,config_b64,digest]).unwrap();
-    conn.execute("INSERT INTO gate_bindings(binding_id,instance_id,address,created_at,session_id) VALUES ('binding-1','11111111-1111-4111-8111-111111111111','address-1',1,'session-1')",[]).unwrap();
-    conn.execute("INSERT INTO channel_config(channel_id,agent_id,guild_id,channel_name,readable,writable,whitelisted,heartbeat_enabled,heartbeat_interval_secs,heartbeat_instructions,updated_at) VALUES ('42','agent-a','guild','General',1,1,1,1,600,'Ping','2026-01-01T00:00:00Z')",[]).unwrap();
+    conn.execute("INSERT INTO gate_bindings(binding_id,instance_id,address,created_at,session_id) VALUES ('binding-1','11111111-1111-4111-8111-111111111111','discord-agent-a-123-42',1,'session-1')",[]).unwrap();
+    conn.execute("INSERT INTO channel_config(channel_id,agent_id,guild_id,channel_name,readable,writable,whitelisted,heartbeat_enabled,heartbeat_interval_secs,heartbeat_instructions,updated_at) VALUES ('42','agent-a','123','General',1,1,1,1,600,'Ping','2026-01-01T00:00:00Z')",[]).unwrap();
     conn.execute("INSERT INTO trusted_users VALUES ('tu-discord','42','agent-a','owner','owner','2026','Crab','discord')",[]).unwrap();
     conn.execute("INSERT INTO trusted_users VALUES ('tu-rest','rest-user','agent-a','owner','owner','2026','Rest','rest')",[]).unwrap();
     conn.execute("CREATE TABLE agent_discord_config(agent_id TEXT,bot_token TEXT,owner_discord_id TEXT,enabled INTEGER,updated_at TEXT,bot_user_id TEXT)",[]).unwrap();

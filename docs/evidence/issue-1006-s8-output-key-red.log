@@ -1,0 +1,19 @@
+   Compiling opencrab-gateway-migrate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gateway-migrate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.08s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_gateway_migrate-639abb0bdea7c711)
+
+running 1 test
+
+thread 'destination::s8_review_red_tests::verification_key_never_exposes_external_identity' panicked at crates/gateway-migrate/src/destination.rs:917:9:
+the verification manifest must contain only key digests
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test destination::s8_review_red_tests::verification_key_never_exposes_external_identity ... FAILED
+
+failures:
+
+failures:
+    destination::s8_review_red_tests::verification_key_never_exposes_external_identity
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p opencrab-gateway-migrate --lib`

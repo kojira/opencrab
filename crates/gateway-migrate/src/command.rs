@@ -25,6 +25,7 @@ pub struct ImportReport {
     pub backup_set_sha256: String,
     pub backups: Vec<BackupRecord>,
     pub source_rows: Vec<SourceRowsProof>,
+    #[serde(deserialize_with = "read_destination_reports")]
     pub destinations: Value,
     pub destination_manifest_sha256: String,
 }
@@ -34,6 +35,107 @@ pub struct SourceRowsProof {
     pub table: String,
     pub row_count: u64,
     pub fingerprint_set_sha256: String,
+}
+
+fn read_destination_reports<'de, D: serde::Deserializer<'de>>(
+    de: D,
+) -> std::result::Result<Value, D::Error> {
+    use serde::de::Error as _;
+    let value = Value::deserialize(de)?;
+    validate_destination_reports(&value).map_err(D::Error::custom)?;
+    Ok(value)
+}
+
+fn validate_destination_reports(value: &Value) -> Result<()> {
+    fn object<'a>(value: &'a Value, keys: &[&str]) -> Result<&'a serde_json::Map<String, Value>> {
+        let map = value
+            .as_object()
+            .context("destination report object required")?;
+        ensure!(
+            map.len() == keys.len() && keys.iter().all(|key| map.contains_key(*key)),
+            "destination report contains missing or unapproved fields"
+        );
+        Ok(map)
+    }
+    for report in value
+        .as_array()
+        .context("destination reports array required")?
+    {
+        let report = object(
+            report,
+            &[
+                "kind_id",
+                "path_id",
+                "schema",
+                "before_logical_sha256",
+                "after_logical_sha256",
+                "counts",
+                "inserted_keys",
+                "accepted_existing_keys",
+                "credentials",
+            ],
+        )?;
+        for key in [
+            "kind_id",
+            "path_id",
+            "schema",
+            "before_logical_sha256",
+            "after_logical_sha256",
+        ] {
+            ensure!(
+                report[key].is_string(),
+                "destination report string field invalid"
+            );
+        }
+        let counts = object(
+            &report["counts"],
+            &[
+                "instances",
+                "endpoints",
+                "identity_projections",
+                "policies",
+                "credentials",
+            ],
+        )?;
+        ensure!(
+            counts.values().all(Value::is_u64),
+            "destination report count invalid"
+        );
+        for key in ["inserted_keys", "accepted_existing_keys"] {
+            for row in report[key]
+                .as_array()
+                .context("destination report key list required")?
+            {
+                let row = object(row, &["table", "key_sha256", "row_sha256"])?;
+                ensure!(
+                    row.values().all(Value::is_string),
+                    "destination report key invalid"
+                );
+            }
+        }
+        for credential in report["credentials"]
+            .as_array()
+            .context("destination credential list required")?
+        {
+            let credential = object(
+                credential,
+                &[
+                    "instance_id",
+                    "source",
+                    "envelope_sha256",
+                    "credential_configured",
+                ],
+            )?;
+            ensure!(
+                credential["instance_id"].is_string()
+                    && credential["source"].is_string()
+                    && credential["envelope_sha256"].is_string()
+                    && credential["credential_configured"] == true,
+                "destination credential evidence invalid"
+            );
+        }
+    }
+    Ok(())
 }
 
 pub struct ImportArgs<'a> {
@@ -53,10 +155,6 @@ pub struct ProjectArgs<'a> {
 
 pub fn run_import(args: ImportArgs<'_>) -> Result<ImportReport> {
     let approval = Approval::load(args.approval_path)?;
-    ensure!(
-        source::file_sha256(args.core_path)? == approval.source_core_sha256,
-        "source core hash mismatch"
-    );
     let core = source::open_read_only(args.core_path)?;
     let rows = source::validate(&core)?;
     let paths = approval
@@ -80,8 +178,6 @@ pub fn run_import(args: ImportArgs<'_>) -> Result<ImportReport> {
     let before_core = source::file_sha256(args.core_path)?;
     // Build and validate the complete plan before snapshots or writes.
     destination::prevalidate(&core, &rows, &approval, &args.inputs)?;
-    let backups = backup::create_or_load_set(args.core_path, &paths, args.backup_dir)?;
-    let backup_set_sha256 = backup::set_sha256(&backups)?;
     let source_rows = source_rows_proof(&rows)?;
     if args.report_path.exists() {
         let raw = fs::read(args.report_path)?;
@@ -99,9 +195,25 @@ pub fn run_import(args: ImportArgs<'_>) -> Result<ImportReport> {
             "existing import report approval hash mismatch"
         );
         ensure!(
-            existing.backups == backups && existing.backup_set_sha256 == backup_set_sha256,
+            existing.backup_set_sha256 == backup::set_sha256(&existing.backups)?,
             "existing import report backup mismatch"
         );
+        ensure!(
+            existing.backups.len() == paths.len() + 1
+                && existing.backups.iter().any(|item| item.kind_id == "core"
+                    && item.path_id == "core"
+                    && item.schema == "core-v56")
+                && paths
+                    .iter()
+                    .all(|(destination, _)| existing
+                        .backups
+                        .iter()
+                        .any(|item| item.kind_id == destination.kind_id
+                            && item.path_id == destination.path_id
+                            && item.schema == destination.schema)),
+            "existing import report backup inventory mismatch"
+        );
+        backup::verify_record_set(args.backup_dir, &existing.backups)?;
         ensure!(
             existing.source_rows == source_rows,
             "existing import report source mismatch"
@@ -114,16 +226,35 @@ pub fn run_import(args: ImportArgs<'_>) -> Result<ImportReport> {
             args.approval_path,
             &approval,
             &args.inputs.paths,
-            &backups,
-            &backup_set_sha256,
+            &existing.backups,
+            &existing.backup_set_sha256,
             &existing.destinations,
         )?;
+        if source::file_sha256(args.core_path)? != approval.source_core_sha256 {
+            ensure!(
+                projection::verify_already_applied(
+                    &core,
+                    &rows,
+                    &approval,
+                    &existing.backup_set_sha256,
+                    &existing.destination_manifest_sha256
+                )?
+                .is_some(),
+                "rerun core is neither source nor matching projected state"
+            );
+        }
         ensure!(
             source::file_sha256(args.core_path)? == before_core,
             "import modified core"
         );
         return Ok(existing);
     }
+    ensure!(
+        source::file_sha256(args.core_path)? == approval.source_core_sha256,
+        "source core hash mismatch"
+    );
+    let backups = backup::create_or_load_set(args.core_path, &paths, args.backup_dir)?;
+    let backup_set_sha256 = backup::set_sha256(&backups)?;
     let destinations = destination::import(
         &core,
         &rows,

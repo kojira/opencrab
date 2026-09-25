@@ -1,0 +1,20 @@
+   Compiling opencrab-gateway-migrate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gateway-migrate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 39.84s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_gateway_migrate-639abb0bdea7c711)
+
+running 12 tests
+test destination::s8_review_red_tests::each_watch_row_has_exactly_one_edge ... ok
+test command::s8_review_red_tests::import_report_rejects_unknown_destination_fields ... ok
+test destination::s8_review_red_tests::rest_identity_has_exactly_one_api_principal_edge ... ok
+test destination::s8_review_red_tests::verification_key_never_exposes_external_identity ... ok
+test destination::s8_review_red_tests::missing_web_instance_is_not_invented_by_migration ... ok
+test destination::s8_review_red_tests::progressed_instance_with_stale_core_revision_conflicts ... ok
+test destination::s8_review_red_tests::existing_web_instance_uses_persisted_author_and_role_without_creation ... ok
+test backup::s8_review_red_tests::a_second_import_cannot_reuse_a_preexisting_backup_directory ... ok
+test destination::s8_review_red_tests::complete_channel_binding_edge_set_is_validated ... ok
+test destination::s8_review_red_tests::destination_schema_identifier_is_exact ... ok
+test destination::s8_review_red_tests::destination_missing_used_column_is_rejected_before_backup ... ok
+test source::s8_review_red_tests::required_core_column_must_exist_but_extra_columns_are_allowed ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.15s
+

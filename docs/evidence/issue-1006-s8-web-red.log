@@ -1,0 +1,19 @@
+   Compiling opencrab-gateway-migrate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gateway-migrate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 37.93s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_gateway_migrate-639abb0bdea7c711)
+
+running 1 test
+
+thread 'destination::s8_review_red_tests::missing_web_instance_is_not_invented_by_migration' panicked at crates/gateway-migrate/src/destination.rs:887:9:
+assertion failed: apply_instance(&tx, &plan, &[9; 32]).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test destination::s8_review_red_tests::missing_web_instance_is_not_invented_by_migration ... FAILED
+
+failures:
+
+failures:
+    destination::s8_review_red_tests::missing_web_instance_is_not_invented_by_migration
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p opencrab-gateway-migrate --lib`

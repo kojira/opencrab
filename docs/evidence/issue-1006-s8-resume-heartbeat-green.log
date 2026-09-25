@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.46s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_gateway_migrate-639abb0bdea7c711)
+
+running 1 test
+test projection::s8_minimal_heartbeat_red::conflicting_channels_for_one_session_cannot_choose_an_arbitrary_heartbeat ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.02s
+

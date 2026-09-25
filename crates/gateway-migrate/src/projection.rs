@@ -243,6 +243,21 @@ fn build_heartbeat_targets(
     }
     let mut targets = Vec::new();
     for ((agent_id, session_id), sources) in grouped {
+        for scope in [agent_id.as_str(), ""] {
+            let scoped = sources
+                .iter()
+                .filter(|row| row.text("agent_id").ok() == Some(scope))
+                .collect::<Vec<_>>();
+            if let Some(first) = scoped.first() {
+                let reference = (heartbeat_source(first)?, first.text("updated_at")?);
+                for row in scoped.iter().skip(1) {
+                    ensure!(
+                        (heartbeat_source(row)?, row.text("updated_at")?) == reference,
+                        "ambiguous heartbeat target for one session"
+                    );
+                }
+            }
+        }
         let exact = sources
             .iter()
             .find(|row| row.text("agent_id").ok() == Some(agent_id.as_str()))
@@ -278,6 +293,76 @@ fn build_heartbeat_targets(
     targets.sort_by(|a, b| (&a.agent_id, &a.session_id).cmp(&(&b.agent_id, &b.session_id)));
     Ok(targets)
 }
+#[cfg(test)]
+mod s8_minimal_heartbeat_red {
+    use super::*;
+    use crate::{manifest::ChannelEdge, source::Cell};
+
+    #[test]
+    fn conflicting_channels_for_one_session_cannot_choose_an_arbitrary_heartbeat() {
+        let core = opencrab_db::init_memory().unwrap();
+        core.execute("INSERT INTO agents(agent_id,name,persona_name,instructions,created_at,updated_at) VALUES ('agent-a','A','A','','2026','2026')", []).unwrap();
+        let subject: i64 = core
+            .query_row(
+                "SELECT subject_id FROM agents WHERE agent_id='agent-a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        core.execute(
+            "INSERT INTO sessions(id,theme,created_at,updated_at) VALUES ('s','t','2026','2026')",
+            [],
+        )
+        .unwrap();
+        core.execute(
+            "INSERT INTO agent_sessions(agent_id,session_id) VALUES ('agent-a','s')",
+            [],
+        )
+        .unwrap();
+        core.execute("INSERT INTO gate_instances(instance_id,kind_id,subject_id,revision,enabled,config_b64,config_digest,created_at,updated_at,association_grandfathered) VALUES ('i','discord',?1,1,1,'e30=','44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',1,1,1)", [subject]).unwrap();
+        core.execute("INSERT INTO gate_bindings(binding_id,instance_id,address,created_at,session_id) VALUES ('b1','i','discord-agent-a--42',1,'s'),('b2','i','discord-agent-a--43',1,'s')", []).unwrap();
+        let rows = [600, 700]
+            .into_iter()
+            .enumerate()
+            .map(|(index, interval)| SourceRow {
+                table: "channel_config".into(),
+                fingerprint: format!("{index:064x}"),
+                columns: vec![
+                    ("agent_id".into(), Cell::Text("agent-a".into())),
+                    ("heartbeat_enabled".into(), Cell::Integer(1)),
+                    ("heartbeat_interval_secs".into(), Cell::Integer(interval)),
+                    ("heartbeat_instructions".into(), Cell::Text("Ping".into())),
+                    ("updated_at".into(), Cell::Text("2026".into())),
+                ],
+            })
+            .collect::<Vec<_>>();
+        let mut approval = Approval {
+            version: 1,
+            operation_id: "00000000-0000-4000-8000-000000000008".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            core_user_version: 56,
+            source_core_sha256: "a".repeat(64),
+            destinations: vec![],
+            identity_dispositions: vec![],
+            channel_edges: vec![],
+            watch_edges: vec![],
+            credential_sources: vec![],
+        };
+        for (index, row) in rows.iter().enumerate() {
+            approval.channel_edges.push(ChannelEdge {
+                source_fingerprint: row.fingerprint.clone(),
+                instance_id: "i".into(),
+                binding_id: format!("b{}", index + 1),
+                session_id: "s".into(),
+            });
+        }
+        assert!(
+            build_heartbeat_targets(&core, &rows, &approval).is_err(),
+            "different eligible heartbeat settings for one session must be rejected"
+        );
+    }
+}
+
 fn heartbeat_source(row: &SourceRow) -> Result<HeartbeatProjectionSource> {
     Ok(HeartbeatProjectionSource {
         enabled: row.integer("heartbeat_enabled")? != 0,
