@@ -334,6 +334,42 @@ pub fn run_project(args: ProjectArgs<'_>) -> Result<Value> {
             )?
         }
     };
+    if outcome.already_applied && args.verification_path.exists() {
+        let raw = fs::read(args.verification_path)?;
+        let existing: Value = serde_json::from_slice(&raw)?;
+        ensure!(
+            raw == canonical::value_bytes(&existing)?,
+            "existing verification not canonical"
+        );
+        let mut content = existing.clone();
+        let digest = content
+            .as_object_mut()
+            .context("existing verification object required")?
+            .remove("manifest_sha256")
+            .context("existing verification digest missing")?;
+        ensure!(
+            digest == canonical::hash(&content)?,
+            "existing verification digest mismatch"
+        );
+        ensure!(
+            existing["version"] == 1
+                && existing["approval_sha256"] == report.approval_sha256
+                && existing["backup_set_sha256"] == report.backup_set_sha256
+                && existing["backups"] == serde_json::to_value(&report.backups)?
+                && existing["source_rows"] == serde_json::to_value(&report.source_rows)?
+                && existing["destinations"] == report.destinations
+                && existing["core_projection"]["after_logical_sha256"]
+                    == outcome.after_logical_sha256
+                && existing["core_projection"]["deliveries"]
+                    == serde_json::to_value(&outcome.deliveries)?
+                && existing["core_projection"]["heartbeat"]["initial_sha256"]
+                    == outcome.heartbeat.initial_sha256
+                && existing["core_projection"]["heartbeat"]["lineage_sha256"]
+                    == outcome.heartbeat.lineage_sha256,
+            "existing verification differs"
+        );
+        return Ok(existing);
+    }
     let core_projection = serde_json::json!({
         "before_logical_sha256": outcome.before_logical_sha256,
         "after_logical_sha256": outcome.after_logical_sha256,

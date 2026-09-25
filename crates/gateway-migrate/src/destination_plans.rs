@@ -302,7 +302,23 @@ fn validate_source_coverage(rows: &[SourceRow], approval: &Approval, plans: &[In
             "session_watches" => {
                 ensure!(watches.contains(row.fingerprint.as_str()), "unmapped watch")
             }
-            "agent_discord_config" | "agent_nostr_config" => ensure!(plans.iter().any(|p| p.agent_id == row.text("agent_id").unwrap_or("")), "unmapped credential config"),
+            "agent_discord_config" | "agent_nostr_config" => {
+                let (kind, secret_column) = if row.table == "agent_discord_config" {
+                    ("discord", "bot_token")
+                } else {
+                    ("nostr", "secret_key")
+                };
+                let agent_id = row.text("agent_id")?;
+                let secret = row.text(secret_column)?;
+                ensure!(
+                    plans.iter().any(|plan| {
+                        plan.destination.kind_id == kind
+                            && plan.agent_id == agent_id
+                            && plan.credential.as_slice() == secret.as_bytes()
+                    }),
+                    "unmapped credential config"
+                );
+            },
             _ => {}
         }
     }
