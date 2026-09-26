@@ -304,6 +304,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconcile_preserves_existing_binding_id_and_session_for_same_instance_address() {
+        let unique = uuid::Uuid::new_v4().to_string();
+        let socket = PathBuf::from(format!("/tmp/oc-ga-{}.sock", &unique[..8]));
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let binding_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let address = "opaque-address";
+        let observed = json!({
+            "instance_id":instance_id,"kind_id":"synthetic","subject_id":7,"revision":1,
+            "enabled":true,"config_b64":"e30=","config_digest":"digest",
+            "bindings":[{"binding_id":binding_id,"address":address,"session_id":"existing-session"}]
+        });
+        let server = tokio::spawn(async move {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = String::from_utf8(read_request(&mut stream).await).unwrap();
+                if request.starts_with("GET /api/gate-instances/") {
+                    respond(&mut stream, 200, &observed).await;
+                } else {
+                    assert_eq!(index, 1);
+                    respond(&mut stream, 409, &json!({"code":"binding_conflict"})).await;
+                }
+            }
+        });
+        let client = GateAdminClient::new_for_test(socket.clone(), "protected-token".into());
+        let result = client
+            .reconcile(ReconcileDesired {
+                instance_id,
+                kind_id: "synthetic",
+                subject_id: 7,
+                enabled: true,
+                config_b64: "e30=",
+                subject_grant: None,
+                addresses: &[address.to_string()],
+            })
+            .await
+            .expect("existing binding should be retained without a new PUT");
+        assert_eq!(result.bindings[0].binding_id, binding_id);
+        assert_eq!(result.bindings[0].session_id.as_deref(), Some("existing-session"));
+        server.await.unwrap();
+        std::fs::remove_file(socket).unwrap();
+    }
+
+    #[tokio::test]
     async fn s5_gate_admin_client_reconciles_generic_instance_and_binding_over_protected_uds() {
         let unique = uuid::Uuid::new_v4().to_string();
         let socket = PathBuf::from(format!("/tmp/oc-ga-{}.sock", &unique[..8]));
