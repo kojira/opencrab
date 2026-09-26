@@ -23,8 +23,8 @@ mod turn;
 use attachments::{materialize, promote_local_files, remove_local_files, remove_promoted_files};
 use binding::{binding_said_error, load_origin_row};
 pub(crate) use binding::{resolve_binding_context, BindingContext};
+pub use record::channel_whitelisted;
 pub(crate) use record::seq_for_origin;
-pub use record::{channel_whitelisted, dm_allowed};
 use record::{existing_seq, next_seq, record_inbound};
 use turn::enqueue_turn;
 

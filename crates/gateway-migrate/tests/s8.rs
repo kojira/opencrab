@@ -101,6 +101,7 @@ fn source_profile_refuses_neighbor_versions_and_missing_required_column() {
             .contains("exactly 56"));
     }
     let conn = opencrab_db::init_memory().unwrap();
+    create_legacy_core_source_tables(&conn);
     conn.execute_batch("ALTER TABLE trusted_users ADD COLUMN surprise TEXT;")
         .unwrap();
     source::validate(&conn).expect("extra unrelated columns must not block migration");
@@ -111,9 +112,8 @@ fn source_profile_refuses_neighbor_versions_and_missing_required_column() {
         .to_string()
         .contains("trusted_users"));
 }
-
+include!("s8_support/legacy_source_schema.rs");
 include!("s8_support/projected.rs");
-
 fn projected_discord_fixture(freeze: bool, fired: bool, cleanup: bool, changed: bool) {
     let temp = tempfile::tempdir().unwrap();
     let core_path = temp.path().join("core.db");
@@ -724,6 +724,7 @@ fn assert_missing_credential_fixture(kind: &str, enabled: bool) {
 
 fn seed_core(path: &std::path::Path) {
     let conn = opencrab_db::init_connection(path.to_str().unwrap()).unwrap();
+    create_legacy_core_source_tables(&conn);
     conn.execute("INSERT INTO agents(agent_id,name,persona_name,instructions,created_at,updated_at) VALUES ('agent-a','A','A','','2026','2026')",[]).unwrap();
     let subject: i64 = conn
         .query_row(

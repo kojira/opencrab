@@ -10,7 +10,6 @@ include!("memory_index/fixtures.rs");
 include!("sessions.rs");
 include!("agents.rs");
 include!("agent_inbox.rs");
-include!("channel_config.rs");
 include!("curated_memory.rs");
 include!("heartbeat.rs");
 include!("impressions.rs");
@@ -24,7 +23,7 @@ include!("model_pricing.rs");
 include!("session_logs.rs");
 include!("skills.rs");
 include!("task_ledger.rs");
-include!("trusted_users.rs");
+include!("api_principal_permission.rs");
 include!("webhook_config.rs");
 
 fn setup() -> Connection {

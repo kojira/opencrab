@@ -11,7 +11,6 @@ mod agent_schedules;
 mod agents;
 mod allowed_commands;
 mod api_principals;
-mod channel_config;
 mod conversation_snapshots;
 mod curated_memory;
 mod gate_binding;
@@ -25,14 +24,13 @@ mod pending_interactions;
 mod provider_settings;
 mod session_heartbeat;
 mod session_logs;
-mod session_watches;
 mod sessions;
 mod skills;
 mod subject;
 mod sync_state;
 mod task_ledger;
 mod tool_logs;
-mod trusted_users;
+mod trusted_co_agents;
 mod webhook_config;
 
 pub use agent_inbox::*;
@@ -42,7 +40,6 @@ pub use agent_schedules::*;
 pub use agents::*;
 pub use allowed_commands::*;
 pub use api_principals::*;
-pub use channel_config::*;
 pub use conversation_snapshots::*;
 pub use curated_memory::*;
 pub use gate_binding::*;
@@ -56,15 +53,20 @@ pub use pending_interactions::*;
 pub use provider_settings::*;
 pub use session_heartbeat::*;
 pub use session_logs::*;
-pub use session_watches::*;
 pub use sessions::*;
 pub use skills::*;
 pub use subject::*;
 pub use sync_state::*;
 pub use task_ledger::*;
 pub use tool_logs::*;
-pub use trusted_users::*;
+pub use trusted_co_agents::*;
 pub use webhook_config::*;
+
+#[cfg(test)]
+#[path = "tests/legacy_channel_helpers.rs"]
+mod legacy_channel_helpers;
+#[cfg(test)]
+pub use legacy_channel_helpers::{get_channel_config, get_channel_config_for_agent};
 
 #[cfg(test)]
 mod tests;

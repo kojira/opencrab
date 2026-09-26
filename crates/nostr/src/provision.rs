@@ -1,7 +1,7 @@
 //! instance canonical config（秘密を含めない）。
 
+use crate::binding::SessionWatchRow;
 use anyhow::Context;
-use opencrab_db::queries::SessionWatchRow;
 use serde_json::{json, Value};
 
 use crate::config::NostrConfig;
@@ -102,7 +102,6 @@ pub fn instance_config_bytes_with_access(
 mod tests {
     use super::*;
     use crate::config::NostrFilter;
-    use opencrab_db::queries::SessionWatchRow;
 
     #[test]
     fn config_is_say_and_has_no_secret() {

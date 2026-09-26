@@ -10,6 +10,8 @@ use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path};
 
+include!("s8_support/legacy_source_schema.rs");
+
 const INSTANCE_ID: &str = "22222222-2222-4222-8222-222222222222";
 const CREDENTIAL: &str = "web-test-credential";
 const WEB_KEY: [u8; 32] = [9; 32];
@@ -375,6 +377,7 @@ fn assert_web_mapping(
 
 fn seed_web_core(path: &Path) {
     let conn = opencrab_db::init_connection(path.to_str().unwrap()).unwrap();
+    create_legacy_core_source_tables(&conn);
     conn.execute("INSERT INTO agents(agent_id,name,persona_name,instructions,created_at,updated_at) VALUES ('agent-web','Web','Web','','2026','2026')", []).unwrap();
     let subject: i64 = conn
         .query_row(

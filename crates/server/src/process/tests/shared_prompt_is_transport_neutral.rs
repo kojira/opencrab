@@ -1,25 +1,9 @@
 use super::prompt::build_agent_context;
-use opencrab_db::queries::TrustedUserPermission;
 
 /// 共有プロンプトから transport 語が消えていること（grep 相当をテスト化）。
 #[test]
 fn shared_prompt_has_no_transport_specific_terms() {
     let conn = opencrab_db::init_memory().unwrap();
-    // #920: 名簿は Peer Review 節ごと prompt から撤去済み。レビュアーを登録しても
-    // transport 語・名簿（表示名）が共有プロンプトに漏れないことを検査する。
-    opencrab_db::queries::add_trusted_user(
-        &conn,
-        "external-a",
-        "r1",
-        "a1",
-        "42",
-        TrustedUserPermission::CoAgent,
-        "owner",
-        "2026-01-01",
-        "Crab B",
-    )
-    .unwrap();
-
     let (prompt, _name) =
         build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
 
@@ -28,12 +12,6 @@ fn shared_prompt_has_no_transport_specific_terms() {
         prompt.contains("## Turn completion"),
         "prompt too small: {prompt}"
     );
-    // #920: 登録レビュアーの表示名も共有プロンプトには出さない（名簿撤去）。
-    assert!(
-        !prompt.contains("Crab B"),
-        "roster leaked into prompt: {prompt}"
-    );
-
     for needle in ["Discord", "discord", "[Discord context]", "<@"] {
         assert!(
             !prompt.contains(needle),

@@ -99,7 +99,7 @@ fn v17_never_destroys_populated_trusted_users() {
 fn permission_spelling_migration_rewrites_rows_without_changing_who_is_a_co_agent() {
     use crate::queries::TrustedUserPermission;
 
-    let conn = crate::init_memory().expect("init");
+    let conn = super::init_historical_schema_fixture().expect("init");
     // v17 相当の既存 DB を模す: 旧表記の行を含めて 4 件入れ、version 17 へ戻す。
     conn.execute_batch(
         "DELETE FROM trusted_users;

@@ -1,13 +1,13 @@
 //! Nostr instance / binding の core 側敷設。address は既存 session_id（V3.5 reuse）。
 
 use crate::{
-    instance_config_bytes_with_access, nostr_instance_id, plan_session_bindings, AllowSources,
-    NostrConfig, SessionBindingPlan,
+    binding::SessionWatchRow, instance_config_bytes_with_access, nostr_instance_id,
+    plan_session_bindings, AllowSources, NostrConfig, SessionBindingPlan,
 };
 use anyhow::{bail, Context, Result};
 use opencrab_db::queries::{
     create_gate_binding_in_tx, get_session, revise_gate_instance_in_tx, CreateGateBindingError,
-    ReviseGateInstanceError, SessionWatchRow,
+    ReviseGateInstanceError,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 

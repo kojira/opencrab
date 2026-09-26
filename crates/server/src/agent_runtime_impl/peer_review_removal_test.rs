@@ -1,7 +1,7 @@
 use opencrab_actions::{AgentRuntime, InboundMessageRecord, TranscriptSource};
 
 #[test]
-fn inbound_speech_does_not_create_peer_review_progress_with_or_without_legacy_identity_table() {
+fn inbound_speech_does_not_create_peer_review_progress_after_legacy_identity_cleanup() {
     let state = crate::test_app_state();
     let source = TranscriptSource::new("external", "test-out");
     let session_id = "s1";
@@ -26,18 +26,6 @@ fn inbound_speech_does_not_create_peer_review_progress_with_or_without_legacy_id
             },
         )
         .unwrap();
-        opencrab_db::queries::add_trusted_user(
-            &conn,
-            "external",
-            "legacy-row",
-            "a1",
-            "42",
-            opencrab_db::queries::TrustedUserPermission::CoAgent,
-            "owner",
-            "2026-01-01",
-            "Reviewer",
-        )
-        .unwrap();
         let id = opencrab_db::queries::insert_task_ledger(&conn, "a1", session_id, "goal", None)
             .unwrap();
         opencrab_db::queries::insert_task_progress(
@@ -51,21 +39,20 @@ fn inbound_speech_does_not_create_peer_review_progress_with_or_without_legacy_id
     };
     state.ensure_session(session_id, &["a1".into()], "", "{}", "discord");
 
-    for (index, text) in [
+    assert!(!state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='trusted_users')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap());
+    for text in [
         "[Peer Review] score: 0.6 summary: ordinary speech",
-        "[Peer Review] score: 0.7 summary: after legacy table removal",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if index == 1 {
-            state
-                .db
-                .lock()
-                .unwrap()
-                .execute_batch("DROP TABLE trusted_users")
-                .unwrap();
-        }
+        "[Peer Review] score: 0.7 summary: second speech",
+    ] {
         let record = InboundMessageRecord {
             session_id,
             recipient_agent_id: "a1",

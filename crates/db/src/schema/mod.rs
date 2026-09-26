@@ -100,6 +100,35 @@ fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
 ///   適用する（途中失敗時は直前まで確定・再開可能）。
 pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
     let current = schema_version(conn)?;
+    let empty_new_database = current == 0
+        && conn.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+    if empty_new_database {
+        // Historical migrations need their original source tables. On a genuinely fresh
+        // database, apply that bootstrap and discard its legacy gateway state before commit.
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(SCHEMA_SQL)?;
+        migrate(&tx)?;
+        for migration in MIGRATIONS {
+            (migration.up)(&tx)?;
+        }
+        tx.execute_batch(
+            "DROP TABLE IF EXISTS channel_config;
+             DROP TABLE IF EXISTS session_watches;
+             DROP TABLE IF EXISTS trusted_users;
+             DROP TABLE IF EXISTS agent_discord_config;
+             DROP TABLE IF EXISTS agent_nostr_config;",
+        )?;
+        tx.execute_batch(&format!(
+            "PRAGMA user_version = {}",
+            latest_version_for_init()
+        ))?;
+        tx.commit()?;
+        return Ok(());
+    }
     if current < BASELINE_VERSION {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(SCHEMA_SQL)?;
@@ -109,6 +138,14 @@ pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
     }
     run_migrations(conn, MIGRATIONS)?;
     Ok(())
+}
+
+fn latest_version_for_init() -> i64 {
+    MIGRATIONS
+        .into_iter()
+        .last()
+        .map(|migration| migration.version)
+        .unwrap_or(BASELINE_VERSION)
 }
 
 /// 番号付きマイグレーションを順に適用する。
@@ -146,6 +183,18 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn init_historical_schema_fixture() -> rusqlite::Result<Connection> {
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch(
+        "PRAGMA foreign_keys=ON;
+         CREATE TABLE historical_fixture_marker (id INTEGER);",
+    )?;
+    initialize(&conn)?;
+    conn.execute_batch("DROP TABLE historical_fixture_marker")?;
+    Ok(conn)
 }
 
 #[cfg(test)]

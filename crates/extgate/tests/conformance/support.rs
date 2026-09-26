@@ -16,7 +16,7 @@ use opencrab_actions::{
     SubtaskLifecycle, SubtaskRegistries, TranscriptSource,
 };
 use opencrab_core::EngineResult;
-use opencrab_db::queries::{AgentRow, SessionRow, TRUSTED_PLATFORM_EXTGATE};
+use opencrab_db::queries::{AgentRow, SessionRow};
 use opencrab_extgate::completion::ExtgateCompletionSink;
 use opencrab_extgate::{
     admin_router, invoke_and_wait, now_nanos, recover_stale_calls, recover_stale_deliveries,

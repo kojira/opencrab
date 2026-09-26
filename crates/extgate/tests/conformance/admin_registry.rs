@@ -518,7 +518,6 @@ async fn lookups_unknown_address_is_false() {
     assert!(!opencrab_extgate::channel_whitelisted(
         &conn, "agent-1", "missing", "nope"
     ));
-    let _ = TRUSTED_PLATFORM_EXTGATE;
     let _ = session_id_for_binding("x");
 }
 

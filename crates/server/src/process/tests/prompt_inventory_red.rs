@@ -392,31 +392,15 @@ working state and takes precedence over your own recall.
 }
 
 /// §6 A49/§7: Peer Review 節・レビュアー名簿（A57）・導入部マーカー文（A13）を丸ごと撤去。
-/// 名簿は登録レビュアーが居ないと空になり恒真化するため、co-agent レビュアーを seed した上で
-/// 「名簿が出ない」ことを観測する（現 tip では seed すると名簿が出るので **赤**）。
 #[test]
 fn peer_review_section_and_roster_are_removed() {
     let conn = opencrab_db::init_memory().unwrap();
-    // 表示名つき co-agent レビュアーを seed（現 tip なら名簿に載る）。
-    opencrab_db::queries::add_trusted_user(
-        &conn,
-        "external-a",
-        "r1",
-        "a1",
-        "42",
-        opencrab_db::queries::TrustedUserPermission::CoAgent,
-        "owner",
-        "2026-01-01",
-        "Crab B",
-    )
-    .unwrap();
     let (prompt, _name) =
         build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
 
     for (frag, label) in [
         ("## Peer Review", "Peer Review 節見出し"),
         ("Your registered peer reviewers", "A57 レビュアー名簿見出し"),
-        ("Crab B", "seed したレビュアー表示名（名簿本体）"),
         ("request_peer_review", "Peer Review 節本文"),
         ("レビュアーとして応答し", "A13 導入部マーカー文"),
     ] {

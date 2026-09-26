@@ -19,10 +19,6 @@ pub mod setup;
 pub mod skills;
 pub mod sleep;
 pub mod system;
-#[cfg(test)]
-pub mod test_config_api;
-#[cfg(test)]
-pub mod test_identity_api;
 pub mod tool_logs;
 pub mod workspace;
 
