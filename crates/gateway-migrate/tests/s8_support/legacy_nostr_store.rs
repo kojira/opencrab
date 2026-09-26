@@ -32,12 +32,17 @@ fn s8_refuses_conflicting_old_gateway_and_core_watch_sessions_before_backup() {
 
 #[test]
 fn s8_preserves_gateway_only_nostr_relay_change_in_core_and_destination() {
-    legacy_nostr_gateway_fixture_with_updates(false, false, false, None, false, true, false);
+    legacy_nostr_gateway_fixture_with_updates(false, false, false, None, false, true, false, false);
 }
 
 #[test]
 fn s8_keeps_removed_nostr_sender_inert_despite_stale_core_identity() {
-    legacy_nostr_gateway_fixture_with_updates(false, false, false, None, false, false, true);
+    legacy_nostr_gateway_fixture_with_updates(false, false, false, None, false, false, true, false);
+}
+
+#[test]
+fn s8_canonicalizes_semantically_valid_old_nostr_core_config_during_projection() {
+    legacy_nostr_gateway_fixture_with_updates(false, false, false, None, false, false, false, true);
 }
 
 fn legacy_nostr_gateway_fixture(
@@ -48,7 +53,7 @@ fn legacy_nostr_gateway_fixture(
     watch_session_conflict: bool,
 ) {
     legacy_nostr_gateway_fixture_with_updates(encrypted_source, missing_association, credential_conflict,
-        core_config_conflict, watch_session_conflict, false, false);
+        core_config_conflict, watch_session_conflict, false, false, false);
 }
 
 fn legacy_nostr_gateway_fixture_with_updates(
@@ -59,6 +64,7 @@ fn legacy_nostr_gateway_fixture_with_updates(
     watch_session_conflict: bool,
     gateway_relay_change: bool,
     stale_core_sender: bool,
+    noncanonical_core_config: bool,
 ) {
     let temp = tempfile::tempdir().unwrap();
     let core_path = temp.path().join("core.db");
@@ -96,6 +102,14 @@ fn legacy_nostr_gateway_fixture_with_updates(
                 .unwrap()
         )
     );
+    let (config_b64, digest) = if noncanonical_core_config {
+        let raw = serde_json::to_vec(&config).unwrap();
+        let source_b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+        assert_ne!(source_b64, config_b64, "fixture must contain old noncanonical JSON");
+        (source_b64, format!("{:x}", Sha256::digest(raw)))
+    } else {
+        (config_b64, digest)
+    };
     core.execute(
         "UPDATE gate_instances SET kind_id='nostr',config_b64=?1,config_digest=?2",
         params![config_b64, digest],
@@ -350,7 +364,7 @@ fn legacy_nostr_gateway_fixture_with_updates(
         assert_eq!(retained, "different-signing-secret", "stale source history must remain untouched");
         assert_eq!(opencrab_nostr_gateway::secret_store::decrypt(&envelope, &[7u8; 32]).unwrap().as_slice(), b"test-signing-secret");
     }
-    if gateway_relay_change || stale_core_sender {
+    if gateway_relay_change || stale_core_sender || noncanonical_core_config {
         let core = Connection::open(&core_path).unwrap();
         let (revision, config_b64): (i64, String) = core.query_row(
             "SELECT revision,config_b64 FROM gate_instances WHERE instance_id='11111111-1111-4111-8111-111111111111'",
@@ -358,11 +372,19 @@ fn legacy_nostr_gateway_fixture_with_updates(
         ).unwrap();
         let config: serde_json::Value = serde_json::from_slice(
             &base64::engine::general_purpose::STANDARD.decode(&config_b64).unwrap()).unwrap();
-        if gateway_relay_change {
-            assert_eq!(revision, 2, "stopped projection must revise only changed Nostr config");
-            assert_eq!(config["relays"], serde_json::json!(["wss://changed.invalid"]));
+        if gateway_relay_change || noncanonical_core_config {
+            assert_eq!(revision, 2, "stopped projection must revise the legacy Nostr encoding once");
+            if gateway_relay_change {
+                assert_eq!(config["relays"], serde_json::json!(["wss://changed.invalid"]));
+            }
             let destination_config: String = migrated.query_row("SELECT config_b64 FROM instances", [], |r| r.get(0)).unwrap();
             assert_eq!(config_b64, destination_config);
+            if noncanonical_core_config {
+                assert_eq!(config_b64, opencrab_nostr_gateway::config::canonicalize_config_b64(&config_b64).unwrap());
+                assert_eq!(config["access"]["followees"], serde_json::json!(["d".repeat(64)]));
+                let core_digest: String = core.query_row("SELECT config_digest FROM gate_instances WHERE instance_id='11111111-1111-4111-8111-111111111111'", [], |r| r.get(0)).unwrap();
+                assert_eq!(core_digest, format!("{:x}", Sha256::digest(base64::engine::general_purpose::STANDARD.decode(&config_b64).unwrap())));
+            }
             command::run_import(ImportArgs {
                 core_path: &core_path, approval_path: &approval_path, report_path: &report_path,
                 backup_dir: &backup_dir, inputs: Inputs {
