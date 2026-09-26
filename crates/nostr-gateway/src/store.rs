@@ -103,12 +103,18 @@ pub struct NostrStore {
 }
 
 impl NostrStore {
+    /// Offline S8 upgrades an old gateway database inside its destination transaction.
+    pub fn initialize_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(SCHEMA)?;
+        Ok(())
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
-        conn.execute_batch(SCHEMA)?;
+        Self::initialize_schema(&conn)?;
         Ok(Self {
             path: path.into(),
             conn,

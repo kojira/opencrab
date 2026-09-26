@@ -71,7 +71,7 @@ VALID_GATEWAY_DB_OPEN_IDENTITIES = {
     ("gateway-db-open", "crates/discord-gateway/src/daemon.rs", 725, "let store = DiscordStore::open(&config.database_path)?;"),
     ("gateway-db-open", "crates/discord-gateway/src/store.rs", 110, "let conn = Connection::open(path)?;"),
     ("gateway-db-open", "crates/nostr-gateway/src/daemon.rs", 722, "let store = NostrStore::open(&config.database_path)?;"),
-    ("gateway-db-open", "crates/nostr-gateway/src/store.rs", 110, "let conn = Connection::open(path)?;"),
+    ("gateway-db-open", "crates/nostr-gateway/src/store.rs", 116, "let conn = Connection::open(path)?;"),
     ("gateway-db-open", "crates/web-gateway/src/owner.rs", 39, "let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));"),
     ("gateway-db-open", "crates/web-gateway/src/store.rs", 71, "let conn = Connection::open(path)?;"),
 }

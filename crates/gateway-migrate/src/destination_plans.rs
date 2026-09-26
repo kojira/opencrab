@@ -20,7 +20,7 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut plans = Vec::new();
-    for (instance_id, kind, agent_id, subject_id, revision, enabled, config_b64, digest) in raw {
+    for (instance_id, kind, agent_id, subject_id, mut revision, mut enabled, mut config_b64, digest) in raw {
         if !matches!(kind.as_str(), "discord" | "nostr" | "web") {
             continue;
         }
@@ -43,6 +43,32 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
             .query_map([&instance_id], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let destination_path = inputs.paths.get(&(kind.clone(), destination.path_id.clone())).context("missing destination")?;
+        let mut legacy_nostr = false;
+        if kind == "nostr" {
+            let conn = Connection::open_with_flags(destination_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            if legacy_nostr_shape(&conn)? {
+                let (merged, old_enabled, changed) = authoritative_nostr_config(&conn, &agent_id, &config_b64, enabled)?;
+                config_b64 = merged;
+                enabled = old_enabled;
+                if changed { revision = revision.checked_add(1).context("Nostr core revision overflow")?; }
+                legacy_nostr = true;
+            } else {
+                let retained: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_nostr_instances')", [], |row| row.get(0))?;
+                if retained {
+                    let (merged, old_enabled): (String, bool) = conn.query_row(
+                        "SELECT config_b64,enabled FROM instances WHERE instance_id=?1 AND agent_id=?2",
+                        params![instance_id,agent_id], |row| Ok((row.get(0)?,row.get(1)?)),
+                    )?;
+                    ensure!(opencrab_nostr_gateway::config::canonicalize_config_b64(&merged)? == merged, "retained old Nostr config invalid");
+                    if old_enabled != enabled || merged != config_b64 {
+                        revision = revision.checked_add(1).context("Nostr core revision overflow")?;
+                    }
+                    config_b64 = merged;
+                    enabled = old_enabled;
+                    legacy_nostr = true;
+                }
+            }
+        }
         let (credential, source) = if kind == "web" {
             ensure!(
                 !approval.credential_sources.iter().any(|item| item.instance_id == instance_id),
@@ -67,6 +93,7 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
             credential,
             credential_source: source,
             created_at: approval.created_at.clone(),
+            legacy_nostr,
         });
     }
     Ok(plans)
@@ -88,11 +115,37 @@ fn select_credential(rows: &[SourceRow], approval: &Approval, path: &Path, kind:
         _ => None,
     }
     .filter(|value| !value.is_empty());
-    let existing_envelope: Option<String> = Connection::open(path)?
-        .query_row("SELECT credential_envelope FROM instances WHERE instance_id=?1", [instance_id], |row| row.get::<_, Option<String>>(0))
-        .optional()?
-        .flatten();
+    let destination = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let old_store = kind == "nostr" && legacy_nostr_shape(&destination)?;
+    if old_store {
+        if let Some(old) = legacy_nostr_credential(&destination, agent_id, key)? {
+            // The historical gateway upsert could rotate its signing key without
+            // writing back to the old core source row. The gateway key was live.
+            if old.is_empty() {
+                ensure!(!enabled, "enabled instance requires credential");
+                ensure!(descriptor.is_none(), "empty old credential has an approval descriptor");
+                return Ok((old, String::new()));
+            }
+            let selected = format!("legacy-nostr-store:instance:{instance_id}");
+            let descriptor = descriptor.context("credential source missing")?;
+            ensure!(descriptor.source == selected, "old Nostr credential source descriptor mismatch");
+            return Ok((old, selected));
+        }
+        ensure!(!descriptor.is_some_and(|item| item.source.starts_with("legacy-nostr-store:instance:")), "old Nostr instance missing");
+    }
+    let existing_envelope: Option<String> = if old_store { None } else {
+        destination.query_row("SELECT credential_envelope FROM instances WHERE instance_id=?1", [instance_id], |row| row.get::<_, Option<String>>(0)).optional()?.flatten()
+    };
     let existing = existing_envelope.as_deref().filter(|value| !value.is_empty()).map(|value| decrypt(kind, value, key)).transpose()?;
+    if kind == "nostr" && descriptor.is_some_and(|item| item.source == format!("legacy-nostr-store:instance:{instance_id}")) {
+        source::require_columns(&destination, "legacy_nostr_instances", &["agent_id", "secret_key"])?;
+        let retained: String = destination.query_row(
+            "SELECT secret_key FROM legacy_nostr_instances WHERE agent_id=?1", [agent_id], |row| row.get(0),
+        )?;
+        let clear = decrypt(kind, &retained, key)?;
+        ensure!(existing.as_ref().is_some_and(|value| value.as_slice() == clear.as_slice()), "old Nostr credential rerun conflict");
+        return Ok((clear, descriptor.unwrap().source.clone()));
+    }
     if !enabled && descriptor.is_none() && legacy.is_none() && existing.is_none() {
         return Ok((Zeroizing::new(Vec::new()), String::new()));
     }
@@ -153,16 +206,28 @@ fn build_identity_plans(rows: &[SourceRow], approval: &Approval, plans: &[Instan
                         .find(|plan| &plan.instance_id == instance_id && &plan.destination.kind_id == kind_id)
                         .context("identity target instance missing")?;
                     ensure!(plan.agent_id == row.text("agent_id")?, "identity agent mismatch");
-                    if kind_id == "web" {
+                    let active = if kind_id == "web" {
                         ensure!(row.text("user_id")? != "web-local", "Web source identity conflicts with local Owner policy");
+                        true
+                    } else if plan.legacy_nostr {
+                        access_config_contains(plan, row.text("user_id")?, role)?
                     } else {
                         prove_access_config(plan, row.text("user_id")?, role)?;
-                    }
+                        true
+                    };
+                    let relationship_id = if active && plan.legacy_nostr && role == "co_agent" {
+                        let bytes = base64::engine::general_purpose::STANDARD.decode(&plan.config_b64)?;
+                        opencrab_nostr_gateway::config::parse_instance_config(&bytes)?.access.co_agents
+                            .get(row.text("user_id")?).cloned()
+                    } else {
+                        (role == "co_agent").then(|| row.text("user_id").unwrap().to_string())
+                    };
                     output.entry((plan.destination.kind_id.clone(), plan.destination.path_id.clone())).or_default().push(IdentityPlan {
                         instance_id: instance_id.clone(),
                         role: role.into(),
                         external_id: row.text("user_id")?.into(),
-                        relationship_id: (role == "co_agent").then(|| row.text("user_id").unwrap().to_string()),
+                        relationship_id,
+                        active,
                         source: LegacyIdentitySource {
                             instance_id: instance_id.clone(),
                             id: row.text("id")?.into(),
@@ -186,6 +251,11 @@ fn build_identity_plans(rows: &[SourceRow], approval: &Approval, plans: &[Instan
 }
 
 fn prove_access_config(plan: &InstancePlan, external_id: &str, role: &str) -> Result<()> {
+    ensure!(access_config_contains(plan, external_id, role)?, "identity is not represented by gateway config");
+    Ok(())
+}
+
+fn access_config_contains(plan: &InstancePlan, external_id: &str, role: &str) -> Result<bool> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(&plan.config_b64)?;
     let matches = match plan.destination.kind_id.as_str() {
         "discord" => {
@@ -206,8 +276,7 @@ fn prove_access_config(plan: &InstancePlan, external_id: &str, role: &str) -> Re
         }
         _ => false,
     };
-    ensure!(matches, "identity is not represented by gateway config");
-    Ok(())
+    Ok(matches)
 }
 
 fn build_endpoint_plans(core: &Connection, rows: &[SourceRow], approval: &Approval, plans: &[InstancePlan]) -> Result<BTreeMap<(String, String), Vec<EndpointPlan>>> {
@@ -339,7 +408,7 @@ fn validate_source_coverage(rows: &[SourceRow], approval: &Approval, plans: &[In
                     plans.iter().any(|plan| {
                         plan.destination.kind_id == kind
                             && plan.agent_id == agent_id
-                            && plan.credential.as_slice() == secret.as_bytes()
+                            && (plan.legacy_nostr || plan.credential.as_slice() == secret.as_bytes())
                     }),
                     "unmapped credential config"
                 );

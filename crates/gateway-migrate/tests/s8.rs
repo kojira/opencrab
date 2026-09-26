@@ -11,7 +11,6 @@ use opencrab_gateway_migrate::{
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt};
-
 #[test]
 fn published_schema_56_source_fingerprints_are_stable() {
     let cases = [

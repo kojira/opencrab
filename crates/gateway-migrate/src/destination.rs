@@ -25,6 +25,14 @@ pub struct Inputs {
     pub credential_files: BTreeMap<String, PathBuf>,
 }
 
+pub(crate) struct LegacyNostrCoreUpdate {
+    pub instance_id: String,
+    pub expected_revision: u64,
+    pub enabled: bool,
+    pub config_b64: String,
+    pub config_digest: String,
+}
+
 #[derive(Debug)]
 struct InstancePlan {
     destination: Destination,
@@ -39,6 +47,7 @@ struct InstancePlan {
     credential: Zeroizing<Vec<u8>>,
     credential_source: String,
     created_at: String,
+    legacy_nostr: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +56,7 @@ struct IdentityPlan {
     role: String,
     external_id: String,
     relationship_id: Option<String>,
+    active: bool,
     source: LegacyIdentitySource,
 }
 #[derive(Debug, Clone)]
@@ -107,6 +117,10 @@ pub fn initialize_destinations(approval: &Approval, inputs: &Inputs) -> Result<(
     for destination in &approval.destinations {
         let path = inputs.paths.get(&(destination.kind_id.clone(), destination.path_id.clone())).context("missing destination path")?;
         ensure!(!path.is_symlink(), "destination may not be symlink");
+        if destination.kind_id == "nostr" && path.exists() {
+            let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            if legacy_nostr_shape(&conn)? { continue; }
+        }
         match destination.kind_id.as_str() {
             "discord" => {
                 drop(opencrab_discord_gateway::store::DiscordStore::open(path)?);
@@ -155,17 +169,25 @@ pub fn import(
             .context("destination backup missing")?;
         let before_path = crate::backup::database_path(backup_dir, &destination.kind_id, &destination.path_id);
         let before = Connection::open_with_flags(before_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let expected = expected_keys(&before, &destination_plans, &destination_identities, &destination_endpoints)?;
+        let expected = if destination.kind_id == "nostr" && legacy_nostr_shape(&before)? {
+            Vec::new()
+        } else {
+            expected_keys(&before, &destination_plans, &destination_identities, &destination_endpoints)?
+        };
         drop(before);
         let artifact = prepare_partial(&partial_dir, approval, destination, backup, backup_set_sha256, expected)?;
         let mut conn = Connection::open(path)?;
         validate_current_against_artifact(&conn, &artifact)?;
         let tx = conn.transaction()?;
+        let upgrading_legacy = destination.kind_id == "nostr" && legacy_nostr_shape(&tx)?;
+        if upgrading_legacy {
+            convert_legacy_nostr_store(&tx)?;
+        }
         create_legacy_identity_sources(&tx)?;
         let mut inserted = Vec::new();
         let mut accepted = Vec::new();
         let mut credentials = Vec::new();
-        for plan in destination_plans {
+        for plan in &destination_plans {
             let outcome = apply_instance(&tx, plan, key.as_deref())?;
             if outcome.0 {
                 inserted.push(key_value("instances", vec![plan.instance_id.clone()], outcome.1.clone())?);
@@ -177,12 +199,14 @@ pub fn import(
             }
         }
         for identity in &destination_identities {
-            let (was_inserted, hash) = apply_identity(&tx, identity)?;
-            let item = key_value("identity_projections", vec![identity.instance_id.clone(), identity.role.clone(), identity.external_id.clone()], hash)?;
-            if was_inserted {
-                inserted.push(item);
-            } else {
-                accepted.push(item);
+            if identity.active {
+                let (was_inserted, hash) = apply_identity(&tx, identity)?;
+                let item = key_value("identity_projections", vec![identity.instance_id.clone(), identity.role.clone(), identity.external_id.clone()], hash)?;
+                if was_inserted {
+                    inserted.push(item);
+                } else {
+                    accepted.push(item);
+                }
             }
             let (was_inserted, hash) = apply_legacy_identity_source(&tx, &identity.source)?;
             let item = key_value("legacy_identity_sources", vec![identity.source.instance_id.clone(), identity.source.id.clone()], hash)?;
@@ -192,6 +216,12 @@ pub fn import(
                 accepted.push(item);
             }
         }
+        let legacy_identities = if upgrading_legacy {
+            tx.execute_batch("UPDATE legacy_nostr_instances SET secret_key = (SELECT credential_envelope FROM instances WHERE instances.agent_id = legacy_nostr_instances.agent_id);")?;
+            import_legacy_nostr_identities(&tx, &destination_plans, &mut inserted)?
+        } else {
+            0
+        };
         for endpoint in &destination_endpoints {
             let (was_inserted, hash) = apply_endpoint(&tx, endpoint)?;
             let item = key_value("endpoints", vec![endpoint.instance_id.clone(), endpoint.channel_id.clone()], hash)?;
@@ -209,7 +239,7 @@ pub fn import(
         outputs.push(json!({
             "kind_id":destination.kind_id,"path_id":destination.path_id,"schema":destination.schema,
             "before_logical_sha256":backup.logical_sha256,"after_logical_sha256":crate::backup::logical_sha256(path)?,
-            "counts":{"instances":plans.iter().filter(|p| p.destination == *destination).count(),"endpoints":destination_endpoints.len(),"identity_projections":destination_identities.len(),"legacy_identity_sources":destination_identities.len(),"policies":0,"credentials":credentials.len()},
+            "counts":{"instances":plans.iter().filter(|p| p.destination == *destination).count(),"endpoints":destination_endpoints.len(),"identity_projections":destination_identities.iter().filter(|identity| identity.active).count()+legacy_identities,"legacy_identity_sources":destination_identities.len(),"policies":0,"credentials":credentials.len()},
             "inserted_keys":inserted,"accepted_existing_keys":accepted,"credentials":credentials
         }));
     }
@@ -222,6 +252,7 @@ fn credential_source_category(source: &str, kind: &str) -> Result<&'static str> 
         "nostr" if source.starts_with("legacy-core:agent_nostr_config:") => Ok("legacy-core:agent_nostr_config"),
         "discord" if source.starts_with("existing-destination:discord:") => Ok("existing-destination:discord"),
         "nostr" if source.starts_with("existing-destination:nostr:") => Ok("existing-destination:nostr"),
+        "nostr" if source.starts_with("legacy-nostr-store:instance:") => Ok("legacy-nostr-store:instance"),
         _ => anyhow::bail!("credential source category mismatch"),
     }
 }
@@ -277,6 +308,7 @@ pub fn validate_project_artifacts(
 }
 
 include!("destination_plans.rs");
+include!("destination_legacy_nostr.rs");
 include!("destination_identity_sources.rs");
 
 fn expected_keys(conn: &Connection, plans: &[&InstancePlan], identities: &[IdentityPlan], endpoints: &[EndpointPlan]) -> Result<Vec<ExpectedKey>> {
@@ -287,12 +319,14 @@ fn expected_keys(conn: &Connection, plans: &[&InstancePlan], identities: &[Ident
         out.push(expected_key(conn, "instances", vec![plan.instance_id.clone()], expected)?);
     }
     for item in identities {
-        out.push(expected_key(
-            conn,
-            "identity_projections",
-            vec![item.instance_id.clone(), item.role.clone(), item.external_id.clone()],
-            identity_semantic(item),
-        )?);
+        if item.active {
+            out.push(expected_key(
+                conn,
+                "identity_projections",
+                vec![item.instance_id.clone(), item.role.clone(), item.external_id.clone()],
+                identity_semantic(item),
+            )?);
+        }
         out.push(expected_key(
             conn,
             "legacy_identity_sources",
@@ -433,7 +467,12 @@ fn apply_instance(tx: &Transaction<'_>, plan: &InstancePlan, key: Option<&[u8; 3
     };
     match plan.destination.kind_id.as_str() {
         "discord" | "nostr" => {
-            tx.execute("INSERT INTO instances(instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,subject_grant_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,core_digest,binding_inventory_json,process_id,process_nonce,failure_count,retry_at_unix_ms,last_exit,updated_at) VALUES (?1,?2,?3,?4,?5,?6,NULL,?7,1,NULL,'pending',NULL,NULL,'[]',NULL,NULL,0,NULL,NULL,?8)",params![plan.instance_id,plan.agent_id,plan.subject_id,plan.config_b64,serde_json::to_string(&plan.addresses)?,envelope,plan.enabled,plan.created_at])?;
+            let revision = plan.legacy_nostr.then_some(plan.revision);
+            let digest = if plan.legacy_nostr {
+                Some(canonical::hex(&Sha256::digest(base64::engine::general_purpose::STANDARD.decode(&plan.config_b64)?)))
+            } else { None };
+            let inventory = if plan.legacy_nostr { serde_json::to_string(&plan.binding_ids)? } else { "[]".into() };
+            tx.execute("INSERT INTO instances(instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,subject_grant_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,core_digest,binding_inventory_json,process_id,process_nonce,failure_count,retry_at_unix_ms,last_exit,updated_at) VALUES (?1,?2,?3,?4,?5,?6,NULL,?7,1,NULL,'pending',?8,?9,?10,NULL,NULL,0,NULL,NULL,?11)",params![plan.instance_id,plan.agent_id,plan.subject_id,plan.config_b64,serde_json::to_string(&plan.addresses)?,envelope,plan.enabled,revision,digest,inventory,plan.created_at])?;
         }
         _ => bail!("unknown destination"),
     }
@@ -599,7 +638,9 @@ pub fn prevalidate(core: &Connection, rows: &[SourceRow], approval: &Approval, i
         let path = inputs.paths.get(&(destination.kind_id.clone(), destination.path_id.clone())).context("destination path missing")?;
         ensure!(path.exists() && !path.is_symlink(), "destination must be an existing regular database path");
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        require_destination_shape(&conn, destination)?;
+        if destination.kind_id != "nostr" || !legacy_nostr_shape(&conn)? {
+            require_destination_shape(&conn, destination)?;
+        }
     }
     let plans = build_instance_plans(core, rows, approval, inputs)?;
     let identities = build_identity_plans(rows, approval, &plans)?;
@@ -612,7 +653,11 @@ pub fn prevalidate(core: &Connection, rows: &[SourceRow], approval: &Approval, i
         let destination_plans = plans.iter().filter(|plan| plan.destination == *destination).collect::<Vec<_>>();
         let ids = identities.get(&(destination.kind_id.clone(), destination.path_id.clone())).cloned().unwrap_or_default();
         let eps = endpoints.get(&(destination.kind_id.clone(), destination.path_id.clone())).cloned().unwrap_or_default();
-        let _ = expected_keys(&conn, &destination_plans, &ids, &eps)?;
+        if destination.kind_id == "nostr" && legacy_nostr_shape(&conn)? {
+            validate_legacy_nostr_store(core, rows, &conn, &destination_plans)?;
+        } else {
+            let _ = expected_keys(&conn, &destination_plans, &ids, &eps)?;
+        }
     }
     Ok(())
 }
@@ -665,7 +710,7 @@ mod s8_review_red_tests {
         let raw = serde_json::to_vec(&cfg).unwrap();
         let config_b64 = opencrab_discord_gateway::config::canonicalize_config_b64(&base64::engine::general_purpose::STANDARD.encode(raw)).unwrap();
         let destination = Destination { kind_id:"discord".into(), path_id:"main".into(), schema:"s5-discord-v1".into() };
-        let plan = InstancePlan { destination:destination.clone(), instance_id:"i".into(), agent_id:"agent-a".into(), subject_id:1, revision:1, config_b64, addresses:vec![], binding_ids:vec![], enabled:true, credential:Zeroizing::new(vec![1]), credential_source:"x".into(), created_at:"2026-01-01T00:00:00Z".into() };
+        let plan = InstancePlan { destination:destination.clone(), instance_id:"i".into(), agent_id:"agent-a".into(), subject_id:1, revision:1, config_b64, addresses:vec![], binding_ids:vec![], enabled:true, credential:Zeroizing::new(vec![1]), credential_source:"x".into(), created_at:"2026-01-01T00:00:00Z".into(), legacy_nostr:false };
         let mut approval = approval(destination);
         approval.identity_dispositions.push(IdentityDisposition { source_fingerprint:row.fingerprint.clone(), edges:vec![IdentityEdge::Gateway { kind_id:"discord".into(), instance_id:"i".into() }] });
         assert!(build_identity_plans(&[row], &approval, &[plan]).is_err());
@@ -706,7 +751,7 @@ mod s8_review_red_tests {
             destination: Destination {kind_id:"web".into(),path_id:"main".into(),schema:"s5-web-v1".into()},
             instance_id:"missing".into(),agent_id:"agent-a".into(),subject_id:1,revision:1,
             config_b64:"e30=".into(),addresses:vec![],binding_ids:vec![],enabled:true,credential:Zeroizing::new(vec![1]),
-            credential_source:"x".into(),created_at:"2026".into()
+            credential_source:"x".into(),created_at:"2026".into(),legacy_nostr:false
         };
         let tx = conn.transaction().unwrap();
         assert!(apply_instance(&tx, &plan, None).is_err());
@@ -731,7 +776,7 @@ mod s8_review_red_tests {
             ("guild_id".into(), crate::source::Cell::Text("".into())),
         ]};
         let destination = Destination { kind_id:"discord".into(), path_id:"main".into(), schema:"s5-discord-v1".into() };
-        let plan = InstancePlan { destination:destination.clone(), instance_id:"i".into(), agent_id:"agent-a".into(), subject_id:subject, revision:1, config_b64, addresses:vec!["discord-agent-a--42".into()], binding_ids:vec!["b".into()], enabled:true, credential:Zeroizing::new(vec![1]), credential_source:"x".into(), created_at:"2026".into() };
+        let plan = InstancePlan { destination:destination.clone(), instance_id:"i".into(), agent_id:"agent-a".into(), subject_id:subject, revision:1, config_b64, addresses:vec!["discord-agent-a--42".into()], binding_ids:vec!["b".into()], enabled:true, credential:Zeroizing::new(vec![1]), credential_source:"x".into(), created_at:"2026".into(), legacy_nostr:false };
         assert!(build_endpoint_plans(&core, &[row], &approval(destination), &[plan]).is_err(), "a matching live binding cannot be omitted from the approved channel edges");
     }
 

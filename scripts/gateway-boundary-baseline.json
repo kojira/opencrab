@@ -40,7 +40,7 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/store.rs",
-      "line": 110,
+      "line": 116,
       "snippet": "let conn = Connection::open(path)?;",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",

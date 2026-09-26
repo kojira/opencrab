@@ -343,15 +343,18 @@ impl SourceRow {
 #[cfg(test)]
 mod s8_review_red_tests {
     use super::*;
+    include!("../tests/s8_support/legacy_source_schema.rs");
 
     #[test]
     fn required_core_column_must_exist_but_extra_columns_are_allowed() {
         let conn = opencrab_db::init_memory().unwrap();
+        create_legacy_core_source_tables(&conn);
         conn.execute_batch("ALTER TABLE agents ADD COLUMN s8_surprise TEXT;")
             .unwrap();
         validate(&conn).expect("an unrelated extra column is allowed");
 
         let conn = opencrab_db::init_memory().unwrap();
+        create_legacy_core_source_tables(&conn);
         conn.execute_batch(
             "ALTER TABLE gate_instances RENAME COLUMN config_digest TO missing_digest;",
         )

@@ -1,13 +1,14 @@
 use crate::{
     canonical,
+    destination::LegacyNostrCoreUpdate,
     manifest::{Approval, IdentityEdge},
     source::SourceRow,
 };
 use anyhow::{ensure, Context, Result};
 use opencrab_db::queries::{
     insert_api_principal_in_tx, project_stopped_session_heartbeat_target_in_tx,
-    resolve_heartbeat_projection_sources, ApiPrincipalRow, HeartbeatProjectionSource,
-    StoppedHeartbeatProjectionTarget,
+    resolve_heartbeat_projection_sources, revise_gate_instance_in_tx, ApiPrincipalRow,
+    HeartbeatProjectionSource, StoppedHeartbeatProjectionTarget,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -136,12 +137,13 @@ pub fn verify_immutable_marker_for_freeze(
     Ok(())
 }
 
-pub fn project(
+pub(crate) fn project(
     conn: &mut Connection,
     rows: &[SourceRow],
     approval: &Approval,
     backup_set_sha256: &str,
     destination_manifest_sha256: &str,
+    legacy_updates: &[LegacyNostrCoreUpdate],
 ) -> Result<ProjectionOutcome> {
     ensure!(
         verify_already_applied(
@@ -163,6 +165,23 @@ pub fn project(
     let api = build_api_principals(rows, approval)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     validate_subject_safeguards(&tx)?;
+    let revision_at = chrono::DateTime::parse_from_rfc3339(&approval.created_at)?.timestamp();
+    for update in legacy_updates {
+        let revised = revise_gate_instance_in_tx(
+            &tx,
+            &update.instance_id,
+            update.expected_revision,
+            update.enabled,
+            &update.config_b64,
+            &update.config_digest,
+            revision_at,
+        )
+        .map_err(|error| anyhow::anyhow!("legacy Nostr core revision failed: {error:?}"))?;
+        ensure!(
+            revised == update.expected_revision + 1,
+            "legacy Nostr revision mismatch"
+        );
+    }
     let mut inserted_api = Vec::new();
     let mut accepted_api = Vec::new();
     for row in &api {
