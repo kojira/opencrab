@@ -88,7 +88,7 @@ fn authoritative_nostr_config(conn: &Connection, agent_id: &str, core_config_b64
     for (id, interval_secs, filter) in old_watches {
         let max_items = config.watches.iter().find(|watch| watch.id == id)
             .map(|watch| watch.max_items).unwrap_or(DEFAULT_BUNDLE_MAX_ITEMS);
-        watches.push(WatchPlacement { id, interval_secs, max_items,
+        watches.push(WatchPlacement { id, interval_secs, legacy_session_id: None, max_items,
             filter: serde_json::from_str::<WatchFilter>(&filter)?, filter_json: None });
     }
     config.watches = watches;

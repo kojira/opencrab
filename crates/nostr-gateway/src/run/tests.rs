@@ -12,6 +12,7 @@ fn watches_present_still_spawns_mention_keyword_lane() {
         watches: vec![WatchPlacement {
             id: 3,
             interval_secs: 120,
+            legacy_session_id: None,
             max_items: crate::config::DEFAULT_BUNDLE_MAX_ITEMS,
             filter: WatchFilter {
                 authors: vec!["npub1watched".into()],
@@ -160,6 +161,7 @@ fn dedup_ttl_covers_max_watch_interval() {
     cfg.watches = vec![WatchPlacement {
         id: 1,
         interval_secs: 3600,
+        legacy_session_id: None,
         max_items: crate::config::DEFAULT_BUNDLE_MAX_ITEMS,
         filter: WatchFilter::default(),
         filter_json: None,

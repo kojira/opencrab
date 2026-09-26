@@ -74,6 +74,12 @@ fn default_max_items() -> i64 {
 pub struct WatchPlacement {
     pub id: i64,
     pub interval_secs: i64,
+    /// Legacy core-owned watch configs stored the owning session in each watch.
+    /// The gateway derives delivery from the binding/placement instead; accept
+    /// the field for historical QC/runtime configs but drop it from canonical
+    /// gateway config so it cannot become a second authority.
+    #[serde(default, rename = "session_id", skip_serializing)]
+    pub legacy_session_id: Option<String>,
     /// 1 interval で束ねる上限。省略時は [`DEFAULT_BUNDLE_MAX_ITEMS`]。
     #[serde(default = "default_max_items")]
     pub max_items: i64,
@@ -348,6 +354,27 @@ mod tests {
     }
 
     #[test]
+    fn legacy_watch_session_id_is_accepted_but_not_canonicalized() {
+        let value = serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab",
+            "watches": [{
+                "id": 1,
+                "session_id": "legacy-session",
+                "interval_secs": 30,
+                "filter_json": { "authors": ["npub1watched"] }
+            }]
+        });
+        let cfg: InstanceConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(cfg.watches[0].legacy_session_id.as_deref(), Some("legacy-session"));
+        validate_instance_config(&cfg).unwrap();
+
+        let canonical = serde_json::to_value(&cfg).unwrap();
+        assert!(canonical["watches"][0].get("session_id").is_none());
+    }
+
+    #[test]
     fn omitted_max_items_defaults_to_50() {
         let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
             "relays": ["wss://example.invalid"],
@@ -388,6 +415,7 @@ mod tests {
         cfg.watches.push(WatchPlacement {
             id: 1,
             interval_secs: 30,
+            legacy_session_id: None,
             max_items: 0,
             filter: WatchFilter::default(),
             filter_json: None,
