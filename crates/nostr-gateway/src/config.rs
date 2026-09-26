@@ -154,8 +154,14 @@ pub fn canonicalize_config_b64(config_b64: &str) -> anyhow::Result<String> {
 }
 
 pub fn parse_instance_config(bytes: &[u8]) -> anyhow::Result<InstanceConfig> {
-    let cfg: InstanceConfig = serde_json::from_slice(bytes)
+    let mut cfg: InstanceConfig = serde_json::from_slice(bytes)
         .map_err(|e| anyhow::anyhow!("instance config is not valid JSON object: {e}"))?;
+    // Historical Nostr configs predate the generic delivery-mode marker. The Nostr
+    // gateway's declared operations require tool-driven delivery, so canonicalize
+    // the missing legacy value to the explicit runtime contract.
+    if cfg.delivery_mode.is_none() {
+        cfg.delivery_mode = Some("tool_driven".into());
+    }
     validate_instance_config(&cfg)?;
     Ok(cfg)
 }
@@ -366,12 +372,26 @@ mod tests {
                 "filter_json": { "authors": ["npub1watched"] }
             }]
         });
-        let cfg: InstanceConfig = serde_json::from_value(value).unwrap();
+        let cfg = parse_instance_config(&serde_json::to_vec(&value).unwrap()).unwrap();
         assert_eq!(cfg.watches[0].legacy_session_id.as_deref(), Some("legacy-session"));
-        validate_instance_config(&cfg).unwrap();
+        assert_eq!(cfg.delivery_mode.as_deref(), Some("tool_driven"));
 
         let canonical = serde_json::to_value(&cfg).unwrap();
         assert!(canonical["watches"][0].get("session_id").is_none());
+    }
+
+    #[test]
+    fn legacy_missing_delivery_mode_is_canonicalized_to_tool_driven() {
+        let value = serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab"
+        });
+        let cfg = parse_instance_config(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(cfg.delivery_mode.as_deref(), Some("tool_driven"));
+
+        let canonical = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(canonical["delivery_mode"], "tool_driven");
     }
 
     #[test]
