@@ -31,9 +31,22 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
             "web" => config_b64.clone(),
             _ => unreachable!(),
         };
-        ensure!(canonical == config_b64, "noncanonical config");
         let decoded = base64::engine::general_purpose::STANDARD.decode(&config_b64)?;
         ensure!(canonical::hex(&Sha256::digest(&decoded)) == digest, "config digest mismatch");
+        let destination_path = inputs.paths.get(&(kind.clone(), destination.path_id.clone())).context("missing destination")?;
+        let nostr_conn = if kind == "nostr" {
+            Some(Connection::open_with_flags(destination_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?)
+        } else {
+            None
+        };
+        let old_nostr_store = nostr_conn.as_ref().map(legacy_nostr_shape).transpose()?.unwrap_or(false);
+        let retained_old_nostr = if let Some(conn) = nostr_conn.as_ref() {
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_nostr_instances')", [], |row| row.get::<_, bool>(0))?
+        } else {
+            false
+        };
+        // Only a verified old Nostr store can reconcile its historical core encoding in S8.
+        ensure!(canonical == config_b64 || old_nostr_store || retained_old_nostr, "noncanonical config");
         let mut addresses = core
             .prepare("SELECT address FROM gate_bindings WHERE instance_id=?1 AND closed_at IS NULL ORDER BY address")?
             .query_map([&instance_id], |row| row.get::<_, String>(0))?
@@ -42,31 +55,26 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
         let binding_ids = core.prepare("SELECT binding_id FROM gate_bindings WHERE instance_id=?1 AND closed_at IS NULL ORDER BY binding_id")?
             .query_map([&instance_id], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let destination_path = inputs.paths.get(&(kind.clone(), destination.path_id.clone())).context("missing destination")?;
         let mut legacy_nostr = false;
-        if kind == "nostr" {
-            let conn = Connection::open_with_flags(destination_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            if legacy_nostr_shape(&conn)? {
+        if let Some(conn) = nostr_conn {
+            if old_nostr_store {
                 let (merged, old_enabled, changed) = authoritative_nostr_config(&conn, &agent_id, &config_b64, enabled)?;
                 config_b64 = merged;
                 enabled = old_enabled;
                 if changed { revision = revision.checked_add(1).context("Nostr core revision overflow")?; }
                 legacy_nostr = true;
-            } else {
-                let retained: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_nostr_instances')", [], |row| row.get(0))?;
-                if retained {
-                    let (merged, old_enabled): (String, bool) = conn.query_row(
-                        "SELECT config_b64,enabled FROM instances WHERE instance_id=?1 AND agent_id=?2",
-                        params![instance_id,agent_id], |row| Ok((row.get(0)?,row.get(1)?)),
-                    )?;
-                    ensure!(opencrab_nostr_gateway::config::canonicalize_config_b64(&merged)? == merged, "retained old Nostr config invalid");
-                    if old_enabled != enabled || merged != config_b64 {
-                        revision = revision.checked_add(1).context("Nostr core revision overflow")?;
-                    }
-                    config_b64 = merged;
-                    enabled = old_enabled;
-                    legacy_nostr = true;
+            } else if retained_old_nostr {
+                let (merged, old_enabled): (String, bool) = conn.query_row(
+                    "SELECT config_b64,enabled FROM instances WHERE instance_id=?1 AND agent_id=?2",
+                    params![instance_id,agent_id], |row| Ok((row.get(0)?,row.get(1)?)),
+                )?;
+                ensure!(opencrab_nostr_gateway::config::canonicalize_config_b64(&merged)? == merged, "retained old Nostr config invalid");
+                if old_enabled != enabled || merged != config_b64 {
+                    revision = revision.checked_add(1).context("Nostr core revision overflow")?;
                 }
+                config_b64 = merged;
+                enabled = old_enabled;
+                legacy_nostr = true;
             }
         }
         let (credential, source) = if kind == "web" {
