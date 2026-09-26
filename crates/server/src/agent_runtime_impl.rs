@@ -415,6 +415,10 @@ impl AgentRuntime for AppState {
 ///
 /// 件数だけだと「どの会話の応答が捨てられたか」が後から追えない。`session_id` は
 /// #196 で挿入時に埋めるようにしたので、ここで意味のある値が出る。
+#[cfg(test)]
+#[path = "agent_runtime_impl/peer_review_removal_test.rs"]
+mod peer_review_removal_test;
+
 fn log_closed_interactions(
     closed: &[opencrab_db::queries::ClosedInteraction],
     scope: Option<&str>,
