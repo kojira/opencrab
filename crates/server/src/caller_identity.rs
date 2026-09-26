@@ -24,13 +24,13 @@ pub fn resolve_rest_api_principal(
     principal: Option<opencrab_db::queries::ApiPrincipalRow>,
     user_id: &str,
 ) -> CallerIdentity {
-    use opencrab_db::queries::TrustedUserPermission;
+    use opencrab_db::queries::ApiPrincipalPermission;
 
     let identity = match principal.map(|row| row.parsed_permission()) {
-        Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {
+        Some(ApiPrincipalPermission::CoAgent) => CallerIdentity::CoAgent {
             agent_id: user_id.to_string(),
         },
-        Some(TrustedUserPermission::Owner | TrustedUserPermission::User) => {
+        Some(ApiPrincipalPermission::Owner | ApiPrincipalPermission::User) => {
             CallerIdentity::TrustedUser
         }
         None => CallerIdentity::Agent,

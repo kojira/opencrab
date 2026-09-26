@@ -97,7 +97,7 @@ fn v17_never_destroys_populated_trusted_users() {
 /// 見ていたもの（`co_agent`）だけ**を移し、それ以外は触らない（権限を増やさない）。
 #[test]
 fn permission_spelling_migration_rewrites_rows_without_changing_who_is_a_co_agent() {
-    use crate::queries::TrustedUserPermission;
+    use crate::queries::ApiPrincipalPermission;
 
     let conn = super::init_historical_schema_fixture().expect("init");
     // v17 相当の既存 DB を模す: 旧表記の行を含めて 4 件入れ、version 17 へ戻す。
@@ -141,8 +141,8 @@ fn permission_spelling_migration_rewrites_rows_without_changing_who_is_a_co_agen
         .query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                TrustedUserPermission::from_db_str(&r.get::<_, String>(1)?)
-                    == TrustedUserPermission::CoAgent,
+                ApiPrincipalPermission::from_db_str(&r.get::<_, String>(1)?)
+                    == ApiPrincipalPermission::CoAgent,
             ))
         })
         .unwrap()

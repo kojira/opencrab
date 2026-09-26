@@ -153,7 +153,7 @@ fn seeded_state() -> Result<AppState, String> {
         "baseline-trusted-row",
         AGENT_ID,
         "baseline-user",
-        opencrab_db::queries::TrustedUserPermission::User,
+        opencrab_db::queries::ApiPrincipalPermission::User,
         "owner",
         "2026-01-01T00:00:00Z",
         "Baseline User",

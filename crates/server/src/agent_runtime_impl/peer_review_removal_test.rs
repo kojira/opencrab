@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use opencrab_actions::{AgentRuntime, InboundMessageRecord, TranscriptSource};
 
 #[test]

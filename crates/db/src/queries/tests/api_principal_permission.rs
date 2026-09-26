@@ -4,19 +4,19 @@
 /// **全 variant がケバブケース**で、読み書きが往復する。
 #[test]
 fn permission_spelling_cannot_drift() {
-    for p in TRUSTED_USER_PERMISSIONS {
+    for p in API_PRINCIPAL_PERMISSIONS {
         let s = p.as_db_str();
         // アンダースコア表記は存在しない（#234 の食い違いはこれで起きた）。
         assert!(!s.contains('_'), "{s} はケバブケースでない");
         // 書いた表記はそのまま読み戻せる。
-        assert_eq!(TrustedUserPermission::parse(s), Some(p));
-        assert_eq!(TrustedUserPermission::from_db_str(s), p);
+        assert_eq!(ApiPrincipalPermission::parse(s), Some(p));
+        assert_eq!(ApiPrincipalPermission::from_db_str(s), p);
         // serde 表現（API の応答 / 設定側の CommandPermission と同じ規約）も同じ文字列。
         assert_eq!(serde_json::to_string(&p).unwrap(), format!("\"{s}\""));
     }
     // 表記は 3 つで全部（増えたらここが落ちる）。
     assert_eq!(
-        TRUSTED_USER_PERMISSIONS.map(|p| p.as_db_str()),
+        API_PRINCIPAL_PERMISSIONS.map(|p| p.as_db_str()),
         ["owner", "user", "co-agent"]
     );
 }
@@ -28,10 +28,10 @@ fn unknown_permission_spellings_are_rejected_at_the_gate() {
     for bad in [
         "co_agent", "coagent", "CoAgent", "Owner", "trusted", "", " user",
     ] {
-        assert_eq!(TrustedUserPermission::parse(bad), None, "{bad:?}");
+        assert_eq!(ApiPrincipalPermission::parse(bad), None, "{bad:?}");
         assert_eq!(
-            TrustedUserPermission::from_db_str(bad),
-            TrustedUserPermission::User,
+            ApiPrincipalPermission::from_db_str(bad),
+            ApiPrincipalPermission::User,
             "{bad:?}"
         );
     }
@@ -41,7 +41,7 @@ fn unknown_permission_spellings_are_rejected_at_the_gate() {
 #[test]
 fn permission_defaults_to_user() {
     assert_eq!(
-        TrustedUserPermission::default(),
-        TrustedUserPermission::User
+        ApiPrincipalPermission::default(),
+        ApiPrincipalPermission::User
     );
 }

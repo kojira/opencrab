@@ -58,13 +58,22 @@ HISTORICAL_FILES = {
     "crates/db/src/schema/migration_tests.rs",
     "crates/db/src/schema/v43_v47.rs",
 }
+# Five historical tables are created only inside the empty-DB bootstrap transaction
+# and removed before its first commit. This is not an exception for live queries.
+FRESH_BOOTSTRAP_LEGACY_DROP_IDENTITIES = frozenset({
+    ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 119, '"DROP TABLE IF EXISTS channel_config;'),
+    ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 120, "DROP TABLE IF EXISTS session_watches;"),
+    ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 121, "DROP TABLE IF EXISTS trusted_users;"),
+    ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 122, "DROP TABLE IF EXISTS agent_discord_config;"),
+    ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 123, 'DROP TABLE IF EXISTS agent_nostr_config;",'),
+})
 VALID_GATEWAY_DB_OPEN_IDENTITIES = {
     ("gateway-db-open", "crates/discord-gateway/src/daemon.rs", 725, "let store = DiscordStore::open(&config.database_path)?;"),
-    ("gateway-db-open", "crates/discord-gateway/src/store.rs", 98, "let conn = Connection::open(path)?;"),
+    ("gateway-db-open", "crates/discord-gateway/src/store.rs", 110, "let conn = Connection::open(path)?;"),
     ("gateway-db-open", "crates/nostr-gateway/src/daemon.rs", 722, "let store = NostrStore::open(&config.database_path)?;"),
-    ("gateway-db-open", "crates/nostr-gateway/src/store.rs", 98, "let conn = Connection::open(path)?;"),
-    ("gateway-db-open", "crates/web-gateway/src/owner.rs", 47, "let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));"),
-    ("gateway-db-open", "crates/web-gateway/src/store.rs", 60, "let conn = Connection::open(path)?;"),
+    ("gateway-db-open", "crates/nostr-gateway/src/store.rs", 110, "let conn = Connection::open(path)?;"),
+    ("gateway-db-open", "crates/web-gateway/src/owner.rs", 39, "let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));"),
+    ("gateway-db-open", "crates/web-gateway/src/store.rs", 71, "let conn = Connection::open(path)?;"),
 }
 # These three exact sites are a generic caller-role naming debt, not operation-name routing.
 # Exact finding identities prevent a moved or duplicated occurrence from inheriting the deferral.
@@ -105,6 +114,7 @@ VALID_CLASSIFICATIONS = {
     "production-violation",
     "valid-gateway-owned-store",
     "dev-only-qc",
+    "transitional-empty-db-bootstrap",
 }
 
 
@@ -660,6 +670,8 @@ def _metadata_for(finding: Finding) -> tuple[str, str, str, str]:
         return "production-violation", "V08", "S5", "remove concrete lifecycle registry after daemon-owned lifecycle is live"
     if "timed_fire" in path or "subtask" in path:
         return "production-violation", "V09", "S3", "replace platform-shaped routing with canonical generic binding/session IDs"
+    if finding.key in FRESH_BOOTSTRAP_LEGACY_DROP_IDENTITIES:
+        return "transitional-empty-db-bootstrap", "V11", "S10", "retain only for historical replay within the fresh empty-database transaction; no live legacy table"
     if finding.key in DEFERRED_GENERIC_CALLER_ROLE_IDENTITIES:
         return "production-violation", "V11", "S5/S10", "rename legacy generic caller-role vocabulary after gateway policy ownership moves"
     if finding.rule == "shared-gateway-name-branch" or "ops_projection" in path or "traits.rs" in path:

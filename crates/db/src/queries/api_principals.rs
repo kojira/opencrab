@@ -5,25 +5,25 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
-pub enum TrustedUserPermission {
+pub enum ApiPrincipalPermission {
     /// オーナー相当。
     Owner,
     /// ただの信頼済みユーザー（登録の既定）。
     #[default]
     User,
-    /// 協働エージェント（相互レビューの名簿に載る）。
+    /// 協働エージェント。
     CoAgent,
 }
 
 /// 権限の全体。ダッシュボードの選択肢はここから導く（一致は
 /// `dashboard_permission_options_match_the_enum` が検査する）。
-pub const TRUSTED_USER_PERMISSIONS: [TrustedUserPermission; 3] = [
-    TrustedUserPermission::Owner,
-    TrustedUserPermission::User,
-    TrustedUserPermission::CoAgent,
+pub const API_PRINCIPAL_PERMISSIONS: [ApiPrincipalPermission; 3] = [
+    ApiPrincipalPermission::Owner,
+    ApiPrincipalPermission::User,
+    ApiPrincipalPermission::CoAgent,
 ];
 
-impl TrustedUserPermission {
+impl ApiPrincipalPermission {
     /// DB に入る表記（ケバブケース）。**書き込みはこの関数だけを通す。**
     pub fn as_db_str(self) -> &'static str {
         match self {
@@ -36,7 +36,7 @@ impl TrustedUserPermission {
     /// 既知の表記だけを受け付ける（入口の検証用）。**別表記の受け入れはしない** —
     /// 「どちらの表記も通す」が #234 そのものだったので、通す表記はひとつに保つ。
     pub fn parse(s: &str) -> Option<Self> {
-        TRUSTED_USER_PERMISSIONS
+        API_PRINCIPAL_PERMISSIONS
             .into_iter()
             .find(|p| p.as_db_str() == s)
     }
@@ -63,8 +63,8 @@ pub struct ApiPrincipalRow {
 }
 
 impl ApiPrincipalRow {
-    pub fn parsed_permission(&self) -> TrustedUserPermission {
-        TrustedUserPermission::from_db_str(&self.permission)
+    pub fn parsed_permission(&self) -> ApiPrincipalPermission {
+        ApiPrincipalPermission::from_db_str(&self.permission)
     }
 }
 
