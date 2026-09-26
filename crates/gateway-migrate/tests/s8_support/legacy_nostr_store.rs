@@ -14,12 +14,12 @@ fn s8_refuses_unmapped_old_nostr_gateway_instance_without_backup_or_write() {
 }
 
 #[test]
-fn s8_refuses_conflicting_nostr_core_and_gateway_credentials_before_backup() {
+fn s8_preserves_gateway_only_nostr_signing_key_rotation() {
     legacy_nostr_gateway_fixture(false, false, true, None, false);
 }
 
 #[test]
-fn s8_refuses_conflicting_old_gateway_and_core_nostr_settings_before_backup() {
+fn s8_preserves_old_gateway_settings_when_legacy_core_config_is_stale() {
     for field in ["relays_json", "filter_json", "enabled", "owner_pubkey", "self_pubkey"] {
         legacy_nostr_gateway_fixture(false, false, false, Some(field), false);
     }
@@ -218,26 +218,10 @@ fn legacy_nostr_gateway_fixture_with_updates(
             credential_files: BTreeMap::new(),
         },
     });
-    if core_config_conflict.is_some() || watch_session_conflict {
-        let expected = if watch_session_conflict { "old Nostr watch session conflict" } else { "old Nostr core config conflict" };
-        assert!(result.unwrap_err().to_string().contains(expected), "must refuse contradictory historical Nostr authority");
+    if watch_session_conflict {
+        assert!(result.unwrap_err().to_string().contains("old Nostr watch session conflict"), "must refuse contradictory watch session");
         assert!(!backup_dir.exists(), "source conflicts must refuse before backup");
         assert_eq!(source::file_sha256(&gateway_path).unwrap(), original_gateway_hash);
-        return;
-    }
-    if credential_conflict {
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("credential candidates conflict"));
-        assert!(
-            !backup_dir.exists(),
-            "conflicting signing keys must refuse before backup"
-        );
-        assert_eq!(
-            source::file_sha256(&gateway_path).unwrap(),
-            original_gateway_hash
-        );
         return;
     }
     if missing_association {
@@ -345,6 +329,12 @@ fn legacy_nostr_gateway_fixture_with_updates(
     })
     .expect("existing user must complete S8 projection after old Nostr store conversion");
     assert_eq!(verified["core_projection"]["deliveries"]["row_count"], 1);
+    if credential_conflict {
+        let core = Connection::open(&core_path).unwrap();
+        let retained: String = core.query_row("SELECT secret_key FROM agent_nostr_config WHERE agent_id='agent-a'", [], |r| r.get(0)).unwrap();
+        assert_eq!(retained, "different-signing-secret", "stale source history must remain untouched");
+        assert_eq!(opencrab_nostr_gateway::secret_store::decrypt(&envelope, &[7u8; 32]).unwrap().as_slice(), b"test-signing-secret");
+    }
     if gateway_relay_change || stale_core_sender {
         let core = Connection::open(&core_path).unwrap();
         let (revision, config_b64): (i64, String) = core.query_row(
@@ -359,7 +349,7 @@ fn legacy_nostr_gateway_fixture_with_updates(
             let destination_config: String = migrated.query_row("SELECT config_b64 FROM instances", [], |r| r.get(0)).unwrap();
             assert_eq!(config_b64, destination_config);
         } else {
-            assert_eq!(revision, 1, "stale core sender must not force config revision when no gateway settings changed");
+            assert_eq!(revision, 2, "removing a stale core sender must revise admission config once");
         }
         if stale_core_sender {
             assert_eq!(config["access"]["trusted_users"], serde_json::json!([]));
