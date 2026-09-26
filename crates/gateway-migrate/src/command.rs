@@ -311,7 +311,8 @@ pub fn run_project(args: ProjectArgs<'_>) -> Result<Value> {
         &report.backup_set_sha256,
         &report.destinations,
     )?;
-    let legacy_updates = destination::legacy_nostr_core_updates(&conn_ro, &args.destination_paths)?;
+    let legacy_updates =
+        destination::legacy_nostr_core_updates(&conn_ro, &rows, &args.destination_paths)?;
     let outcome = match projection::verify_already_applied(
         &conn_ro,
         &rows,

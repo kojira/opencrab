@@ -1,5 +1,5 @@
 // The pre-S5 gateway store is an S8 source, never a live daemon fallback.
-pub(crate) fn legacy_nostr_core_updates(core: &Connection, paths: &BTreeMap<(String, String), PathBuf>) -> Result<Vec<LegacyNostrCoreUpdate>> {
+pub(crate) fn legacy_nostr_core_updates(core: &Connection, rows: &[SourceRow], paths: &BTreeMap<(String, String), PathBuf>) -> Result<Vec<LegacyNostrCoreUpdate>> {
     let mut updates = Vec::new();
     for ((kind, _), path) in paths {
         if kind != "nostr" { continue; }
@@ -8,7 +8,26 @@ pub(crate) fn legacy_nostr_core_updates(core: &Connection, paths: &BTreeMap<(Str
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_nostr_instances')",
             [], |row| row.get(0),
         )?;
-        if !retained { continue; }
+        if !retained {
+            let mut stmt = core.prepare("SELECT i.instance_id,a.agent_id,i.revision,i.enabled,i.config_b64 FROM gate_instances i JOIN agents a ON a.subject_id=i.subject_id WHERE i.kind_id='nostr' AND i.deleted_at IS NULL ORDER BY i.instance_id")?;
+            let instances = stmt.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,row.get::<_,bool>(3)?,row.get::<_,String>(4)?)))?
+                .collect::<std::result::Result<Vec<_>,_>>()?;
+            for (instance_id, agent_id, revision, enabled, current) in instances {
+                let Some(desired) = core_only_nostr_config(core, rows, &agent_id, &instance_id, &current)? else { continue };
+                let expected_revision = revision.checked_add(i64::from(desired != current)).context("Nostr revision overflow")?;
+                let digest = canonical::hex(&Sha256::digest(base64::engine::general_purpose::STANDARD.decode(&desired)?));
+                let (target_config, target_revision, target_digest, target_enabled): (String,Option<i64>,Option<String>,bool) = gateway.query_row(
+                    "SELECT config_b64,core_revision,core_digest,enabled FROM instances WHERE instance_id=?1 AND agent_id=?2",
+                    params![instance_id,agent_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+                )?;
+                ensure!(target_config == desired && target_revision == Some(expected_revision) && target_digest.as_deref() == Some(digest.as_str()) && target_enabled == enabled,
+                    "core-only Nostr destination revision/digest conflict");
+                if desired != current {
+                    updates.push(LegacyNostrCoreUpdate { instance_id, expected_revision:u64::try_from(revision)?, enabled, config_b64:desired, config_digest:digest });
+                }
+            }
+            continue;
+        }
         let mut stmt = gateway.prepare("SELECT i.instance_id,i.agent_id,i.config_b64,i.enabled,i.core_revision,i.core_digest FROM instances i JOIN legacy_nostr_instances l ON l.agent_id=i.agent_id ORDER BY i.instance_id")?;
         let desired = stmt.query_map([], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,bool>(3)?,row.get::<_,Option<i64>>(4)?,row.get::<_,Option<String>>(5)?)))?
             .collect::<std::result::Result<Vec<_>,_>>()?;

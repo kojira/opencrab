@@ -48,6 +48,7 @@ struct InstancePlan {
     credential_source: String,
     created_at: String,
     legacy_nostr: bool,
+    core_only_nostr: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +58,7 @@ struct IdentityPlan {
     external_id: String,
     relationship_id: Option<String>,
     active: bool,
-    source: LegacyIdentitySource,
+    source: Option<LegacyIdentitySource>,
 }
 #[derive(Debug, Clone)]
 struct LegacyIdentitySource {
@@ -208,12 +209,10 @@ pub fn import(
                     accepted.push(item);
                 }
             }
-            let (was_inserted, hash) = apply_legacy_identity_source(&tx, &identity.source)?;
-            let item = key_value("legacy_identity_sources", vec![identity.source.instance_id.clone(), identity.source.id.clone()], hash)?;
-            if was_inserted {
-                inserted.push(item);
-            } else {
-                accepted.push(item);
+            if let Some(source) = &identity.source {
+                let (was_inserted, hash) = apply_legacy_identity_source(&tx, source)?;
+                let item = key_value("legacy_identity_sources", vec![source.instance_id.clone(), source.id.clone()], hash)?;
+                if was_inserted { inserted.push(item); } else { accepted.push(item); }
             }
         }
         let legacy_identities = if upgrading_legacy {
@@ -239,7 +238,7 @@ pub fn import(
         outputs.push(json!({
             "kind_id":destination.kind_id,"path_id":destination.path_id,"schema":destination.schema,
             "before_logical_sha256":backup.logical_sha256,"after_logical_sha256":crate::backup::logical_sha256(path)?,
-            "counts":{"instances":plans.iter().filter(|p| p.destination == *destination).count(),"endpoints":destination_endpoints.len(),"identity_projections":destination_identities.iter().filter(|identity| identity.active).count()+legacy_identities,"legacy_identity_sources":destination_identities.len(),"policies":0,"credentials":credentials.len()},
+            "counts":{"instances":plans.iter().filter(|p| p.destination == *destination).count(),"endpoints":destination_endpoints.len(),"identity_projections":destination_identities.iter().filter(|identity| identity.active).count()+legacy_identities,"legacy_identity_sources":destination_identities.iter().filter(|identity| identity.source.is_some()).count(),"policies":0,"credentials":credentials.len()},
             "inserted_keys":inserted,"accepted_existing_keys":accepted,"credentials":credentials
         }));
     }
@@ -307,6 +306,7 @@ pub fn validate_project_artifacts(
     Ok(())
 }
 
+include!("destination_core_nostr.rs");
 include!("destination_plans.rs");
 include!("destination_legacy_nostr.rs");
 include!("destination_identity_sources.rs");
@@ -327,12 +327,14 @@ fn expected_keys(conn: &Connection, plans: &[&InstancePlan], identities: &[Ident
                 identity_semantic(item),
             )?);
         }
-        out.push(expected_key(
-            conn,
-            "legacy_identity_sources",
-            vec![item.source.instance_id.clone(), item.source.id.clone()],
-            legacy_identity_source_semantic(&item.source),
-        )?);
+        if let Some(source) = &item.source {
+            out.push(expected_key(
+                conn,
+                "legacy_identity_sources",
+                vec![source.instance_id.clone(), source.id.clone()],
+                legacy_identity_source_semantic(source),
+            )?);
+        }
     }
     for item in endpoints {
         out.push(expected_key(conn, "endpoints", vec![item.instance_id.clone(), item.channel_id.clone()], endpoint_semantic(item))?);
@@ -467,11 +469,11 @@ fn apply_instance(tx: &Transaction<'_>, plan: &InstancePlan, key: Option<&[u8; 3
     };
     match plan.destination.kind_id.as_str() {
         "discord" | "nostr" => {
-            let revision = plan.legacy_nostr.then_some(plan.revision);
-            let digest = if plan.legacy_nostr {
+            let revision = (plan.legacy_nostr || plan.core_only_nostr).then_some(plan.revision);
+            let digest = if plan.legacy_nostr || plan.core_only_nostr {
                 Some(canonical::hex(&Sha256::digest(base64::engine::general_purpose::STANDARD.decode(&plan.config_b64)?)))
             } else { None };
-            let inventory = if plan.legacy_nostr { serde_json::to_string(&plan.binding_ids)? } else { "[]".into() };
+            let inventory = if plan.legacy_nostr || plan.core_only_nostr { serde_json::to_string(&plan.binding_ids)? } else { "[]".into() };
             tx.execute("INSERT INTO instances(instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,subject_grant_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,core_digest,binding_inventory_json,process_id,process_nonce,failure_count,retry_at_unix_ms,last_exit,updated_at) VALUES (?1,?2,?3,?4,?5,?6,NULL,?7,1,NULL,'pending',?8,?9,?10,NULL,NULL,0,NULL,NULL,?11)",params![plan.instance_id,plan.agent_id,plan.subject_id,plan.config_b64,serde_json::to_string(&plan.addresses)?,envelope,plan.enabled,revision,digest,inventory,plan.created_at])?;
         }
         _ => bail!("unknown destination"),
@@ -710,7 +712,7 @@ mod s8_review_red_tests {
         let raw = serde_json::to_vec(&cfg).unwrap();
         let config_b64 = opencrab_discord_gateway::config::canonicalize_config_b64(&base64::engine::general_purpose::STANDARD.encode(raw)).unwrap();
         let destination = Destination { kind_id:"discord".into(), path_id:"main".into(), schema:"s5-discord-v1".into() };
-        let plan = InstancePlan { destination:destination.clone(), instance_id:"i".into(), agent_id:"agent-a".into(), subject_id:1, revision:1, config_b64, addresses:vec![], binding_ids:vec![], enabled:true, credential:Zeroizing::new(vec![1]), credential_source:"x".into(), created_at:"2026-01-01T00:00:00Z".into(), legacy_nostr:false };
+        let plan = InstancePlan { destination:destination.clone(), instance_id:"i".into(), agent_id:"agent-a".into(), subject_id:1, revision:1, config_b64, addresses:vec![], binding_ids:vec![], enabled:true, credential:Zeroizing::new(vec![1]), credential_source:"x".into(), created_at:"2026-01-01T00:00:00Z".into(), legacy_nostr:false, core_only_nostr:false };
         let mut approval = approval(destination);
         approval.identity_dispositions.push(IdentityDisposition { source_fingerprint:row.fingerprint.clone(), edges:vec![IdentityEdge::Gateway { kind_id:"discord".into(), instance_id:"i".into() }] });
         assert!(build_identity_plans(&[row], &approval, &[plan]).is_err());
@@ -751,7 +753,7 @@ mod s8_review_red_tests {
             destination: Destination {kind_id:"web".into(),path_id:"main".into(),schema:"s5-web-v1".into()},
             instance_id:"missing".into(),agent_id:"agent-a".into(),subject_id:1,revision:1,
             config_b64:"e30=".into(),addresses:vec![],binding_ids:vec![],enabled:true,credential:Zeroizing::new(vec![1]),
-            credential_source:"x".into(),created_at:"2026".into(),legacy_nostr:false
+            credential_source:"x".into(),created_at:"2026".into(),legacy_nostr:false,core_only_nostr:false
         };
         let tx = conn.transaction().unwrap();
         assert!(apply_instance(&tx, &plan, None).is_err());
@@ -776,7 +778,7 @@ mod s8_review_red_tests {
             ("guild_id".into(), crate::source::Cell::Text("".into())),
         ]};
         let destination = Destination { kind_id:"discord".into(), path_id:"main".into(), schema:"s5-discord-v1".into() };
-        let plan = InstancePlan { destination:destination.clone(), instance_id:"i".into(), agent_id:"agent-a".into(), subject_id:subject, revision:1, config_b64, addresses:vec!["discord-agent-a--42".into()], binding_ids:vec!["b".into()], enabled:true, credential:Zeroizing::new(vec![1]), credential_source:"x".into(), created_at:"2026".into(), legacy_nostr:false };
+        let plan = InstancePlan { destination:destination.clone(), instance_id:"i".into(), agent_id:"agent-a".into(), subject_id:subject, revision:1, config_b64, addresses:vec!["discord-agent-a--42".into()], binding_ids:vec!["b".into()], enabled:true, credential:Zeroizing::new(vec![1]), credential_source:"x".into(), created_at:"2026".into(), legacy_nostr:false, core_only_nostr:false };
         assert!(build_endpoint_plans(&core, &[row], &approval(destination), &[plan]).is_err(), "a matching live binding cannot be omitted from the approved channel edges");
     }
 

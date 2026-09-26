@@ -1,14 +1,19 @@
 #[test]
 fn s8_core_only_nostr_projects_historical_owner_before_trusted_admission() {
-    core_only_nostr_owner_fixture(false);
+    core_only_nostr_owner_fixture(false, false);
 }
 
 #[test]
 fn s8_core_only_nostr_converts_bound_historical_watch_session_id() {
-    core_only_nostr_owner_fixture(true);
+    core_only_nostr_owner_fixture(true, false);
 }
 
-fn core_only_nostr_owner_fixture(historical_watch_session: bool) {
+#[test]
+fn s8_core_only_nostr_refuses_mismatched_historical_watch_before_backup() {
+    core_only_nostr_owner_fixture(true, true);
+}
+
+fn core_only_nostr_owner_fixture(historical_watch_session: bool, mismatched_session: bool) {
     use opencrab_gate_client::wire::SaidCaller;
     use opencrab_nostr_gateway::{admission::admit, config::parse_instance_config, map::WatchEvent};
 
@@ -36,7 +41,7 @@ fn core_only_nostr_owner_fixture(historical_watch_session: bool) {
         let config = serde_json::json!({"name":name,"relays":["wss://example.invalid"],
             "self_pubkey":self_key,"filter":{"kinds":[1]},
             "access":{"followees":[followee]},
-            "watches":if *enabled { vec![if historical_watch_session { serde_json::json!({"id":7,"session_id":"session-1","interval_secs":600,"filter":{"kinds":[1]}}) } else { serde_json::json!({"id":7,"interval_secs":600,"filter":{"kinds":[1]}}) }] } else { vec![] }});
+            "watches":if *enabled { vec![if historical_watch_session { serde_json::json!({"id":7,"session_id":if mismatched_session { "session-2" } else { "session-1" },"interval_secs":600,"filter":{"kinds":[1]}}) } else { serde_json::json!({"id":7,"interval_secs":600,"filter":{"kinds":[1]}}) }] } else { vec![] }});
         let raw = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config).unwrap());
         let b64 = if *enabled && historical_watch_session { raw } else {
             opencrab_nostr_gateway::config::canonicalize_config_b64(&raw).unwrap()
@@ -82,6 +87,11 @@ fn core_only_nostr_owner_fixture(historical_watch_session: bool) {
     let backup_dir = temp.path().join("backups");
     let inputs = || Inputs {paths:BTreeMap::from([(("nostr".into(),"nostr-primary".into()),gateway_path.clone())]),master_keys:BTreeMap::from([("nostr".into(),key_path.clone())]),credential_files:BTreeMap::new()};
     let imported = command::run_import(ImportArgs {core_path:&core_path,approval_path:&approval_path,report_path:&report_path,backup_dir:&backup_dir,inputs:inputs()});
+    if mismatched_session {
+        assert!(imported.unwrap_err().to_string().contains("historical Nostr watch source mismatch"));
+        assert!(!backup_dir.exists());
+        return;
+    }
     assert!(imported.is_ok(), "S8 must import the bound historical Nostr watch at its production entry: {:?}", imported.err().map(|error| error.to_string()));
     command::run_project(ProjectArgs {core_path:&core_path,approval_path:&approval_path,import_report_path:&report_path,verification_path:&verification_path,destination_paths:inputs().paths}).unwrap();
     let gateway = Connection::open(&gateway_path).unwrap();

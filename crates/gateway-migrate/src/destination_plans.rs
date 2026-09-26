@@ -25,12 +25,6 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
             continue;
         }
         let destination = approval.destination(&kind)?.clone();
-        let canonical = match kind.as_str() {
-            "discord" => opencrab_discord_gateway::config::canonicalize_config_b64(&config_b64)?,
-            "nostr" => opencrab_nostr_gateway::config::canonicalize_config_b64(&config_b64)?,
-            "web" => config_b64.clone(),
-            _ => unreachable!(),
-        };
         let decoded = base64::engine::general_purpose::STANDARD.decode(&config_b64)?;
         ensure!(canonical::hex(&Sha256::digest(&decoded)) == digest, "config digest mismatch");
         let destination_path = inputs.paths.get(&(kind.clone(), destination.path_id.clone())).context("missing destination")?;
@@ -45,8 +39,18 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
         } else {
             false
         };
-        // Only a verified old Nostr store can reconcile its historical core encoding in S8.
-        ensure!(canonical == config_b64 || old_nostr_store || retained_old_nostr, "noncanonical config");
+        let core_only_nostr = kind == "nostr" && !old_nostr_store && !retained_old_nostr
+            && rows.iter().any(|row| row.table == "agent_nostr_config" && row.text("agent_id").ok() == Some(agent_id.as_str()));
+        let (normalized, historical_watch) = if core_only_nostr {
+            normalize_historical_nostr_watches(core, &agent_id, &instance_id, &config_b64)?
+        } else { (config_b64.clone(), false) };
+        let canonical = match kind.as_str() {
+            "discord" => opencrab_discord_gateway::config::canonicalize_config_b64(&config_b64)?,
+            "nostr" => opencrab_nostr_gateway::config::canonicalize_config_b64(&normalized)?,
+            "web" => config_b64.clone(),
+            _ => unreachable!(),
+        };
+        ensure!(canonical == config_b64 || old_nostr_store || retained_old_nostr || historical_watch, "noncanonical config");
         let mut addresses = core
             .prepare("SELECT address FROM gate_bindings WHERE instance_id=?1 AND closed_at IS NULL ORDER BY address")?
             .query_map([&instance_id], |row| row.get::<_, String>(0))?
@@ -56,6 +60,13 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
             .query_map([&instance_id], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut legacy_nostr = false;
+        if core_only_nostr {
+            let desired = core_only_nostr_config(core, rows, &agent_id, &instance_id, &config_b64)?.context("Nostr source missing")?;
+            if desired != config_b64 {
+                revision = revision.checked_add(1).context("Nostr core revision overflow")?;
+                config_b64 = desired;
+            }
+        }
         if let Some(conn) = nostr_conn {
             if old_nostr_store {
                 let (merged, old_enabled, changed) = authoritative_nostr_config(&conn, &agent_id, &config_b64, enabled)?;
@@ -102,6 +113,7 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
             credential_source: source,
             created_at: approval.created_at.clone(),
             legacy_nostr,
+            core_only_nostr,
         });
     }
     Ok(plans)
@@ -236,7 +248,7 @@ fn build_identity_plans(rows: &[SourceRow], approval: &Approval, plans: &[Instan
                         external_id: row.text("user_id")?.into(),
                         relationship_id,
                         active,
-                        source: LegacyIdentitySource {
+                        source: Some(LegacyIdentitySource {
                             instance_id: instance_id.clone(),
                             id: row.text("id")?.into(),
                             user_id: row.text("user_id")?.into(),
@@ -246,9 +258,20 @@ fn build_identity_plans(rows: &[SourceRow], approval: &Approval, plans: &[Instan
                             created_at: row.text("created_at")?.into(),
                             display_name: row.text("display_name")?.into(),
                             platform: row.text("platform")?.into(),
-                        },
+                        }),
                     });
                 }
+            }
+        }
+    }
+    for plan in plans.iter().filter(|plan| plan.core_only_nostr) {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(&plan.config_b64)?;
+        let access = opencrab_nostr_gateway::config::parse_instance_config(&bytes)?.access;
+        let values = output.entry((plan.destination.kind_id.clone(), plan.destination.path_id.clone())).or_default();
+        for (role, external, relationship_id) in access.owner.into_iter().map(|key| ("owner", key, None))
+            .chain(access.co_agents.into_iter().map(|(key, agent)| ("co_agent", key, Some(agent)))) {
+            if !values.iter().any(|item| item.instance_id == plan.instance_id && item.role == role && item.external_id == external) {
+                values.push(IdentityPlan { instance_id:plan.instance_id.clone(),role:role.into(),external_id:external,relationship_id,active:true,source:None });
             }
         }
     }

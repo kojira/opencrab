@@ -1676,6 +1676,7 @@ dependencies = [
  "libc",
  "opencrab-db",
  "opencrab-discord-gateway",
+ "opencrab-gate-client",
  "opencrab-nostr-gateway",
  "opencrab-web-gateway",
  "rusqlite",
