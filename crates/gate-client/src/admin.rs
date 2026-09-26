@@ -171,6 +171,14 @@ impl GateAdminClient {
         let namespace = uuid::Uuid::parse_str(desired.instance_id)?;
         let mut wanted = std::collections::BTreeSet::new();
         for address in desired.addresses {
+            if let Some(binding) = observed
+                .bindings
+                .iter()
+                .find(|binding| binding.address == *address)
+            {
+                wanted.insert(binding.binding_id.clone());
+                continue;
+            }
             let binding_id = uuid::Uuid::new_v5(&namespace, address.as_bytes()).to_string();
             let session_id = format!("extgate-{binding_id}");
             self.put_binding(
@@ -342,7 +350,10 @@ mod tests {
             .await
             .expect("existing binding should be retained without a new PUT");
         assert_eq!(result.bindings[0].binding_id, binding_id);
-        assert_eq!(result.bindings[0].session_id.as_deref(), Some("existing-session"));
+        assert_eq!(
+            result.bindings[0].session_id.as_deref(),
+            Some("existing-session")
+        );
         server.await.unwrap();
         std::fs::remove_file(socket).unwrap();
     }
