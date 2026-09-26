@@ -1,5 +1,5 @@
 #[test]
-fn s8_migrates_existing_nostr_gateway_store_without_losing_identity_or_watch() {
+fn s8_migrates_existing_nostr_gateway_store_without_losing_identity_watch_or_followees() {
     legacy_nostr_gateway_fixture(false, false, false, None, false);
 }
 
@@ -81,7 +81,7 @@ fn legacy_nostr_gateway_fixture_with_updates(
     let config = serde_json::json!({
         "relays":["wss://example.invalid"], "filter":{"kinds":[1]},
         "self_pubkey":"a".repeat(64), "name":"A",
-        "access":{"owner":["b".repeat(64)], "co_agents":{}, "trusted_users":if stale_core_sender { vec!["c".repeat(64)] } else { Vec::new() }},
+        "access":{"owner":["b".repeat(64)], "co_agents":{}, "trusted_users":if stale_core_sender { vec!["c".repeat(64)] } else { Vec::new() }, "followees":["d".repeat(64)]},
         "watches":[{"id":7,"interval_secs":600,"filter":{"kinds":[1]}}]
     });
     let config_b64 = opencrab_nostr_gateway::config::canonicalize_config_b64(
@@ -255,6 +255,12 @@ fn legacy_nostr_gateway_fixture_with_updates(
     let reopened = opencrab_nostr_gateway::store::NostrStore::open(&gateway_path).unwrap();
     drop(reopened);
     let migrated = Connection::open(&gateway_path).unwrap();
+    let destination_config_b64: String = migrated.query_row("SELECT config_b64 FROM instances", [], |row| row.get(0)).unwrap();
+    let destination_config = opencrab_nostr_gateway::config::parse_instance_config(
+        &base64::engine::general_purpose::STANDARD.decode(&destination_config_b64).unwrap(),
+    ).unwrap();
+    assert_eq!(destination_config.access.followees, vec!["d".repeat(64)],
+        "old gateway admission must not erase core-only followees");
     let (stable_id, envelope): (String, String) = migrated
         .query_row(
             "SELECT instance_id,credential_envelope FROM instances",
@@ -308,7 +314,7 @@ fn legacy_nostr_gateway_fixture_with_updates(
         backup_dir: &backup_dir,
         inputs: Inputs {
             paths: BTreeMap::from([(("nostr".into(), "nostr-primary".into()), gateway_path)]),
-            master_keys: BTreeMap::from([("nostr".into(), key_path)]),
+            master_keys: BTreeMap::from([("nostr".into(), key_path.clone())]),
             credential_files: BTreeMap::new(),
         },
     })
@@ -329,6 +335,15 @@ fn legacy_nostr_gateway_fixture_with_updates(
     })
     .expect("existing user must complete S8 projection after old Nostr store conversion");
     assert_eq!(verified["core_projection"]["deliveries"]["row_count"], 1);
+    let projected_config_b64: String = Connection::open(&core_path).unwrap().query_row(
+        "SELECT config_b64 FROM gate_instances WHERE instance_id='11111111-1111-4111-8111-111111111111'",
+        [], |row| row.get(0),
+    ).unwrap();
+    let projected_config = opencrab_nostr_gateway::config::parse_instance_config(
+        &base64::engine::general_purpose::STANDARD.decode(projected_config_b64).unwrap(),
+    ).unwrap();
+    assert_eq!(projected_config.access.followees, vec!["d".repeat(64)],
+        "core-only followees must survive projected revision");
     if credential_conflict {
         let core = Connection::open(&core_path).unwrap();
         let retained: String = core.query_row("SELECT secret_key FROM agent_nostr_config WHERE agent_id='agent-a'", [], |r| r.get(0)).unwrap();
@@ -348,6 +363,20 @@ fn legacy_nostr_gateway_fixture_with_updates(
             assert_eq!(config["relays"], serde_json::json!(["wss://changed.invalid"]));
             let destination_config: String = migrated.query_row("SELECT config_b64 FROM instances", [], |r| r.get(0)).unwrap();
             assert_eq!(config_b64, destination_config);
+            command::run_import(ImportArgs {
+                core_path: &core_path, approval_path: &approval_path, report_path: &report_path,
+                backup_dir: &backup_dir, inputs: Inputs {
+                    paths: BTreeMap::from([(("nostr".into(), "nostr-primary".into()), temp.path().join("nostr.db"))]),
+                    master_keys: BTreeMap::from([("nostr".into(), key_path.clone())]),
+                    credential_files: BTreeMap::new(),
+                },
+            }).expect("projected legacy migration must rerun without a second revision");
+            command::run_project(ProjectArgs {
+                core_path: &core_path, approval_path: &approval_path, import_report_path: &report_path,
+                verification_path: &verification_path,
+                destination_paths: BTreeMap::from([(("nostr".into(), "nostr-primary".into()), temp.path().join("nostr.db"))]),
+            }).expect("projected legacy migration must verify existing marker");
+            assert_eq!(core.query_row("SELECT revision FROM gate_instances WHERE instance_id='11111111-1111-4111-8111-111111111111'", [], |r| r.get::<_,i64>(0)).unwrap(), 2);
         } else {
             assert_eq!(revision, 2, "removing a stale core sender must revise admission config once");
         }
