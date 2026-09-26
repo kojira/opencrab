@@ -30,12 +30,35 @@ fn s8_refuses_conflicting_old_gateway_and_core_watch_sessions_before_backup() {
     legacy_nostr_gateway_fixture(false, false, false, None, true);
 }
 
+#[test]
+fn s8_preserves_gateway_only_nostr_relay_change_in_core_and_destination() {
+    legacy_nostr_gateway_fixture_with_updates(false, false, false, None, false, true, false);
+}
+
+#[test]
+fn s8_keeps_removed_nostr_sender_inert_despite_stale_core_identity() {
+    legacy_nostr_gateway_fixture_with_updates(false, false, false, None, false, false, true);
+}
+
 fn legacy_nostr_gateway_fixture(
     encrypted_source: bool,
     missing_association: bool,
     credential_conflict: bool,
     core_config_conflict: Option<&str>,
     watch_session_conflict: bool,
+) {
+    legacy_nostr_gateway_fixture_with_updates(encrypted_source, missing_association, credential_conflict,
+        core_config_conflict, watch_session_conflict, false, false);
+}
+
+fn legacy_nostr_gateway_fixture_with_updates(
+    encrypted_source: bool,
+    missing_association: bool,
+    credential_conflict: bool,
+    core_config_conflict: Option<&str>,
+    watch_session_conflict: bool,
+    gateway_relay_change: bool,
+    stale_core_sender: bool,
 ) {
     let temp = tempfile::tempdir().unwrap();
     let core_path = temp.path().join("core.db");
@@ -51,10 +74,14 @@ fn legacy_nostr_gateway_fixture(
         "DELETE FROM agent_discord_config; DELETE FROM channel_config; DELETE FROM trusted_users;",
     )
     .unwrap();
+    if stale_core_sender {
+        core.execute("INSERT INTO trusted_users VALUES ('tu-stale',?1,'agent-a','user','owner','2026','Stale','nostr')",
+            ["c".repeat(64)]).unwrap();
+    }
     let config = serde_json::json!({
         "relays":["wss://example.invalid"], "filter":{"kinds":[1]},
         "self_pubkey":"a".repeat(64), "name":"A",
-        "access":{"owner":["b".repeat(64)], "co_agents":{}, "trusted_users":[]},
+        "access":{"owner":["b".repeat(64)], "co_agents":{}, "trusted_users":if stale_core_sender { vec!["c".repeat(64)] } else { Vec::new() }},
         "watches":[{"id":7,"interval_secs":600,"filter":{"kinds":[1]}}]
     });
     let config_b64 = opencrab_nostr_gateway::config::canonicalize_config_b64(
@@ -118,6 +145,9 @@ fn legacy_nostr_gateway_fixture(
         ["b".repeat(64)],
     )
     .unwrap();
+    if gateway_relay_change {
+        old.execute("UPDATE instances SET relays_json='[\"wss://changed.invalid\"]' WHERE agent_id='agent-a'", []).unwrap();
+    }
     if encrypted_source {
         let source_envelope =
             opencrab_nostr_gateway::secret_store::encrypt(b"test-signing-secret", &[7u8; 32])
@@ -141,6 +171,16 @@ fn legacy_nostr_gateway_fixture(
         &key_path,
         &base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
     );
+    let stale_dispositions = if stale_core_sender {
+        vec![IdentityDisposition {
+            source_fingerprint: source::validate(&Connection::open(&core_path).unwrap()).unwrap()
+                .into_iter().find(|row| row.table == "trusted_users").unwrap().fingerprint,
+            edges: vec![IdentityEdge::Gateway {
+                kind_id: "nostr".into(),
+                instance_id: "11111111-1111-4111-8111-111111111111".into(),
+            }],
+        }]
+    } else { Vec::new() };
     let approval = Approval {
         version: 1,
         operation_id: "00000000-0000-4000-8000-000000000009".into(),
@@ -152,7 +192,7 @@ fn legacy_nostr_gateway_fixture(
             path_id: "nostr-primary".into(),
             schema: "s5-nostr-v1".into(),
         }],
-        identity_dispositions: vec![],
+        identity_dispositions: stale_dispositions,
         channel_edges: vec![],
         watch_edges: watch_fingerprint.map(|source_fingerprint| opencrab_gateway_migrate::manifest::WatchEdge {
             source_fingerprint,
@@ -305,4 +345,27 @@ fn legacy_nostr_gateway_fixture(
     })
     .expect("existing user must complete S8 projection after old Nostr store conversion");
     assert_eq!(verified["core_projection"]["deliveries"]["row_count"], 1);
+    if gateway_relay_change || stale_core_sender {
+        let core = Connection::open(&core_path).unwrap();
+        let (revision, config_b64): (i64, String) = core.query_row(
+            "SELECT revision,config_b64 FROM gate_instances WHERE instance_id='11111111-1111-4111-8111-111111111111'",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        let config: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::STANDARD.decode(&config_b64).unwrap()).unwrap();
+        if gateway_relay_change {
+            assert_eq!(revision, 2, "stopped projection must revise only changed Nostr config");
+            assert_eq!(config["relays"], serde_json::json!(["wss://changed.invalid"]));
+            let destination_config: String = migrated.query_row("SELECT config_b64 FROM instances", [], |r| r.get(0)).unwrap();
+            assert_eq!(config_b64, destination_config);
+        } else {
+            assert_eq!(revision, 1, "stale core sender must not force config revision when no gateway settings changed");
+        }
+        if stale_core_sender {
+            assert_eq!(config["access"]["trusted_users"], serde_json::json!([]));
+            assert_eq!(migrated.query_row("SELECT COUNT(*) FROM identity_projections WHERE external_id=?1", ["c".repeat(64)], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            assert_eq!(migrated.query_row("SELECT COUNT(*) FROM legacy_identity_sources WHERE id='tu-stale'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        }
+        assert_eq!(core.query_row("SELECT COUNT(*) FROM gate_bindings WHERE binding_id='binding-1'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
 }
