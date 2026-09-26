@@ -25,3 +25,4 @@ opencrab-web-gateway.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+opencrab-gate-client.workspace = true

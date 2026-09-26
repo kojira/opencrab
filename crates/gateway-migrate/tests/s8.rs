@@ -113,6 +113,7 @@ fn source_profile_refuses_neighbor_versions_and_missing_required_column() {
 }
 include!("s8_support/legacy_source_schema.rs");
 include!("s8_support/legacy_nostr_store.rs");
+include!("s8_support/core_only_nostr_owner.rs");
 include!("s8_support/projected.rs");
 fn projected_discord_fixture(freeze: bool, fired: bool, cleanup: bool, changed: bool) {
     let temp = tempfile::tempdir().unwrap();
