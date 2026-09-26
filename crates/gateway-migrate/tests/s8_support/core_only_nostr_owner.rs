@@ -1,5 +1,14 @@
 #[test]
 fn s8_core_only_nostr_projects_historical_owner_before_trusted_admission() {
+    core_only_nostr_owner_fixture(false);
+}
+
+#[test]
+fn s8_core_only_nostr_converts_bound_historical_watch_session_id() {
+    core_only_nostr_owner_fixture(true);
+}
+
+fn core_only_nostr_owner_fixture(historical_watch_session: bool) {
     use opencrab_gate_client::wire::SaidCaller;
     use opencrab_nostr_gateway::{admission::admit, config::parse_instance_config, map::WatchEvent};
 
@@ -27,9 +36,11 @@ fn s8_core_only_nostr_projects_historical_owner_before_trusted_admission() {
         let config = serde_json::json!({"name":name,"relays":["wss://example.invalid"],
             "self_pubkey":self_key,"filter":{"kinds":[1]},
             "access":{"followees":[followee]},
-            "watches":if *enabled { vec![serde_json::json!({"id":7,"interval_secs":600,"filter":{"kinds":[1]}})] } else { vec![] }});
-        let b64 = opencrab_nostr_gateway::config::canonicalize_config_b64(
-            &base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config).unwrap())).unwrap();
+            "watches":if *enabled { vec![if historical_watch_session { serde_json::json!({"id":7,"session_id":"session-1","interval_secs":600,"filter":{"kinds":[1]}}) } else { serde_json::json!({"id":7,"interval_secs":600,"filter":{"kinds":[1]}}) }] } else { vec![] }});
+        let raw = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config).unwrap());
+        let b64 = if *enabled && historical_watch_session { raw } else {
+            opencrab_nostr_gateway::config::canonicalize_config_b64(&raw).unwrap()
+        };
         let digest = format!("{:x}", Sha256::digest(base64::engine::general_purpose::STANDARD.decode(&b64).unwrap()));
         if *enabled {
             core.execute("UPDATE gate_instances SET kind_id='nostr',config_b64=?1,config_digest=?2", params![b64,digest]).unwrap();
@@ -47,6 +58,7 @@ fn s8_core_only_nostr_projects_historical_owner_before_trusted_admission() {
     for (id, user) in [("tu-owner", &owner), ("tu-other", &other)] {
         core.execute("INSERT INTO trusted_users VALUES (?1,?2,'agent-a','user','owner','2026','Trusted','nostr')", params![id,user]).unwrap();
     }
+    core.execute("INSERT INTO trusted_co_agents(id,agent_id,co_agent_id,created_by,created_at) VALUES ('co-1','agent-a','agent-b','owner','2026')", []).unwrap();
     core.execute("INSERT INTO session_watches(id,session_id,agent_id,interval_secs,filter_json,created_at) VALUES (7,'session-1','agent-a',600,'{\"authors\":[],\"keywords\":[],\"kinds\":[1]}','2026')", []).unwrap();
     core.execute("INSERT INTO tool_logs(agent_id,session_id,tool_name,args_json,outcome,result_text) VALUES ('agent-a','session-1','history-test','{}','done','retained')", []).unwrap();
     core.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;").unwrap();
@@ -69,7 +81,8 @@ fn s8_core_only_nostr_projects_historical_owner_before_trusted_admission() {
     write_secure(&approval_path, &canonical::bytes(&approval).unwrap());
     let backup_dir = temp.path().join("backups");
     let inputs = || Inputs {paths:BTreeMap::from([(("nostr".into(),"nostr-primary".into()),gateway_path.clone())]),master_keys:BTreeMap::from([("nostr".into(),key_path.clone())]),credential_files:BTreeMap::new()};
-    command::run_import(ImportArgs {core_path:&core_path,approval_path:&approval_path,report_path:&report_path,backup_dir:&backup_dir,inputs:inputs()}).unwrap();
+    let imported = command::run_import(ImportArgs {core_path:&core_path,approval_path:&approval_path,report_path:&report_path,backup_dir:&backup_dir,inputs:inputs()});
+    assert!(imported.is_ok(), "S8 must import the bound historical Nostr watch at its production entry: {:?}", imported.err().map(|error| error.to_string()));
     command::run_project(ProjectArgs {core_path:&core_path,approval_path:&approval_path,import_report_path:&report_path,verification_path:&verification_path,destination_paths:inputs().paths}).unwrap();
     let gateway = Connection::open(&gateway_path).unwrap();
     for (_, instance, name, self_key, _) in &configs {
@@ -82,6 +95,7 @@ fn s8_core_only_nostr_projects_historical_owner_before_trusted_admission() {
         if *instance==configs[0].1 {
             assert_eq!(admit(&event(&other),self_key,&config.access),Some(SaidCaller::TrustedUser));
             assert_eq!(config.watches[0].id,7);
+            assert_eq!(admit(&event(&configs[1].3),self_key,&config.access),Some(SaidCaller::CoAgent {agent_id:"agent-b".into()}));
         } else { assert_eq!(admit(&event(&other),self_key,&config.access),None); }
         let core_b64:String=Connection::open(&core_path).unwrap().query_row("SELECT config_b64 FROM gate_instances WHERE instance_id=?1",[instance],|r|r.get(0)).unwrap();
         let gateway_b64:String=gateway.query_row("SELECT config_b64 FROM instances WHERE instance_id=?1",[instance],|r|r.get(0)).unwrap();
@@ -90,6 +104,7 @@ fn s8_core_only_nostr_projects_historical_owner_before_trusted_admission() {
     assert_eq!(protected_counts(&core_path),original_counts);
     assert_eq!(gateway.query_row("SELECT COUNT(*) FROM legacy_identity_sources",[],|r|r.get::<_,i64>(0)).unwrap(),2);
     assert_eq!(gateway.query_row("SELECT COUNT(*) FROM identity_projections WHERE role='owner'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    assert_eq!(gateway.query_row("SELECT relationship_id FROM identity_projections WHERE role='co_agent'",[],|r|r.get::<_,String>(0)).unwrap(),"agent-b");
     assert_eq!(Connection::open(&core_path).unwrap().query_row("SELECT result_text FROM tool_logs WHERE agent_id='agent-a'",[],|r|r.get::<_,String>(0)).unwrap(),"retained");
     command::run_import(ImportArgs {core_path:&core_path,approval_path:&approval_path,report_path:&report_path,backup_dir:&backup_dir,inputs:inputs()}).unwrap();
     command::run_project(ProjectArgs {core_path:&core_path,approval_path:&approval_path,import_report_path:&report_path,verification_path:&verification_path,destination_paths:inputs().paths}).unwrap();
