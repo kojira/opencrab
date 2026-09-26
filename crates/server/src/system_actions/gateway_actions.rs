@@ -153,30 +153,6 @@ impl GatewayActions for SystemGatewayActions {
                     ),
                 },
             },
-            // ピアレビュー依頼（#157 S7）。Discord 側の実装は撤去済みなので inner へは
-            // 委譲しない（委譲パターンにすると二重定義を招く）。配送口を持たない
-            // transport でも**定義には出す**（#157 の目的）ので、無いときは黙って inner へ
-            // 落とさず明示エラーを返す（fail-closed）。
-            "request_peer_review" => match &self.text_delivery {
-                Some(delivery) => {
-                    crate::peer_review::request_peer_review(
-                        &self.state.db,
-                        delivery.as_ref(),
-                        args,
-                        ctx,
-                    )
-                    .await
-                }
-                None => GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some(
-                        "request_peer_review はこのゲートウェイでは利用できません（メッセージを送信できません）。\
-                         このターンの transport はテキストを送れないため、ピアレビュー依頼は省略して先へ進んでよい。"
-                            .to_string(),
-                    ),
-                },
-            },
             // subtask 停止（#161 / #157 S2）。transport 非依存の唯一の実装（Discord 側の
             // 実装は撤去済み）。**inner へは委譲しない**: 委譲パターンのままにすると、
             // Discord が誤って `cancel_subtask` を再定義したときに own の実装（lifecycle
@@ -229,13 +205,4 @@ impl GatewayActions for SystemGatewayActions {
         self.a2ui.clone()
     }
 
-    /// transport の素テキスト配送口を**そのまま外へ通す**（#157 S7）。
-    ///
-    /// `a2ui_surface()` の転送と同じ理由: 本番の sub-engine 配線は合成 gateway の入れ子
-    /// なので、ここで転送しないと内側の合成 gateway が配送口を失い、`request_peer_review`
-    /// が「定義には出るが必ず失敗する」状態になる（sub-engine では深さ拒否が先に効くため
-    /// 実害は無いが、能力を黙って落とさない）。
-    fn text_delivery(&self) -> Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>> {
-        self.text_delivery.clone()
-    }
 }

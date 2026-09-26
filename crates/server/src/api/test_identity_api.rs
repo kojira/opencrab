@@ -411,13 +411,7 @@ mod tests {
         assert_eq!(rows[0].permission, TrustedUserPermission::CoAgent);
     }
 
-    /// **ダッシュボードから協働エージェントとして登録した行が実際に機能すること**（#234 の本題）。
-    ///
-    /// UI が送る表記（`co-agent`）で登録した行が、
-    /// - 呼び出し元の判定で `CoAgent` になり、
-    /// - 相互レビューの名簿に載る。
-    ///
-    /// 表記が食い違っていた頃は、どちらも「ただの信頼済みユーザー」に落ちていた。
+    /// ダッシュボードから登録した `co-agent` 行が呼び出し元の判定に反映される。
     #[tokio::test]
     async fn co_agent_registered_from_the_dashboard_actually_works() {
         let state = crate::test_app_state();
@@ -453,11 +447,5 @@ mod tests {
                 agent_id: "dash-user".to_string()
             }
         );
-        // 相互レビューの名簿
-        let roster =
-            opencrab_db::queries::list_co_agent_reviewers(&conn, TEST_EXTERNAL_SOURCE, "agent-1")
-                .unwrap();
-        assert_eq!(roster.len(), 1);
-        assert_eq!(roster[0].user_id, "dash-user");
     }
 }

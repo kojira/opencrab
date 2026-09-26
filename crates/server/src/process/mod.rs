@@ -47,44 +47,6 @@ use live_inbound::{SessionLiveInbound, SubtaskSteerInbound};
 use loop_restart::prepare_loop_restart;
 use skills::{record_used_skills, spawn_background_index_build};
 
-/// ピアレビュアーのロスターセクションを組み立てる。
-///
-/// trusted_users の permission='co-agent' 行（選定ロジックは
-/// `queries::list_co_agent_reviewers` に一元化 — reviewer 解決側と共有）。
-/// ロスターは変更頻度が低いので system prompt 配置で問題ない（毎 run DB から再構築される）。
-///
-/// 経路も reviewer 解決と同じ [`crate::peer_review::REVIEWER_PLATFORM`]（#159）。返信を
-/// 受理できない経路の相手を載せると、指名はできるが回収されない依頼になる。
-///
-/// **表示名だけを出す**（#158 S2）。共有プロンプトは transport 非依存でなければならず、
-/// メンション記法（`<@id>`）の組み立ては transport 側の責務。reviewer の解決は
-/// 「表示名優先・登録済みのみ」（`resolve_reviewer`）なので表示名で引ける。
-/// 表示名が空の行は名前で指名できないため載せない（モデルに識別子を推測させない）。
-///
-/// #920: Peer Review 節の撤去に伴い prompt 組み立てからは外した（呼び出し元は消えたが、
-/// 関数本体の撤去は #921 で行う。tests がまだ本関数を直接検証している）。
-#[allow(dead_code)]
-fn peer_reviewers_section(conn: &rusqlite::Connection, agent_id: &str) -> String {
-    let reviewers: Vec<String> = opencrab_db::queries::list_co_agent_reviewers(
-        conn,
-        crate::peer_review::REVIEWER_PLATFORM,
-        agent_id,
-    )
-    .unwrap_or_default()
-    .into_iter()
-    .filter(|u| !u.display_name.is_empty())
-    .map(|u| format!("- {}", u.display_name))
-    .collect();
-    if reviewers.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\nYour registered peer reviewers (pass their display name as `reviewer`):\n{}\n",
-            reviewers.join("\n")
-        )
-    }
-}
-
 #[cfg(test)]
 #[path = "tests/agent_visible_skill_index.rs"]
 mod agent_visible_skill_index_tests;
@@ -103,9 +65,6 @@ mod no_forced_reply_tests;
 #[cfg(test)]
 #[path = "tests/past_summary_notice_contract.rs"]
 mod past_summary_notice_contract_tests;
-#[cfg(test)]
-#[path = "tests/peer_reviewers_section.rs"]
-mod peer_reviewers_section_tests;
 #[cfg(test)]
 #[path = "tests/prompt_inventory_red.rs"]
 mod prompt_inventory_red_tests;

@@ -5,5 +5,4 @@ pub use message::{Channel, ContentPart, IncomingMessage, MessageContent, Message
 pub use traits::{
     utterance_body, DispatchMode, GatewayActionDef, GatewayActionResult, GatewayActions,
     GatewayCallContext, GatewayCaller, GatewayCallerClass, SubEngineAccess, ToolClass, ToolSharing,
-    PEER_REVIEW_REPLY_MARKER, PEER_REVIEW_REQUEST_MARKER,
 };

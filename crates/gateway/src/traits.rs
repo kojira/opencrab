@@ -111,8 +111,8 @@ pub struct GatewayCallContext {
     /// この実行を起こした inbound メッセージの返信先（gateway 不透明 token / #158 S1）。
     ///
     /// `RunRequest.reply_target`（#167）と**同じ不透明トークン**をツール実行の文脈まで
-    /// 運ぶ。宛先を引数で受けるアクション（`request_peer_review` 等）が、引数省略時の
-    /// フォールバックとして使う。トークンの解釈は各 gateway の責務（Discord は
+    /// 運ぶ。宛先を引数で受けるアクションが、引数省略時のフォールバックとして使う。
+    /// トークンの解釈は各 gateway の責務（Discord は
     /// channel id の数値文字列、Nostr は返信先イベント id）。
     ///
     /// 既定 `None`（後方互換 — 宛先を明示するツール呼び出しは従来どおり動く）。
@@ -213,22 +213,6 @@ pub trait GatewayActions: Send + Sync {
     fn a2ui_surface(&self) -> Option<Arc<opencrab_core::a2ui::A2uiSurface>> {
         None
     }
-
-    /// この transport が素テキストの配送口を提供するなら返す（#157 S7）。
-    ///
-    /// `request_peer_review` の**実体は gateway 非依存層**
-    /// （`crates/server/src/peer_review.rs`）にあるが、宛先検査・メンション記法・
-    /// 1 通あたりの上限・送信そのものは transport にしか作れない。合成 gateway
-    /// （`SystemGatewayActions`）はこのメソッドで配送口を引き、汎用層へ渡す。
-    ///
-    /// `a2ui_surface()` と違い、これを提供しない transport でも
-    /// `request_peer_review` は**定義に出る**（配送口が無いときだけ実行が明示エラー）。
-    /// ツールの露出が transport の有無で消えないようにするのが #157 の目的そのもの。
-    ///
-    /// 既定は `None`（テキストを送れない transport）。
-    fn text_delivery(&self) -> Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>> {
-        None
-    }
 }
 
 /// ツール定義が自ら名乗る分類。
@@ -302,7 +286,7 @@ pub fn utterance_body(
 pub enum SubEngineAccess {
     /// sub-engine に見せて実行も許す。現状は `report_progress` / `nostr_generate_key` のみ。
     Allowed,
-    /// depth>=1 で明示的に拒否する（多層防御）。配送系（`send_ui` / `request_peer_review` /
+    /// depth>=1 で明示的に拒否する（多層防御）。配送系（`send_ui` /
     /// discord 送信・VC 参加退出など）。
     Blocked,
     /// 既定。許可リストに載せない（許可・拒否のどちらでもない大多数）。
@@ -354,12 +338,3 @@ pub struct GatewayActionResult {
     pub data: Option<serde_json::Value>,
     pub error: Option<String>,
 }
-
-/// ピアレビュー依頼メッセージのマーカー（プロトコル定数）。
-///
-/// discord 側のヘッダ組み立てと server 側の system prompt 規約の両方がこれを参照する。
-/// 文字列がズレると Silent Reply の例外判定が発火せず、レビューが silent に死ぬため
-/// 必ずこの定数を使うこと。
-pub const PEER_REVIEW_REQUEST_MARKER: &str = "[Peer Review Request]";
-/// ピアレビュー返信メッセージのマーカー（プロトコル定数）。
-pub const PEER_REVIEW_REPLY_MARKER: &str = "[Peer Review]";

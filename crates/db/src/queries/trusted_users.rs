@@ -290,37 +290,6 @@ pub fn add_trusted_user(
     Ok(())
 }
 
-/// このエージェントのピアレビュアー（permission='co-agent' の trusted user）一覧。
-/// プロンプトのロスター表示と reviewer 解決の両方がこれを使う（選定ロジックの一元化）。
-///
-/// **`platform` で絞る（#159）**。以前は絞っていなかったが、返信の受理ゲート
-/// （`peer_review::record_peer_review_reply`）は送信者を**その受信経路の空間**で引くため、
-/// 別経路の co_agent は「依頼は飛ぶが返信を受理されない」非対称になっていた。名簿を
-/// 受理側と同じ経路に揃えることで、指名できる相手＝返信を受理できる相手にする。
-///
-/// **緩める方向へは動かせない**: ここは絞り込みだけで、受理ゲート側に新しい経路の
-/// 判定を足してはいない（別経路に認可判定を新設すると権限が昇格しうる経路になる）。
-pub fn list_co_agent_reviewers(
-    conn: &Connection,
-    platform: &str,
-    agent_id: &str,
-) -> Result<Vec<TrustedUserRow>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {TRUSTED_USER_COLUMNS} \
-         FROM trusted_users WHERE platform = ?1 AND agent_id = ?2 AND permission = ?3 \
-         ORDER BY created_at ASC"
-    ))?;
-    let rows = stmt.query_map(
-        [
-            platform,
-            agent_id,
-            TrustedUserPermission::CoAgent.as_db_str(),
-        ],
-        trusted_user_from_row,
-    )?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
-}
-
 pub fn update_trusted_user_display_name(
     conn: &Connection,
     id: &str,

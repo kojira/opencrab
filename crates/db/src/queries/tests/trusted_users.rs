@@ -143,62 +143,6 @@ fn known_platforms_are_exactly_the_read_paths() {
     assert!(!is_known_trusted_platform(""));
 }
 
-/// ロスターも経路で切られている（#159: 受理ゲートと揃えた）。
-#[test]
-fn co_agent_roster_is_scoped_by_platform() {
-    let conn = setup();
-    add_trusted_user(
-        &conn,
-        TEST_SOURCE_A,
-        "row-d",
-        "a1",
-        "42",
-        TrustedUserPermission::CoAgent,
-        "owner",
-        "2026-01-01",
-        "Crab D",
-    )
-    .unwrap();
-    add_trusted_user(
-        &conn,
-        TEST_EXTERNAL_SOURCE,
-        "row-w",
-        "a1",
-        "dash-user",
-        TrustedUserPermission::CoAgent,
-        "owner",
-        "2026-01-01",
-        "Crab W",
-    )
-    .unwrap();
-
-    let discord = list_co_agent_reviewers(&conn, TEST_SOURCE_A, "a1").unwrap();
-    assert_eq!(discord.len(), 1);
-    assert_eq!(discord[0].display_name, "Crab D");
-
-    let web = list_co_agent_reviewers(&conn, TEST_EXTERNAL_SOURCE, "a1").unwrap();
-    assert_eq!(web.len(), 1);
-    assert_eq!(web[0].display_name, "Crab W");
-
-    assert!(list_co_agent_reviewers(&conn, TRUSTED_PLATFORM_REST, "a1")
-        .unwrap()
-        .is_empty());
-
-    // permission と agent_id の絞り込みは維持されている。
-    add_trusted(&conn, TEST_SOURCE_A, "row-u", "43", "a1");
-    assert_eq!(
-        list_co_agent_reviewers(&conn, TEST_SOURCE_A, "a1")
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(
-        list_co_agent_reviewers(&conn, TEST_SOURCE_A, "a2")
-            .unwrap()
-            .is_empty()
-    );
-}
-
 // ---- 権限の表記（列挙型, #234） ----
 
 /// 表記ゆれが型で起こりえないこと: DB に入る文字列は列挙型からしか作れず、

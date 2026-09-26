@@ -23,7 +23,6 @@ pub mod memory_declare;
 pub mod memory_maintenance;
 pub mod memory_organize;
 pub mod offload_cleanup;
-pub mod peer_review;
 pub mod process;
 pub mod schedule_cron;
 pub mod skill_consolidation;
