@@ -138,6 +138,18 @@ fn assert_frozen_cleanup(root: &Path, mutate_gateway: bool) {
         1,
         "the retained REST principal must not be deleted with mixed trusted_users"
     );
+    drop(core);
+    let restarted = opencrab_db::init_connection(core_path.to_str().unwrap())
+        .expect("core initialization must accept an offline-cleaned database");
+    let revived_legacy: i64 = restarted.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('trusted_users','channel_config','session_watches','agent_discord_config','agent_nostr_config')",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(revived_legacy, 0, "core restart must not recreate cleaned legacy gateway tables");
+    let rest = opencrab_db::queries::get_api_principal(&restarted, "rest-user", "agent-a")
+        .expect("REST principal lookup must survive cleanup and restart");
+    assert_eq!(rest.id, "tu-rest");
 }
 
 fn retained_cleanup_rows(core: &Connection) -> Vec<String> {
