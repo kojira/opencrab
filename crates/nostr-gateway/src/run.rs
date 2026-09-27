@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use opencrab_gate_client::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
 use opencrab_gate_client::wire::{LiveInboundScope, SaidContext};
-use opencrab_gate_client::SayPolicy;
+use opencrab_gate_client::{FinalDelivery, RuntimeCapabilities, SayPolicy};
 use tokio::sync::Notify;
 
 use crate::config::{
@@ -92,6 +92,9 @@ pub fn spawn_instance(
     })?;
     // DI 能力宣言（§9.2）と invoke handler を hello に載せて接続する。invoke は nostaro CLI 実行へ
     // 写す（reply/reaction/repost/follow/unfollow/kind0/upload/resolve）。秘密鍵は env 注入のみ。
+    // delivery_mode=say では投稿は gateway の automatic final delivery が所有し、LLM に投稿 tool を
+    // 見せない。明示 tool 運用が必要な config だけ operation-driven にする。
+    let (operations, runtime_capabilities) = runtime_contract_for_config(&cfg);
     let invoke_handler: Arc<dyn opencrab_gate_client::InvokeHandler> =
         Arc::new(crate::ops::NostrInvokeHandler::new(
             nostaro_bin.clone(),
@@ -106,10 +109,8 @@ pub fn spawn_instance(
         cfg.self_pubkey.clone(),
         digest,
         SayPolicy::AcceptToLiveQueue,
-        Some(crate::ops::operation_declarations()),
-        opencrab_gate_client::RuntimeCapabilities {
-            final_delivery: opencrab_gate_client::FinalDelivery::OperationDriven,
-        },
+        operations,
+        runtime_capabilities,
         invoke_handler,
     );
     let metrics = Arc::new(SaidMetrics::default());
@@ -127,6 +128,26 @@ pub fn spawn_instance(
         overrides,
     );
     Ok(client)
+}
+
+fn runtime_contract_for_config(
+    cfg: &InstanceConfig,
+) -> (Option<serde_json::Value>, RuntimeCapabilities) {
+    if cfg.delivery_mode.as_deref() == Some("tool_driven") {
+        (
+            Some(crate::ops::operation_declarations()),
+            RuntimeCapabilities {
+                final_delivery: FinalDelivery::OperationDriven,
+            },
+        )
+    } else {
+        (
+            None,
+            RuntimeCapabilities {
+                final_delivery: FinalDelivery::Automatic,
+            },
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

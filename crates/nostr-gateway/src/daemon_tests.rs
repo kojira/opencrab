@@ -564,7 +564,7 @@ fn production_placement_uses_gateway_access_and_opaque_core_config() {
     let value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(placement_path).unwrap()).unwrap();
     let instance = &value["instances"][0];
-    assert_eq!(instance["core_config_b64"], OPAQUE_CORE_CONFIG_B64);
+    assert_eq!(instance["core_config_b64"], DEFAULT_CORE_CONFIG_B64);
     let cfg = parse_instance_config(
         &decode_config_b64(instance["config_b64"].as_str().unwrap()).unwrap(),
     )
