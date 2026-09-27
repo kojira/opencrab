@@ -160,6 +160,7 @@ pub fn map_event(
     beyond_self: bool,
     lane: &Lane,
     bundle: Option<&BundlePlace>,
+    automatic_delivery: bool,
 ) -> Option<SaidMap> {
     let event_id = normalize_event_id(&event.id)?;
     let author_id = normalize_author_id(&event.pubkey)?;
@@ -180,8 +181,8 @@ pub fn map_event(
         text: history,
         attachments,
         system_context: bundle
-            .map(|place| bundle_response_context(place.count))
-            .unwrap_or_else(|| response_context(event, &author_id)),
+            .map(|place| bundle_response_context(place.count, automatic_delivery))
+            .unwrap_or_else(|| response_context(event, &author_id, automatic_delivery)),
         reply_target: bundle.is_none().then(|| parent_event_id(event)).flatten(),
         route,
     })
@@ -238,26 +239,46 @@ fn e_tag_is_self(event: &WatchEvent, self_pubkey: &str) -> bool {
     })
 }
 
-fn bundle_response_context(count: u32) -> String {
-    format!(
-        "[Nostr] タイムラインの束ね（{count} 件）です。窓内を1ターンの文脈に載せています。\
-         心が動いた投稿には本文をそのまま書いて独立投稿で触れてよいです。\
-         特定投稿に反応するなら reply(e番号, 本文)／reaction(e番号)／repost(e番号) を使ってください。\
-         反応不要なら NO_REPLY とだけ答えてください。"
-    )
+fn bundle_response_context(count: u32, automatic_delivery: bool) -> String {
+    if automatic_delivery {
+        format!(
+            "[Nostr] タイムラインの束ね（{count} 件）です。窓内を1ターンの文脈に載せています。\
+             心が動いた投稿には、投稿本文だけをそのまま書いてください。\
+             reply(e番号, 本文)／reaction(e番号)／repost(e番号) のような操作構文は本文に書かないでください。\
+             反応不要なら NO_REPLY とだけ答えてください。"
+        )
+    } else {
+        format!(
+            "[Nostr] タイムラインの束ね（{count} 件）です。窓内を1ターンの文脈に載せています。\
+             心が動いた投稿には本文をそのまま書いて独立投稿で触れてよいです。\
+             特定投稿に反応するなら reply(e番号, 本文)／reaction(e番号)／repost(e番号) を使ってください。\
+             反応不要なら NO_REPLY とだけ答えてください。"
+        )
+    }
 }
 
-fn response_context(event: &WatchEvent, author_id: &str) -> String {
+fn response_context(event: &WatchEvent, author_id: &str, automatic_delivery: bool) -> String {
     let short: String = author_id.chars().take(12).collect();
-    format!(
-        "[Nostr] {short}… さんの投稿（kind:{}／{}）への応答です。\n\
-         普通の投稿は本文をそのまま書いてください。\n\
-         この投稿へ返信するなら reply(e番号, 本文)、リアクションは reaction(e番号)、\
-         リポストは repost(e番号) を使ってください。\n\
-         反応が不要なら NO_REPLY とだけ答えてください。",
-        event.kind,
-        inbound_kind_label(event),
-    )
+    if automatic_delivery {
+        format!(
+            "[Nostr] {short}… さんの投稿（kind:{}／{}）への応答です。\n\
+             返信するなら、表示したい返信本文だけをそのまま書いてください。\n\
+             reply(e番号, 本文)／reaction(e番号)／repost(e番号) のような操作構文は本文に書かないでください。\n\
+             反応が不要なら NO_REPLY とだけ答えてください。",
+            event.kind,
+            inbound_kind_label(event),
+        )
+    } else {
+        format!(
+            "[Nostr] {short}… さんの投稿（kind:{}／{}）への応答です。\n\
+             普通の投稿は本文をそのまま書いてください。\n\
+             この投稿へ返信するなら reply(e番号, 本文)、リアクションは reaction(e番号)、\
+             リポストは repost(e番号) を使ってください。\n\
+             反応が不要なら NO_REPLY とだけ答えてください。",
+            event.kind,
+            inbound_kind_label(event),
+        )
+    }
 }
 
 fn image_urls(event: &WatchEvent) -> Vec<String> {
@@ -386,6 +407,45 @@ mod tests {
     }
 
     #[test]
+    fn automatic_delivery_prompt_uses_visible_body_not_legacy_operation_syntax() {
+        let self_pk = self_pk();
+        let event = ev(1, vec![vec!["p".into(), self_pk.clone()]]);
+        let mapped = map_event(&event, &self_pk, false, &Lane::default_lane(), None, true).unwrap();
+        assert!(
+            mapped.system_context.contains("返信本文だけ"),
+            "{}",
+            mapped.system_context
+        );
+        assert!(
+            mapped.system_context.contains("操作構文は本文に書かない"),
+            "{}",
+            mapped.system_context
+        );
+        assert!(
+            !mapped
+                .system_context
+                .contains("この投稿へ返信するなら reply"),
+            "{}",
+            mapped.system_context
+        );
+    }
+
+    #[test]
+    fn tool_driven_prompt_keeps_legacy_operation_syntax() {
+        let self_pk = self_pk();
+        let event = ev(1, vec![vec!["p".into(), self_pk.clone()]]);
+        let mapped =
+            map_event(&event, &self_pk, false, &Lane::default_lane(), None, false).unwrap();
+        assert!(
+            mapped
+                .system_context
+                .contains("この投稿へ返信するなら reply"),
+            "{}",
+            mapped.system_context
+        );
+    }
+
+    #[test]
     fn origin_convention() {
         let id = "aa".repeat(32);
         assert_eq!(
@@ -408,7 +468,7 @@ mod tests {
                 vec!["e".into(), "bb".repeat(32)],
             ],
         );
-        let mapped = map_event(&event, &self_pk, false, &Lane::watch(17), None).unwrap();
+        let mapped = map_event(&event, &self_pk, false, &Lane::watch(17), None, true).unwrap();
         assert_eq!(mapped.text, "hello\n[Nostr kind:1 リプライ]");
         assert_eq!(mapped.reply_target, Some("bb".repeat(32)));
         assert!(mapped.system_context.contains("kind:1／リプライ"));
@@ -471,7 +531,7 @@ mod tests {
     fn mention_lane_said_is_immediate() {
         let self_pk = self_pk();
         let event = ev(1, vec![vec!["p".into(), self_pk.clone()]]);
-        let mapped = map_event(&event, &self_pk, false, &Lane::default_lane(), None).unwrap();
+        let mapped = map_event(&event, &self_pk, false, &Lane::default_lane(), None, true).unwrap();
         assert_eq!(mapped.route, Route::Immediate);
         assert!(!mapped.text.contains("NOSTRGATE"));
         assert_eq!(
@@ -484,10 +544,10 @@ mod tests {
     fn dm_kind_is_immediate_not_discard() {
         let self_pk = self_pk();
         let event = ev(4, vec![]);
-        let mapped = map_event(&event, &self_pk, true, &Lane::watch(1), None).unwrap();
+        let mapped = map_event(&event, &self_pk, true, &Lane::watch(1), None, true).unwrap();
         assert_eq!(mapped.route, Route::Immediate);
         let event = ev(1059, vec![]);
-        let mapped = map_event(&event, &self_pk, true, &Lane::watch(1), None).unwrap();
+        let mapped = map_event(&event, &self_pk, true, &Lane::watch(1), None, true).unwrap();
         assert_eq!(mapped.route, Route::Immediate);
     }
 
@@ -507,16 +567,16 @@ mod tests {
     fn reject_non_hex_author() {
         let mut event = ev(1, vec![]);
         event.pubkey = "not-a-key".into();
-        assert!(map_event(&event, &self_pk(), false, &Lane::default_lane(), None).is_none());
+        assert!(map_event(&event, &self_pk(), false, &Lane::default_lane(), None, true).is_none());
     }
 
     #[test]
     fn beyond_self_uses_watch_config_not_p_self() {
         let self_pk = self_pk();
         let event = ev(1, vec![]);
-        let mapped = map_event(&event, &self_pk, false, &Lane::watch(17), None).unwrap();
+        let mapped = map_event(&event, &self_pk, false, &Lane::watch(17), None, true).unwrap();
         assert_eq!(mapped.route, Route::Immediate);
-        let mapped = map_event(&event, &self_pk, true, &Lane::watch(17), None).unwrap();
+        let mapped = map_event(&event, &self_pk, true, &Lane::watch(17), None, true).unwrap();
         assert_eq!(mapped.route, Route::Bundle);
     }
 
@@ -539,7 +599,8 @@ mod tests {
             count: 2,
             origins: origins.clone(),
         };
-        let mapped = map_event(&event, &self_pk, true, &Lane::watch(17), Some(&place)).unwrap();
+        let mapped =
+            map_event(&event, &self_pk, true, &Lane::watch(17), Some(&place), true).unwrap();
         assert_eq!(mapped.route, Route::Bundle);
         assert_eq!(mapped.text, "hello\n[Nostr kind:1 メンション]");
         assert!(!mapped.text.contains("NOSTRBUNDLE"));

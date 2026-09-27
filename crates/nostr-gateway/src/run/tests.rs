@@ -372,6 +372,7 @@ fn capped_bundle_manifest_matches_coordinator_contract() {
             true,
             &Lane::watch(17),
             Some(&place),
+            true,
         )
         .expect("map");
         assert!(!mapped.text.contains("NOSTRBUNDLE"));

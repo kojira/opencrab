@@ -324,6 +324,7 @@ fn start_lanes(
                 planned.filter,
                 cfg.self_pubkey.clone(),
                 cfg.access.clone(),
+                cfg.delivery_mode.as_deref() != Some("tool_driven"),
                 planned.watch,
                 secret.clone(),
                 nostaro_bin.clone(),
@@ -345,6 +346,7 @@ fn spawn_lane(
     filter: WatchFilter,
     self_pubkey: String,
     access: AccessConfig,
+    automatic_delivery: bool,
     watch: Option<WatchPlacement>,
     secret: Option<Arc<String>>,
     nostaro_bin: PathBuf,
@@ -392,6 +394,7 @@ fn spawn_lane(
                         &self_pubkey,
                         &access,
                         beyond,
+                        automatic_delivery,
                         &pending,
                         &metrics,
                         &seen,
@@ -428,6 +431,7 @@ fn spawn_lane(
                     &self_pubkey,
                     &access,
                     beyond,
+                    automatic_delivery,
                     &pending,
                     &metrics,
                     &seen,
@@ -454,6 +458,7 @@ async fn handle_line(
     self_pubkey: &str,
     access: &AccessConfig,
     beyond: bool,
+    automatic_delivery: bool,
     pending: &tokio::sync::Mutex<Vec<WatchEvent>>,
     metrics: &SaidMetrics,
     seen: &SeenEvents,
@@ -497,6 +502,7 @@ async fn handle_line(
         self_pubkey,
         access,
         beyond,
+        automatic_delivery,
         &event,
         None,
         metrics,
@@ -575,6 +581,7 @@ async fn flush_bundle(
     self_pubkey: &str,
     access: &AccessConfig,
     beyond: bool,
+    automatic_delivery: bool,
     pending: &tokio::sync::Mutex<Vec<WatchEvent>>,
     metrics: &SaidMetrics,
     seen: &SeenEvents,
@@ -640,6 +647,7 @@ async fn flush_bundle(
             self_pubkey,
             access,
             beyond,
+            automatic_delivery,
             event,
             Some(&place),
             metrics,
@@ -664,6 +672,7 @@ async fn send_mapped(
     self_pubkey: &str,
     access: &AccessConfig,
     beyond: bool,
+    automatic_delivery: bool,
     event: &WatchEvent,
     bundle: Option<&BundlePlace>,
     metrics: &SaidMetrics,
@@ -672,7 +681,8 @@ async fn send_mapped(
         tracing::debug!(id = %event.id, "said dropped by gateway admission");
         return true;
     };
-    let Some(mapped) = map_event(event, self_pubkey, beyond, lane, bundle) else {
+    let Some(mapped) = map_event(event, self_pubkey, beyond, lane, bundle, automatic_delivery)
+    else {
         tracing::warn!(id = %event.id, "said dropped; author or event id is not hex");
         return false;
     };
