@@ -13,7 +13,7 @@ fn resolve_live_binding(
     binding_id: &str,
     session_id: &str,
     expected_agent_id: &str,
-) -> Option<(BindingContext, crate::delivery_mode::DeliveryMode)> {
+) -> Option<BindingContext> {
     let ctx = {
         let conn = state.db.lock().ok()?;
         let (stored_session_id, closed_at): (String, Option<i64>) = conn
@@ -37,9 +37,7 @@ fn resolve_live_binding(
     if !live.acknowledged.contains(binding_id) {
         return None;
     }
-    let delivery_mode =
-        crate::delivery_mode::delivery_mode_from_final_delivery(live.final_delivery);
-    Some((ctx, delivery_mode))
+    Some(ctx)
 }
 
 pub struct ExtgateTimedFireSink<R: AgentRuntime> {
@@ -55,7 +53,7 @@ impl<R: AgentRuntime> ExtgateTimedFireSink<R> {
 
 impl<R: AgentRuntime> TimedFireSink for ExtgateTimedFireSink<R> {
     fn fire_timed_turn(&self, req: TimedFireRequest) {
-        let (ctx, delivery_mode) = match resolve_live_binding(
+        let ctx = match resolve_live_binding(
             &self.state,
             &req.binding_id,
             &req.session_id,
@@ -81,7 +79,6 @@ impl<R: AgentRuntime> TimedFireSink for ExtgateTimedFireSink<R> {
             session_id: req.session_id,
             only_speaker: false,
             speaker_id: String::new(),
-            delivery_mode,
             system_context: req.prompt,
         };
         tokio::spawn(async move {

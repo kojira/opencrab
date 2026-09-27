@@ -34,7 +34,7 @@ pub struct InstanceConfig {
     pub name: Option<String>,
     #[serde(default)]
     pub watches: Vec<WatchPlacement>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_mode: Option<String>,
     #[serde(default)]
     pub access: AccessConfig,
@@ -177,23 +177,14 @@ pub fn canonicalize_config_b64_with_gateway_access(
     use base64::Engine as _;
     let mut config: InstanceConfig = serde_json::from_slice(&decode_config_b64(config_b64)?)
         .map_err(|e| anyhow::anyhow!("instance config is not valid JSON object: {e}"))?;
-    if config.delivery_mode.is_none() {
-        config.delivery_mode = Some("say".into());
-    }
     config.access = gateway_access;
     validate_instance_config(&config)?;
     Ok(base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config)?))
 }
 
 pub fn parse_instance_config(bytes: &[u8]) -> anyhow::Result<InstanceConfig> {
-    let mut cfg: InstanceConfig = serde_json::from_slice(bytes)
+    let cfg: InstanceConfig = serde_json::from_slice(bytes)
         .map_err(|e| anyhow::anyhow!("instance config is not valid JSON object: {e}"))?;
-    // Historical Nostr configs predate the generic delivery-mode marker. Default
-    // missing configs to gateway-owned automatic final-text delivery; explicit
-    // tool_driven remains available for operation-driven deployments.
-    if cfg.delivery_mode.is_none() {
-        cfg.delivery_mode = Some("say".into());
-    }
     validate_instance_config(&cfg)?;
     Ok(cfg)
 }
@@ -213,10 +204,6 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
         .is_none()
     {
         anyhow::bail!("name must be nonempty");
-    }
-    match cfg.delivery_mode.as_deref() {
-        None | Some("say") | Some("tool_driven") => {}
-        Some(_) => anyhow::bail!("delivery_mode must be say or tool_driven"),
     }
     if cfg.access.is_empty() {
         anyhow::bail!(
@@ -465,14 +452,14 @@ mod tests {
             cfg.watches[0].legacy_session_id.as_deref(),
             Some("legacy-session")
         );
-        assert_eq!(cfg.delivery_mode.as_deref(), Some("say"));
+        assert_eq!(cfg.delivery_mode.as_deref(), None);
 
         let canonical = serde_json::to_value(&cfg).unwrap();
         assert!(canonical["watches"][0].get("session_id").is_none());
     }
 
     #[test]
-    fn legacy_missing_delivery_mode_is_canonicalized_to_say() {
+    fn legacy_missing_delivery_mode_stays_absent() {
         let value = serde_json::json!({
             "relays": ["wss://example.invalid"],
             "self_pubkey": "aa".repeat(32),
@@ -480,10 +467,10 @@ mod tests {
             "access": { "owner": ["bb".repeat(32)] }
         });
         let cfg = parse_instance_config(&serde_json::to_vec(&value).unwrap()).unwrap();
-        assert_eq!(cfg.delivery_mode.as_deref(), Some("say"));
+        assert_eq!(cfg.delivery_mode.as_deref(), None);
 
         let canonical = serde_json::to_value(&cfg).unwrap();
-        assert_eq!(canonical["delivery_mode"], "say");
+        assert!(canonical.get("delivery_mode").is_none());
     }
 
     #[test]

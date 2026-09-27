@@ -9,7 +9,6 @@ use opencrab_actions::{
 
 use crate::completion::{v3_attach_dispatch, ExtgateCompletionSink};
 use crate::delivery::apply_delivery_effect;
-use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
 use crate::error::ErrorCode;
 use crate::listen::{emit_activity, emit_ended_activity};
 use crate::protocol::Said;
@@ -44,7 +43,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     let images = said.image_urls();
     let address = row.address.clone();
     let origin = said.origin.clone();
-    let delivery_mode = row.delivery_mode;
     let system_context = system_context.to_string();
     let reply_target = reply_target.map(str::to_string);
     let caller = asserted_caller(&said.caller);
@@ -168,7 +166,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 session_id: session_id.clone(),
                                 only_speaker,
                                 speaker_id: author_id.clone(),
-                                delivery_mode,
                                 system_context,
                             });
                         start_session_turn(
@@ -234,7 +231,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                     })
                                 })
                                 // 明示終了前の途中発話をループ中に配送・保存する。最終応答と同じ
-                                // send_text経路を通し、Sayモードのみ配送する。配送失敗はターンを失敗させる。
+                                // send_text経路を通す。配送失敗はターンを失敗させる。
                                 .with_on_continuation_speech({
                                     let hs = Arc::clone(&hook_state);
                                     let hi = hook_instance.clone();
@@ -242,7 +239,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                     let ha = hook_agent.clone();
                                     let hse = hook_session.clone();
                                     let hr = hook_reply.clone();
-                                    let dm = delivery_mode;
                                     let latest = Arc::clone(&hook_last_continuation_say);
                                     Arc::new(move |speech: String| {
                                         let hs = Arc::clone(&hs);
@@ -253,27 +249,25 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                         let hr = hr.clone();
                                         let latest = Arc::clone(&latest);
                                         Box::pin(async move {
-                                            if dm == DeliveryMode::Say {
-                                                let delivery_id =
-                                                    crate::delivery::deliver_intermediate_say(
-                                                        &hs,
-                                                        &hi,
-                                                        &hb,
-                                                        &ha,
-                                                        &hse,
-                                                        &speech,
-                                                        hr.as_deref(),
+                                            let delivery_id =
+                                                crate::delivery::deliver_intermediate_say(
+                                                    &hs,
+                                                    &hi,
+                                                    &hb,
+                                                    &ha,
+                                                    &hse,
+                                                    &speech,
+                                                    hr.as_deref(),
+                                                )
+                                                .await
+                                                .map_err(|e| {
+                                                    anyhow::anyhow!(
+                                                        "extgate intermediate say failed: {}",
+                                                        e.code.as_str()
                                                     )
-                                                    .await
-                                                    .map_err(|e| {
-                                                        anyhow::anyhow!(
-                                                            "extgate intermediate say failed: {}",
-                                                            e.code.as_str()
-                                                        )
-                                                    })?;
-                                                *latest.lock().expect("continuation say id lock") =
-                                                    Some(delivery_id);
-                                            }
+                                                })?;
+                                            *latest.lock().expect("continuation say id lock") =
+                                                Some(delivery_id);
                                             Ok(())
                                         })
                                     })
@@ -326,7 +320,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             ),
                             None => opencrab_actions::DeliveryEffect::Empty,
                         };
-                        let effect = adjust_inbound_effect(delivery_mode, effect);
                         // 単一メンションは発端 origin を say payload に明示（gateway が e-tag reply）。
                         // bundle は None（gateway が standalone post で publish・row292）。
                         let final_say_id = apply_delivery_effect(

@@ -1,6 +1,5 @@
 use rusqlite::{params, Connection, Transaction};
 
-use crate::delivery_mode::DeliveryMode;
 use crate::error::{ErrorCode, GateError};
 use crate::registry::ExtgateState;
 
@@ -11,7 +10,6 @@ pub(super) struct OriginRow {
     pub(super) instance_id: String,
     pub(super) address: String,
     pub(super) agent_id: String,
-    pub(super) delivery_mode: DeliveryMode,
 }
 
 pub(super) fn binding_said_error(
@@ -65,7 +63,6 @@ pub(super) fn load_origin_row(
     tx: &Transaction<'_>,
     instance_id: &str,
     binding_id: &str,
-    delivery_mode: DeliveryMode,
 ) -> Result<Option<OriginRow>, GateError> {
     let result = tx.query_row(
         "SELECT b.instance_id, i.kind_id, b.address, a.agent_id, b.closed_at
@@ -95,7 +92,6 @@ pub(super) fn load_origin_row(
                 instance_id: inst,
                 address,
                 agent_id,
-                delivery_mode,
             }))
         }
     }

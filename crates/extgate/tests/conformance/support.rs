@@ -20,7 +20,7 @@ use opencrab_db::queries::{AgentRow, SessionRow};
 use opencrab_extgate::completion::ExtgateCompletionSink;
 use opencrab_extgate::{
     admin_router, invoke_and_wait, now_nanos, recover_stale_calls, recover_stale_deliveries,
-    serve_uds, session_id_for_binding, validate_listen_socket, DeliveryMode,
+    serve_uds, session_id_for_binding, validate_listen_socket,
     ExtgateOpsGatewayActions,
     ExtgateState, UNAUTHORIZED_BODY,
 };
