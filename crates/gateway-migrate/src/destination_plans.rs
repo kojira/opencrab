@@ -127,7 +127,7 @@ fn canonicalize_nostr_migration_config_b64(config_b64: &str, allow_empty_access:
         return opencrab_nostr_gateway::config::canonicalize_config_b64(config_b64);
     }
     let bytes = base64::engine::general_purpose::STANDARD.decode(config_b64)?;
-    let mut config: opencrab_nostr_gateway::config::InstanceConfig = serde_json::from_slice(&bytes)
+    let config: opencrab_nostr_gateway::config::InstanceConfig = serde_json::from_slice(&bytes)
         .map_err(|e| anyhow::anyhow!("instance config is not valid JSON object: {e}"))?;
     if !config.access.is_empty() {
         let encoded = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config)?);
