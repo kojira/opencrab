@@ -345,6 +345,7 @@ fn build_heartbeat_targets(
     Ok(targets)
 }
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod s8_minimal_heartbeat_red {
     use super::*;
     use crate::{manifest::ChannelEdge, source::Cell};

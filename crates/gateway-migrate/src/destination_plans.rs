@@ -151,6 +151,7 @@ fn is_lower_hex_pubkey(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn select_credential(rows: &[SourceRow], approval: &Approval, path: &Path, kind: &str, instance_id: &str, agent_id: &str, enabled: bool, key: &[u8; 32]) -> Result<(Zeroizing<Vec<u8>>, String)> {
     let descriptor = approval.credential_sources.iter().find(|item| item.instance_id == instance_id);
     let legacy = match kind {

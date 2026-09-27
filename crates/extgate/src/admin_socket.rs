@@ -13,9 +13,9 @@ use crate::secure_path::ParentDir;
 
 #[derive(Clone, Copy)]
 struct SocketIdentity {
-    device: u64,
-    inode: u64,
-    uid: u32,
+    device: libc::dev_t,
+    inode: libc::ino_t,
+    uid: libc::uid_t,
 }
 
 pub struct PreparedAdminSocket {
@@ -46,7 +46,7 @@ impl Drop for PreparedAdminSocket {
 
 fn matches_identity(stat: &libc::stat, identity: SocketIdentity) -> bool {
     (stat.st_mode & libc::S_IFMT) == libc::S_IFSOCK
-        && stat.st_dev as u64 == identity.device
+        && stat.st_dev == identity.device
         && stat.st_ino == identity.inode
         && stat.st_uid == identity.uid
 }
@@ -249,8 +249,8 @@ pub fn prepare_admin_socket(
     let listener = bind_relative_to(&parent).map_err(|_| SecurityError::Store)?;
     let created = parent.child_stat().map_err(|_| SecurityError::Store)?;
     let identity = SocketIdentity {
-        device: created.st_dev as u64,
-        inode: created.st_ino as u64,
+        device: created.st_dev,
+        inode: created.st_ino,
         uid: created.st_uid,
     };
     if !matches_identity(&created, identity)

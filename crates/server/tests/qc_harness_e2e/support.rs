@@ -678,6 +678,7 @@ async fn wire_instance(
         revision: 1,
         address: address.clone(),
         config_b64,
+        core_config_b64: None,
     };
     let overrides = HarnessOverrides {
         fake_watch: Some(fixture.path.clone()),
