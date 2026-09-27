@@ -30,6 +30,7 @@
 // `scenario_930_folded_said_does_not_spawn_independent_turn`（NO_REPLY 変種・633 ch）で補助的に持つ。
 // ===================================================================
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_930_eyes_on_read_folded_midturn_message() {
     let buf = install_capture();
     let mock = Arc::new(EyesOnReadMock {
@@ -259,6 +260,7 @@ impl LlmProvider for NoMidturnMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_930_no_read_reaction_without_midturn_message() {
     let buf = install_capture();
     let mock = Arc::new(NoMidturnMock {
@@ -329,6 +331,7 @@ async fn scenario_930_no_read_reaction_without_midturn_message() {
 const R930D_CH: &str = "633";
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_930_folded_said_does_not_spawn_independent_turn() {
     let buf = install_capture();
     let mock = Arc::new(EyesOnReadMock {

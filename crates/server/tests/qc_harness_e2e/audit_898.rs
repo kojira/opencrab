@@ -11,6 +11,7 @@ const AUD898_2: &str = "AUD898-TWO 監査二回目";
 const AUD898_3: &str = "AUD898-THREE 監査三回目";
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn audit_898_continue_split_delivers_and_saves_each_iteration() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());

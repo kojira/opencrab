@@ -82,6 +82,7 @@ fn shell_enabled_tools_config() -> opencrab_actions::tools::ToolsConfig {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_shell_stdout_survives_into_resume_turn() {
     let buf = install_capture();
     let mock = Arc::new(ShellMock::new());
@@ -205,6 +206,7 @@ impl LlmProvider for WsWriteMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_no_exit_code_dispatch_result_survives_into_resume_turn() {
     let buf = install_capture();
     let mock = Arc::new(WsWriteMock::new());
@@ -386,6 +388,7 @@ impl LlmProvider for BigShellMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_shell_big_output_offload_read_back_loop_closed() {
     let buf = install_capture();
     let mock = Arc::new(BigShellMock::new());

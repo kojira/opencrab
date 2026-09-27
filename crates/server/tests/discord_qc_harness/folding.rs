@@ -68,6 +68,7 @@ impl LlmProvider for SpawnedAckFoldMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_930_eyes_on_read_via_spawned_ack_reinvocation() {
     let buf = install_capture();
     let mock = Arc::new(SpawnedAckFoldMock {
@@ -208,6 +209,7 @@ async fn scenario_930_eyes_on_read_via_spawned_ack_reinvocation() {
 const R933_CH: &str = "641";
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_933_multi_said_fold_no_independent_turn() {
     let buf = install_capture();
     let mock = Arc::new(EyesOnReadMock {

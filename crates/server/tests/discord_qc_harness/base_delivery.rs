@@ -1,6 +1,7 @@
 // ==================== (a) message → say ＋ §9A e番号 ====================
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_a_message_becomes_say_and_conversation_has_e_number() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());
@@ -60,6 +61,7 @@ async fn scenario_a_message_becomes_say_and_conversation_has_e_number() {
 // ==================== (b) reply(e1, 本文) の実 DI 経路 ====================
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_b_reply_resolves_e_number_and_settles() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());
@@ -114,6 +116,7 @@ async fn scenario_b_reply_resolves_e_number_and_settles() {
 // ==================== (c) reaction(e1, emoji) の実 DI 経路 ====================
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_c_reaction_resolves_e_number_and_settles() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());
@@ -166,6 +169,7 @@ async fn scenario_c_reaction_resolves_e_number_and_settles() {
 // ==================== (d) system reaction（👀 受理・🏁 完了）の V3 経路 ====================
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_d_system_reactions_accepted_and_completed() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());

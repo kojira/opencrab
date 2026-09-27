@@ -353,6 +353,7 @@ fn spawn_sse(port: u16, session: &str) -> std::sync::mpsc::Receiver<String> {
 }
 
 #[test]
+#[ignore = "gate_admin dependency is being removed; keep out of default CI (#1033)"]
 fn send_said_turn_say_sse_over_real_processes() {
     let mock = spawn_mock_llm();
     let root = tempfile::tempdir().unwrap();

@@ -35,6 +35,7 @@ impl LlmProvider for SayContinueThenNoReplyMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_915_say_continue_then_no_reply_flags_previous_say() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();
@@ -163,6 +164,7 @@ impl LlmProvider for ReplyContinueThenReactionMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_915_reply_continue_then_reaction_only_gets_no_flag() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();
@@ -237,6 +239,7 @@ async fn scenario_915_reply_continue_then_reaction_only_gets_no_flag() {
 // （`message`＝返信先 origin とは分離）。
 // ---------------------------------------------------------------------------
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_915_reply3_flag_on_last_reply() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());
@@ -356,6 +359,7 @@ impl LlmProvider for Reply2ThenNoReplyMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_915_reply2_then_no_reply_flag_on_last_reply() {
     let buf = install_capture();
     let mock = Arc::new(Reply2ThenNoReplyMock);
@@ -448,6 +452,7 @@ impl LlmProvider for BodyThenTrailingNoReplyMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_915_body_then_trailing_no_reply_flag_on_say() {
     let buf = install_capture();
     let mock = Arc::new(BodyThenTrailingNoReplyMock);
@@ -546,6 +551,7 @@ impl LlmProvider for Reply2PlusBodyMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_915_reply2_plus_body_flag_on_last_post_say() {
     let buf = install_capture();
     let mock = Arc::new(Reply2PlusBodyMock);

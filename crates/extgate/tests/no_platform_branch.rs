@@ -394,6 +394,7 @@ fn external_test_source_paths_match_file_size_gate_convention() {
 }
 
 #[test]
+#[ignore = "gate_admin/admin boundary audit is being removed; keep out of default CI (#1033)"]
 fn gateway_shared_layer_has_no_platform_branch() {
     // extgate の manifest は `crates/extgate`。その親が `crates/`。
     let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))

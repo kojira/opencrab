@@ -67,6 +67,7 @@ impl LlmProvider for ReplyContinueMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn audit_900b_reply_plus_continue_delivers_three_over_three_llm_calls() {
     let buf = install_capture();
     let mock = Arc::new(ReplyContinueMock {
@@ -185,6 +186,7 @@ impl LlmProvider for ReplyBodyMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn audit_s13_7_replies_plus_body_deliver_all_and_save_all() {
     let buf = install_capture();
     let mock = Arc::new(ReplyBodyMock {

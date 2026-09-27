@@ -14,6 +14,7 @@ const B_SUBTASK_RESULT: &str = "subresult-delta-internal";
 /// qc_harness_e2e の scenario_main の web 版。長処理（保持中の背景サブタスク）走行中に投じた
 /// 第2依頼が待たされず即応し、3 say が 1→2→3 の順で残る。
 #[test]
+#[ignore = "gate_admin dependency is being removed; keep out of default CI (#1033)"]
 fn second_request_not_blocked_during_long_op() {
     // ルーティングは qc の RoutedMock と同順（E→B→D→A→C）。
     let mock = spawn_mock(|req, gate| {

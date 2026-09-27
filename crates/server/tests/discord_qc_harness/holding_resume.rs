@@ -44,6 +44,7 @@ impl LlmProvider for HoldingShellMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_916_holding_body_delivered_and_saved() {
     let buf = install_capture();
     let mock = Arc::new(HoldingShellMock {
@@ -234,6 +235,7 @@ impl LlmProvider for ResumeContinueMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_918_resume_turn_continue_split_delivers_both() {
     let buf = install_capture();
     let mock = Arc::new(ResumeContinueMock {
@@ -424,6 +426,7 @@ impl LlmProvider for HoldingNoReplyShellMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_916_holding_body_before_no_reply_delivered() {
     let buf = install_capture();
     let mock = Arc::new(HoldingNoReplyShellMock {

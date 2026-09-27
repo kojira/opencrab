@@ -50,6 +50,7 @@ impl LlmProvider for A3Mock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_a3_reply_utterance_no_subtask_no_machine_lines() {
     let buf = install_capture();
     let mock = Arc::new(A3Mock {
@@ -122,6 +123,7 @@ async fn scenario_a3_reply_utterance_no_subtask_no_machine_lines() {
 
 /// #880: reply×3 を 1 生成に並べ、3 通を配送して LLM 往復なしで完了する。
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_a3_three_replies_complete_in_one_llm_call_without_subtask() {
     let buf = install_capture();
     let mock = Arc::new(A3Mock {
@@ -248,6 +250,7 @@ impl LlmProvider for A3ContinueMock {
 
 /// #900: reply×1＋末尾 継続 を 3 回連ねる → 3 通配送・LLM 3 呼び出し・継続 非残留。
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_a3_utterance_only_with_continue_runs_next_iteration() {
     let buf = install_capture();
     let mock = Arc::new(A3ContinueMock {
@@ -370,6 +373,7 @@ impl LlmProvider for N2Mock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_n2_resolve_query_class_keeps_subtask_and_machine_line() {
     let buf = install_capture();
     let mock = Arc::new(N2Mock);

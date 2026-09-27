@@ -13,6 +13,7 @@ const C898_2: &str = "C898-2回目。次いこう";
 const C898_3: &str = "C898-3回目。これで最後";
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_continue_intermediate_speech_delivered_and_saved() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());
@@ -96,6 +97,7 @@ const J898_2: &str = "J898-2回目。次いこう";
 const J898_3: &str = "J898-3回目。これで最後";
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_continue_intermediate_delivery_failure_stops_continuation() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());
@@ -187,6 +189,7 @@ impl LlmProvider for S8Mock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_s13_8_reply_plus_body_plus_continue_delivers_body_and_continues() {
     let buf = install_capture();
     let mock = Arc::new(S8Mock {

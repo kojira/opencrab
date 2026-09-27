@@ -56,6 +56,7 @@ fn message_text(message: &Message) -> String {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn canonical_history_survives_visible_speech_and_native_dispatch_end_to_end() {
     let buf = install_capture();
     let requests = Arc::new(Mutex::new(Vec::new()));

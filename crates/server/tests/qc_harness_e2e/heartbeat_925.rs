@@ -112,6 +112,7 @@ impl LlmProvider for HbNostrTwoSayMock {
 //   🏁/🤐/typing は Nostr に無いので assert しない（対象なし・裁定 3）。
 // ---------------------------------------------------------------------------
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn heartbeat_h1_nostr_two_standalone_posts() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();

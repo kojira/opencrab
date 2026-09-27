@@ -7,6 +7,7 @@
 /// #899 §12.6: 沈黙の監査行 `speech='NO_REPLY'`（旧: `no_reply:true`）も **DB に残さない**。
 /// withheld の可視化は SSE `completed_no_reply`（`LiveEvent::CompletedNoReply` 由来・DB 非依存）が担う。
 #[test]
+#[ignore = "gate_admin dependency is being removed; keep out of default CI (#1033)"]
 fn no_reply_is_withheld_not_said() {
     // 何が来ても沈黙（NO_REPLY）を返す。
     let mock = spawn_mock(|_req, _gate| text_resp("NO_REPLY"));

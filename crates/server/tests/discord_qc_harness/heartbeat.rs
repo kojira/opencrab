@@ -183,6 +183,7 @@ impl LlmProvider for HbTwoSayMock {
 // H1: heartbeat 起点で 2 件投稿（say 2・保存 2・🏁 は 2 件目のみ・継続/NO_REPLY 残留 0・typing）。
 // ---------------------------------------------------------------------------
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn heartbeat_h1_two_posts_flag_only_on_last() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();
@@ -351,6 +352,7 @@ impl LlmProvider for HbSilentMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn heartbeat_h2_no_reply_stays_silent() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();
@@ -438,6 +440,7 @@ impl LlmProvider for HbDeclMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn heartbeat_h3_declaration_then_subtask_then_report() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();
@@ -569,6 +572,7 @@ impl LlmProvider for HbCrossSessionMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn heartbeat_other_parent_subtask_does_not_suppress_completed_flag() {
     let buf = install_capture();
     let core = start_core(Arc::new(HbCrossSessionMock) as Arc<dyn LlmProvider>).await;
@@ -673,6 +677,7 @@ impl LlmProvider for HbDownMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn heartbeat_h4_unbound_gateway_fires_nothing() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();

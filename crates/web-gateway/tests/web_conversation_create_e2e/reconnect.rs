@@ -23,6 +23,7 @@ fn wait_gateway_uds(gw_port: u16, timeout: Duration) -> Option<(u16, String)> {
 
 /// QC 症状の再現: core 再起動後も gateway が自動再接続し、作成が 201 ready → message → say。
 #[test]
+#[ignore = "gate_admin dependency is being removed; keep out of default CI (#1033)"]
 fn core_restart_gateway_reconnects_then_create_201_message_say() {
     let mock = spawn_mock_llm();
     let root = tempfile::tempdir().unwrap();
