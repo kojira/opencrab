@@ -3,12 +3,12 @@
 Ran 3 tests in 0.305s
 
 OK
-   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/db)
-   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
-   Compiling opencrab-core v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/core)
-   Compiling opencrab-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gateway)
-   Compiling opencrab-actions v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/actions)
-   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/extgate)
+   Compiling opencrab-db v0.2.17 (<repo>/crates/db)
+   Compiling opencrab-gate-client v0.2.17 (<repo>/crates/gate-client)
+   Compiling opencrab-core v0.2.17 (<repo>/crates/core)
+   Compiling opencrab-gateway v0.2.17 (<repo>/crates/gateway)
+   Compiling opencrab-actions v0.2.17 (<repo>/crates/actions)
+   Compiling opencrab-extgate v0.2.17 (<repo>/crates/extgate)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 31.85s
      Running tests/conformance.rs (target/debug/deps/conformance-1748002750a6d3d5)
 

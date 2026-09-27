@@ -1,4 +1,4 @@
-   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/extgate)
+   Compiling opencrab-extgate v0.2.17 (<repo>/crates/extgate)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 13.64s
      Running unittests src/lib.rs (target/debug/deps/opencrab_extgate-272058eb52f7d3f0)
 
@@ -55,7 +55,7 @@ test s3_shared_and_server_production_have_no_concrete_lifecycle_registry ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
+   Compiling opencrab-gate-client v0.2.17 (<repo>/crates/gate-client)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 23.93s
      Running unittests src/lib.rs (target/debug/deps/opencrab_gate_client-5c78c38c2de53c9a)
 
@@ -77,7 +77,7 @@ failures:
 test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.00s
 
 error: test failed, to rerun pass `-p opencrab-gate-client --lib`
-   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/db)
+   Compiling opencrab-db v0.2.17 (<repo>/crates/db)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 2.75s
      Running unittests src/lib.rs (target/debug/deps/opencrab_db-2c230eafa415f662)
 
@@ -90,17 +90,17 @@ test schema::migration_tests::s4_v55_upgrade_and_fresh_schema_are_identical ... 
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 265 filtered out; finished in 0.13s
 
-   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/db)
-   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
-   Compiling opencrab-core v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/core)
-   Compiling opencrab-nostr-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/nostr-gateway)
-   Compiling opencrab-discord-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/discord-gateway)
-   Compiling opencrab-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gateway)
-   Compiling opencrab-actions v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/actions)
-   Compiling opencrab-mcp v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/mcp)
-   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/extgate)
-   Compiling opencrab-nostr v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/nostr)
-   Compiling opencrab-server v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/server)
+   Compiling opencrab-db v0.2.17 (<repo>/crates/db)
+   Compiling opencrab-gate-client v0.2.17 (<repo>/crates/gate-client)
+   Compiling opencrab-core v0.2.17 (<repo>/crates/core)
+   Compiling opencrab-nostr-gateway v0.2.17 (<repo>/crates/nostr-gateway)
+   Compiling opencrab-discord-gateway v0.2.17 (<repo>/crates/discord-gateway)
+   Compiling opencrab-gateway v0.2.17 (<repo>/crates/gateway)
+   Compiling opencrab-actions v0.2.17 (<repo>/crates/actions)
+   Compiling opencrab-mcp v0.2.17 (<repo>/crates/mcp)
+   Compiling opencrab-extgate v0.2.17 (<repo>/crates/extgate)
+   Compiling opencrab-nostr v0.2.17 (<repo>/crates/nostr)
+   Compiling opencrab-server v0.2.17 (<repo>/crates/server)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 08s
      Running unittests src/main.rs (target/debug/deps/opencrab_server-f81b1413a49801dc)
 
@@ -109,7 +109,7 @@ test scheduler::tests::alias_resolution::s4_scheduler_emits_generic_binding_sess
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.03s
 
-   Compiling opencrab-server v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/server)
+   Compiling opencrab-server v0.2.17 (<repo>/crates/server)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 22.85s
      Running unittests src/lib.rs (target/debug/deps/opencrab_server-6219ec3e5202c904)
 

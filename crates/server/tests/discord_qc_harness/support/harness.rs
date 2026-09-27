@@ -184,6 +184,7 @@ fn database_backed_admin(core: &Core, instance_id: &str) -> String {
     hasher.update(token);
     let hash = hasher.finalize().to_vec();
     let conn = core.extgate.db.lock().unwrap();
+    let expires_at = 4_000_000_000_i64 * 1_000_000_000;
     let exists: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM gate_admin_principals WHERE principal_id=?1)",
@@ -196,9 +197,9 @@ fn database_backed_admin(core: &Core, instance_id: &str) -> String {
             "INSERT INTO gate_admin_principals
              (principal_id, credential_salt, credential_hash, scope_mode, created_at, expires_at,
               revoked_at, sealed_at, predecessor_principal_id, overlap_deadline)
-             VALUES (?1, ?2, ?3, 'exact', 1, 4000000000000000000,
+             VALUES (?1, ?2, ?3, 'exact', 1, ?4,
                      NULL, NULL, NULL, NULL)",
-            rusqlite::params![principal_id, salt.as_slice(), hash],
+            rusqlite::params![principal_id, salt.as_slice(), hash, expires_at],
         )
         .unwrap();
         for operation in ["instance.put", "binding.put"] {

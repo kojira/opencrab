@@ -1,4 +1,4 @@
-   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/extgate)
+   Compiling opencrab-extgate v0.2.17 (<repo>/crates/extgate)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 35.14s
      Running unittests src/lib.rs (target/debug/deps/opencrab_extgate-272058eb52f7d3f0)
 
@@ -255,7 +255,7 @@ test ended_batch_at_exact_capacity_is_complete_and_ordered ... ok
 
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
 
-   Compiling opencrab-web-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/web-gateway)
+   Compiling opencrab-web-gateway v0.2.17 (<repo>/crates/web-gateway)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 52.56s
      Running unittests src/lib.rs (target/debug/deps/opencrab_web_gateway-5d0ffe01320b6c88)
 

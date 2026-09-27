@@ -1,4 +1,4 @@
-   Compiling opencrab-gateway-migrate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gateway-migrate)
+   Compiling opencrab-gateway-migrate v0.2.17 (<repo>/crates/gateway-migrate)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 26.48s
      Running unittests src/lib.rs (target/debug/deps/opencrab_gateway_migrate-639abb0bdea7c711)
 
