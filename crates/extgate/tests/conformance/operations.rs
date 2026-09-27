@@ -297,29 +297,19 @@ async fn di_invoke_undeclared_operation_is_unknown() {
 // ===== DI 拡張 改訂ラン: revision digest リセット / indeterminate / recover / option-B 継ぎ目 =====
 
 async fn post_revision(h: &Harness, instance_id: &str, expected: u64) -> u64 {
-    let (st, body) = h
-        .admin(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/gate-instances/{instance_id}/revisions"))
-                .header(header::AUTHORIZATION, auth())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({"expected_revision": expected, "enabled": true, "config_b64": config_b64()})
-                        .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(
-        st,
-        StatusCode::CREATED,
-        "{}",
-        String::from_utf8_lossy(&body)
-    );
-    let v: Value = serde_json::from_slice(&body).unwrap();
-    v["revision"].as_u64().unwrap()
+    let mut conn = h.state.db.lock().unwrap();
+    opencrab_db::queries::revise_gate_instance(
+        &mut conn,
+        instance_id,
+        expected,
+        true,
+        config_b64(),
+        &config_digest(),
+        now_nanos(),
+    )
+    .unwrap()
 }
+
 
 /// DI-04: revision を上げると宣言 digest が未確立化し、別宣言の hello が通る（mismatch にならない）。
 #[tokio::test]
@@ -342,7 +332,7 @@ async fn di_revision_bump_reestablishes_declaration() {
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    // revision POST（rev2・digest を NULL 化）。
+    // Shared non-admin revision fixture (rev2・digest を NULL 化)。
     let new_rev = post_revision(&h, &instance_id, 1).await;
     assert_eq!(new_rev, 2);
     // rev2 で別宣言（reaction）→ mismatch にならず ok（新 revision で再確立）。

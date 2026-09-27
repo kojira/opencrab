@@ -1,16 +1,23 @@
-/// A new kind uses the existing protected admin, declared operation, timed route, and
+/// A new kind uses declarative V3 provisioning, declared operation, timed route, and
 /// one-frame/one-handler delivery without a concrete branch in core/shared/server.
 #[tokio::test]
 async fn s9_synthetic_gateway_provisions_invokes_and_delivers_a_timed_result() {
     let h = Harness::start().await;
     let instance_id = uuid();
     let binding_id = uuid();
-    let session_id = "synthetic-session";
-    insert_named_session(&h, session_id);
+    let session_id = session_id_for_binding(&binding_id);
 
-    let instance = put_instance_kind(&h, &instance_id, true, "synthetic").await;
-    assert_eq!(instance["kind_id"], "synthetic", "fixture must provision a new kind");
-    put_binding(&h, &binding_id, &instance_id, session_id).await;
+    put_instance_kind(&h, &instance_id, true, "synthetic").await;
+    assert_eq!(
+        h.state.db.lock().unwrap().query_row(
+            "SELECT kind_id FROM gate_instances WHERE instance_id=?1",
+            [&instance_id],
+            |row| row.get::<_, String>(0),
+        ).unwrap(),
+        "synthetic",
+        "fixture must provision a new kind"
+    );
+    put_binding(&h, &binding_id, &instance_id, &session_id).await;
 
     let operations = json!([{
         "name": "synthetic.report",
@@ -33,7 +40,7 @@ async fn s9_synthetic_gateway_provisions_invokes_and_delivers_a_timed_result() {
     wait_acked(&h, &instance_id, &binding_id).await;
 
     let projected = ExtgateOpsGatewayActions::for_binding(
-        Arc::clone(&h.state), &instance_id, &binding_id, session_id, "agent-1",
+        Arc::clone(&h.state), &instance_id, &binding_id, &session_id, "agent-1",
     ).unwrap();
     let invoked = tokio::spawn(async move {
         projected.execute(
@@ -52,7 +59,7 @@ async fn s9_synthetic_gateway_provisions_invokes_and_delivers_a_timed_result() {
 
     let target = {
         let conn = h.state.db.lock().unwrap();
-        TimedFireRouter::new().resolve_persisted_target(&conn, session_id, "agent-1")
+        TimedFireRouter::new().resolve_persisted_target(&conn, &session_id, "agent-1")
             .expect("generic timed route")
     };
     assert_eq!(target.binding_id, binding_id);

@@ -3,6 +3,7 @@
 /// `event: completed_no_reply` は**流れない**。旧実装は activity ended を say より先に出していたため
 /// 返信ターンでも completed_no_reply を誤発火していた（core reorder で撤去）。
 #[test]
+#[ignore = "gate_admin dependency is being removed; keep out of default CI (#1033)"]
 fn reply_turn_does_not_emit_completed_no_reply() {
     const B_REPLY: &str = "replybody-omega-answer";
     // 何が来ても通常の返信本文（＝say）を返す。

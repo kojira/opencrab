@@ -1,7 +1,20 @@
 #[tokio::test]
 async fn said_dedup_same_origin_and_separate_bindings() {
     let h = Harness::start().await;
-    let (mut s, instance_id, binding_a) = ready_pair(&h).await;
+    let instance_id = uuid();
+    let binding_a = uuid();
+    let binding_b = uuid();
+    put_instance(&h, &instance_id, true).await;
+    put_binding(&h, &binding_a, &instance_id, "chan-1").await;
+    put_binding(&h, &binding_b, &instance_id, "chan-b").await;
+    let mut s = h.connect().await;
+    hello_ok(&mut s, &instance_id, 1).await;
+    let first = ack_bind(&mut s).await;
+    let second = ack_bind(&mut s).await;
+    assert!(
+        [first.as_str(), second.as_str()].contains(&binding_a.as_str())
+            && [first.as_str(), second.as_str()].contains(&binding_b.as_str())
+    );
     write_frame(
         &mut s,
         &json!({
@@ -36,11 +49,7 @@ async fn said_dedup_same_origin_and_separate_bindings() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), turns);
 
-    let binding_b = uuid();
-    put_binding(&h, &binding_b, &instance_id, "chan-b").await;
-    let bind = read_frame(&mut s).await;
-    assert_eq!(bind["binding_id"], binding_b);
-    write_frame(&mut s, &json!({"id": bind["id"], "m": "ok"})).await;
+
     write_frame(
         &mut s,
         &json!({
