@@ -88,7 +88,12 @@ impl GateAdminClient {
 
     pub async fn get_instance(&self, instance_id: &str) -> Result<Option<ObservedInstance>> {
         let response = self
-            .request("GET", &format!("/api/gate-instances/{instance_id}"), None)
+            .request(
+                "GET",
+                &format!("/api/gate-instances/{instance_id}"),
+                None,
+                true,
+            )
             .await?;
         if response.status == 404 {
             return Ok(None);
@@ -105,6 +110,7 @@ impl GateAdminClient {
             "PUT",
             &format!("/api/gate-instances/{instance_id}"),
             Some(serde_json::to_value(desired)?),
+            false,
         )
         .await?
         .json()
@@ -117,7 +123,7 @@ impl GateAdminClient {
         enabled: bool,
         config_b64: &str,
     ) -> Result<ObservedInstance> {
-        self.request("POST", &format!("/api/gate-instances/{instance_id}/revisions"), Some(json!({"expected_revision":expected_revision,"enabled":enabled,"config_b64":config_b64}))).await?.json()
+        self.request("POST", &format!("/api/gate-instances/{instance_id}/revisions"), Some(json!({"expected_revision":expected_revision,"enabled":enabled,"config_b64":config_b64})), false).await?.json()
     }
 
     pub async fn put_binding(
@@ -128,12 +134,17 @@ impl GateAdminClient {
         session_id: &str,
         title: &str,
     ) -> Result<ObservedBinding> {
-        self.request("PUT", &format!("/api/gate-bindings/{binding_id}"), Some(json!({"instance_id":instance_id,"address":address,"session":{"session_id":session_id,"title":title}}))).await?.json()
+        self.request("PUT", &format!("/api/gate-bindings/{binding_id}"), Some(json!({"instance_id":instance_id,"address":address,"session":{"session_id":session_id,"title":title}})), false).await?.json()
     }
 
     pub async fn delete_binding(&self, binding_id: &str) -> Result<()> {
-        self.request("DELETE", &format!("/api/gate-bindings/{binding_id}"), None)
-            .await?;
+        self.request(
+            "DELETE",
+            &format!("/api/gate-bindings/{binding_id}"),
+            None,
+            false,
+        )
+        .await?;
         Ok(())
     }
 
@@ -218,6 +229,7 @@ impl GateAdminClient {
         method: &str,
         path: &str,
         body: Option<Value>,
+        allow_not_found: bool,
     ) -> Result<AdminResponse> {
         let encoded = body
             .map(|v| serde_json::to_vec(&v))
@@ -231,7 +243,7 @@ impl GateAdminClient {
         stream.write_all(&encoded).await?;
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await?;
-        AdminResponse::parse(&response)
+        AdminResponse::parse(&response, allow_not_found)
     }
 }
 
@@ -240,7 +252,7 @@ struct AdminResponse {
     body: Vec<u8>,
 }
 impl AdminResponse {
-    fn parse(bytes: &[u8]) -> Result<Self> {
+    fn parse(bytes: &[u8], allow_not_found: bool) -> Result<Self> {
         let split = bytes
             .windows(4)
             .position(|v| v == b"\r\n\r\n")
@@ -253,7 +265,7 @@ impl AdminResponse {
             .context("missing HTTP status")?
             .parse()?;
         let body = bytes[split + 4..].to_vec();
-        if !(200..300).contains(&status) && status != 404 {
+        if !(200..300).contains(&status) && !(allow_not_found && status == 404) {
             let code = serde_json::from_slice::<Value>(&body)
                 .ok()
                 .and_then(|v| v.get("code").and_then(Value::as_str).map(str::to_string))
@@ -309,6 +321,17 @@ mod tests {
             .await
             .unwrap();
         stream.write_all(&body).await.unwrap();
+    }
+
+    #[test]
+    fn admin_response_allows_404_only_when_explicitly_requested() {
+        let bytes = b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 26\r\n\r\n{\"code\":\"subject_unknown\"}";
+        assert!(AdminResponse::parse(bytes, true).is_ok());
+        let error = match AdminResponse::parse(bytes, false) {
+            Ok(_) => panic!("404 must be rejected unless explicitly allowed"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("subject_unknown"), "{error}");
     }
 
     #[tokio::test]
