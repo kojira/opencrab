@@ -47,7 +47,11 @@ fn core_only_nostr_config(
     };
     let (normalized, _) = normalize_historical_nostr_watches(core, agent_id, instance_id, config_b64)?;
     let bytes = base64::engine::general_purpose::STANDARD.decode(normalized)?;
-    let mut config = opencrab_nostr_gateway::config::parse_instance_config(&bytes)?;
+    let mut config: opencrab_nostr_gateway::config::InstanceConfig = serde_json::from_slice(&bytes)
+        .map_err(|e| anyhow::anyhow!("instance config is not valid JSON object: {e}"))?;
+    if config.delivery_mode.is_none() {
+        config.delivery_mode = Some("tool_driven".into());
+    }
     let self_key = source.text("self_pubkey")?;
     ensure!(self_key.is_empty() || self_key == config.self_pubkey, "Nostr self key source conflicts with generic config");
     let owner = source.text("owner_pubkey")?;

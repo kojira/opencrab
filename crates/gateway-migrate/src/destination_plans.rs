@@ -46,10 +46,13 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
         } else { (config_b64.clone(), false) };
         let canonical = match kind.as_str() {
             "discord" => opencrab_discord_gateway::config::canonicalize_config_b64(&config_b64)?,
-            "nostr" => opencrab_nostr_gateway::config::canonicalize_config_b64(&normalized)?,
+            "nostr" => canonicalize_nostr_migration_config_b64(&normalized, !enabled && !core_only_nostr)?,
             "web" => config_b64.clone(),
             _ => unreachable!(),
         };
+        if kind == "nostr" && !enabled && !core_only_nostr && canonical != config_b64 {
+            config_b64 = canonical.clone();
+        }
         ensure!(canonical == config_b64 || old_nostr_store || retained_old_nostr || historical_watch, "noncanonical config");
         let mut addresses = core
             .prepare("SELECT address FROM gate_bindings WHERE instance_id=?1 AND closed_at IS NULL ORDER BY address")?
@@ -117,6 +120,35 @@ fn build_instance_plans(core: &Connection, rows: &[SourceRow], approval: &Approv
         });
     }
     Ok(plans)
+}
+
+fn canonicalize_nostr_migration_config_b64(config_b64: &str, allow_empty_access: bool) -> Result<String> {
+    if !allow_empty_access {
+        return opencrab_nostr_gateway::config::canonicalize_config_b64(config_b64);
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(config_b64)?;
+    let mut config: opencrab_nostr_gateway::config::InstanceConfig = serde_json::from_slice(&bytes)
+        .map_err(|e| anyhow::anyhow!("instance config is not valid JSON object: {e}"))?;
+    if config.delivery_mode.is_none() {
+        config.delivery_mode = Some("tool_driven".into());
+    }
+    if !config.access.is_empty() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config)?);
+        return opencrab_nostr_gateway::config::canonicalize_config_b64(&encoded);
+    }
+    ensure!(!config.relays.is_empty(), "relays must be nonempty");
+    ensure!(is_lower_hex_pubkey(&config.self_pubkey), "self_pubkey must be 64 lowercase hex");
+    ensure!(config.name.as_deref().map(str::trim).is_some_and(|name| !name.is_empty()), "name must be nonempty");
+    ensure!(matches!(config.delivery_mode.as_deref(), Some("say") | Some("tool_driven")), "delivery_mode must be say or tool_driven");
+    for watch in &config.watches {
+        ensure!(watch.interval_secs > 0, "watch {} interval_secs must be a positive integer", watch.id);
+        ensure!(watch.max_items > 0, "watch {} max_items must be a positive integer", watch.id);
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config)?))
+}
+
+fn is_lower_hex_pubkey(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn select_credential(rows: &[SourceRow], approval: &Approval, path: &Path, kind: &str, instance_id: &str, agent_id: &str, enabled: bool, key: &[u8; 32]) -> Result<(Zeroizing<Vec<u8>>, String)> {

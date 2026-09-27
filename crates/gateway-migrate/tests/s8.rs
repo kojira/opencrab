@@ -505,18 +505,7 @@ fn s8_refuses_retained_discord_config_with_only_nostr_instance_before_backup() {
     seed_core(&core_path);
     let conn = Connection::open(&core_path).unwrap();
     conn.execute_batch("DELETE FROM deliveries; DELETE FROM gate_bindings; DELETE FROM channel_config; DELETE FROM trusted_users;").unwrap();
-    let config_b64 = opencrab_nostr_gateway::config::canonicalize_config_b64(
-        &base64::engine::general_purpose::STANDARD.encode(
-            serde_json::to_vec(&serde_json::json!({
-                "relays": ["wss://example.invalid"],
-                "self_pubkey": "aa".repeat(32),
-                "name": "test-agent",
-                "access": {"owner": [], "co_agents": {}, "trusted_users": []}
-            }))
-            .unwrap(),
-        ),
-    )
-    .unwrap();
+    let config_b64 = legacy_empty_access_nostr_config_b64();
     let digest = format!(
         "{:x}",
         Sha256::digest(
@@ -613,18 +602,7 @@ fn assert_missing_credential_fixture(kind: &str, enabled: bool) {
     conn.execute("UPDATE gate_instances SET enabled=?1", [enabled])
         .unwrap();
     if kind == "nostr" {
-        let config_b64 = opencrab_nostr_gateway::config::canonicalize_config_b64(
-            &base64::engine::general_purpose::STANDARD.encode(
-                serde_json::to_vec(&serde_json::json!({
-                    "relays": ["wss://example.invalid"],
-                    "self_pubkey": "aa".repeat(32),
-                    "name": "test-agent",
-                    "access": {"owner": [], "co_agents": {}, "trusted_users": []}
-                }))
-                .unwrap(),
-            ),
-        )
-        .unwrap();
+        let config_b64 = legacy_empty_access_nostr_config_b64();
         let digest = format!(
             "{:x}",
             Sha256::digest(
@@ -786,6 +764,18 @@ fn protected_counts(path: &std::path::Path) -> Vec<i64> {
     })
     .collect()
 }
+fn legacy_empty_access_nostr_config_b64() -> String {
+    base64::engine::general_purpose::STANDARD.encode(
+        serde_json::to_vec(&serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "test-agent",
+            "access": {"owner": [], "co_agents": {}, "trusted_users": []}
+        }))
+        .unwrap(),
+    )
+}
+
 fn write_secret(path: &std::path::Path, text: &str) {
     write_secure(path, text.as_bytes())
 }
