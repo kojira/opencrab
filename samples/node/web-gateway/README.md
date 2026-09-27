@@ -1,6 +1,6 @@
 # samples/node/web-gateway
 
-HTTP/SSE ⇄ V3 protocol=2（UDS）の変換だけ。判断しない。Bearer を持たない。fail-loud（例外 / unhandled rejection / invariant 違反は nonzero exit）。fallback しない。
+HTTP/SSE ⇄ V3 protocol=3（UDS）の変換だけ。判断しない。Bearer を持たない。fail-loud（例外 / unhandled rejection / invariant 違反は nonzero exit）。fallback しない。
 
 ## 起動
 

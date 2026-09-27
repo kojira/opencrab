@@ -52,7 +52,10 @@ function helloFrame(id, instanceId, revisionLexeme, digest) {
   return {
     id,
     m: "hello",
-    protocol: 2,
+    protocol: 3,
+    operation_protocol: 1,
+    final_delivery: "automatic",
+    operations: [],
     instance_id: instanceId,
     revision: { __int: true, lexeme: revisionLexeme },
     config_digest: digest,
