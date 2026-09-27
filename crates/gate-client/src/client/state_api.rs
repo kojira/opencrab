@@ -9,17 +9,6 @@ pub trait InvokeHandler: Send + Sync {
         operation: &str,
         payload: &Value,
     ) -> InvokeOutcome;
-
-    /// この operation が**発話クラス**（reply/reaction/repost 等・ユーザーに見える発言）か。
-    ///
-    /// #900: 発話は say と同じく「そのターンで発話した」証跡になる。gateway 固有の operation
-    /// 名を知るのは handler なので、発話クラスの判定は handler が担う（gate-client は非依存）。
-    /// これが `true` の invoke が Ok で決着すると、ターンは沈黙ではなくなり `CompletedNoReply`
-    /// 外部側の沈黙表現を立てない。resolve/follow等の照会・操作classは既定の`false`。
-    fn is_utterance(&self, operation: &str) -> bool {
-        let _ = operation;
-        false
-    }
 }
 
 /// invoke の三結果（§5.3）。gateway 側の観測を core へ正しく伝える。
@@ -220,6 +209,7 @@ pub struct InstanceClient {
     say_policy: SayPolicy,
     /// DI 拡張 §3.1: hello に載せる能力宣言配列（None は従来の hello＝能力ゼロ）。
     operations: Option<Value>,
+    runtime_capabilities: super::wire::RuntimeCapabilities,
     /// DI 拡張 §5: invoke の実行 handler（None は operation_unknown を返す）。
     invoke_handler: Option<Arc<dyn InvokeHandler>>,
     inner: Mutex<Inner>,
@@ -234,6 +224,7 @@ impl InstanceClient {
         author_id: String,
         say_policy: SayPolicy,
         operations: Option<Value>,
+        runtime_capabilities: super::wire::RuntimeCapabilities,
         invoke_handler: Option<Arc<dyn InvokeHandler>>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -243,6 +234,7 @@ impl InstanceClient {
             author_id,
             say_policy,
             operations,
+            runtime_capabilities,
             invoke_handler,
             inner: Mutex::new(Inner {
                 acknowledged: HashMap::new(),
@@ -274,6 +266,7 @@ impl InstanceClient {
             author_id,
             SayPolicy::AcceptToLiveQueue,
             None,
+            super::wire::RuntimeCapabilities::default(),
             None,
         ));
         attach(&client, socket, revision, &config_digest).await?;
@@ -306,7 +299,14 @@ impl InstanceClient {
         config_digest: String,
         say_policy: SayPolicy,
     ) -> Arc<Self> {
-        let client = Arc::new(Self::blank(instance_id, author_id, say_policy, None, None));
+        let client = Arc::new(Self::blank(
+            instance_id,
+            author_id,
+            say_policy,
+            None,
+            super::wire::RuntimeCapabilities::default(),
+            None,
+        ));
         tokio::spawn(reconnect_loop(
             client.clone(),
             socket,
@@ -327,6 +327,7 @@ impl InstanceClient {
         config_digest: String,
         say_policy: SayPolicy,
         operations: Option<Value>,
+        runtime_capabilities: super::wire::RuntimeCapabilities,
         invoke_handler: Arc<dyn InvokeHandler>,
     ) -> Arc<Self> {
         let client = Arc::new(Self::blank(
@@ -334,6 +335,7 @@ impl InstanceClient {
             author_id,
             say_policy,
             operations,
+            runtime_capabilities,
             Some(invoke_handler),
         ));
         tokio::spawn(reconnect_loop(
@@ -356,6 +358,33 @@ impl InstanceClient {
     fn next_id(&self) -> String {
         let n = self.req_seq.fetch_add(1, Ordering::Relaxed);
         format!("said:{n}")
+    }
+
+    /// Validate an invoke against the immutable hello snapshot before calling the adapter handler.
+    pub(super) fn validate_invocation(&self, invoke: &super::wire::Invoke) -> Result<(), &'static str> {
+        let operations = self
+            .operations
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .ok_or("operation_unknown")?;
+        let declaration = operations
+            .iter()
+            .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(&invoke.operation))
+            .ok_or("operation_unknown")?;
+        let digest = super::wire::runtime_declaration_digest_from_value(
+            self.operations.as_ref(),
+            self.runtime_capabilities,
+        )
+        .ok_or("operation_rejected")?;
+        if invoke.declaration_digest != digest
+            || declaration.get("dispatch").and_then(serde_json::Value::as_str)
+                != Some(&invoke.dispatch)
+            || declaration.get("effect").and_then(serde_json::Value::as_str)
+                != Some(&invoke.effect)
+        {
+            return Err("operation_rejected");
+        }
+        Ok(())
     }
 
     pub async fn binding_for_address(&self, address: &str) -> Option<String> {

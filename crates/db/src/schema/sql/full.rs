@@ -248,6 +248,7 @@ CREATE TABLE IF NOT EXISTS heartbeat_instructions_audit (
     agent_id TEXT NOT NULL,
     scope TEXT NOT NULL,
     channel_id TEXT,
+    session_id TEXT,
     caller_identity TEXT NOT NULL,
     caller_user_id TEXT,
     old_value TEXT,
@@ -441,6 +442,19 @@ CREATE TABLE IF NOT EXISTS trusted_users (
 );
 CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);
 
+-- REST/API caller principals retained in core after gateway-owned identities move out.
+CREATE TABLE IF NOT EXISTS api_principals (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  permission TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  UNIQUE(user_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_api_principals_agent ON api_principals(agent_id);
+
 -- ============================================
 -- エージェント別メモリインデックス設定
 -- ============================================
@@ -609,6 +623,19 @@ CREATE TABLE IF NOT EXISTS session_heartbeat_config (
     last_fired_at TEXT,
     updated_at    TEXT NOT NULL,
     PRIMARY KEY (agent_id, session_id)
+);
+
+-- Generic per-session heartbeat instructions (Issue #1006 S4).
+-- NULL override_text inherits current agents.heartbeat_instructions, then the generic default.
+CREATE TABLE IF NOT EXISTS session_heartbeat_instructions (
+    agent_id      TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    override_text TEXT,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (agent_id, session_id),
+    FOREIGN KEY (agent_id, session_id)
+        REFERENCES session_heartbeat_config(agent_id, session_id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
 -- ============================================

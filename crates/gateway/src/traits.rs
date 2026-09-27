@@ -19,14 +19,31 @@ pub enum GatewayCaller {
     TrustedUser,
 }
 
+/// Platform-neutral authorization class exposed to dynamic operation policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayCallerClass {
+    Owner,
+    CoAgent,
+    Trusted,
+    Guest,
+}
+
 impl GatewayCaller {
     /// 監査ログ・表示用の正準ラベル（権限判定には enum match を使うこと）。
     pub fn label(&self) -> &'static str {
+        self.label_and_authorization_class().0
+    }
+
+    pub fn authorization_class(&self) -> GatewayCallerClass {
+        self.label_and_authorization_class().1
+    }
+
+    fn label_and_authorization_class(&self) -> (&'static str, GatewayCallerClass) {
         match self {
-            GatewayCaller::Owner => "owner",
-            GatewayCaller::Agent => "agent",
-            GatewayCaller::CoAgent { .. } => "co_agent",
-            GatewayCaller::TrustedUser => "trusted_user",
+            GatewayCaller::Owner => ("owner", GatewayCallerClass::Owner),
+            GatewayCaller::Agent => ("agent", GatewayCallerClass::Guest),
+            GatewayCaller::CoAgent { .. } => ("co_agent", GatewayCallerClass::CoAgent),
+            GatewayCaller::TrustedUser => ("trusted_user", GatewayCallerClass::Trusted),
         }
     }
 
@@ -94,8 +111,8 @@ pub struct GatewayCallContext {
     /// この実行を起こした inbound メッセージの返信先（gateway 不透明 token / #158 S1）。
     ///
     /// `RunRequest.reply_target`（#167）と**同じ不透明トークン**をツール実行の文脈まで
-    /// 運ぶ。宛先を引数で受けるアクション（`request_peer_review` 等）が、引数省略時の
-    /// フォールバックとして使う。トークンの解釈は各 gateway の責務（Discord は
+    /// 運ぶ。宛先を引数で受けるアクションが、引数省略時のフォールバックとして使う。
+    /// トークンの解釈は各 gateway の責務（Discord は
     /// channel id の数値文字列、Nostr は返信先イベント id）。
     ///
     /// 既定 `None`（後方互換 — 宛先を明示するツール呼び出しは従来どおり動く）。
@@ -196,22 +213,6 @@ pub trait GatewayActions: Send + Sync {
     fn a2ui_surface(&self) -> Option<Arc<opencrab_core::a2ui::A2uiSurface>> {
         None
     }
-
-    /// この transport が素テキストの配送口を提供するなら返す（#157 S7）。
-    ///
-    /// `request_peer_review` の**実体は gateway 非依存層**
-    /// （`crates/server/src/peer_review.rs`）にあるが、宛先検査・メンション記法・
-    /// 1 通あたりの上限・送信そのものは transport にしか作れない。合成 gateway
-    /// （`SystemGatewayActions`）はこのメソッドで配送口を引き、汎用層へ渡す。
-    ///
-    /// `a2ui_surface()` と違い、これを提供しない transport でも
-    /// `request_peer_review` は**定義に出る**（配送口が無いときだけ実行が明示エラー）。
-    /// ツールの露出が transport の有無で消えないようにするのが #157 の目的そのもの。
-    ///
-    /// 既定は `None`（テキストを送れない transport）。
-    fn text_delivery(&self) -> Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>> {
-        None
-    }
 }
 
 /// ツール定義が自ら名乗る分類。
@@ -255,48 +256,25 @@ pub enum DispatchMode {
     Utterance,
 }
 
-/// core 既知の**発話クラス** operation 名か（R3 統括裁定 (c)・第一段）。
+/// A dynamically declared utterance's generic transcript projection.
 ///
-/// `say`（最終応答＝既に撃ちっぱなし配送）と DI operation の `reply`/`reaction`/`repost`。
-/// `resolve` は結果を読む**照会クラス**なのでここに含めない（従来どおり Dispatchable）。
-/// `follow`/`unfollow`/`kind0`/`upload` 等の書き込み系も第一段では対象外（従来維持）。
-/// 将来の外部 DI gateway 拡張は宣言 field（additive）で自ら名乗れるが、その導出は
-/// 呼び出し側（`ops_projection`）が本関数へフォールバックする（DESIGN §3.3.1 C2）。
-pub fn is_known_utterance_op(name: &str) -> bool {
-    matches!(name, "say" | "reply" | "reaction" | "repost")
-}
-
-/// 発話 op の payload から `(永続する発話本文, 関係注記の種別, 対象参照)` を **core 既知名**で
-/// 導く（R3 (c)・DESIGN-RESUME-SETTLE §3.3.1 C5/C6）。
-///
-/// 既知名の field 規約（reply=text/event・reaction=emoji/event・repost=event）を第一段では直接
-/// 読む。未知の発話 op は best-effort（text/event or target を探し kind=op 名）。この関数と
-/// [`is_known_utterance_op`] が「core 既知名」の集約点であり、extgate の generic DI 中核
-/// （operations / operation_calls / ops_projection）には op 名リテラルを置かない
-/// （DI-18 / §11.6 の generic 性 audit を割らない）。
+/// Classification never depends on the operation name. The gateway declaration owns dispatch and
+/// effect; core only retains a best-effort human-readable scalar plus an opaque target reference.
 pub fn utterance_body(
     operation: &str,
     payload: &serde_json::Value,
 ) -> (String, String, Option<String>) {
-    let s = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(str::to_string);
-    match operation {
-        "reply" => (
-            s("text").unwrap_or_default(),
-            "reply".to_string(),
-            s("event"),
-        ),
-        "reaction" => (
-            s("emoji").unwrap_or_else(|| "+".to_string()),
-            "reaction".to_string(),
-            s("event"),
-        ),
-        "repost" => (String::new(), "repost".to_string(), s("event")),
-        other => (
-            s("text").unwrap_or_default(),
-            other.to_string(),
-            s("event").or_else(|| s("target")),
-        ),
-    }
+    let string = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    };
+    let body = string("text")
+        .or_else(|| string("emoji"))
+        .unwrap_or_default();
+    let target = string("target").or_else(|| string("event"));
+    (body, operation.to_string(), target)
 }
 
 /// depth>=1 の sub-engine（`spawn_subtask` で起動した子）から見たツールの扱い。
@@ -308,7 +286,7 @@ pub fn utterance_body(
 pub enum SubEngineAccess {
     /// sub-engine に見せて実行も許す。現状は `report_progress` / `nostr_generate_key` のみ。
     Allowed,
-    /// depth>=1 で明示的に拒否する（多層防御）。配送系（`send_ui` / `request_peer_review` /
+    /// depth>=1 で明示的に拒否する（多層防御）。配送系（`send_ui` /
     /// discord 送信・VC 参加退出など）。
     Blocked,
     /// 既定。許可リストに載せない（許可・拒否のどちらでもない大多数）。
@@ -360,12 +338,3 @@ pub struct GatewayActionResult {
     pub data: Option<serde_json::Value>,
     pub error: Option<String>,
 }
-
-/// ピアレビュー依頼メッセージのマーカー（プロトコル定数）。
-///
-/// discord 側のヘッダ組み立てと server 側の system prompt 規約の両方がこれを参照する。
-/// 文字列がズレると Silent Reply の例外判定が発火せず、レビューが silent に死ぬため
-/// 必ずこの定数を使うこと。
-pub const PEER_REVIEW_REQUEST_MARKER: &str = "[Peer Review Request]";
-/// ピアレビュー返信メッセージのマーカー（プロトコル定数）。
-pub const PEER_REVIEW_REPLY_MARKER: &str = "[Peer Review]";

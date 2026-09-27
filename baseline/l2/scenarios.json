@@ -27,21 +27,9 @@
         "normal": "baseline-peer",
         "missing": "baseline-missing"
       },
-      "channel_id": {
-        "normal": "baseline-channel",
-        "missing": "baseline-missing"
-      },
-      "user_id": {
-        "normal": "baseline-trusted-row",
-        "missing": "baseline-missing"
-      },
       "command": {
         "normal": "baseline-command",
         "missing": "baseline-missing"
-      },
-      "watch_id": {
-        "normal": "1",
-        "missing": "999999"
       },
       "source": {
         "normal": "baseline-source",
@@ -54,14 +42,6 @@
       "*path": {
         "normal": "baseline.txt",
         "missing": "baseline-missing.txt"
-      },
-      "instance_id": {
-        "normal": "11111111-1111-4111-8111-111111111111",
-        "missing": "00000000-0000-4000-8000-000000000000"
-      },
-      "binding_id": {
-        "normal": "22222222-2222-4222-8222-222222222222",
-        "missing": "00000000-0000-4000-8000-000000000001"
       },
       "agent_id": {
         "normal": "baseline-agent",
@@ -107,14 +87,6 @@
       },
       "POST /api/agents/{id}/allowed-commands": {
         "command": "printf"
-      },
-      "PUT /api/agents/{id}/channel-configs": {
-        "channel_id": "baseline-new-channel",
-        "guild_id": "baseline-guild",
-        "channel_name": "new",
-        "readable": true,
-        "writable": true,
-        "whitelisted": true
       },
       "POST /api/agents/{id}/co-agents": {
         "co_agent_id": "baseline-new-peer"
@@ -167,15 +139,6 @@
         "preset_name": "Baseline",
         "persona_name": "Baseline"
       },
-      "POST /api/agents/{id}/trusted-users": {
-        "platform": "web",
-        "user_id": "baseline-new-user",
-        "display_name": "Baseline New User",
-        "permission": "user"
-      },
-      "PATCH /api/agents/{id}/trusted-users/{user_id}": {
-        "display_name": "Renamed"
-      },
       "PUT /api/agents/{id}/workspace/{*path}": {
         "content": "baseline write\n"
       },
@@ -216,11 +179,6 @@
     "normal_uncollected_l3": {
       "POST /api/agents/{id}/mcp/{name}/test": "operator supplied subprocess",
       "POST /api/llm/providers/{name}/test": "provider network endpoint",
-      "PUT /api/gate-instances/{instance_id}": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
-      "DELETE /api/gate-instances/{instance_id}": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
-      "POST /api/gate-instances/{instance_id}/revisions": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
-      "PUT /api/gate-bindings/{binding_id}": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
-      "DELETE /api/gate-bindings/{binding_id}": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
       "POST /api/agents/{id}/daily-log-index/rebuild": "successful branch schedules LLM-backed indexing",
       "POST /api/agents/{id}/daily-log-index/run": "successful branch schedules LLM-backed indexing",
       "POST /api/agents/{id}/memory/index": "successful branch schedules LLM-backed indexing",
@@ -284,18 +242,6 @@
       "POST /api/agents/{id}/import/sync": {
         "kind": "uncollected",
         "reason": "bodyless operator-workspace action; operator source is outside L2"
-      },
-      "PUT /api/gate-instances/{instance_id}": {
-        "kind": "uncollected",
-        "reason": "operator Bearer admin; L2 does not hold the operator token"
-      },
-      "POST /api/gate-instances/{instance_id}/revisions": {
-        "kind": "uncollected",
-        "reason": "operator Bearer admin; L2 does not hold the operator token"
-      },
-      "PUT /api/gate-bindings/{binding_id}": {
-        "kind": "uncollected",
-        "reason": "operator Bearer admin; L2 does not hold the operator token"
       }
     },
     "mutation_postconditions": {
@@ -322,14 +268,6 @@
       "DELETE /api/agents/{id}/allowed-commands/{command}": {
         "method": "GET",
         "path": "/api/agents/{id}/allowed-commands"
-      },
-      "PUT /api/agents/{id}/channel-configs": {
-        "method": "GET",
-        "path": "/api/agents/{id}/channel-configs"
-      },
-      "DELETE /api/agents/{id}/channel-configs/{channel_id}": {
-        "method": "GET",
-        "path": "/api/agents/{id}/channel-configs"
       },
       "POST /api/agents/{id}/co-agents": {
         "method": "GET",
@@ -406,18 +344,6 @@
       "POST /api/agents/{id}/soul/presets/{preset_id}/apply": {
         "method": "GET",
         "path": "/api/agents/{id}"
-      },
-      "POST /api/agents/{id}/trusted-users": {
-        "method": "GET",
-        "path": "/api/agents/{id}/trusted-users"
-      },
-      "PATCH /api/agents/{id}/trusted-users/{user_id}": {
-        "method": "GET",
-        "path": "/api/agents/{id}/trusted-users"
-      },
-      "DELETE /api/agents/{id}/trusted-users/{user_id}": {
-        "method": "GET",
-        "path": "/api/agents/{id}/trusted-users"
       },
       "PUT /api/agents/{id}/workspace/{*path}": {
         "method": "GET",
@@ -839,7 +765,6 @@
     },
     "success_uncollected_l3": {
       "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
-      "request_peer_review": "Success delivers a message through the active transport. A local fake delivery would not fix live delivery behavior.",
       "delete_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
       "get_my_heartbeat": "requires an inbound gateway session fire descriptor owned by an external gateway process",
       "get_my_schedules": "requires an inbound gateway session fire descriptor owned by an external gateway process",

@@ -1,7 +1,8 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[allow(unused_imports)]
 use super::*;
@@ -36,6 +37,232 @@ pub struct SessionHeartbeatConfigRow {
     pub anchor_at: Option<String>,
     /// 最終発火時刻（rfc3339 の壁時計）。`None` = 未発火。
     pub last_fired_at: Option<String>,
+}
+
+/// Generic instruction override paired with one composite heartbeat target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHeartbeatInstructionsRow {
+    pub agent_id: String,
+    pub session_id: String,
+    /// `None` inherits the current agent instructions, then the generic default.
+    pub override_text: Option<String>,
+}
+
+/// A stopped-migration source after its external destination has already been resolved to a
+/// generic binding/session target. This type intentionally has no platform or locator fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeartbeatProjectionSource {
+    pub enabled: bool,
+    pub interval_secs: Option<i64>,
+    pub instruction_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHeartbeatProjection {
+    pub enabled: bool,
+    pub interval_secs: Option<i64>,
+    pub override_text: Option<String>,
+}
+
+/// Resolve config and instruction precedence independently. Exact config always shadows global
+/// config. Instructions use the first non-empty exact/global value; no value becomes NULL
+/// inheritance at the generic target.
+pub fn resolve_heartbeat_projection_sources(
+    exact: Option<&HeartbeatProjectionSource>,
+    global: Option<&HeartbeatProjectionSource>,
+) -> Option<ResolvedHeartbeatProjection> {
+    let config = exact.or(global)?;
+    let override_text = exact
+        .and_then(|source| source.instruction_text.as_deref())
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            global
+                .and_then(|source| source.instruction_text.as_deref())
+                .filter(|text| !text.is_empty())
+        })
+        .map(str::to_owned);
+    Some(ResolvedHeartbeatProjection {
+        enabled: config.enabled,
+        interval_secs: config.interval_secs,
+        override_text,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StoppedHeartbeatProjectionTarget {
+    pub agent_id: String,
+    pub session_id: String,
+    pub enabled: bool,
+    pub interval_secs: Option<i64>,
+    pub anchor_at: Option<String>,
+    pub last_fired_at: Option<String>,
+    pub override_text: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeartbeatProjectionFingerprints {
+    /// Exact stopped-retry fingerprint, including initial mutable scheduling state.
+    pub initial_fingerprint: String,
+    /// Long-lived lineage digest, excluding runtime-mutated last-fired and update timestamps.
+    pub lineage_digest: String,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum HeartbeatProjectionError {
+    #[error("generic heartbeat projection target conflicts with existing state")]
+    Conflict,
+    #[error("generic heartbeat projection store error")]
+    Store,
+}
+
+fn digest_json<T: Serialize>(value: &T) -> String {
+    let bytes = serde_json::to_vec(value).expect("projection fingerprint serialization");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn projection_fingerprints_from_target(
+    target: &StoppedHeartbeatProjectionTarget,
+) -> HeartbeatProjectionFingerprints {
+    let initial_fingerprint = digest_json(target);
+    let lineage_digest = digest_json(&(
+        &target.agent_id,
+        &target.session_id,
+        target.enabled,
+        target.interval_secs,
+        &target.anchor_at,
+        &target.override_text,
+    ));
+    HeartbeatProjectionFingerprints {
+        initial_fingerprint,
+        lineage_digest,
+    }
+}
+
+/// Read the current target fingerprints. The initial fingerprint changes after a legitimate
+/// runtime anchor update; the lineage digest deliberately does not.
+pub fn heartbeat_projection_fingerprints(
+    conn: &Connection,
+    agent_id: &str,
+    session_id: &str,
+) -> Result<Option<HeartbeatProjectionFingerprints>> {
+    let target = conn
+        .query_row(
+            "SELECT c.agent_id, c.session_id, c.enabled, c.interval_secs, c.anchor_at,
+                    c.last_fired_at, i.override_text, c.updated_at
+             FROM session_heartbeat_config c
+             JOIN session_heartbeat_instructions i
+               ON i.agent_id=c.agent_id AND i.session_id=c.session_id
+             WHERE c.agent_id=?1 AND c.session_id=?2",
+            params![agent_id, session_id],
+            |row| {
+                Ok(StoppedHeartbeatProjectionTarget {
+                    agent_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    enabled: row.get(2)?,
+                    interval_secs: row.get(3)?,
+                    anchor_at: row.get(4)?,
+                    last_fired_at: row.get(5)?,
+                    override_text: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(target.as_ref().map(projection_fingerprints_from_target))
+}
+
+/// Materialize one manifest-approved generic target inside the caller's stopped projection
+/// transaction. Exact retries are read-only; partial or non-identical pre-existing state fails
+/// closed. This is a library seam for the sole S8 `project-core-state` transaction, not a runtime
+/// migration path.
+pub fn project_stopped_session_heartbeat_target_in_tx(
+    conn: &Connection,
+    target: &StoppedHeartbeatProjectionTarget,
+) -> std::result::Result<HeartbeatProjectionFingerprints, HeartbeatProjectionError> {
+    if conn.is_autocommit() {
+        return Err(HeartbeatProjectionError::Store);
+    }
+    let membership: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_sessions WHERE agent_id=?1 AND session_id=?2)",
+            params![target.agent_id, target.session_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| HeartbeatProjectionError::Store)?;
+    if !membership {
+        return Err(HeartbeatProjectionError::Conflict);
+    }
+
+    let config = conn
+        .query_row(
+            "SELECT enabled, interval_secs, anchor_at, last_fired_at, updated_at
+             FROM session_heartbeat_config WHERE agent_id=?1 AND session_id=?2",
+            params![target.agent_id, target.session_id],
+            |row| {
+                Ok((
+                    row.get::<_, bool>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| HeartbeatProjectionError::Store)?;
+    let instructions = conn
+        .query_row(
+            "SELECT override_text, updated_at FROM session_heartbeat_instructions
+             WHERE agent_id=?1 AND session_id=?2",
+            params![target.agent_id, target.session_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|_| HeartbeatProjectionError::Store)?;
+
+    match (config, instructions) {
+        (None, None) => {
+            conn.execute(
+                "INSERT INTO session_heartbeat_config
+                 (agent_id, session_id, enabled, interval_secs, anchor_at, last_fired_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    target.agent_id,
+                    target.session_id,
+                    target.enabled,
+                    target.interval_secs,
+                    target.anchor_at,
+                    target.last_fired_at,
+                    target.updated_at,
+                ],
+            )
+            .map_err(|_| HeartbeatProjectionError::Store)?;
+            conn.execute(
+                "INSERT INTO session_heartbeat_instructions
+                 (agent_id, session_id, override_text, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    target.agent_id,
+                    target.session_id,
+                    target.override_text,
+                    target.updated_at,
+                ],
+            )
+            .map_err(|_| HeartbeatProjectionError::Store)?;
+        }
+        (Some(config), Some(instructions))
+            if config
+                == (
+                    target.enabled,
+                    target.interval_secs,
+                    target.anchor_at.clone(),
+                    target.last_fired_at.clone(),
+                    target.updated_at.clone(),
+                )
+                && instructions == (target.override_text.clone(), target.updated_at.clone()) => {}
+        _ => return Err(HeartbeatProjectionError::Conflict),
+    }
+    Ok(projection_fingerprints_from_target(target))
 }
 
 /// `(agent_id, session_id)` で設定を取得する。行が無ければ `None`。
@@ -105,6 +332,78 @@ pub fn upsert_session_heartbeat_config(
         ],
     )?;
     Ok(())
+}
+
+pub fn get_session_heartbeat_instructions(
+    conn: &Connection,
+    agent_id: &str,
+    session_id: &str,
+) -> Result<Option<SessionHeartbeatInstructionsRow>> {
+    Ok(conn
+        .query_row(
+            "SELECT agent_id, session_id, override_text
+             FROM session_heartbeat_instructions WHERE agent_id=?1 AND session_id=?2",
+            params![agent_id, session_id],
+            |row| {
+                Ok(SessionHeartbeatInstructionsRow {
+                    agent_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    override_text: row.get(2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Update only the generic instruction override. This does not create or alter scheduling state;
+/// the composite foreign key requires an existing heartbeat target.
+pub fn upsert_session_heartbeat_instructions(
+    conn: &Connection,
+    row: &SessionHeartbeatInstructionsRow,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_heartbeat_instructions
+         (agent_id, session_id, override_text, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(agent_id, session_id) DO UPDATE SET
+             override_text=excluded.override_text,
+             updated_at=excluded.updated_at",
+        params![
+            row.agent_id,
+            row.session_id,
+            row.override_text,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn resolve_session_heartbeat_instructions(
+    conn: &Connection,
+    agent_id: &str,
+    session_id: &str,
+) -> Result<ResolvedHeartbeatInstructions> {
+    if let Some(row) = get_session_heartbeat_instructions(conn, agent_id, session_id)? {
+        if let Some(text) = row.override_text {
+            return Ok(ResolvedHeartbeatInstructions {
+                text,
+                source: "session",
+            });
+        }
+    }
+    let agent = get_agent(conn, agent_id)?
+        .map(|row| sanitize_heartbeat_instructions(&row.heartbeat_instructions))
+        .unwrap_or_default();
+    if agent.is_empty() {
+        Ok(ResolvedHeartbeatInstructions {
+            text: DEFAULT_HEARTBEAT_INSTRUCTIONS.to_string(),
+            source: "default",
+        })
+    } else {
+        Ok(ResolvedHeartbeatInstructions {
+            text: agent,
+            source: "agent",
+        })
+    }
 }
 
 /// **enabled = 1** のセッション設定を全件列挙する（中央スケジューラ用 / PR2）。
@@ -310,5 +609,161 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got.last_fired_at, None, "新規行は未発火（None）");
+    }
+
+    fn seed_s4_target(conn: &Connection, agent_id: &str, session_id: &str) {
+        conn.execute(
+            "INSERT INTO agents (agent_id, name, persona_name) VALUES (?1, 'A', 'P')",
+            [agent_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, theme, created_at, updated_at) VALUES (?1, 'T', '1', '1')",
+            [session_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_sessions (agent_id, session_id) VALUES (?1, ?2)",
+            params![agent_id, session_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn s4_composite_instruction_rows_and_null_inheritance_are_generic() {
+        let conn = crate::init_memory().unwrap();
+        seed_s4_target(&conn, "agent-a", "opaque-session");
+        conn.execute(
+            "UPDATE agents SET heartbeat_instructions='agent current' WHERE agent_id='agent-a'",
+            [],
+        )
+        .unwrap();
+        upsert_session_heartbeat_config(
+            &conn,
+            &SessionHeartbeatConfigRow {
+                agent_id: "agent-a".into(),
+                session_id: "opaque-session".into(),
+                enabled: true,
+                interval_secs: Some(600),
+                anchor_at: Some("2026-01-01T00:00:00Z".into()),
+                last_fired_at: None,
+            },
+        )
+        .unwrap();
+        upsert_session_heartbeat_instructions(
+            &conn,
+            &SessionHeartbeatInstructionsRow {
+                agent_id: "agent-a".into(),
+                session_id: "opaque-session".into(),
+                override_text: None,
+            },
+        )
+        .unwrap();
+        let inherited =
+            resolve_session_heartbeat_instructions(&conn, "agent-a", "opaque-session").unwrap();
+        assert_eq!(inherited.text, "agent current");
+        assert_eq!(inherited.source, "agent");
+
+        conn.execute(
+            "UPDATE agents SET heartbeat_instructions='' WHERE agent_id='agent-a'",
+            [],
+        )
+        .unwrap();
+        let defaulted =
+            resolve_session_heartbeat_instructions(&conn, "agent-a", "opaque-session").unwrap();
+        assert_eq!(defaulted.text, DEFAULT_HEARTBEAT_INSTRUCTIONS);
+        assert_eq!(defaulted.source, "default");
+
+        upsert_session_heartbeat_instructions(
+            &conn,
+            &SessionHeartbeatInstructionsRow {
+                agent_id: "agent-a".into(),
+                session_id: "opaque-session".into(),
+                override_text: Some("session override".into()),
+            },
+        )
+        .unwrap();
+        let overridden =
+            resolve_session_heartbeat_instructions(&conn, "agent-a", "opaque-session").unwrap();
+        assert_eq!(overridden.text, "session override");
+        assert_eq!(overridden.source, "session");
+    }
+
+    #[test]
+    fn s4_exact_config_and_nonempty_instruction_precedence_are_independent() {
+        let exact = HeartbeatProjectionSource {
+            enabled: false,
+            interval_secs: Some(900),
+            instruction_text: Some(String::new()),
+        };
+        let global = HeartbeatProjectionSource {
+            enabled: true,
+            interval_secs: Some(1800),
+            instruction_text: Some("global fallback".into()),
+        };
+        let resolved = resolve_heartbeat_projection_sources(Some(&exact), Some(&global)).unwrap();
+        assert!(!resolved.enabled, "exact config shadows global config");
+        assert_eq!(resolved.interval_secs, Some(900));
+        assert_eq!(
+            resolved.override_text.as_deref(),
+            Some("global fallback"),
+            "empty exact instructions fall back to non-empty global instructions"
+        );
+        let exact_nonempty = HeartbeatProjectionSource {
+            instruction_text: Some("exact wins".into()),
+            ..exact
+        };
+        let resolved =
+            resolve_heartbeat_projection_sources(Some(&exact_nonempty), Some(&global)).unwrap();
+        assert_eq!(resolved.override_text.as_deref(), Some("exact wins"));
+    }
+
+    #[test]
+    fn s4_stopped_projection_refuses_conflict_and_runtime_anchor_can_advance() {
+        let conn = crate::init_memory().unwrap();
+        seed_s4_target(&conn, "agent-a", "opaque-session");
+        let target = StoppedHeartbeatProjectionTarget {
+            agent_id: "agent-a".into(),
+            session_id: "opaque-session".into(),
+            enabled: true,
+            interval_secs: Some(600),
+            anchor_at: Some("2026-01-01T00:00:00Z".into()),
+            last_fired_at: Some("2026-01-01T00:10:00Z".into()),
+            override_text: Some("projected".into()),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let first = {
+            let tx = conn.unchecked_transaction().unwrap();
+            let fingerprints =
+                project_stopped_session_heartbeat_target_in_tx(&tx, &target).unwrap();
+            tx.commit().unwrap();
+            fingerprints
+        };
+        let retry = {
+            let tx = conn.unchecked_transaction().unwrap();
+            let fingerprints =
+                project_stopped_session_heartbeat_target_in_tx(&tx, &target).unwrap();
+            tx.commit().unwrap();
+            fingerprints
+        };
+        assert_eq!(first, retry, "stopped exact retry must be byte-stable");
+        assert_ne!(first.initial_fingerprint, first.lineage_digest);
+
+        let conflicting = StoppedHeartbeatProjectionTarget {
+            interval_secs: Some(601),
+            ..target.clone()
+        };
+        let conflict = {
+            let tx = conn.unchecked_transaction().unwrap();
+            project_stopped_session_heartbeat_target_in_tx(&tx, &conflicting).unwrap_err()
+        };
+        assert_eq!(conflict, HeartbeatProjectionError::Conflict);
+
+        set_session_last_fired(&conn, "agent-a", "opaque-session", "2026-01-01T00:20:00Z").unwrap();
+        let after = heartbeat_projection_fingerprints(&conn, "agent-a", "opaque-session")
+            .unwrap()
+            .unwrap();
+        assert_ne!(after.initial_fingerprint, first.initial_fingerprint);
+        assert_eq!(after.lineage_digest, first.lineage_digest);
     }
 }

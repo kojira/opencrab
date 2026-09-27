@@ -34,7 +34,6 @@ pub mod secret_box;
 pub mod skill;
 pub mod soul;
 pub mod task_ledger;
-pub mod text_delivery;
 pub mod tokens;
 pub mod tool_result_log;
 pub mod workspace;

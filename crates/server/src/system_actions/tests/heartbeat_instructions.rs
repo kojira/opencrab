@@ -30,6 +30,41 @@ fn insert_agent(state: &AppState, heartbeat_instructions: &str) {
     .unwrap();
 }
 
+fn insert_session_target(state: &AppState, session_id: &str, override_text: Option<&str>) {
+    let conn = state.db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO sessions (id, theme, created_at, updated_at) VALUES (?1, 'T', '1', '1')",
+        [session_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_sessions (agent_id, session_id) VALUES ('agent-x', ?1)",
+        [session_id],
+    )
+    .unwrap();
+    opencrab_db::queries::upsert_session_heartbeat_config(
+        &conn,
+        &opencrab_db::queries::SessionHeartbeatConfigRow {
+            agent_id: "agent-x".into(),
+            session_id: session_id.into(),
+            enabled: true,
+            interval_secs: Some(600),
+            anchor_at: Some("2026-01-01T00:00:00Z".into()),
+            last_fired_at: None,
+        },
+    )
+    .unwrap();
+    opencrab_db::queries::upsert_session_heartbeat_instructions(
+        &conn,
+        &opencrab_db::queries::SessionHeartbeatInstructionsRow {
+            agent_id: "agent-x".into(),
+            session_id: session_id.into(),
+            override_text: override_text.map(str::to_owned),
+        },
+    )
+    .unwrap();
+}
+
 fn audit_rows(state: &AppState) -> Vec<opencrab_db::queries::HeartbeatInstructionsAuditRow> {
     let conn = state.db.lock().unwrap();
     opencrab_db::queries::list_heartbeat_instructions_audit(&conn, "agent-x", 10).unwrap()
@@ -58,9 +93,11 @@ fn heartbeat_instruction_tools_are_exposed_in_own_definitions() {
     assert!(required.iter().any(|v| v == "scope"));
     assert!(required.iter().any(|v| v == "instructions"));
     let props = update.parameters["properties"].as_object().unwrap();
-    for key in ["scope", "channel_id", "guild_id", "instructions", "reason"] {
+    for key in ["scope", "session_id", "instructions", "reason"] {
         assert!(props.contains_key(key), "missing property: {key}");
     }
+    assert!(!props.contains_key("channel_id"));
+    assert!(!props.contains_key("guild_id"));
     let read = defs
         .iter()
         .find(|d| d.name == "read_heartbeat_instructions")
@@ -129,7 +166,7 @@ async fn update_heartbeat_instructions_owner_success_and_audit() {
         json!({
             "success": true,
             "scope": "agent",
-            "channel_id": Value::Null,
+            "session_id": Value::Null,
             "length": 5,
             "preview": "NEW指示",
         })
@@ -197,26 +234,23 @@ async fn update_heartbeat_instructions_missing_agent_and_bad_args() {
     let r = actions
         .execute(
             "update_heartbeat_instructions",
-            &json!({"scope": "channel", "instructions": "x"}),
+            &json!({"scope": "session", "instructions": "x"}),
             &owner_ctx(),
         )
         .await;
     assert_eq!(
         r.error.as_deref(),
-        Some("scope=channelのときはchannel_idが必要です")
+        Some("scope=sessionのときはsession_idが必要です")
     );
 
     let r = actions
         .execute(
             "update_heartbeat_instructions",
-            &json!({"scope": "channel", "channel_id": "ch1", "instructions": "x"}),
+            &json!({"scope": "session", "session_id": "missing", "instructions": "x"}),
             &owner_ctx(),
         )
         .await;
-    assert_eq!(
-        r.error.as_deref(),
-        Some("新規チャンネル設定の作成にはguild_idが必要です")
-    );
+    assert!(r.error.as_deref().unwrap().starts_with("セッション指示の保存に失敗:"));
 
     let r = actions
         .execute(
@@ -227,46 +261,28 @@ async fn update_heartbeat_instructions_missing_agent_and_bad_args() {
         .await;
     assert_eq!(
         r.error.as_deref(),
-        Some("不明なscope: nope（agent または channel）")
+        Some("不明なscope: nope（agent または session）")
     );
 }
 
-/// `scope="effective"` が解決結果（source + instructions）を返す（旧テストの移植）。
 #[tokio::test]
-async fn read_heartbeat_instructions_effective() {
+async fn read_heartbeat_instructions_effective_uses_generic_session_override() {
     let state = crate::test_app_state();
-    {
-        let conn = state.db.lock().unwrap();
-        opencrab_db::queries::upsert_channel_config(
-            &conn,
-            &opencrab_db::queries::ChannelConfigRow {
-                channel_id: "ch1".to_string(),
-                agent_id: "agent-x".to_string(),
-                guild_id: "g1".to_string(),
-                channel_name: String::new(),
-                readable: true,
-                writable: true,
-                whitelisted: false,
-                heartbeat_enabled: true,
-                heartbeat_interval_secs: None,
-                heartbeat_instructions: "業務連絡のみ".to_string(),
-            },
-        )
-        .unwrap();
-    }
+    insert_agent(&state, "agent fallback");
+    insert_session_target(&state, "opaque-session", Some("業務連絡のみ"));
     let actions = SystemGatewayActions::new(state, None, None, None);
     let r = actions
         .execute(
             "read_heartbeat_instructions",
-            &json!({"scope": "effective", "channel_id": "ch1"}),
+            &json!({"scope": "effective", "session_id": "opaque-session"}),
             &trusted_ctx(),
         )
         .await;
     assert!(r.success, "{:?}", r.error);
     let data = r.data.unwrap();
     assert_eq!(data["scope"], "effective");
-    assert_eq!(data["channel_id"], "ch1");
-    assert_eq!(data["source"], "channel");
+    assert_eq!(data["session_id"], "opaque-session");
+    assert_eq!(data["source"], "session");
     assert_eq!(data["instructions"], "業務連絡のみ");
 }
 
@@ -307,41 +323,32 @@ async fn read_heartbeat_instructions_rejected_for_plain_agent() {
     );
 }
 
-/// **チャンネル単位設定の非対称（#157 S3）**: 非 Discord 経路には通常チャンネル設定の
-/// 行が無いので、`scope="channel"` は空文字列を返し、`scope="effective"` は
-/// エージェント/既定へフォールバックする。エラーにはならない（露出はする）。
 #[tokio::test]
-async fn read_heartbeat_instructions_channel_scope_is_empty_without_a_channel_row() {
+async fn read_heartbeat_instructions_null_session_override_inherits_current_agent() {
     let state = crate::test_app_state();
     insert_agent(&state, "エージェント既定の指示");
+    insert_session_target(&state, "opaque-session", None);
     let actions = SystemGatewayActions::new(state, None, None, None);
 
-    let r = actions
+    let raw = actions
         .execute(
             "read_heartbeat_instructions",
-            &json!({"scope": "channel", "channel_id": "no-such-channel"}),
+            &json!({"scope": "session", "session_id": "opaque-session"}),
             &trusted_ctx(),
         )
         .await;
-    assert!(r.success, "{:?}", r.error);
-    assert_eq!(
-        r.data.unwrap(),
-        json!({
-            "scope": "channel",
-            "channel_id": "no-such-channel",
-            "instructions": "",
-        })
-    );
+    assert!(raw.success, "{:?}", raw.error);
+    assert_eq!(raw.data.unwrap()["instructions"], "");
 
-    let r = actions
+    let effective = actions
         .execute(
             "read_heartbeat_instructions",
-            &json!({"scope": "effective", "channel_id": "no-such-channel"}),
+            &json!({"scope": "effective", "session_id": "opaque-session"}),
             &trusted_ctx(),
         )
         .await;
-    assert!(r.success, "{:?}", r.error);
-    let data = r.data.unwrap();
+    assert!(effective.success, "{:?}", effective.error);
+    let data = effective.data.unwrap();
     assert_eq!(data["instructions"], "エージェント既定の指示");
     assert_eq!(data["source"], "agent");
 }
@@ -354,13 +361,13 @@ async fn read_heartbeat_instructions_bad_args() {
     let r = actions
         .execute(
             "read_heartbeat_instructions",
-            &json!({"scope": "channel"}),
+            &json!({"scope": "session"}),
             &trusted_ctx(),
         )
         .await;
     assert_eq!(
         r.error.as_deref(),
-        Some("scope=channelのときはchannel_idが必要です")
+        Some("scope=sessionのときはsession_idが必要です")
     );
 
     let r = actions
@@ -372,7 +379,7 @@ async fn read_heartbeat_instructions_bad_args() {
         .await;
     assert_eq!(
         r.error.as_deref(),
-        Some("不明なscope: nope（agent / channel / effective）")
+        Some("不明なscope: nope（agent / session / effective）")
     );
 }
 

@@ -1,5 +1,62 @@
     use super::*;
 
+    #[test]
+    fn s3_invoke_snapshot_rejects_stale_undeclared_and_mismatched_metadata() {
+        let operations = serde_json::json!([{
+            "name": "quasar.synthetic-v7",
+            "description": "synthetic",
+            "input_schema": {"type": "object"},
+            "output_schema": null,
+            "callback_schema": null,
+            "authorization": {"allowed_callers": ["owner"]},
+            "dispatch": "background",
+            "sub_engine": "not_exposed",
+            "sharing": "agent_bound",
+            "effect": "state_change"
+        }]);
+        let capabilities = crate::wire::RuntimeCapabilities {
+            final_delivery: crate::wire::FinalDelivery::Automatic,
+        };
+        let client = InstanceClient::blank(
+            "instance".into(),
+            "author".into(),
+            SayPolicy::AcceptToLiveQueue,
+            Some(operations.clone()),
+            capabilities,
+            None,
+        );
+        let digest = crate::wire::runtime_declaration_digest_from_value(
+            Some(&operations),
+            capabilities,
+        )
+        .unwrap();
+        assert_eq!(
+            digest,
+            "ae3998f8b460f71a2555ee1760ff82408162e4444a3a1d5dc5decac5020b889f"
+        );
+        let valid = Invoke {
+            id: "call".into(),
+            binding_id: "binding".into(),
+            declaration_digest: digest,
+            operation: "quasar.synthetic-v7".into(),
+            dispatch: "background".into(),
+            effect: "state_change".into(),
+            continuation_id: None,
+            payload: serde_json::json!({}),
+        };
+        assert_eq!(client.validate_invocation(&valid), Ok(()));
+
+        let mut stale = valid.clone();
+        stale.declaration_digest = "0".repeat(64);
+        assert_eq!(client.validate_invocation(&stale), Err("operation_rejected"));
+        let mut undeclared = valid.clone();
+        undeclared.operation = "other".into();
+        assert_eq!(client.validate_invocation(&undeclared), Err("operation_unknown"));
+        let mut metadata = valid.clone();
+        metadata.dispatch = "inline".into();
+        assert_eq!(client.validate_invocation(&metadata), Err("operation_rejected"));
+    }
+
     #[tokio::test]
     async fn malformed_present_reply_target_never_reaches_live_delivery() {
         for payload in [
@@ -12,6 +69,7 @@
                 "author".into(),
                 SayPolicy::AcceptToLiveQueue,
                 None,
+                crate::wire::RuntimeCapabilities::default(),
                 None,
             );
             {
@@ -66,6 +124,7 @@
             "author".into(),
             SayPolicy::AcceptToLiveQueue,
             None,
+            crate::wire::RuntimeCapabilities::default(),
             None,
         );
         {
@@ -125,6 +184,7 @@ async fn command_timeout_removes_pending_and_ignores_late_reply() {
         "author".to_string(),
         SayPolicy::AcceptToLiveQueue,
         None,
+        crate::wire::RuntimeCapabilities::default(),
         None,
     );
     let (write_tx, mut write_rx) = mpsc::unbounded_channel();

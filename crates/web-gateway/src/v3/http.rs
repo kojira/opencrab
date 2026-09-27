@@ -1,4 +1,4 @@
-//! HTTP/SSE 外形。判断はしない。Bearer は持たない。
+//! Web HTTP/SSE transport. The loopback HTTP routes retain their historical Owner context.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -298,8 +298,6 @@ async fn post_message(
             return json_error(StatusCode::CONFLICT, "binding_conflict", None);
         }
     };
-    // The web gateway binds only to loopback. An HTTP post accepted at this boundary is the
-    // operator-owned local web identity; shared layers receive only this generic role.
     let context = SaidContext {
         caller: SaidCaller::Owner,
         start_turn: true,
@@ -418,5 +416,31 @@ fn live_to_event(ev: &LiveEvent) -> Option<Event> {
                 .event("gate_error")
                 .data(json!({"code": code, "detail": detail}).to_string()),
         ),
+    }
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn web_routes_preserve_historical_credential_free_access() {
+        let app = router(HttpState {
+            instances: Vec::new(),
+            agent_clients: HashMap::new(),
+        });
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/web-conversations")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(r#"{"agent_id":"agent"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 }

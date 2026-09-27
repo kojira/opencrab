@@ -24,7 +24,7 @@ fn hb_set_instructions(core: &Core, text: &str) {
     .unwrap();
 }
 
-fn hb_seed_config(core: &Core, session_id: &str) {
+fn hb_seed_config(core: &Core, session_id: &str, override_text: &str) {
     let conn = core.extgate.db.lock().unwrap();
     opencrab_db::queries::upsert_session_heartbeat_config(
         &conn,
@@ -35,6 +35,15 @@ fn hb_seed_config(core: &Core, session_id: &str) {
             interval_secs: Some(60),
             anchor_at: None,
             last_fired_at: None,
+        },
+    )
+    .unwrap();
+    opencrab_db::queries::upsert_session_heartbeat_instructions(
+        &conn,
+        &opencrab_db::queries::SessionHeartbeatInstructionsRow {
+            agent_id: AGENT_ID.into(),
+            session_id: session_id.into(),
+            override_text: Some(override_text.to_string()),
         },
     )
     .unwrap();
@@ -55,11 +64,13 @@ fn hb_own_speech_rows(core: &Core) -> i64 {
 /// scheduler 実経路（scheduler.rs:152 と同一の `resolve_target`）→ `run_one_heartbeat`。
 /// extgate descriptor 未登録なら None を返し発火しない（現 tip の #925 未実装状態）。
 async fn hb_fire_via_scheduler_seam(core: &Core, session_id: &str) {
-    if let Some(target) = core
-        .state
-        .timed_fire_router
-        .resolve_target(session_id, AGENT_ID)
-    {
+    let target = {
+        let conn = core.state.db.lock().unwrap();
+        core.state
+            .timed_fire_router
+            .resolve_persisted_target(&conn, session_id, AGENT_ID)
+    };
+    if let Some(target) = target {
         opencrab_server::heartbeat_fire::run_one_heartbeat(&core.state, AGENT_ID, &target).await;
     }
 }
@@ -112,11 +123,12 @@ async fn heartbeat_h1_nostr_two_standalone_posts() {
 
     let fixture = Fixture::new();
     let (_client, _address, session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
-    hb_set_instructions(
+    hb_set_instructions(&core, "agent fallback must not drive this session");
+    hb_seed_config(
         &core,
+        &session_id,
         &format!("{M_HBN} 巡回して報告することがあれば 2 回に分けて投稿して"),
     );
-    hb_seed_config(&core, &session_id);
 
     hb_fire_via_scheduler_seam(&core, &session_id).await;
 

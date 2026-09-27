@@ -48,12 +48,23 @@ pub struct AppConfig {
     /// External gate V3 UDS listen path。空・欠落は listen しない。
     #[serde(default)]
     pub gate: GateConfig,
+    /// Dedicated protected core gate-admin UDS and bootstrap manifest.
+    #[serde(default)]
+    pub gate_admin: GateAdminConfig,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct GateConfig {
     #[serde(default)]
     pub listen_socket: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct GateAdminConfig {
+    #[serde(default)]
+    pub listen_socket: String,
+    #[serde(default)]
+    pub bootstrap_credential_file: String,
 }
 
 /// 古い `llm_logs` を zip へ書き出して DB から外す設定（#337）。

@@ -27,21 +27,6 @@ fn hb_agent(id: &str, heartbeat: &str) -> AgentRow {
     }
 }
 
-fn hb_channel(channel_id: &str, agent_id: &str, heartbeat: &str) -> ChannelConfigRow {
-    ChannelConfigRow {
-        channel_id: channel_id.to_string(),
-        agent_id: agent_id.to_string(),
-        guild_id: "g1".to_string(),
-        channel_name: String::new(),
-        readable: true,
-        writable: true,
-        whitelisted: false,
-        heartbeat_enabled: true,
-        heartbeat_interval_secs: None,
-        heartbeat_instructions: heartbeat.to_string(),
-    }
-}
-
 /// T-1.1 / T-1.2: agents.heartbeat_instructions round-trips and patches independently.
 #[test]
 fn test_agent_heartbeat_instructions_roundtrip_and_patch() {
@@ -61,54 +46,6 @@ fn test_agent_heartbeat_instructions_roundtrip_and_patch() {
     assert_eq!(got.heartbeat_instructions, "業務連絡のみ");
     assert_eq!(got.name, "N");
     assert_eq!(got.persona_name, "P");
-}
-
-/// T-1.3: channel override round-trips.
-#[test]
-fn test_channel_heartbeat_instructions_roundtrip() {
-    let conn = setup();
-    upsert_channel_config(&conn, &hb_channel("ch1", "a1", "雑談禁止")).unwrap();
-    let got = get_channel_config_for_agent(&conn, "ch1", "a1")
-        .unwrap()
-        .unwrap();
-    assert_eq!(got.heartbeat_instructions, "雑談禁止");
-}
-
-/// T-2.1: priority channel(agent) > channel(global) > agent global.
-/// チャンネル指示があればエージェント指示に**上書き**する（連結しない・#583）。
-#[test]
-fn test_resolve_priority() {
-    let conn = setup();
-    upsert_agent(&conn, &hb_agent("a1", "AGENT")).unwrap();
-    upsert_channel_config(&conn, &hb_channel("ch1", "", "GLOBAL_CH")).unwrap();
-    upsert_channel_config(&conn, &hb_channel("ch1", "a1", "AGENT_CH")).unwrap();
-
-    // channel(agent) wins and overrides the agent global entirely.
-    let r = resolve_heartbeat_instructions(&conn, "a1", "ch1");
-    assert_eq!(r.source, "channel");
-    assert_eq!(r.text, "AGENT_CH");
-
-    // remove channel(agent) override → falls back to channel(global), still overriding agent.
-    delete_channel_config_for_agent(&conn, "ch1", "a1").unwrap();
-    let r = resolve_heartbeat_instructions(&conn, "a1", "ch1");
-    assert_eq!(r.source, "channel");
-    assert_eq!(r.text, "GLOBAL_CH");
-
-    // remove channel(global) → agent global only.
-    delete_channel_config_for_agent(&conn, "ch1", "").unwrap();
-    let r = resolve_heartbeat_instructions(&conn, "a1", "ch1");
-    assert_eq!(r.source, "agent");
-    assert_eq!(r.text, "AGENT");
-}
-
-/// T-2.2: all empty → default fallback.
-#[test]
-fn test_resolve_default_fallback() {
-    let conn = setup();
-    upsert_agent(&conn, &hb_agent("a1", "")).unwrap();
-    let r = resolve_heartbeat_instructions(&conn, "a1", "ch-none");
-    assert_eq!(r.source, "default");
-    assert_eq!(r.text, DEFAULT_HEARTBEAT_INSTRUCTIONS);
 }
 
 /// T-2.4: clamp to max length and strip control characters.
@@ -133,7 +70,7 @@ fn test_heartbeat_instructions_audit_roundtrip() {
     let audit = HeartbeatInstructionsAuditRow {
         agent_id: "a1".to_string(),
         scope: "agent".to_string(),
-        channel_id: None,
+        session_id: None,
         caller_identity: "owner".to_string(),
         caller_user_id: Some("123".to_string()),
         old_value: Some("old".to_string()),
@@ -330,31 +267,6 @@ fn agent_heartbeat_broken_interval_disables_and_below_floor_clamps_up() {
 // Channel Heartbeat Interval 解決（#336）
 // ============================================
 
-/// テスト用にチャンネルのハートビート間隔を仕込む。
-fn seed_channel_interval(
-    conn: &Connection,
-    channel_id: &str,
-    agent_id: &str,
-    interval: Option<u64>,
-) {
-    upsert_channel_config(
-        conn,
-        &ChannelConfigRow {
-            channel_id: channel_id.to_string(),
-            agent_id: agent_id.to_string(),
-            guild_id: "g1".to_string(),
-            channel_name: String::new(),
-            readable: true,
-            writable: true,
-            whitelisted: false,
-            heartbeat_enabled: true,
-            heartbeat_interval_secs: interval,
-            heartbeat_instructions: String::new(),
-        },
-    )
-    .unwrap();
-}
-
 /// チャンネルの値が最優先（channel → agent → 既定）。
 #[test]
 fn resolve_channel_heartbeat_prefers_channel_value() {
@@ -438,19 +350,4 @@ fn resolve_channel_heartbeat_clamps_below_floor() {
     // 壊れた channel 値（0）は未設定扱い → agent 120 → clamp 300。
     let r = resolve_channel_heartbeat_interval(&conn, "a1", Some(0), 1800, 300);
     assert_eq!((r.interval_secs, r.source), (300, "clamped"));
-}
-
-/// 実データが失われないこと（既存の他エージェントの channel 行が混ざらない）。
-#[test]
-fn resolve_channel_heartbeat_is_per_agent() {
-    let conn = crate::init_memory().unwrap();
-    seed_channel_interval(&conn, "ch1", "a1", Some(900));
-    seed_channel_interval(&conn, "ch1", "a2", Some(1200));
-
-    // a1 の channel 行の値を渡せば a1 用に解決される（channel_interval は呼び出し側が
-    // 該当行から取り出して渡す設計）。
-    let r1 = resolve_channel_heartbeat_interval(&conn, "a1", Some(900), 1800, 300);
-    assert_eq!(r1.interval_secs, 900);
-    let r2 = resolve_channel_heartbeat_interval(&conn, "a2", Some(1200), 1800, 300);
-    assert_eq!(r2.interval_secs, 1200);
 }

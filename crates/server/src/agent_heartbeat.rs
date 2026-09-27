@@ -224,7 +224,7 @@ fn session_payload(
     conn: &rusqlite::Connection,
     agent_id: &str,
     session_id: &str,
-    target: &opencrab_actions::FireTarget,
+    _target: &opencrab_actions::FireTarget,
 ) -> serde_json::Value {
     let limits = state.heartbeat_limits;
     let row = opencrab_db::queries::get_session_heartbeat_config(conn, agent_id, session_id)
@@ -261,30 +261,11 @@ fn session_payload(
         None
     };
 
-    // enabled なのに発火しない理由（本人に見せる・#394）。**whitelist は現行 HB 発火経路に
-    // ゲートとして存在しないので理由に含めない**（含めると発火に影響しない嘘の理由になる・
-    // 設計 §5 N3 / §13.1 訂正）。実際の非発火ゲートは (a) 壊れた間隔・(b) G ゲート対象 transport
-    // （Discord）の live G。**「Discord か」ではなく「G ゲート対象か」を descriptor に問う**（#628）。
-    let live_g = state.heartbeat_config_rx.borrow().enabled;
-    let g_gated = state
-        .timed_fire_router
-        .descriptor(target.kind)
-        .map(|d| d.is_g_gated())
-        .unwrap_or(false);
-    let gated_reason: Option<String> = if enabled {
-        if effective.is_none() {
-            Some(
-                "設定された間隔が不正（0 以下）なため発火しません。有効な間隔（秒）を指定し直してください。"
-                    .to_string(),
-            )
-        } else if g_gated && !live_g {
-            Some(
-                "グローバルのハートビートが無効化（[agent] heartbeat_enabled=false）されているため、現在このセッションは発火しません（運用者設定）。"
-                    .to_string(),
-            )
-        } else {
-            None
-        }
+    let gated_reason: Option<String> = if enabled && effective.is_none() {
+        Some(
+            "設定された間隔が不正（0 以下）なため発火しません。有効な間隔（秒）を指定し直してください。"
+                .to_string(),
+        )
     } else {
         None
     };
@@ -540,14 +521,8 @@ pub(crate) fn run_my_heartbeat(
         Some(_) => return err("session_id は文字列で指定してください"),
     };
 
-    // 受け口の有無を先に確認する（UX: ゲートウェイ未稼働なら黙って spawn せず即エラーで返す）。
-    // これは発火経路ではなく事前検証（読み取りのみ）。実際の発火は run_one_heartbeat が回す。
-    // 受け口の kind は発火先の transport（descriptor が名乗った kind）そのもの（#628）。
-    let kind = target.kind;
-    if !state.timed_fire_router.has_sink_for_kind(kind) {
-        return err(format!(
-            "{kind} のゲートウェイが稼働していないため発火できません（受け口が未登録）。ゲートウェイの起動を確認してください。"
-        ));
+    if !state.timed_fire_router.has_live_sink() {
+        return err("ゲートウェイが稼働していないため発火できません（受け口が未登録）。ゲートウェイの起動を確認してください。");
     }
 
     // 時間発火とまったく同じ経路を spawn で回す（呼び出しターンが現在セッションのロックを
@@ -639,16 +614,15 @@ mod tests {
                 "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 &session_id,
-                &session_id,
+                "alias",
                 1,
             )
             .unwrap();
             tx.commit().unwrap();
         }
-        state.timed_fire_router.register_shared(
-            opencrab_extgate::EXTGATE_TIMED_FIRE_KIND,
-            Arc::new(NoopTimedFireSink),
-        );
+        state
+            .timed_fire_router
+            .register_sink(Arc::new(NoopTimedFireSink));
         let ctx = GatewayCallContext::new(GatewayCaller::Owner, agent_id)
             .with_session_id(session_id.clone());
         (state, ctx, session_id)

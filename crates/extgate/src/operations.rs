@@ -81,16 +81,116 @@ impl Sharing {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OperationClass {
+pub enum AllowedCaller {
+    Owner,
+    CoAgent,
+    Trusted,
+    Guest,
+}
+
+impl AllowedCaller {
+    fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "owner" => Self::Owner,
+            "co_agent" => Self::CoAgent,
+            "trusted" => Self::Trusted,
+            "guest" => Self::Guest,
+            _ => return None,
+        })
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::CoAgent => "co_agent",
+            Self::Trusted => "trusted",
+            Self::Guest => "guest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationDispatch {
+    Inline,
+    Background,
+    Utterance,
+}
+
+impl OperationDispatch {
+    fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "inline" => Self::Inline,
+            "background" => Self::Background,
+            "utterance" => Self::Utterance,
+            _ => return None,
+        })
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::Background => "background",
+            Self::Utterance => "utterance",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationEffect {
+    ReadOnly,
+    StateChange,
+    Utterance,
+}
+
+impl OperationEffect {
+    fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "read_only" => Self::ReadOnly,
+            "state_change" => Self::StateChange,
+            "utterance" => Self::Utterance,
+            _ => return None,
+        })
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::StateChange => "state_change",
+            Self::Utterance => "utterance",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalDelivery {
+    Automatic,
+    OperationDriven,
+}
+
+impl FinalDelivery {
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "automatic" => Self::Automatic,
+            "operation_driven" => Self::OperationDriven,
+            _ => return None,
+        })
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::OperationDriven => "operation_driven",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationPolicy {
+    pub allowed_callers: Vec<AllowedCaller>,
+    pub dispatch: OperationDispatch,
     pub sub_engine: SubEngine,
     pub sharing: Sharing,
-    /// 発話クラスの**宣言による自己申告**（DESIGN-RESUME-SETTLE §3.3.1 C2・R3 (a)）。
-    /// 第一段の分類は core 既知名（`is_known_utterance_op`）が担い、この field は将来の外部
-    /// DI gateway 拡張に備えた additive な併設で、`None`（未宣言）は後方互換で無視される。
-    /// **digest には含めない**（`to_canonical_value` 参照）——既存 gateway の宣言 digest を
-    /// 変えず、分類は routing の便宜であって wire 契約の一部ではないため（sub_engine 等の
-    /// セキュリティ属性のみ digest 契約に残す）。
-    pub utterance: Option<bool>,
+    pub effect: OperationEffect,
 }
 
 /// hello で宣言される 1 能力。immutable snapshot として live entry に保持する。
@@ -101,7 +201,7 @@ pub struct GatewayOperationDeclaration {
     pub input_schema: Value,
     pub output_schema: Option<Value>,
     pub callback_schema: Option<Value>,
-    pub class: OperationClass,
+    pub policy: OperationPolicy,
 }
 
 impl GatewayOperationDeclaration {
@@ -114,14 +214,16 @@ impl GatewayOperationDeclaration {
     /// 無視されるので digest に混ざらない。serde_json の Map は BTreeMap で key を UTF-8 昇順に
     /// 並べ、`to_vec` は最小セパレータで byte 化する（DI-05・既存 config_b64 正規化と同種）。
     fn to_canonical_value(&self) -> Value {
-        let mut class = Map::new();
-        class.insert(
-            "sub_engine".to_string(),
-            Value::String(self.class.sub_engine.as_str().to_string()),
-        );
-        class.insert(
-            "sharing".to_string(),
-            Value::String(self.class.sharing.as_str().to_string()),
+        let mut authorization = Map::new();
+        authorization.insert(
+            "allowed_callers".to_string(),
+            Value::Array(
+                self.policy
+                    .allowed_callers
+                    .iter()
+                    .map(|caller| Value::String(caller.as_str().to_string()))
+                    .collect(),
+            ),
         );
         let mut obj = Map::new();
         obj.insert("name".to_string(), Value::String(self.name.clone()));
@@ -138,7 +240,23 @@ impl GatewayOperationDeclaration {
             "callback_schema".to_string(),
             self.callback_schema.clone().unwrap_or(Value::Null),
         );
-        obj.insert("class".to_string(), Value::Object(class));
+        obj.insert("authorization".to_string(), Value::Object(authorization));
+        obj.insert(
+            "dispatch".to_string(),
+            Value::String(self.policy.dispatch.as_str().to_string()),
+        );
+        obj.insert(
+            "sub_engine".to_string(),
+            Value::String(self.policy.sub_engine.as_str().to_string()),
+        );
+        obj.insert(
+            "sharing".to_string(),
+            Value::String(self.policy.sharing.as_str().to_string()),
+        );
+        obj.insert(
+            "effect".to_string(),
+            Value::String(self.policy.effect.as_str().to_string()),
+        );
         Value::Object(obj)
     }
 }
@@ -211,14 +329,14 @@ fn parse_declaration(obj: &Map<String, Value>) -> Result<GatewayOperationDeclara
     };
     let output_schema = parse_optional_schema(obj.get("output_schema"))?;
     let callback_schema = parse_optional_schema(obj.get("callback_schema"))?;
-    let class = parse_class(obj.get("class"))?;
+    let policy = parse_policy(obj)?;
     Ok(GatewayOperationDeclaration {
         name,
         description,
         input_schema,
         output_schema,
         callback_schema,
-        class,
+        policy,
     })
 }
 
@@ -234,9 +352,33 @@ fn parse_optional_schema(value: Option<&Value>) -> Result<Option<Value>, GateErr
     }
 }
 
-fn parse_class(value: Option<&Value>) -> Result<OperationClass, GateError> {
-    let obj = value.and_then(Value::as_object).ok_or_else(invalid)?;
-    // class は sub_engine / sharing の 2 field だけ（余剰 member は無視、値は generic enum）。
+fn parse_policy(obj: &Map<String, Value>) -> Result<OperationPolicy, GateError> {
+    let authorization = obj
+        .get("authorization")
+        .and_then(Value::as_object)
+        .ok_or_else(invalid)?;
+    let callers = authorization
+        .get("allowed_callers")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    if callers.is_empty() {
+        return Err(invalid());
+    }
+    let mut allowed_callers = Vec::with_capacity(callers.len());
+    let mut previous: Option<&str> = None;
+    for raw in callers {
+        let raw = raw.as_str().ok_or_else(invalid)?;
+        if previous.is_some_and(|prev| prev >= raw) {
+            return Err(invalid());
+        }
+        allowed_callers.push(AllowedCaller::parse(raw).ok_or_else(invalid)?);
+        previous = Some(raw);
+    }
+    let dispatch = obj
+        .get("dispatch")
+        .and_then(Value::as_str)
+        .and_then(OperationDispatch::parse)
+        .ok_or_else(invalid)?;
     let sub_engine = obj
         .get("sub_engine")
         .and_then(Value::as_str)
@@ -247,13 +389,22 @@ fn parse_class(value: Option<&Value>) -> Result<OperationClass, GateError> {
         .and_then(Value::as_str)
         .and_then(Sharing::parse)
         .ok_or_else(invalid)?;
-    // additive・後方互換: `utterance` は任意。bool 以外・欠落は None（core 既知名へフォール
-    // バック）。宣言不正にはしない（未知/欠落 field は無視の後方互換・§3.3.1 C2）。
-    let utterance = obj.get("utterance").and_then(Value::as_bool);
-    Ok(OperationClass {
+    let effect = obj
+        .get("effect")
+        .and_then(Value::as_str)
+        .and_then(OperationEffect::parse)
+        .ok_or_else(invalid)?;
+    if matches!(dispatch, OperationDispatch::Utterance)
+        != matches!(effect, OperationEffect::Utterance)
+    {
+        return Err(invalid());
+    }
+    Ok(OperationPolicy {
+        allowed_callers,
+        dispatch,
         sub_engine,
         sharing,
-        utterance,
+        effect,
     })
 }
 
@@ -372,9 +523,46 @@ fn check_value_size(value: &Value, nodes: &mut usize) -> Result<(), GateError> {
 /// 検証済み宣言配列の canonical JSON の SHA-256 lowerhex（DI-04/05）。宣言が空でも
 /// `[]` の digest を返す。宣言順は validate 済みで name 昇順に固定されている。
 pub fn declaration_digest(decls: &[GatewayOperationDeclaration]) -> String {
-    let array = Value::Array(decls.iter().map(|d| d.to_canonical_value()).collect());
-    // serde_json は BTreeMap key 順 + 最小セパレータ。既存 config_b64 と同じ正規化系。
-    let bytes = serde_json::to_vec(&array).expect("canonical declaration serialization");
+    digest_value(&Value::Array(
+        decls.iter().map(|d| d.to_canonical_value()).collect(),
+    ))
+}
+
+/// Digest-covered protocol-v3 live capability snapshot.
+pub fn runtime_declaration_digest(
+    decls: &[GatewayOperationDeclaration],
+    final_delivery: FinalDelivery,
+) -> String {
+    let mut value = Map::new();
+    value.insert("version".to_string(), Value::Number(1u64.into()));
+    value.insert(
+        "final_delivery".to_string(),
+        Value::String(final_delivery.as_str().to_string()),
+    );
+    value.insert(
+        "operations".to_string(),
+        Value::Array(decls.iter().map(|d| d.to_canonical_value()).collect()),
+    );
+    digest_value(&Value::Object(value))
+}
+
+pub fn validate_runtime_compatibility(
+    decls: &[GatewayOperationDeclaration],
+    final_delivery: FinalDelivery,
+) -> Result<(), GateError> {
+    if matches!(final_delivery, FinalDelivery::OperationDriven)
+        && !decls
+            .iter()
+            .any(|declaration| matches!(declaration.policy.dispatch, OperationDispatch::Utterance))
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn digest_value(value: &Value) -> String {
+    // serde_json is deterministic for the canonical maps constructed above.
+    let bytes = serde_json::to_vec(value).expect("canonical declaration serialization");
     let hash = Sha256::digest(&bytes);
     let mut out = String::with_capacity(64);
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -386,143 +574,5 @@ pub fn declaration_digest(decls: &[GatewayOperationDeclaration]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn no_reserved(_: &str) -> bool {
-        false
-    }
-
-    fn decl(name: &str) -> Value {
-        json!({
-            "name": name,
-            "description": "d",
-            "input_schema": {"type": "object"},
-            "output_schema": null,
-            "callback_schema": null,
-            "class": {"sub_engine": "allowed", "sharing": "conversation_bound"}
-        })
-    }
-
-    #[test]
-    fn empty_array_is_valid_zero_tools() {
-        let decls = validate_operations(&json!([]), &no_reserved).unwrap();
-        assert!(decls.is_empty());
-        // 空配列の digest も安定。
-        assert_eq!(declaration_digest(&decls).len(), 64);
-    }
-
-    #[test]
-    fn sorted_names_ok_unsorted_rejected() {
-        let ok = validate_operations(&json!([decl("a"), decl("b")]), &no_reserved).unwrap();
-        assert_eq!(ok.len(), 2);
-        let err = validate_operations(&json!([decl("b"), decl("a")]), &no_reserved).unwrap_err();
-        assert_eq!(err.code, ErrorCode::OperationDeclarationInvalid);
-    }
-
-    #[test]
-    fn duplicate_name_rejected() {
-        let err = validate_operations(&json!([decl("a"), decl("a")]), &no_reserved).unwrap_err();
-        assert_eq!(err.code, ErrorCode::OperationDeclarationInvalid);
-    }
-
-    #[test]
-    fn reserved_name_is_bad_request() {
-        let reserved = |n: &str| n == "reply";
-        let err = validate_operations(&json!([decl("reply")]), &reserved).unwrap_err();
-        assert_eq!(err.code, ErrorCode::BadRequest);
-    }
-
-    #[test]
-    fn bad_name_grammar_rejected() {
-        let err = validate_operations(&json!([decl("1bad")]), &no_reserved).unwrap_err();
-        assert_eq!(err.code, ErrorCode::OperationDeclarationInvalid);
-        let err = validate_operations(&json!([decl("has space")]), &no_reserved).unwrap_err();
-        assert_eq!(err.code, ErrorCode::OperationDeclarationInvalid);
-    }
-
-    #[test]
-    fn empty_description_rejected() {
-        let mut d = decl("a");
-        d["description"] = json!("");
-        let err = validate_operations(&json!([d]), &no_reserved).unwrap_err();
-        assert_eq!(err.code, ErrorCode::OperationDeclarationInvalid);
-    }
-
-    #[test]
-    fn schema_must_be_object() {
-        let mut d = decl("a");
-        d["input_schema"] = json!("not-object");
-        let err = validate_operations(&json!([d]), &no_reserved).unwrap_err();
-        assert_eq!(err.code, ErrorCode::OperationDeclarationInvalid);
-    }
-
-    #[test]
-    fn schema_disallowed_keyword_rejected() {
-        let mut d = decl("a");
-        d["input_schema"] = json!({"type": "object", "additionalProperties": false});
-        let err = validate_operations(&json!([d]), &no_reserved).unwrap_err();
-        assert_eq!(err.code, ErrorCode::OperationDeclarationInvalid);
-    }
-
-    #[test]
-    fn nested_properties_recurse_and_allow() {
-        let mut d = decl("a");
-        d["input_schema"] = json!({
-            "type": "object",
-            "required": ["event", "text"],
-            "properties": {
-                "event": {"type": "string", "description": "e番号"},
-                "text": {"type": "string"}
-            }
-        });
-        let ok = validate_operations(&json!([d]), &no_reserved).unwrap();
-        assert_eq!(ok.len(), 1);
-    }
-
-    #[test]
-    fn class_unknown_enum_rejected() {
-        let mut d = decl("a");
-        d["class"] = json!({"sub_engine": "nope", "sharing": "agent_bound"});
-        let err = validate_operations(&json!([d]), &no_reserved).unwrap_err();
-        assert_eq!(err.code, ErrorCode::OperationDeclarationInvalid);
-    }
-
-    #[test]
-    fn missing_field_rejected() {
-        let mut d = decl("a");
-        d.as_object_mut().unwrap().remove("output_schema");
-        let err = validate_operations(&json!([d]), &no_reserved).unwrap_err();
-        assert_eq!(err.code, ErrorCode::OperationDeclarationInvalid);
-    }
-
-    #[test]
-    fn digest_stable_across_member_order() {
-        // schema object の member 順が違っても digest は同値（DI-05 golden 性質）。
-        let mut a = decl("x");
-        a["input_schema"] = json!({"type": "object", "description": "z"});
-        let mut b = decl("x");
-        b["input_schema"] = json!({"description": "z", "type": "object"});
-        let da = validate_operations(&json!([a]), &no_reserved).unwrap();
-        let db = validate_operations(&json!([b]), &no_reserved).unwrap();
-        assert_eq!(declaration_digest(&da), declaration_digest(&db));
-    }
-
-    #[test]
-    fn digest_changes_with_declaration() {
-        let one = validate_operations(&json!([decl("a")]), &no_reserved).unwrap();
-        let two = validate_operations(&json!([decl("a"), decl("b")]), &no_reserved).unwrap();
-        assert_ne!(declaration_digest(&one), declaration_digest(&two));
-    }
-
-    #[test]
-    fn callback_capable_flag_follows_schema() {
-        let mut d = decl("a");
-        d["callback_schema"] = json!({"type": "object"});
-        let decls = validate_operations(&json!([d]), &no_reserved).unwrap();
-        assert!(decls[0].is_callback_capable());
-        let plain = validate_operations(&json!([decl("a")]), &no_reserved).unwrap();
-        assert!(!plain[0].is_callback_capable());
-    }
-}
+#[path = "operations/tests.rs"]
+mod tests;

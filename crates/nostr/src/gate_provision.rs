@@ -1,13 +1,13 @@
 //! Nostr instance / binding の core 側敷設。address は既存 session_id（V3.5 reuse）。
 
 use crate::{
-    instance_config_bytes_with_access, nostr_instance_id, plan_session_bindings, AllowSources,
-    NostrConfig, SessionBindingPlan,
+    binding::SessionWatchRow, nostr_instance_id, plan_session_bindings, AllowSources, NostrConfig,
+    SessionBindingPlan,
 };
 use anyhow::{bail, Context, Result};
 use opencrab_db::queries::{
     create_gate_binding_in_tx, get_session, revise_gate_instance_in_tx, CreateGateBindingError,
-    ReviseGateInstanceError, SessionWatchRow,
+    ReviseGateInstanceError,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -42,6 +42,13 @@ fn config_digest(bytes: &[u8]) -> String {
     out
 }
 
+fn opaque_core_config() -> (String, String) {
+    // Core still owns generic final-delivery compatibility during the extgate transition.
+    // Keep that generic bit, but do not carry any Nostr runtime/admission authority here.
+    let bytes = br#"{"delivery_mode":"tool_driven"}"#;
+    (encode_config_b64(bytes), config_digest(bytes))
+}
+
 /// Computes the exact core-facing instance config without mutating core storage.
 pub fn desired_nostr_config_b64(
     conn: &Connection,
@@ -55,16 +62,16 @@ pub fn desired_nostr_config_b64(
 }
 
 fn desired_nostr_config(
-    conn: &Connection,
-    agent_id: &str,
-    self_pubkey: &str,
-    config: &NostrConfig,
-    watches: &[SessionWatchRow],
-    access: &AllowSources,
+    _conn: &Connection,
+    _agent_id: &str,
+    _self_pubkey: &str,
+    _config: &NostrConfig,
+    _watches: &[SessionWatchRow],
+    _access: &AllowSources,
 ) -> Result<(String, String)> {
-    let name = agent_name(conn, agent_id)?;
-    let bytes = instance_config_bytes_with_access(self_pubkey, &name, config, watches, access)?;
-    Ok((encode_config_b64(&bytes), config_digest(&bytes)))
+    // Core owns only generic instance lifecycle/revision/digest. Runtime Nostr
+    // config and admission authority are owned by the gateway-side store.
+    Ok(opaque_core_config())
 }
 
 pub fn build_allow_sources(
@@ -297,8 +304,13 @@ fn ensure_bindings(
                 now,
             ) {
                 Ok(()) => {}
-                Err(CreateGateBindingError::Conflict) => bail!(
-                    "binding address {} の membership / 占有が一致しない",
+                Err(
+                    CreateGateBindingError::Unknown
+                    | CreateGateBindingError::Conflict
+                    | CreateGateBindingError::AddressInUse
+                    | CreateGateBindingError::Closed,
+                ) => bail!(
+                    "binding address {} の instance / membership / 占有が一致しない",
                     plan.address
                 ),
                 Err(CreateGateBindingError::Store(error)) => return Err(error),
@@ -315,15 +327,6 @@ fn agent_subject_id(conn: &Connection, agent_id: &str) -> Result<i64> {
         |row| row.get(0),
     )
     .with_context(|| format!("agent {agent_id} の subject_id が無い"))
-}
-
-fn agent_name(conn: &Connection, agent_id: &str) -> Result<String> {
-    conn.query_row(
-        "SELECT name FROM agents WHERE agent_id = ?1",
-        params![agent_id],
-        |r| r.get(0),
-    )
-    .with_context(|| format!("agent {agent_id} の name が無い"))
 }
 
 #[cfg(test)]
@@ -397,18 +400,11 @@ mod tests {
         assert_eq!(kind, "nostr");
 
         let router = opencrab_actions::TimedFireRouter::new();
-        router.register_descriptor(std::sync::Arc::new(opencrab_extgate::ExtgateFire));
         let target = router
             .resolve_persisted_target(&conn, &sid, "a1")
-            .expect("reused protocol session must resolve through generic extgate metadata");
-        assert_eq!(
-            router
-                .descriptor(target.kind)
-                .unwrap()
-                .build_session_id(&target, "a1"),
-            sid,
-            "timed fire must preserve the provisioned canonical session"
-        );
+            .expect("reused protocol session must resolve through generic binding metadata");
+        assert_eq!(target.session_id, sid);
+        assert_eq!(target.binding_id, plans[0].binding_id);
     }
 
     #[test]
@@ -486,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn instance_config_includes_agent_name() {
+    fn core_config_is_opaque_and_contains_no_nostr_authority() {
         let mut conn = opencrab_db::init_memory().unwrap();
         seed_agent(&conn);
         let cfg = NostrConfig {
@@ -498,16 +494,14 @@ mod tests {
         insert_session_in_tx(&tx, &sid, &sid, "2026-01-01T00:00:00Z").unwrap();
         insert_agent_session_in_tx(&tx, "a1", &sid).unwrap();
         tx.commit().unwrap();
-        provision_nostr_gate(
-            &mut conn,
-            "a1",
-            &"aa".repeat(32),
-            &cfg,
-            &[],
-            &AllowSources::default(),
-            1,
-        )
-        .unwrap();
+        let mut access = AllowSources::default();
+        access.owner.insert("11".repeat(32));
+        access.trusted_users.insert("22".repeat(32));
+        access.followees.insert("33".repeat(32));
+        access
+            .co_agent_identities
+            .insert("44".repeat(32), "peer-agent".into());
+        provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], &access, 1).unwrap();
         let config_b64: String = conn
             .query_row(
                 "SELECT config_b64 FROM gate_instances WHERE instance_id = ?1",
@@ -522,48 +516,23 @@ mod tests {
                 .unwrap()
         };
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["name"], "a1");
-    }
-
-    #[test]
-    fn empty_agent_name_is_fail_loud() {
-        let mut conn = opencrab_db::init_memory().unwrap();
-        upsert_agent(
-            &conn,
-            &AgentRow {
-                agent_id: "a1".into(),
-                name: "   ".into(),
-                job_title: None,
-                organization: None,
-                image_url: None,
-                persona_name: "p".into(),
-                personality: None,
-                instructions: String::new(),
-                heartbeat_instructions: String::new(),
-                model: None,
-                reasoning_effort: None,
-                web_search: None,
-                metadata_json: None,
-            },
-        )
-        .unwrap();
-        let cfg = NostrConfig {
-            relays: vec!["wss://yabu.me".into()],
-            filter: crate::NostrFilter::default(),
-        };
-        let err = provision_nostr_gate(
-            &mut conn,
-            "a1",
-            &"aa".repeat(32),
-            &cfg,
-            &[],
-            &AllowSources::default(),
-            1,
-        )
-        .unwrap_err();
+        assert_eq!(
+            value
+                .get("delivery_mode")
+                .and_then(serde_json::Value::as_str),
+            Some("tool_driven")
+        );
         assert!(
-            err.to_string().contains("agents.name"),
-            "empty name must fail-loud: {err}"
+            value.get("access").is_none(),
+            "core config must not carry gateway access: {value}"
+        );
+        assert!(
+            value.get("relays").is_none(),
+            "core config must not carry gateway runtime config: {value}"
+        );
+        assert!(
+            value.get("self_pubkey").is_none(),
+            "core config must not carry gateway runtime config: {value}"
         );
     }
 }

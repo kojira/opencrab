@@ -78,7 +78,6 @@ fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppSt
         intake: std::sync::Arc::new(Default::default()),
         intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
-        gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
@@ -123,24 +122,19 @@ pub(crate) async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     let db = opencrab_db::Db::from_connection(conn);
     register_mock_pricing(&db);
     let subject_id = upsert_test_agent(&db);
-    let extgate = Arc::new(ExtgateState::new(
-        db.clone(),
-        OperatorToken::from_bytes(TOKEN),
-    ));
+    let extgate = Arc::new(ExtgateState::new_protected(db.clone()));
     let state = build_app_state(db.clone(), provider);
     // #925: 本番と同じ descriptor 登録（`register_production_descriptors`）＋ V3 heartbeat 受け口
     // （`ExtgateTimedFireSink`）を実型で配線する。これで scheduler seam（resolve_target →
     // run_one_heartbeat）が extgate session を解決し発火できる（未登録なら resolve_target None で
     // 配送 0＝赤）。descriptor は本番経路で登録するので、`register_production_descriptors` から
     // ExtgateFire が抜けると本ハーネスの heartbeat も赤になる（配線漏れを捕捉）。
-    opencrab_server::register_production_descriptors(&state.timed_fire_router);
-    state.timed_fire_router.register_shared(
-        opencrab_extgate::EXTGATE_TIMED_FIRE_KIND,
-        Arc::new(opencrab_extgate::ExtgateTimedFireSink::new(
+    state
+        .timed_fire_router
+        .register_sink(Arc::new(opencrab_extgate::ExtgateTimedFireSink::new(
             extgate.clone(),
             state.clone(),
-        )),
-    );
+        )));
 
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("gate.sock");
@@ -176,13 +170,82 @@ pub(crate) async fn admin(core: &Core, req: Request<Body>) -> (StatusCode, Vec<u
     (status, body)
 }
 
+fn database_backed_admin(core: &Core, instance_id: &str) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+
+    let salt = [0x3c_u8; 32];
+    let token = Sha256::digest(instance_id.as_bytes());
+    let principal_id = format!("discord-qc-{instance_id}");
+    let mut hasher = Sha256::new();
+    hasher.update(b"opencrab/gate-admin/bearer/v1\0");
+    hasher.update(salt);
+    hasher.update(token);
+    let hash = hasher.finalize().to_vec();
+    let conn = core.extgate.db.lock().unwrap();
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM gate_admin_principals WHERE principal_id=?1)",
+            [&principal_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if !exists {
+        conn.execute(
+            "INSERT INTO gate_admin_principals
+             (principal_id, credential_salt, credential_hash, scope_mode, created_at, expires_at,
+              revoked_at, sealed_at, predecessor_principal_id, overlap_deadline)
+             VALUES (?1, ?2, ?3, 'exact', 1, 4000000000000000000,
+                     NULL, NULL, NULL, NULL)",
+            rusqlite::params![principal_id, salt.as_slice(), hash],
+        )
+        .unwrap();
+        for operation in ["instance.put", "binding.put"] {
+            conn.execute(
+                "INSERT INTO gate_admin_principal_operations VALUES (?1, ?2)",
+                rusqlite::params![principal_id, operation],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO gate_admin_principal_subjects VALUES (?1, ?2)",
+            rusqlite::params![principal_id, core.subject_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO gate_admin_principal_instances VALUES (?1, ?2)",
+            rusqlite::params![principal_id, instance_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE gate_admin_principals SET sealed_at=2 WHERE principal_id=?1",
+            [&principal_id],
+        )
+        .unwrap();
+    }
+    format!("Bearer {}", URL_SAFE_NO_PAD.encode(token))
+}
+
 pub(crate) async fn put_instance(core: &Core, instance_id: &str, config_b64: &str) {
+    let authorization = database_backed_admin(core, instance_id);
+    let subject_grant = {
+        let mut conn = core.extgate.db.lock().unwrap();
+        opencrab_db::queries::issue_subject_association_grant(
+            &mut conn,
+            AGENT_ID,
+            core.subject_id,
+            i64::MAX,
+            100,
+        )
+        .unwrap()
+    };
     let (st, body) = admin(
         core,
         Request::builder()
             .method("PUT")
             .uri(format!("/api/gate-instances/{instance_id}"))
-            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::AUTHORIZATION, authorization)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
                 serde_json::json!({
@@ -190,6 +253,7 @@ pub(crate) async fn put_instance(core: &Core, instance_id: &str, config_b64: &st
                     "subject_id": core.subject_id,
                     "enabled": true,
                     "config_b64": config_b64,
+                    "subject_grant": subject_grant,
                 })
                 .to_string(),
             ))
@@ -204,15 +268,31 @@ pub(crate) async fn put_instance(core: &Core, instance_id: &str, config_b64: &st
 }
 
 pub(crate) async fn put_binding(core: &Core, binding_id: &str, instance_id: &str, address: &str) {
+    let authorization = database_backed_admin(core, instance_id);
+    let (session_id, title) = {
+        let conn = core.extgate.db.lock().unwrap();
+        match opencrab_db::queries::get_session(&conn, address).unwrap() {
+            Some(session) => (address.to_string(), session.theme),
+            None => (
+                opencrab_extgate::session_id_for_binding(binding_id),
+                address.to_string(),
+            ),
+        }
+    };
     let (st, body) = admin(
         core,
         Request::builder()
             .method("PUT")
             .uri(format!("/api/gate-bindings/{binding_id}"))
-            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::AUTHORIZATION, authorization)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
-                serde_json::json!({"instance_id": instance_id, "address": address}).to_string(),
+                serde_json::json!({
+                    "instance_id": instance_id,
+                    "address": address,
+                    "session": {"session_id": session_id, "title": title},
+                })
+                .to_string(),
             ))
             .unwrap(),
     )

@@ -49,15 +49,25 @@ async fn run() -> anyhow::Result<()> {
         PathBuf::from(first)
     };
     let secret = take_watch_secret().map(Arc::new);
+    let raw_placement: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let control = raw_placement
+        .get("control_socket")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
+    let start_nonce = raw_placement
+        .get("start_nonce")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     let place = Placement::load(&path)?;
     let socket = PathBuf::from(&place.core_socket);
     let nostaro_bin = PathBuf::from(&place.nostaro_bin);
     // QC ハーネス差し替えは env からのみ（既定 OFF＝production 挙動）。
     let overrides = HarnessOverrides::from_env();
 
+    let mut readiness = Vec::new();
     for inst in &place.instances {
         let bytes = decode_config_b64(&inst.config_b64)?;
-        spawn_instance(
+        let client = spawn_instance(
             socket.clone(),
             inst,
             &bytes,
@@ -65,6 +75,31 @@ async fn run() -> anyhow::Result<()> {
             nostaro_bin.clone(),
             overrides.clone(),
         )?;
+        readiness.push((client, inst.address.clone()));
+    }
+    if let (Some(control), Some(nonce)) = (control, start_nonce) {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            loop {
+                let mut ready = true;
+                for (client, address) in &readiness {
+                    if !client.connection_live().await
+                        || client.remembered_binding(address).await.is_none()
+                    {
+                        ready = false;
+                        break;
+                    }
+                }
+                if ready {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            if let Ok(mut stream) = tokio::net::UnixStream::connect(control).await {
+                let message = serde_json::json!({"nonce":nonce,"pid":std::process::id()});
+                let _ = stream.write_all(message.to_string().as_bytes()).await;
+            }
+        });
     }
 
     tracing::info!("nostr-gateway running");

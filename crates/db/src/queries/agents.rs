@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 #[allow(unused_imports)]
@@ -274,18 +274,42 @@ pub fn delete_soul_preset(conn: &Connection, preset_id: &str) -> Result<bool> {
     Ok(deleted > 0)
 }
 
-/// Delete an agent and all shared related data.
+/// Delete an agent and all shared related data after permanently tombstoning its subject.
 pub fn delete_agent(conn: &Connection, agent_id: &str) -> Result<bool> {
-    let deleted = conn.execute("DELETE FROM agents WHERE agent_id = ?1", params![agent_id])?;
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let subject_id = tx
+        .query_row(
+            "SELECT subject_id FROM agents WHERE agent_id = ?1",
+            params![agent_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let Some(subject_id) = subject_id else {
+        tx.rollback()?;
+        return Ok(false);
+    };
+    let deleted_at = Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
+    let deletion_revision: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(deletion_revision), 0) + 1 FROM subject_tombstones",
+        [],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO subject_tombstones(subject_id, deleted_at, deletion_revision)
+         VALUES (?1, ?2, ?3)",
+        params![subject_id, deleted_at, deletion_revision],
+    )?;
+    tx.execute(
         "DELETE FROM soul_presets WHERE agent_id = ?1",
         params![agent_id],
     )?;
-    conn.execute("DELETE FROM skills WHERE agent_id = ?1", params![agent_id])?;
-    conn.execute(
+    tx.execute("DELETE FROM skills WHERE agent_id = ?1", params![agent_id])?;
+    tx.execute(
         "DELETE FROM memory_curated WHERE agent_id = ?1",
         params![agent_id],
     )?;
+    let deleted = tx.execute("DELETE FROM agents WHERE agent_id = ?1", params![agent_id])?;
+    tx.commit()?;
     Ok(deleted > 0)
 }
 

@@ -1,0 +1,134 @@
+   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/extgate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.64s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_extgate-272058eb52f7d3f0)
+
+running 6 tests
+test operations::tests::s3_runtime_compatibility_rejects_operation_driven_without_utterance ... ok
+test operations::tests::s3_arbitrary_operation_name_is_classified_only_by_complete_metadata ... ok
+test operations::tests::s3_dispatch_utterance_if_and_only_if_effect_utterance ... ok
+test operations::tests::s3_missing_or_unknown_required_metadata_is_rejected ... ok
+test operations::tests::s3_final_delivery_is_digest_covered ... ok
+test operations::tests::s3_all_policy_metadata_changes_the_declaration_digest ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 65 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (target/debug/deps/conformance-1748002750a6d3d5)
+
+running 6 tests
+test s3_hello_final_delivery_rejects_both_legacy_config_mismatch_directions ... ok
+test s3_arbitrary_synthetic_operation_projects_and_authorizes_from_metadata ... ok
+test s3_subtask_continuation_routes_by_exact_generic_session_without_prefix ... ok
+test s3_projection_rejects_stale_live_declaration_digest_before_db_and_wire ... ok
+test s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_continuation ... ok
+test s3_timed_continuation_routes_generic_binding_session_once_after_reconnect_ack ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 85 filtered out; finished in 3.86s
+
+     Running tests/gate_admin_production_boundary.rs (target/debug/deps/gate_admin_production_boundary-6f392e9c05ee6df8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/no_platform_branch.rs (target/debug/deps/no_platform_branch-0f976b834c6641f8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/s3_static_boundary.rs (target/debug/deps/s3_static_boundary-80854c0c446816a3)
+
+running 3 tests
+test s3_shared_timed_fire_envelope_has_only_generic_binding_and_session_ids ... ok
+test s3_gateway_operation_projection_has_no_name_classification_fallback ... ok
+test s3_shared_and_server_production_have_no_concrete_lifecycle_registry ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.90s
+     Running tests/s3_static_boundary.rs (target/debug/deps/s3_static_boundary-80854c0c446816a3)
+
+running 3 tests
+test s3_shared_timed_fire_envelope_has_only_generic_binding_and_session_ids ... ok
+test s3_gateway_operation_projection_has_no_name_classification_fallback ... ok
+test s3_shared_and_server_production_have_no_concrete_lifecycle_registry ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.93s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_gate_client-5c78c38c2de53c9a)
+
+running 2 tests
+
+thread 'client::completed_tests::s3_invoke_snapshot_rejects_stale_undeclared_and_mismatched_metadata' panicked at crates/gate-client/src/client/tests.rs:33:9:
+assertion `left == right` failed
+  left: "ae3998f8b460f71a2555ee1760ff82408162e4444a3a1d5dc5decac5020b889f"
+ right: "e7c4edf813fbe34fc420ec1e859e342cc3295b1598983bf3dff9c3580df596db"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test wire::tests::s3_invoke_requires_digest_dispatch_and_effect ... ok
+test client::completed_tests::s3_invoke_snapshot_rejects_stale_undeclared_and_mismatched_metadata ... FAILED
+
+failures:
+
+failures:
+    client::completed_tests::s3_invoke_snapshot_rejects_stale_undeclared_and_mismatched_metadata
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p opencrab-gate-client --lib`
+   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/db)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.75s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_db-2c230eafa415f662)
+
+running 5 tests
+test queries::session_heartbeat::tests::s4_exact_config_and_nonempty_instruction_precedence_are_independent ... ok
+test queries::session_heartbeat::tests::s4_composite_instruction_rows_and_null_inheritance_are_generic ... ok
+test queries::session_heartbeat::tests::s4_stopped_projection_refuses_conflict_and_runtime_anchor_can_advance ... ok
+test schema::migration_tests::s4_v55_upgrade_creates_composite_generic_heartbeat_instructions ... ok
+test schema::migration_tests::s4_v55_upgrade_and_fresh_schema_are_identical ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 265 filtered out; finished in 0.13s
+
+   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/db)
+   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
+   Compiling opencrab-core v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/core)
+   Compiling opencrab-nostr-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/nostr-gateway)
+   Compiling opencrab-discord-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/discord-gateway)
+   Compiling opencrab-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gateway)
+   Compiling opencrab-actions v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/actions)
+   Compiling opencrab-mcp v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/mcp)
+   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/extgate)
+   Compiling opencrab-nostr v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/nostr)
+   Compiling opencrab-server v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 08s
+     Running unittests src/main.rs (target/debug/deps/opencrab_server-f81b1413a49801dc)
+
+running 1 test
+test scheduler::tests::alias_resolution::s4_scheduler_emits_generic_binding_session_with_session_instructions_and_advances_anchor ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.03s
+
+   Compiling opencrab-server v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.85s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_server-6219ec3e5202c904)
+
+running 7 tests
+test system_actions::tests::update_heartbeat_instructions_rejected_for_non_owner ... ok
+test system_actions::tests::read_heartbeat_instructions_rejected_for_plain_agent ... ok
+test system_actions::tests::read_heartbeat_instructions_bad_args ... ok
+test system_actions::tests::update_heartbeat_instructions_missing_agent_and_bad_args ... ok
+test system_actions::tests::read_heartbeat_instructions_effective_uses_generic_session_override ... ok
+test system_actions::tests::read_heartbeat_instructions_null_session_override_inherits_current_agent ... ok
+test system_actions::tests::update_heartbeat_instructions_owner_success_and_audit ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 486 filtered out; finished in 0.26s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+     Running tests/conformance.rs (target/debug/deps/conformance-1748002750a6d3d5)
+
+running 1 test
+test s4_gate_admin_binding_rejects_platform_destination_fields_without_partial_targets ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 90 filtered out; finished in 0.05s
+

@@ -9,7 +9,9 @@ fn ops_reply() -> Value {
             "properties": {"event": {"type": "string"}, "text": {"type": "string"}}},
         "output_schema": null,
         "callback_schema": null,
-        "class": {"sub_engine": "not_exposed", "sharing": "conversation_bound"}
+        "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
+        "dispatch": "utterance", "sub_engine": "not_exposed",
+        "sharing": "conversation_bound", "effect": "utterance"
     }])
 }
 
@@ -38,7 +40,10 @@ async fn hello_with_ops(
     write_frame(
         s,
         &json!({
-            "id": "h1", "m": "hello", "protocol": 2, "instance_id": instance_id,
+            "id": "h1", "m": "hello", "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "operations": [], "instance_id": instance_id,
             "revision": revision, "config_digest": config_digest(), "operations": ops,
         }),
     )
@@ -92,7 +97,9 @@ async fn di_hello_operations_change_accepted_on_reconnect() {
     let other = json!([{
         "name": "reaction", "description": "d",
         "input_schema": {"type": "object"}, "output_schema": null, "callback_schema": null,
-        "class": {"sub_engine": "not_exposed", "sharing": "conversation_bound"}
+        "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
+        "dispatch": "utterance", "sub_engine": "not_exposed",
+        "sharing": "conversation_bound", "effect": "utterance"
     }]);
     let mut s2 = h.connect().await;
     let resp = hello_with_ops(&mut s2, &instance_id, 1, &other).await;
@@ -121,10 +128,14 @@ async fn di_hello_invalid_operations_rejected() {
     let bad = json!([
         {"name": "reply", "description": "d", "input_schema": {"type": "object"},
          "output_schema": null, "callback_schema": null,
-         "class": {"sub_engine": "not_exposed", "sharing": "conversation_bound"}},
+         "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
+        "dispatch": "utterance", "sub_engine": "not_exposed",
+        "sharing": "conversation_bound", "effect": "utterance"},
         {"name": "follow", "description": "d", "input_schema": {"type": "object"},
          "output_schema": null, "callback_schema": null,
-         "class": {"sub_engine": "not_exposed", "sharing": "agent_bound"}}
+         "authorization": {"allowed_callers": ["owner"]},
+          "dispatch": "background", "sub_engine": "not_exposed",
+          "sharing": "agent_bound", "effect": "state_change"}
     ]);
     let mut s = h.connect().await;
     let resp = hello_with_ops(&mut s, &instance_id, 1, &bad).await;
@@ -338,7 +349,9 @@ async fn di_revision_bump_reestablishes_declaration() {
     let other = json!([{
         "name": "reaction", "description": "d", "input_schema": {"type": "object"},
         "output_schema": null, "callback_schema": null,
-        "class": {"sub_engine": "not_exposed", "sharing": "conversation_bound"}
+        "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
+        "dispatch": "utterance", "sub_engine": "not_exposed",
+        "sharing": "conversation_bound", "effect": "utterance"
     }]);
     let mut s2 = h.connect().await;
     let resp = hello_with_ops(&mut s2, &instance_id, 2, &other).await;
@@ -678,7 +691,9 @@ async fn di_short_ref_resolution_targets_declared_fields() {
             "text": {"type": "string"}
         }},
         "output_schema": null, "callback_schema": null,
-        "class": {"sub_engine": "not_exposed", "sharing": "conversation_bound"}
+        "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
+        "dispatch": "utterance", "sub_engine": "not_exposed",
+        "sharing": "conversation_bound", "effect": "utterance"
     }]);
     let mut s = h.connect().await;
     assert_eq!(

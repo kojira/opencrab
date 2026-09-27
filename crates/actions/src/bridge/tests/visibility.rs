@@ -192,48 +192,6 @@ async fn test_execute_falls_back_to_gateway_actions() {
     assert_eq!(result.data["result"], "from_gateway");
 }
 
-#[test]
-fn test_peer_review_visible_at_depth0_hidden_in_subengine() {
-    let (_dir, ctx) = test_context();
-    let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
-        .with_gateway_actions(Arc::new(MockGatewayDiscord));
-    // #923: depth0 で request_peer_review は投影に出さない（#921・設計 §2.7 L168）が、
-    // policy 層（＝depth ゲートを持つ層）には出る。depth ゲートの契約はこの層で検証する。
-    let names: Vec<String> = policy_visible_names(&executor);
-    assert!(names.contains(&"request_peer_review".to_string()));
-    assert!(names.contains(&"report_progress".to_string()));
-
-    // depth >= 1 の sub-engine からはピアレビュー依頼が見えない
-    let (_dir2, sub_ctx) = test_context();
-    let sub = BridgedExecutor::new(ActionDispatcher::new(), sub_ctx)
-        .with_gateway_actions(Arc::new(MockGatewayDiscord))
-        .with_depth(1);
-    // depth>0 では list_tools は narrowing しない（常時集合の絞りは depth0 のみ）ので、
-    // sub-engine の depth ゲート（sub_engine=Blocked）はそのまま list_tools で観測できる。
-    let names: Vec<String> = sub.list_tools().iter().map(|t| t.name.clone()).collect();
-    assert!(!names.contains(&"request_peer_review".to_string()));
-    assert!(names.contains(&"report_progress".to_string()));
-}
-
-/// 定義から隠すだけでなく、名前指定の実行も depth ゲートで拒否されること
-/// （モデルは親コンテキストの記憶でツール名を呼ぶことがある）。
-#[tokio::test]
-async fn test_peer_review_execute_rejected_in_subengine() {
-    let (_dir, ctx) = test_context();
-    let sub = BridgedExecutor::new(ActionDispatcher::new(), ctx)
-        .with_gateway_actions(Arc::new(MockGatewayDiscord))
-        .with_depth(1);
-    let result = sub.execute("request_peer_review", &json!({})).await;
-    assert!(!result.success);
-    let err = result.error.unwrap();
-    assert!(err.starts_with(REJECTION_CODE_PREFIX));
-    assert!(err.contains("not available in sub-engines"));
-
-    // ブロック対象外の gateway action は depth 1 でも実行できる
-    let result = sub.execute("report_progress", &json!({})).await;
-    assert!(result.success);
-}
-
 #[tokio::test]
 async fn test_execute_unknown_action_without_gateway() {
     let (_dir, ctx) = test_context();

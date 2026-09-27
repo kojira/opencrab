@@ -5,6 +5,17 @@ fn tool_driven_digest() -> String {
 }
 
 async fn put_instance_config(h: &Harness, instance_id: &str, config_b64: &str) -> Value {
+    let grant = {
+        let mut conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::issue_subject_association_grant(
+            &mut conn,
+            "agent-1",
+            h.subject_id,
+            i64::MAX,
+            now_nanos(),
+        )
+        .unwrap()
+    };
     let (st, body) = h
         .admin(
             Request::builder()
@@ -18,6 +29,7 @@ async fn put_instance_config(h: &Harness, instance_id: &str, config_b64: &str) -
                         "subject_id": h.subject_id,
                         "enabled": true,
                         "config_b64": config_b64,
+                        "subject_grant": grant,
                     })
                     .to_string(),
                 ))
@@ -38,7 +50,10 @@ async fn hello_ok_digest(s: &mut UnixStream, instance_id: &str, revision: u64, d
         &json!({
             "id": "h1",
             "m": "hello",
-            "protocol": 2,
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "operation_driven",
+            "operations": ops_reply(),
             "instance_id": instance_id,
             "revision": revision,
             "config_digest": digest,
@@ -115,18 +130,4 @@ async fn tool_driven_inbound_is_no_reply_without_say() {
         no_reply, 0,
         "沈黙ターンで NO_REPLY 行を永続してはならない（#899）"
     );
-}
-
-#[tokio::test]
-async fn missing_delivery_mode_keeps_say() {
-    assert_eq!(
-        opencrab_extgate::delivery_mode_from_config_bytes(b"{}").unwrap(),
-        opencrab_extgate::DeliveryMode::Say
-    );
-    assert!(opencrab_extgate::dispatches_v3_say(
-        opencrab_extgate::DeliveryMode::Say
-    ));
-    assert!(!opencrab_extgate::dispatches_v3_say(
-        opencrab_extgate::DeliveryMode::ToolDriven
-    ));
 }

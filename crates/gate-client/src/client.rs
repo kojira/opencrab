@@ -14,7 +14,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use super::wire::{
-    command_frame, create_binding_frame, err_frame, hello_frame_with_operations, invoke_ok_frame,
+    command_frame, create_binding_frame, err_frame, hello_frame_with_capabilities, invoke_ok_frame,
     ok_frame, parse_frame_bytes, read_frame, said_frame_with_context, say_reply_target, say_text,
     write_json, Activity, Attachment, Bind, CoreMsg, FrameError, Invoke, SaidCaller, SaidContext,
     Say, TurnFailed, WireResponse,

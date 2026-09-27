@@ -1,0 +1,19 @@
+   Compiling opencrab-gateway-migrate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gateway-migrate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 38s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_gateway_migrate-639abb0bdea7c711)
+
+running 1 test
+
+thread 'projection::s8_minimal_heartbeat_red::conflicting_channels_for_one_session_cannot_choose_an_arbitrary_heartbeat' panicked at crates/gateway-migrate/src/projection.rs:308:9:
+different eligible heartbeat settings for one session must be rejected
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test projection::s8_minimal_heartbeat_red::conflicting_channels_for_one_session_cannot_choose_an_arbitrary_heartbeat ... FAILED
+
+failures:
+
+failures:
+    projection::s8_minimal_heartbeat_red::conflicting_channels_for_one_session_cannot_choose_an_arbitrary_heartbeat
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p opencrab-gateway-migrate --lib`

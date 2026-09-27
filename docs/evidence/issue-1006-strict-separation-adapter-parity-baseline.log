@@ -1,0 +1,86 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.86s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_discord_gateway-28dd6f1196ce4818)
+
+running 1 test
+test post::tests::long_say_splits_sequentially_and_returns_last_chunk_id ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 75 filtered out; finished in 0.01s
+
+     Running unittests src/main.rs (target/debug/deps/discord_gateway-c742525124343f00)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_discord_gateway-28dd6f1196ce4818)
+
+running 1 test
+test post::tests::long_say_fail_fast_stops_and_keeps_earlier_chunks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 75 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/discord_gateway-c742525124343f00)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+warning: unused doc comment
+   --> crates/nostr-gateway/src/run.rs:185:1
+    |
+185 | / /// core からの say を live queue から取り出し、発端イベントへの e-tag reply として nostaro で
+186 | | /// 投稿する。返信先があれば e-tag reply、無ければ（bundle/曖昧）新規ノート（standalone post）で
+187 | | /// publish する（row292/#843: drop しない）。
+    | |_--------------------------------------------^^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` on by default
+
+warning: `opencrab-nostr-gateway` (lib) generated 1 warning
+warning: `opencrab-nostr-gateway` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_nostr_gateway-9c052c0f87bc4ca8)
+
+running 1 test
+test post::tests::origin_target_invokes_nostaro_reply_with_env_secret ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.38s
+
+     Running unittests src/main.rs (target/debug/deps/nostr_gateway-d56dac918f2c5e47)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+warning: unused doc comment
+   --> crates/nostr-gateway/src/run.rs:185:1
+    |
+185 | / /// core からの say を live queue から取り出し、発端イベントへの e-tag reply として nostaro で
+186 | | /// 投稿する。返信先があれば e-tag reply、無ければ（bundle/曖昧）新規ノート（standalone post）で
+187 | | /// publish する（row292/#843: drop しない）。
+    | |_--------------------------------------------^^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` on by default
+
+warning: `opencrab-nostr-gateway` (lib) generated 1 warning
+warning: `opencrab-nostr-gateway` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running unittests src/lib.rs (target/debug/deps/opencrab_nostr_gateway-9c052c0f87bc4ca8)
+
+running 1 test
+test post::tests::no_target_say_is_published_as_standalone_post ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.32s
+
+     Running unittests src/main.rs (target/debug/deps/nostr_gateway-d56dac918f2c5e47)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

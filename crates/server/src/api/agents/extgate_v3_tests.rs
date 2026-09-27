@@ -63,31 +63,35 @@ async fn get_agent_absent_is_200_null_existing_has_subject_id() {
     assert!(sid > 0);
 }
 
-#[test]
-fn gate_admin_paths_are_exactly_six() {
-    let routes = production_route_inventory();
-    let gate: Vec<_> = routes
+#[tokio::test]
+async fn all_six_gate_admin_operations_are_404_on_public_tcp_router() {
+    assert!(production_route_inventory()
         .iter()
-        .filter(|r| r.path.starts_with("/api/gate"))
-        .collect();
-    let paths: Vec<&str> = gate.iter().map(|r| r.path.as_str()).collect();
-    assert_eq!(
-        paths,
-        vec![
-            "/api/gate-bindings/{binding_id}",
-            "/api/gate-instances/{instance_id}",
-            "/api/gate-instances/{instance_id}/revisions",
-        ]
-    );
-    let methods: Vec<Vec<String>> = gate.iter().map(|r| r.methods.clone()).collect();
-    assert_eq!(
-        methods,
-        vec![
-            vec!["DELETE".to_string(), "PUT".to_string()],
-            vec!["DELETE".to_string(), "GET".to_string(), "PUT".to_string()],
-            vec!["POST".to_string()],
-        ]
-    );
+        .all(|route| !route.path.starts_with("/api/gate")));
+    let app = create_router(test_app_state());
+    let id = "00000000-0000-0000-0000-000000000001";
+    let cases = [
+        ("GET", format!("/api/gate-instances/{id}")),
+        ("PUT", format!("/api/gate-instances/{id}")),
+        ("DELETE", format!("/api/gate-instances/{id}")),
+        ("POST", format!("/api/gate-instances/{id}/revisions")),
+        ("PUT", format!("/api/gate-bindings/{id}")),
+        ("DELETE", format!("/api/gate-bindings/{id}")),
+    ];
+    for (method, uri) in cases {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }
 
 #[tokio::test]

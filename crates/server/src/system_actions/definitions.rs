@@ -31,7 +31,6 @@ impl SystemGatewayActions {
             get_default_webhook_definition(),
             set_default_webhook_definition(),
             list_webhooks_definition(),
-            request_peer_review_definition(),
         ]
     }
 }

@@ -1,7 +1,7 @@
 //! External gate V3 最小形。
 
 pub mod admin;
-pub mod bearer;
+pub mod admin_socket;
 pub mod close;
 pub mod commands;
 pub mod completion;
@@ -9,6 +9,7 @@ pub mod delivery;
 pub mod delivery_mode;
 pub mod error;
 pub mod fire;
+pub mod gate_admin_security;
 pub mod ids;
 pub mod inbound;
 pub mod json;
@@ -19,16 +20,16 @@ pub mod ops_projection;
 pub mod protocol;
 pub mod race;
 pub mod registry;
+mod secure_path;
 pub mod turn_queue;
 
 pub use admin::admin_router;
-pub use bearer::OperatorToken;
 pub use commands::{CommandError, CommandRegistry};
 pub use delivery_mode::{
     adjust_inbound_effect, delivery_mode_from_config_bytes, dispatches_v3_say, DeliveryMode,
 };
 pub use error::{ErrorCode, GateError, UNAUTHORIZED_BODY};
-pub use fire::{ExtgateFire, ExtgateTimedFireSink, EXTGATE_TIMED_FIRE_KIND};
+pub use fire::ExtgateTimedFireSink;
 pub use ids::{config_digest, encode_config_b64, now_nanos, session_id_for_binding};
 pub use inbound::channel_whitelisted;
 pub use listen::{
@@ -37,8 +38,9 @@ pub use listen::{
 };
 pub use operation_calls::{invoke_and_wait, invoke_utterance, recover_stale_calls, InvokeError};
 pub use operations::{
-    declaration_digest, validate_operations, GatewayOperationDeclaration, OperationClass, Sharing,
-    SubEngine,
+    declaration_digest, runtime_declaration_digest, validate_operations,
+    validate_runtime_compatibility, AllowedCaller, FinalDelivery, GatewayOperationDeclaration,
+    OperationDispatch, OperationEffect, OperationPolicy, Sharing, SubEngine,
 };
 pub use ops_projection::ExtgateOpsGatewayActions;
 pub use registry::{ExtgateState, OperationOutcome, Registry, ReservedToolNameFn};

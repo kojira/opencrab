@@ -147,34 +147,6 @@ fn seeded_state() -> Result<AppState, String> {
         },
     )
     .map_err(|e| format!("seed co-agent: {e}"))?;
-    opencrab_db::queries::add_trusted_user(
-        &conn,
-        "baseline-source",
-        "baseline-trusted-row",
-        AGENT_ID,
-        "baseline-user",
-        opencrab_db::queries::TrustedUserPermission::User,
-        "owner",
-        "2026-01-01T00:00:00Z",
-        "Baseline User",
-    )
-    .map_err(|e| format!("seed trusted user: {e}"))?;
-    opencrab_db::queries::upsert_channel_config(
-        &conn,
-        &opencrab_db::queries::ChannelConfigRow {
-            channel_id: "baseline-channel".to_string(),
-            agent_id: AGENT_ID.to_string(),
-            guild_id: "baseline-guild".to_string(),
-            channel_name: "baseline".to_string(),
-            readable: true,
-            writable: true,
-            whitelisted: true,
-            heartbeat_enabled: false,
-            heartbeat_interval_secs: None,
-            heartbeat_instructions: String::new(),
-        },
-    )
-    .map_err(|e| format!("seed channel config: {e}"))?;
     opencrab_db::queries::add_agent_allowed_command(
         &conn,
         AGENT_ID,

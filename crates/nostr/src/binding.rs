@@ -1,8 +1,19 @@
 //! Nostr instance / binding の決定的 ID と §3.1 の lane 畳み。
 
-use opencrab_db::queries::SessionWatchRow;
+use serde::{Deserialize, Serialize};
 
 use crate::session::{nostr_session_id, NOSTR_SESSION_PREFIX};
+
+/// Legacy Nostr watch row used only by this gateway's placement helpers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWatchRow {
+    pub id: i64,
+    pub session_id: String,
+    pub agent_id: String,
+    pub interval_secs: i64,
+    pub filter_json: String,
+    pub created_at: String,
+}
 
 const DNS_NS: uuid::Uuid = uuid::Uuid::NAMESPACE_DNS;
 

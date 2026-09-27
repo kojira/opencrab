@@ -47,8 +47,38 @@ pub async fn invoke_and_wait(
     operation: &str,
     payload: &Value,
 ) -> Result<Value, InvokeError> {
+    invoke_and_wait_checked(state, instance_id, binding_id, operation, None, payload).await
+}
+
+pub(crate) async fn invoke_and_wait_for_digest(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    operation: &str,
+    expected_digest: &str,
+    payload: &Value,
+) -> Result<Value, InvokeError> {
+    invoke_and_wait_checked(
+        state,
+        instance_id,
+        binding_id,
+        operation,
+        Some(expected_digest),
+        payload,
+    )
+    .await
+}
+
+async fn invoke_and_wait_checked(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    operation: &str,
+    expected_digest: Option<&str>,
+    payload: &Value,
+) -> Result<Value, InvokeError> {
     // §10.6 step 1: live + acknowledged binding + live declaration を再検査。
-    let writer = {
+    let (writer, declaration, declaration_digest) = {
         let reg = state
             .lock_registry()
             .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
@@ -58,10 +88,18 @@ pub async fn invoke_and_wait(
         if !live.acknowledged.contains(binding_id) {
             return Err(InvokeError::new(ErrorCode::NotConnected));
         }
-        if live.declaration(operation).is_none() {
-            return Err(InvokeError::new(ErrorCode::OperationUnknown));
+        if expected_digest.is_some_and(|digest| digest != live.declaration_digest) {
+            return Err(InvokeError::new(ErrorCode::OperationRejected));
         }
-        live.writer.clone()
+        let declaration = live
+            .declaration(operation)
+            .cloned()
+            .ok_or_else(|| InvokeError::new(ErrorCode::OperationUnknown))?;
+        (
+            live.writer.clone(),
+            declaration,
+            live.declaration_digest.clone(),
+        )
     };
 
     let call_id = Uuid::new_v4().to_string();
@@ -129,7 +167,14 @@ pub async fn invoke_and_wait(
     // close 側で indeterminate 化＋oneshot に Indeterminate 送出）。
     if write_json(
         &writer,
-        &invoke_frame(&call_id, binding_id, operation, None, payload),
+        &invoke_frame(
+            &call_id,
+            binding_id,
+            &declaration_digest,
+            &declaration,
+            None,
+            payload,
+        ),
     )
     .await
     .is_err()
@@ -182,12 +227,80 @@ pub async fn invoke_utterance(
     utterance_kind: &str,
     reply_target_id: Option<&str>,
     reply_target_origin: Option<&str>,
+    provided_call_id: Option<&str>,
+) -> Result<(), InvokeError> {
+    invoke_utterance_checked(
+        state,
+        instance_id,
+        binding_id,
+        agent_id,
+        session_id,
+        operation,
+        payload,
+        speech_body,
+        utterance_kind,
+        reply_target_id,
+        reply_target_origin,
+        provided_call_id,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn invoke_utterance_for_digest(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    agent_id: &str,
+    session_id: &str,
+    operation: &str,
+    payload: &Value,
+    speech_body: &str,
+    utterance_kind: &str,
+    reply_target_id: Option<&str>,
+    reply_target_origin: Option<&str>,
+    provided_call_id: Option<&str>,
+    expected_digest: &str,
+) -> Result<(), InvokeError> {
+    invoke_utterance_checked(
+        state,
+        instance_id,
+        binding_id,
+        agent_id,
+        session_id,
+        operation,
+        payload,
+        speech_body,
+        utterance_kind,
+        reply_target_id,
+        reply_target_origin,
+        provided_call_id,
+        Some(expected_digest),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn invoke_utterance_checked(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    agent_id: &str,
+    session_id: &str,
+    operation: &str,
+    payload: &Value,
+    speech_body: &str,
+    utterance_kind: &str,
+    reply_target_id: Option<&str>,
+    reply_target_origin: Option<&str>,
     // #915: engine の tool_call.id。発話 id を engine→invoke→gateway で一意に保つため、
     // ある場合は invoke フレームの call_id に採用する（無ければ合成 uuid にフォールバック）。
     provided_call_id: Option<&str>,
+    expected_digest: Option<&str>,
 ) -> Result<(), InvokeError> {
     // live + acknowledged binding + live declaration を再検査（invoke_and_wait と同じ）。
-    let writer = {
+    let (writer, declaration, declaration_digest) = {
         let reg = state
             .lock_registry()
             .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
@@ -197,10 +310,18 @@ pub async fn invoke_utterance(
         if !live.acknowledged.contains(binding_id) {
             return Err(InvokeError::new(ErrorCode::NotConnected));
         }
-        if live.declaration(operation).is_none() {
-            return Err(InvokeError::new(ErrorCode::OperationUnknown));
+        if expected_digest.is_some_and(|digest| digest != live.declaration_digest) {
+            return Err(InvokeError::new(ErrorCode::OperationRejected));
         }
-        live.writer.clone()
+        let declaration = live
+            .declaration(operation)
+            .cloned()
+            .ok_or_else(|| InvokeError::new(ErrorCode::OperationUnknown))?;
+        (
+            live.writer.clone(),
+            declaration,
+            live.declaration_digest.clone(),
+        )
     };
 
     let call_id = provided_call_id
@@ -307,7 +428,14 @@ pub async fn invoke_utterance(
     // invoke を exact 1 回 write（wire への invoke は従来どおり・gateway が publish）。
     if write_json(
         &writer,
-        &invoke_frame(&call_id, binding_id, operation, None, payload),
+        &invoke_frame(
+            &call_id,
+            binding_id,
+            &declaration_digest,
+            &declaration,
+            None,
+            payload,
+        ),
     )
     .await
     .is_err()

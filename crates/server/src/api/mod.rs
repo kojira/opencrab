@@ -2,7 +2,6 @@ pub mod agents;
 pub mod agents_messages;
 pub mod allowed_commands;
 pub mod analytics;
-pub mod channel_configs;
 pub mod co_agents;
 pub mod daily_log_index;
 pub mod hooks;
@@ -21,7 +20,6 @@ pub mod skills;
 pub mod sleep;
 pub mod system;
 pub mod tool_logs;
-pub mod trusted_users;
 pub mod workspace;
 
 /// `owner_discord_id` と呼び出し元 ID が一致するか判定する。

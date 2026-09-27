@@ -5,7 +5,10 @@ use rusqlite::params;
 
 use crate::close::close_live;
 use crate::error::{ErrorCode, GateError};
-use crate::operations::{declaration_digest, validate_operations, GatewayOperationDeclaration};
+use crate::operations::{
+    runtime_declaration_digest, validate_operations, validate_runtime_compatibility, FinalDelivery,
+    GatewayOperationDeclaration,
+};
 use crate::protocol::{bind_frame, ok_frame, write_json};
 use crate::registry::{ExtgateState, LiveEntry, Pending};
 
@@ -17,7 +20,7 @@ pub(crate) async fn handle_hello(
     identity: u64,
     hello: crate::protocol::Hello,
 ) -> Result<String, ()> {
-    if hello.protocol != 2 {
+    if hello.protocol != 3 || hello.operation_protocol != 1 {
         close_live(
             state,
             None,
@@ -46,11 +49,26 @@ pub(crate) async fn handle_hello(
                 Ok(inspected) if inspected.config_digest != hello.config_digest => {
                     Err(ErrorCode::ConfigDigestMismatch)
                 }
+                // S3 transition: hello is the runtime authority, but old config readers remain
+                // until their owning stages. Refuse either mismatch direction so two authorities
+                // can never disagree during the transition.
+                Ok(inspected)
+                    if !final_delivery_matches_config(
+                        &hello.final_delivery,
+                        &inspected.config_b64,
+                    ) =>
+                {
+                    Err(ErrorCode::OperationDeclarationInvalid)
+                }
                 // 宣言検証を hello 検査と同じ lock 下で完了させる（§4.1）。永続 digest との
                 // 照合は撤去済み（#894）。
-                Ok(_) => match validate_hello_declarations(state, &hello.operations) {
+                Ok(_) => match validate_hello_declarations(
+                    state,
+                    &hello.operations,
+                    &hello.final_delivery,
+                ) {
                     Err(code) => Err(code),
-                    Ok((declarations, declaration_digest)) => {
+                    Ok((declarations, declaration_digest, final_delivery)) => {
                         match open_bindings(&state.db, &hello.instance_id) {
                             Err(_) => Err(ErrorCode::StoreError),
                             Ok(bindings) => {
@@ -75,6 +93,7 @@ pub(crate) async fn handle_hello(
                                         pending,
                                         declarations: Arc::new(declarations),
                                         declaration_digest,
+                                        final_delivery,
                                     },
                                 );
                                 Ok(bindings)
@@ -185,13 +204,36 @@ struct InstanceSnap {
     enabled: bool,
     revision: u64,
     config_digest: String,
+    config_b64: String,
+}
+
+fn final_delivery_matches_config(final_delivery: &str, config_b64: &str) -> bool {
+    let Some(final_delivery) = FinalDelivery::parse(final_delivery) else {
+        return false;
+    };
+    let Ok(config) = crate::ids::decode_config_b64(config_b64) else {
+        return false;
+    };
+    let Ok(mode) = crate::delivery_mode::delivery_mode_from_config_bytes(&config) else {
+        return false;
+    };
+    matches!(
+        (final_delivery, mode),
+        (
+            FinalDelivery::Automatic,
+            crate::delivery_mode::DeliveryMode::Say
+        ) | (
+            FinalDelivery::OperationDriven,
+            crate::delivery_mode::DeliveryMode::ToolDriven
+        )
+    )
 }
 
 fn inspect_instance(db: &opencrab_db::Db, instance_id: &str) -> Result<InstanceSnap, ErrorCode> {
     let conn = db.lock().map_err(|_| ErrorCode::StoreError)?;
     // operation_declaration_digest 列は残すが読まない（照合撤去・#894）。
     match conn.query_row(
-        "SELECT enabled, revision, config_digest, deleted_at
+        "SELECT enabled, revision, config_digest, config_b64, deleted_at
          FROM gate_instances WHERE instance_id = ?1",
         params![instance_id],
         |r| {
@@ -199,17 +241,19 @@ fn inspect_instance(db: &opencrab_db::Db, instance_id: &str) -> Result<InstanceS
                 r.get::<_, i64>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, String>(2)?,
-                r.get::<_, Option<i64>>(3)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<i64>>(4)?,
             ))
         },
     ) {
         Err(rusqlite::Error::QueryReturnedNoRows) => Err(ErrorCode::InstanceUnknown),
         Err(_) => Err(ErrorCode::StoreError),
-        Ok((_, _, _, Some(_))) => Err(ErrorCode::InstanceUnknown),
-        Ok((enabled, revision, digest, None)) => Ok(InstanceSnap {
+        Ok((_, _, _, _, Some(_))) => Err(ErrorCode::InstanceUnknown),
+        Ok((enabled, revision, digest, config_b64, None)) => Ok(InstanceSnap {
             enabled: enabled == 1,
             revision: u64::try_from(revision).map_err(|_| ErrorCode::StoreError)?,
             config_digest: digest,
+            config_b64,
         }),
     }
 }
@@ -225,21 +269,16 @@ fn inspect_instance(db: &opencrab_db::Db, instance_id: &str) -> Result<InstanceS
 /// - 他の宣言不正 → `operation_declaration_invalid`（DI-22）
 fn validate_hello_declarations(
     state: &ExtgateState,
-    operations: &Option<serde_json::Value>,
-) -> Result<(Vec<GatewayOperationDeclaration>, String), ErrorCode> {
-    let decls = match operations {
-        Some(ops) => {
-            validate_operations(ops, &|n| state.is_reserved_tool_name(n)).map_err(|e| e.code)?
-        }
-        None => Vec::new(),
-    };
-    // 宣言 present（[] を含む）なら informational digest を計算。absent は「DI 宣言なし」で空。
-    // 照合・永続化はしない（#894）。
-    let digest = operations
-        .as_ref()
-        .map(|_| declaration_digest(&decls))
-        .unwrap_or_default();
-    Ok((decls, digest))
+    operations: &serde_json::Value,
+    final_delivery: &str,
+) -> Result<(Vec<GatewayOperationDeclaration>, String, FinalDelivery), ErrorCode> {
+    let decls = validate_operations(operations, &|name| state.is_reserved_tool_name(name))
+        .map_err(|error| error.code)?;
+    let final_delivery =
+        FinalDelivery::parse(final_delivery).ok_or(ErrorCode::OperationDeclarationInvalid)?;
+    validate_runtime_compatibility(&decls, final_delivery).map_err(|error| error.code)?;
+    let digest = runtime_declaration_digest(&decls, final_delivery);
+    Ok((decls, digest, final_delivery))
 }
 
 fn open_bindings(

@@ -288,18 +288,14 @@ impl AgentRuntime for AppState {
         }
     }
 
-    /// 共通の受信フック（#156 S4）。購読者は今のところ**ピアレビュー返信の回収** 1 つ。
-    ///
-    /// 記録（`record_inbound_message`）と分けているのは、こちらが台帳への**副作用**で、
-    /// 転記の可否ポリシーとは独立に走る必要があるため。購読者が増えたらこのメソッドの
-    /// 中に足す（各ゲートウェイの受信処理は触らない）。
+    // The generic inbound hook is retained for gateway harnesses, but has no
+    // production subscriber after peer-review removal.
     fn on_inbound_message(
         &self,
-        source: opencrab_actions::TranscriptSource,
-        agent_id: &str,
-        record: &opencrab_actions::InboundMessageRecord<'_>,
+        _source: opencrab_actions::TranscriptSource,
+        _agent_id: &str,
+        _record: &opencrab_actions::InboundMessageRecord<'_>,
     ) {
-        crate::peer_review::harvest_inbound_reply(&self.db, source, agent_id, record);
     }
 
     fn record_outbound_reply(
@@ -415,6 +411,10 @@ impl AgentRuntime for AppState {
 ///
 /// 件数だけだと「どの会話の応答が捨てられたか」が後から追えない。`session_id` は
 /// #196 で挿入時に埋めるようにしたので、ここで意味のある値が出る。
+#[cfg(test)]
+#[path = "agent_runtime_impl/peer_review_removal_test.rs"]
+mod peer_review_removal_test;
+
 fn log_closed_interactions(
     closed: &[opencrab_db::queries::ClosedInteraction],
     scope: Option<&str>,

@@ -1,7 +1,5 @@
 use opencrab_actions::TranscriptSource;
-use opencrab_db::queries::{
-    insert_session_log, is_trusted_user, SessionLogRow, TRUSTED_PLATFORM_EXTGATE,
-};
+use opencrab_db::queries::{insert_session_log, SessionLogRow};
 use rusqlite::{params, Connection, Transaction};
 
 use crate::error::GateError;
@@ -118,14 +116,6 @@ pub(super) fn record_inbound(
     )
     .map_err(|e| GateError::store_logged("said.session_log_insert", e))?;
     Ok(())
-}
-
-/// owner 一致または trusted_users。query failure は false。
-pub fn dm_allowed(conn: &Connection, sender: &str, agent_id: &str, owner_id: &str) -> bool {
-    if opencrab_core::owner::is_owner_id(owner_id, sender) {
-        return true;
-    }
-    is_trusted_user(conn, TRUSTED_PLATFORM_EXTGATE, sender, agent_id)
 }
 
 /// 当該 agent/instance/address の open binding exact 1 行だけ true。

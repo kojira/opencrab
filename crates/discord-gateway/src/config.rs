@@ -1,7 +1,7 @@
 //! operator と gateway が共有する配置。HTTP bind は無い。**秘密（bot token）は載せない**
 //! （設計 §1.3・§3.1: canonical config は bot の nonsecret identity / intents / transport 設定だけ）。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Placement {
@@ -24,7 +24,8 @@ pub struct InstancePlacement {
 }
 
 /// instance の非秘密 config。bot token は含めない（env 注入のみ）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstanceConfig {
     /// core `agents.id`。受信 Discord message の (guild,channel) から binding address を組む。
     pub agent_id: String,
@@ -56,7 +57,8 @@ pub struct InstanceConfig {
 /// - `failed`（❌）: 発端メッセージへの返信配送が失敗した時点で付ける。
 /// - `no_reply`（🤐）: ターンが沈黙（say 無し）で終えた時点で発端メッセージへ付ける
 ///   （`CompletedNoReply` の reply_origin が Single のときだけ・裁定A で真の沈黙だけに立つ）。
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccessConfig {
     #[serde(default)]
     pub owners: Vec<String>,
@@ -66,7 +68,8 @@ pub struct AccessConfig {
     pub trusted_users: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SystemReactions {
     #[serde(default = "default_accepted")]
     pub accepted: String,
@@ -150,6 +153,12 @@ pub fn decode_config_b64(config_b64: &str) -> anyhow::Result<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
         .decode(config_b64)
         .map_err(|_| anyhow::anyhow!("config_b64 must be standard padded base64"))
+}
+
+pub fn canonicalize_config_b64(config_b64: &str) -> anyhow::Result<String> {
+    use base64::Engine as _;
+    let config = parse_instance_config(&decode_config_b64(config_b64)?)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config)?))
 }
 
 pub fn config_digest(bytes: &[u8]) -> String {
@@ -255,6 +264,16 @@ mod tests {
     fn encode(v: &serde_json::Value) -> String {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(v).unwrap())
+    }
+
+    #[test]
+    fn s5_secret_shaped_unknown_config_fields_are_rejected() {
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            br#"{"agent_id":"a","self_bot_id":"123456789012345678","token":"leak"}"#,
+        );
+        let bytes = decode_config_b64(&encoded).unwrap();
+        assert!(serde_json::from_slice::<InstanceConfig>(&bytes).is_err());
     }
 
     #[test]

@@ -115,7 +115,7 @@ async fn connect_client(sock: &std::path::Path) -> Arc<InstanceClient> {
 async fn hello_and_bind(mock: &mut MockCore) {
     let hello = mock.recv().await;
     assert_eq!(hello["m"], "hello");
-    assert_eq!(hello["protocol"], 2);
+    assert_eq!(hello["protocol"], 3);
     assert_eq!(hello["instance_id"], INSTANCE);
     mock.send(&json!({"id": hello["id"], "m": "ok"})).await;
     mock.send(&json!({
@@ -232,6 +232,91 @@ async fn rust_unit_conversation_status_is_owned_by_web_gateway() {
         .await
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn d_1006_web_01_existing_routes_do_not_require_bearer() {
+    let app = router(HttpState {
+        instances: Vec::new(),
+        agent_clients: std::collections::HashMap::new(),
+    });
+    for (method, uri, body, expected) in [
+        (
+            "POST",
+            "/api/web-conversations",
+            r#"{"agent_id":"agent"}"#,
+            StatusCode::CONFLICT,
+        ),
+        (
+            "GET",
+            "/api/web-conversations/missing",
+            "",
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "POST",
+            "/api/web-conversations/missing/messages",
+            r#"{"client_message_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","text":"hello","attachments":[]}"#,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            "/api/web-conversations/missing/events",
+            "",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            expected,
+            "historical no-bearer route: {method} {uri}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn d_1006_web_01_http_message_keeps_historical_owner_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("core.sock");
+    let mut mock = MockCore::spawn(sock.clone());
+    let connect = tokio::spawn(async move { connect_client(&sock).await });
+    hello_and_bind(&mut mock).await;
+    let client = connect.await.unwrap();
+    wait_bound(&client).await;
+    let app = router(HttpState {
+        instances: vec![client],
+        agent_clients: std::collections::HashMap::new(),
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/web-conversations/{ADDRESS}/messages"))
+        .header("content-type", "application/json")
+        .body(Body::from(post_body()))
+        .unwrap();
+    let pending = tokio::spawn(app.oneshot(request));
+    let said = mock.recv().await;
+    assert_eq!(said["author_id"], AUTHOR);
+    assert_eq!(
+        said["caller"]["role"], "owner",
+        "Web HTTP input must retain the old Owner caller, not token-assigned authority"
+    );
+    mock.send(&json!({"id": said["id"], "m": "ok", "seq": 1}))
+        .await;
+    assert_eq!(
+        pending.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
 }
 
 #[tokio::test]
@@ -487,6 +572,11 @@ async fn rust_unit_http_post_202_not_admitted_busy_and_old_routes_404() {
     let said = mock.recv().await;
     assert_eq!(said["m"], "said");
     assert_eq!(said["origin"], origin());
+    assert_eq!(said["author_id"], AUTHOR);
+    assert_eq!(
+        said["caller"]["role"], "owner",
+        "Web admitted caller must match the pre-#1006 Owner frame"
+    );
     mock.send(&json!({"id": said["id"], "m": "ok", "seq": 7}))
         .await;
     let res = pending.await.unwrap().unwrap();

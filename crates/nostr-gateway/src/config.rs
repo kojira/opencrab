@@ -14,10 +14,16 @@ pub struct InstancePlacement {
     pub instance_id: String,
     pub revision: u64,
     pub address: String,
+    /// Gateway-owned runtime config. Core must not interpret this payload.
     pub config_b64: String,
+    /// Optional core-owned opaque config used only for hello digest compatibility.
+    /// If absent, legacy placements use `config_b64` for both runtime and hello digest.
+    #[serde(default)]
+    pub core_config_b64: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstanceConfig {
     pub relays: Vec<String>,
     #[serde(default)]
@@ -34,7 +40,8 @@ pub struct InstanceConfig {
     pub access: AccessConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccessConfig {
     #[serde(default)]
     pub followees: Vec<String>,
@@ -46,7 +53,17 @@ pub struct AccessConfig {
     pub trusted_users: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+impl AccessConfig {
+    pub fn is_empty(&self) -> bool {
+        self.owner.is_empty()
+            && self.trusted_users.is_empty()
+            && self.followees.is_empty()
+            && self.co_agents.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WatchFilter {
     #[serde(default)]
     pub authors: Vec<String>,
@@ -66,10 +83,17 @@ fn default_max_items() -> i64 {
     DEFAULT_BUNDLE_MAX_ITEMS
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WatchPlacement {
     pub id: i64,
     pub interval_secs: i64,
+    /// Legacy core-owned watch configs stored the owning session in each watch.
+    /// The gateway derives delivery from the binding/placement instead; accept
+    /// the field for historical QC/runtime configs but drop it from canonical
+    /// gateway config so it cannot become a second authority.
+    #[serde(default, rename = "session_id", skip_serializing)]
+    pub legacy_session_id: Option<String>,
     /// 1 interval で束ねる上限。省略時は [`DEFAULT_BUNDLE_MAX_ITEMS`]。
     #[serde(default = "default_max_items")]
     pub max_items: i64,
@@ -120,6 +144,9 @@ impl Placement {
             let bytes = decode_config_b64(&inst.config_b64)?;
             let cfg = parse_instance_config(&bytes)?;
             validate_instance_config(&cfg)?;
+            if let Some(core_config_b64) = &inst.core_config_b64 {
+                let _ = decode_config_b64(core_config_b64)?;
+            }
         }
         Ok(())
     }
@@ -137,9 +164,36 @@ pub fn config_digest(bytes: &[u8]) -> String {
     hex_lower(&Sha256::digest(bytes))
 }
 
-pub fn parse_instance_config(bytes: &[u8]) -> anyhow::Result<InstanceConfig> {
-    let cfg: InstanceConfig = serde_json::from_slice(bytes)
+pub fn canonicalize_config_b64(config_b64: &str) -> anyhow::Result<String> {
+    use base64::Engine as _;
+    let config = parse_instance_config(&decode_config_b64(config_b64)?)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config)?))
+}
+
+pub fn canonicalize_config_b64_with_gateway_access(
+    config_b64: &str,
+    gateway_access: AccessConfig,
+) -> anyhow::Result<String> {
+    use base64::Engine as _;
+    let mut config: InstanceConfig = serde_json::from_slice(&decode_config_b64(config_b64)?)
         .map_err(|e| anyhow::anyhow!("instance config is not valid JSON object: {e}"))?;
+    if config.delivery_mode.is_none() {
+        config.delivery_mode = Some("say".into());
+    }
+    config.access = gateway_access;
+    validate_instance_config(&config)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config)?))
+}
+
+pub fn parse_instance_config(bytes: &[u8]) -> anyhow::Result<InstanceConfig> {
+    let mut cfg: InstanceConfig = serde_json::from_slice(bytes)
+        .map_err(|e| anyhow::anyhow!("instance config is not valid JSON object: {e}"))?;
+    // Historical Nostr configs predate the generic delivery-mode marker. Default
+    // missing configs to gateway-owned automatic final-text delivery; explicit
+    // tool_driven remains available for operation-driven deployments.
+    if cfg.delivery_mode.is_none() {
+        cfg.delivery_mode = Some("say".into());
+    }
     validate_instance_config(&cfg)?;
     Ok(cfg)
 }
@@ -163,6 +217,11 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
     match cfg.delivery_mode.as_deref() {
         None | Some("say") | Some("tool_driven") => {}
         Some(_) => anyhow::bail!("delivery_mode must be say or tool_driven"),
+    }
+    if cfg.access.is_empty() {
+        anyhow::bail!(
+            "access must contain at least one owner, trusted_user, followee, or co_agent"
+        );
     }
     for watch in &cfg.watches {
         if watch.interval_secs <= 0 {
@@ -256,7 +315,10 @@ mod tests {
             name: Some("crab".into()),
             watches: vec![],
             delivery_mode: Some("tool_driven".into()),
-            access: AccessConfig::default(),
+            access: AccessConfig {
+                owner: vec!["bb".repeat(32)],
+                ..AccessConfig::default()
+            },
         }
     }
 
@@ -276,13 +338,69 @@ mod tests {
                             "relays": ["wss://example.invalid"],
                             "self_pubkey": "aa".repeat(32),
                             "name": "crab",
+                            "access": { "owner": ["bb".repeat(32)] },
                         }))
                         .unwrap(),
                     )
                 },
+                core_config_b64: Some("e30=".into()),
             }],
         };
         p.validate().unwrap();
+    }
+
+    #[test]
+    fn s5_secret_shaped_unknown_config_fields_are_rejected() {
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            br#"{"relays":["wss://relay"],"self_pubkey":"00","secret":"leak"}"#,
+        );
+        let bytes = decode_config_b64(&encoded).unwrap();
+        assert!(serde_json::from_slice::<InstanceConfig>(&bytes).is_err());
+    }
+
+    #[test]
+    fn missing_access_is_fail_loud_before_watch_starts() {
+        let value = serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab"
+        });
+        let err = parse_instance_config(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("access"), "{err}");
+    }
+
+    #[test]
+    fn gateway_access_overlay_is_the_runtime_authority() {
+        use base64::Engine as _;
+
+        let legacy_core_access = serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab",
+            "access": { "owner": ["bb".repeat(32)] }
+        });
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&legacy_core_access).unwrap());
+
+        let err = canonicalize_config_b64_with_gateway_access(&encoded, AccessConfig::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("access"), "{err}");
+
+        let runtime = canonicalize_config_b64_with_gateway_access(
+            &encoded,
+            AccessConfig {
+                trusted_users: vec!["cc".repeat(32)],
+                ..AccessConfig::default()
+            },
+        )
+        .unwrap();
+        let cfg = parse_instance_config(&decode_config_b64(&runtime).unwrap()).unwrap();
+        assert!(
+            cfg.access.owner.is_empty(),
+            "legacy config access must not survive"
+        );
+        assert_eq!(cfg.access.trusted_users, vec!["cc".repeat(32)]);
     }
 
     #[test]
@@ -308,10 +426,10 @@ mod tests {
             "relays": ["wss://example.invalid"],
             "self_pubkey": "aa".repeat(32),
             "name": "crab",
+            "access": { "owner": ["bb".repeat(32)] },
             "watches": [{
                 "id": 17,
                 "interval_secs": 30,
-                "session_id": "nostr-a1",
                 "filter_json": {
                     "authors": ["npub1watched"],
                     "keywords": ["opencrab"],
@@ -329,11 +447,52 @@ mod tests {
     }
 
     #[test]
+    fn legacy_watch_session_id_is_accepted_but_not_canonicalized() {
+        let value = serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab",
+            "access": { "owner": ["bb".repeat(32)] },
+            "watches": [{
+                "id": 1,
+                "session_id": "legacy-session",
+                "interval_secs": 30,
+                "filter_json": { "authors": ["npub1watched"] }
+            }]
+        });
+        let cfg = parse_instance_config(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            cfg.watches[0].legacy_session_id.as_deref(),
+            Some("legacy-session")
+        );
+        assert_eq!(cfg.delivery_mode.as_deref(), Some("say"));
+
+        let canonical = serde_json::to_value(&cfg).unwrap();
+        assert!(canonical["watches"][0].get("session_id").is_none());
+    }
+
+    #[test]
+    fn legacy_missing_delivery_mode_is_canonicalized_to_say() {
+        let value = serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab",
+            "access": { "owner": ["bb".repeat(32)] }
+        });
+        let cfg = parse_instance_config(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(cfg.delivery_mode.as_deref(), Some("say"));
+
+        let canonical = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(canonical["delivery_mode"], "say");
+    }
+
+    #[test]
     fn omitted_max_items_defaults_to_50() {
         let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
             "relays": ["wss://example.invalid"],
             "self_pubkey": "aa".repeat(32),
             "name": "crab",
+            "access": { "owner": ["bb".repeat(32)] },
             "watches": [{
                 "id": 1,
                 "interval_secs": 30,
@@ -351,6 +510,7 @@ mod tests {
             "relays": ["wss://example.invalid"],
             "self_pubkey": "aa".repeat(32),
             "name": "crab",
+            "access": { "owner": ["bb".repeat(32)] },
             "watches": [{
                 "id": 1,
                 "interval_secs": 30,
@@ -369,6 +529,7 @@ mod tests {
         cfg.watches.push(WatchPlacement {
             id: 1,
             interval_secs: 30,
+            legacy_session_id: None,
             max_items: 0,
             filter: WatchFilter::default(),
             filter_json: None,

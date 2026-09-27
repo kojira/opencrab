@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "operation_id": "00000000-0000-4000-8000-000000000008",
+  "created_at": "2026-01-01T00:00:00Z",
+  "core_user_version": 56,
+  "source_core_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "destinations": [],
+  "identity_dispositions": [],
+  "channel_edges": [],
+  "watch_edges": [],
+  "credential_sources": [],
+  "unexpected": true
+}

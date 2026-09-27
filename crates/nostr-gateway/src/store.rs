@@ -1,74 +1,123 @@
-//! Gateway-owned configuration store and one-shot legacy import.
+//! Nostr-owned durable configuration, policy, identity, credential, and lifecycle store.
 
-use std::path::{Path, PathBuf};
-
+use crate::{config::AccessConfig, secret_store};
 use anyhow::{Context as _, Result};
-use opencrab_db::queries::SessionWatchRow;
-use opencrab_nostr::NostrGateAllowKeys;
+use opencrab_process_supervisor::lifecycle::{LifecycleState, PersistedLifecycle};
 use rusqlite::{params, Connection, OptionalExtension as _};
+use std::path::{Path, PathBuf};
+use std::str::FromStr as _;
 
 const SCHEMA: &str = r#"
-PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS gateway_meta (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
+PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS instances (
-    agent_id TEXT PRIMARY KEY,
-    agent_name TEXT NOT NULL,
-    secret_key TEXT NOT NULL,
-    relays_json TEXT NOT NULL,
-    filter_json TEXT NOT NULL,
-    enabled INTEGER NOT NULL,
-    owner_pubkey TEXT NOT NULL DEFAULT '',
-    self_pubkey TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL
+  instance_id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL UNIQUE,
+  subject_id INTEGER NOT NULL CHECK(subject_id > 0),
+  config_b64 TEXT NOT NULL,
+  addresses_json TEXT NOT NULL,
+  credential_envelope TEXT NOT NULL,
+  subject_grant_envelope TEXT,
+  enabled INTEGER NOT NULL,
+  desired_generation INTEGER NOT NULL,
+  applied_generation INTEGER,
+  lifecycle_state TEXT NOT NULL,
+  core_revision INTEGER,
+  core_digest TEXT,
+  binding_inventory_json TEXT NOT NULL DEFAULT '[]',
+  process_id INTEGER,
+  process_nonce TEXT,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  retry_at_unix_ms INTEGER,
+  last_exit TEXT,
+  updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS watches (
-    watch_id INTEGER PRIMARY KEY,
-    agent_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    interval_secs INTEGER NOT NULL,
-    filter_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE(agent_id, session_id)
+CREATE TABLE IF NOT EXISTS endpoints (
+  instance_id TEXT NOT NULL REFERENCES instances(instance_id) ON DELETE CASCADE,
+  channel_id TEXT NOT NULL,
+  guild_id TEXT,
+  readable INTEGER NOT NULL,
+  writable INTEGER NOT NULL,
+  policy_json TEXT NOT NULL,
+  PRIMARY KEY(instance_id, channel_id)
 );
-CREATE TABLE IF NOT EXISTS allow_identities (
-    agent_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    external_id TEXT NOT NULL,
-    mapped_agent_id TEXT,
-    PRIMARY KEY(agent_id, role, external_id)
+CREATE TABLE IF NOT EXISTS identity_projections (
+  instance_id TEXT NOT NULL REFERENCES instances(instance_id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  relationship_id TEXT,
+  relationship_revision INTEGER,
+  PRIMARY KEY(instance_id, role, external_id)
+);
+CREATE TABLE IF NOT EXISTS legacy_identity_sources (
+  instance_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  permission TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  PRIMARY KEY(instance_id, id)
 );
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceRow {
+    pub instance_id: String,
     pub agent_id: String,
-    pub agent_name: String,
-    pub secret_key: String,
-    pub relays_json: String,
-    pub filter_json: String,
+    pub subject_id: i64,
+    pub config_b64: String,
+    pub addresses: Vec<String>,
+    pub credential_envelope: String,
+    pub subject_grant_envelope: Option<String>,
     pub enabled: bool,
+    pub desired_generation: u64,
+    pub applied_generation: Option<u64>,
+    pub lifecycle_state: LifecycleState,
+    pub core_revision: Option<u64>,
+    pub core_digest: Option<String>,
+    pub core_bindings: Vec<String>,
+    pub process_id: Option<u32>,
+    pub process_nonce: Option<String>,
+    pub failure_count: u32,
+    pub retry_at_unix_ms: Option<i64>,
+    pub access: AccessConfig,
 }
 
-pub struct GatewayStore {
+impl InstanceRow {
+    pub fn lifecycle(&self) -> PersistedLifecycle {
+        PersistedLifecycle {
+            desired_generation: self.desired_generation,
+            applied_generation: self.applied_generation,
+            enabled: self.enabled,
+            state: self.lifecycle_state,
+            retry_at_unix_ms: self.retry_at_unix_ms,
+            process_nonce: self.process_nonce.clone(),
+        }
+    }
+}
+
+pub struct NostrStore {
     path: PathBuf,
     conn: Connection,
 }
 
-impl GatewayStore {
+impl NostrStore {
+    /// Offline S8 upgrades an old gateway database inside its destination transaction.
+    pub fn initialize_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(SCHEMA)?;
+        Ok(())
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create gateway DB parent {}", parent.display()))?;
+            std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)
-            .with_context(|| format!("open gateway DB {}", path.display()))?;
-        conn.execute_batch(SCHEMA)
-            .context("initialize gateway DB")?;
+        let conn = Connection::open(path)?;
+        Self::initialize_schema(&conn)?;
         Ok(Self {
-            path: path.to_path_buf(),
+            path: path.into(),
             conn,
         })
     }
@@ -77,384 +126,434 @@ impl GatewayStore {
         &self.path
     }
 
-    pub fn import_legacy_once(&mut self, legacy_path: &Path) -> Result<bool> {
-        if self
-            .conn
-            .query_row(
-                "SELECT value FROM gateway_meta WHERE key = 'legacy_import_v1'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .is_some()
-        {
-            return Ok(false);
-        }
-        let legacy =
-            Connection::open_with_flags(legacy_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .with_context(|| format!("open legacy DB {}", legacy_path.display()))?;
-        let tx = self.conn.transaction()?;
-        {
-            let mut stmt = legacy.prepare(
-                "SELECT c.agent_id, COALESCE(a.name, c.agent_id), c.secret_key,
-                        c.relays_json, c.filter_json, c.enabled,
-                        COALESCE(c.owner_pubkey, ''), COALESCE(c.self_pubkey, ''), c.updated_at
-                 FROM agent_nostr_config c
-                 LEFT JOIN agents a ON a.agent_id = c.agent_id",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, bool>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                ))
-            })?;
-            for row in rows {
-                let (agent_id, agent_name, secret, relays, filter, enabled, owner, own, updated) =
-                    row?;
-                tx.execute(
-                    "INSERT INTO instances
-                     (agent_id, agent_name, secret_key, relays_json, filter_json, enabled,
-                      owner_pubkey, self_pubkey, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                     ON CONFLICT(agent_id) DO NOTHING",
-                    params![
-                        agent_id, agent_name, secret, relays, filter, enabled, owner, own, updated
-                    ],
-                )?;
-            }
-        }
-        import_watches(&legacy, &tx)?;
-        import_allow_identities(&legacy, &tx)?;
-        tx.execute(
-            "INSERT INTO gateway_meta (key, value) VALUES ('legacy_import_v1', ?1)",
-            params![chrono::Utc::now().to_rfc3339()],
-        )?;
-        tx.commit()?;
-        Ok(true)
-    }
-
-    pub fn get(&self, agent_id: &str) -> Result<Option<InstanceRow>> {
-        self.conn
-            .query_row(
-                "SELECT agent_id, agent_name, secret_key, relays_json, filter_json, enabled
-                 FROM instances WHERE agent_id = ?1",
-                params![agent_id],
-                |row| {
-                    Ok(InstanceRow {
-                        agent_id: row.get(0)?,
-                        agent_name: row.get(1)?,
-                        secret_key: row.get(2)?,
-                        relays_json: row.get(3)?,
-                        filter_json: row.get(4)?,
-                        enabled: row.get(5)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn encrypt_plaintext_secrets(
-        &mut self,
-        master_key: &[u8; opencrab_core::secret_box::MASTER_KEY_LEN],
-    ) -> Result<usize> {
-        let rows = self.list_all_secret_values()?;
-        let tx = self.conn.transaction()?;
-        let mut changed = 0;
-        for (agent_id, secret) in rows {
-            if secret.trim().is_empty() || opencrab_core::secret_box::is_encrypted(&secret) {
-                continue;
-            }
-            let encrypted = opencrab_core::secret_box::encrypt(secret.as_bytes(), master_key)?;
-            changed += tx.execute(
-                "UPDATE instances SET secret_key = ?1, updated_at = ?2 WHERE agent_id = ?3",
-                params![encrypted, chrono::Utc::now().to_rfc3339(), agent_id],
-            )?;
-        }
-        tx.commit()?;
-        Ok(changed)
-    }
-
-    fn list_all_secret_values(&self) -> Result<Vec<(String, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT agent_id, secret_key FROM instances")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
-    }
-
-    pub fn list_enabled(&self) -> Result<Vec<InstanceRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT agent_id, agent_name, secret_key, relays_json, filter_json, enabled
-             FROM instances WHERE enabled = 1 ORDER BY agent_id",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(InstanceRow {
-                agent_id: row.get(0)?,
-                agent_name: row.get(1)?,
-                secret_key: row.get(2)?,
-                relays_json: row.get(3)?,
-                filter_json: row.get(4)?,
-                enabled: row.get(5)?,
-            })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
-    }
-
-    pub fn upsert(
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_desired(
         &self,
-        row: &InstanceRow,
-        master_key: &[u8; opencrab_core::secret_box::MASTER_KEY_LEN],
-    ) -> Result<()> {
-        let secret = if opencrab_core::secret_box::is_encrypted(&row.secret_key) {
-            row.secret_key.clone()
+        instance_id: &str,
+        agent_id: &str,
+        subject_id: i64,
+        config_b64: &str,
+        addresses: &[String],
+        credential: &str,
+        subject_grant: Option<&str>,
+        enabled: bool,
+        key: &[u8; secret_store::MASTER_KEY_LEN],
+    ) -> Result<u64> {
+        anyhow::ensure!(subject_id > 0, "subject_id must be positive");
+        let existing = self.get(instance_id)?;
+        let generation = existing
+            .as_ref()
+            .map_or(1, |row| row.desired_generation + 1);
+        let envelope = if credential.is_empty() {
+            existing
+                .as_ref()
+                .map(|row| row.credential_envelope.clone())
+                .context("credential is required for a new instance")?
         } else {
-            opencrab_core::secret_box::encrypt(row.secret_key.as_bytes(), master_key)?
+            secret_store::encrypt(credential.as_bytes(), key)?
+        };
+        let grant_envelope = match subject_grant {
+            Some(grant) if !grant.is_empty() => Some(secret_store::encrypt(grant.as_bytes(), key)?),
+            _ => existing
+                .as_ref()
+                .and_then(|row| row.subject_grant_envelope.clone()),
         };
         self.conn.execute(
             "INSERT INTO instances
-             (agent_id, agent_name, secret_key, relays_json, filter_json, enabled, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(agent_id) DO UPDATE SET
-               agent_name = excluded.agent_name,
-               secret_key = excluded.secret_key,
-               relays_json = excluded.relays_json,
-               filter_json = excluded.filter_json,
-               enabled = excluded.enabled,
-               updated_at = excluded.updated_at",
-            params![
-                row.agent_id,
-                row.agent_name,
-                secret,
-                row.relays_json,
-                row.filter_json,
-                row.enabled,
-                chrono::Utc::now().to_rfc3339(),
-            ],
+             (instance_id, agent_id, subject_id, config_b64, addresses_json, credential_envelope,
+              subject_grant_envelope, enabled, desired_generation, applied_generation, lifecycle_state, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,'pending',?10)
+             ON CONFLICT(instance_id) DO UPDATE SET
+               agent_id=excluded.agent_id, subject_id=excluded.subject_id,
+               config_b64=excluded.config_b64, addresses_json=excluded.addresses_json,
+               credential_envelope=excluded.credential_envelope,
+               subject_grant_envelope=excluded.subject_grant_envelope, enabled=excluded.enabled,
+               desired_generation=excluded.desired_generation, lifecycle_state='pending',
+               process_id=NULL, process_nonce=NULL, retry_at_unix_ms=NULL,
+               updated_at=excluded.updated_at",
+            params![instance_id, agent_id, subject_id, config_b64,
+                serde_json::to_string(addresses)?, envelope, grant_envelope, enabled, generation,
+                chrono::Utc::now().to_rfc3339()],
         )?;
-        Ok(())
+        Ok(generation)
     }
 
-    pub fn delete(&self, agent_id: &str) -> Result<bool> {
-        Ok(self.conn.execute(
-            "DELETE FROM instances WHERE agent_id = ?1",
-            params![agent_id],
-        )? > 0)
+    pub fn get(&self, instance_id: &str) -> Result<Option<InstanceRow>> {
+        let Some(mut row) = self.conn.query_row(
+            "SELECT instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,
+                    subject_grant_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,
+                    core_digest,binding_inventory_json,process_id,process_nonce,failure_count,retry_at_unix_ms
+             FROM instances WHERE instance_id=?1",
+            params![instance_id],
+            |row| {
+                let state: String = row.get(10)?;
+                let desired: i64 = row.get(8)?;
+                let applied: Option<i64> = row.get(9)?;
+                let revision: Option<i64> = row.get(11)?;
+                let failures: i64 = row.get(16)?;
+                Ok(InstanceRow {
+                    instance_id: row.get(0)?, agent_id: row.get(1)?, subject_id: row.get(2)?,
+                    config_b64: row.get(3)?,
+                    addresses: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+                    credential_envelope: row.get(5)?, subject_grant_envelope: row.get(6)?, enabled: row.get(7)?,
+                    desired_generation: u64::try_from(desired).unwrap_or(0),
+                    applied_generation: applied.and_then(|v| u64::try_from(v).ok()),
+                    lifecycle_state: LifecycleState::from_str(&state).unwrap_or(LifecycleState::Error),
+                    core_revision: revision.and_then(|v| u64::try_from(v).ok()),
+                    core_digest: row.get(12)?,
+                    core_bindings: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
+                    process_id: row.get::<_, Option<i64>>(14)?.and_then(|value| u32::try_from(value).ok()),
+                    process_nonce: row.get(15)?,
+                    failure_count: u32::try_from(failures).unwrap_or(u32::MAX),
+                    retry_at_unix_ms: row.get(17)?,
+                    access: AccessConfig::default(),
+                })
+            },
+        ).optional()? else { return Ok(None); };
+        row.access = self.access_config(instance_id)?;
+        Ok(Some(row))
     }
 
-    pub fn set_enabled(&self, agent_id: &str, enabled: bool) -> Result<bool> {
-        Ok(self.conn.execute(
-            "UPDATE instances SET enabled = ?1, updated_at = ?2 WHERE agent_id = ?3",
-            params![enabled, chrono::Utc::now().to_rfc3339(), agent_id],
-        )? > 0)
-    }
-
-    pub fn set_self_pubkey(&self, agent_id: &str, value: &str) -> Result<bool> {
-        Ok(self.conn.execute(
-            "UPDATE instances SET self_pubkey = ?1, updated_at = ?2 WHERE agent_id = ?3",
-            params![value, chrono::Utc::now().to_rfc3339(), agent_id],
-        )? > 0)
-    }
-
-    pub fn watches(&self, agent_id: &str) -> Result<Vec<SessionWatchRow>> {
+    pub fn access_config(&self, instance_id: &str) -> Result<AccessConfig> {
+        let mut access = AccessConfig::default();
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, interval_secs, filter_json
-             FROM watches WHERE agent_id = ?1 ORDER BY watch_id",
+            "SELECT role,external_id,relationship_id FROM identity_projections
+             WHERE instance_id=?1 ORDER BY role,external_id",
         )?;
-        let rows = stmt.query_map(params![agent_id], |row| {
-            Ok(SessionWatchRow {
-                id: 0,
-                agent_id: agent_id.to_string(),
-                session_id: row.get(0)?,
-                interval_secs: row.get(1)?,
-                filter_json: row.get(2)?,
-                created_at: String::new(),
-            })
+        let rows = stmt.query_map(params![instance_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
-    }
-
-    pub fn allow_keys(&self, agent_id: &str) -> Result<NostrGateAllowKeys> {
-        let owner = self.single_values(agent_id, "owner")?;
-        let trusted_users = self.single_values(agent_id, "trusted")?;
-        let mut co_agents = Vec::new();
-        let mut co_agent_identities = Vec::new();
-        let mut stmt = self.conn.prepare(
-            "SELECT external_id, mapped_agent_id FROM allow_identities
-             WHERE agent_id = ?1 AND role = 'co_agent' ORDER BY external_id",
-        )?;
-        for row in stmt.query_map(params![agent_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })? {
-            let (external_id, mapped_agent_id) = row?;
-            co_agents.push(external_id.clone());
-            co_agent_identities.push((external_id, mapped_agent_id));
+        for row in rows {
+            let (role, external_id, relationship_id) = row?;
+            match role.as_str() {
+                "owner" => access.owner.push(external_id),
+                "trusted" | "trusted_user" => access.trusted_users.push(external_id),
+                "followee" => access.followees.push(external_id),
+                "co_agent" => {
+                    access
+                        .co_agents
+                        .insert(external_id, relationship_id.unwrap_or_default());
+                }
+                _ => {}
+            }
         }
-        Ok(NostrGateAllowKeys {
-            owner,
-            co_agents,
-            co_agent_identities,
-            trusted_users,
-        })
+        Ok(access)
     }
 
-    fn single_values(&self, agent_id: &str, role: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT external_id FROM allow_identities
-             WHERE agent_id = ?1 AND role = ?2 ORDER BY external_id",
-        )?;
-        let rows = stmt.query_map(params![agent_id, role], |row| row.get(0))?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    pub fn retry_due_error(
+        &self,
+        instance_id: &str,
+        generation: u64,
+        now_unix_ms: i64,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE instances SET lifecycle_state='pending',
+             process_id=NULL,process_nonce=NULL,retry_at_unix_ms=NULL
+             WHERE instance_id=?1 AND desired_generation=?2 AND lifecycle_state='error'
+               AND (retry_at_unix_ms IS NULL OR retry_at_unix_ms<=?3)",
+            params![instance_id, generation, now_unix_ms],
+        )? == 1)
     }
-}
 
-fn import_watches(legacy: &Connection, tx: &rusqlite::Transaction<'_>) -> Result<()> {
-    let mut stmt = legacy.prepare(
-        "SELECT id, agent_id, session_id, interval_secs, filter_json, created_at
-         FROM session_watches",
-    )?;
-    for row in stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-        ))
-    })? {
-        let (id, agent, session, interval, filter, created) = row?;
-        tx.execute(
-            "INSERT OR IGNORE INTO watches
-             (watch_id, agent_id, session_id, interval_secs, filter_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, agent, session, interval, filter, created],
-        )?;
+    pub fn list(&self) -> Result<Vec<InstanceRow>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT instance_id FROM instances ORDER BY instance_id")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| self.get(&id)?.context("instance vanished"))
+            .collect()
     }
-    Ok(())
-}
 
-fn import_allow_identities(legacy: &Connection, tx: &rusqlite::Transaction<'_>) -> Result<()> {
-    let mut configs = legacy.prepare(
-        "SELECT agent_id, owner_pubkey FROM agent_nostr_config WHERE owner_pubkey <> ''",
-    )?;
-    for row in configs.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })? {
-        let (agent, external) = row?;
-        tx.execute(
-            "INSERT OR IGNORE INTO allow_identities (agent_id, role, external_id) VALUES (?1, 'owner', ?2)",
-            params![agent, external],
-        )?;
+    pub fn mark_provisioning(&self, instance_id: &str, generation: u64) -> Result<bool> {
+        self.transition(instance_id, generation, "pending", "provisioning")
     }
-    let mut trusted =
-        legacy.prepare("SELECT agent_id, user_id FROM trusted_users WHERE platform = 'nostr'")?;
-    for row in trusted.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })? {
-        let (agent, external) = row?;
-        tx.execute(
-            "INSERT OR IGNORE INTO allow_identities (agent_id, role, external_id) VALUES (?1, 'trusted', ?2)",
-            params![agent, external],
-        )?;
+
+    pub fn mark_verified(
+        &self,
+        instance_id: &str,
+        generation: u64,
+        revision: u64,
+        digest: &str,
+        bindings: &[String],
+        enabled: bool,
+    ) -> Result<bool> {
+        let state = if enabled { "ready" } else { "disabled" };
+        Ok(self.conn.execute(
+            "UPDATE instances SET applied_generation=?2,lifecycle_state=?3,core_revision=?4,
+             core_digest=?5,binding_inventory_json=?6,process_id=NULL,process_nonce=NULL,
+             failure_count=0,retry_at_unix_ms=NULL,updated_at=?7
+             WHERE instance_id=?1 AND desired_generation=?2 AND lifecycle_state='provisioning'
+               AND enabled=?8",
+            params![
+                instance_id,
+                generation,
+                state,
+                revision,
+                digest,
+                serde_json::to_string(bindings)?,
+                chrono::Utc::now().to_rfc3339(),
+                enabled
+            ],
+        )? == 1)
     }
-    let mut peers = legacy.prepare(
-        "SELECT c.agent_id, p.self_pubkey, c.co_agent_id
-         FROM trusted_co_agents c JOIN agent_nostr_config p ON p.agent_id = c.co_agent_id
-         WHERE p.self_pubkey <> ''",
-    )?;
-    for row in peers.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })? {
-        let (agent, external, mapped) = row?;
-        tx.execute(
-            "INSERT OR IGNORE INTO allow_identities
-             (agent_id, role, external_id, mapped_agent_id) VALUES (?1, 'co_agent', ?2, ?3)",
-            params![agent, external, mapped],
-        )?;
+
+    pub fn record_started(
+        &self,
+        instance_id: &str,
+        generation: u64,
+        pid: u32,
+        nonce: &str,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE instances SET process_id=?3,process_nonce=?4,updated_at=?5
+             WHERE instance_id=?1 AND desired_generation=?2 AND applied_generation=?2
+             AND lifecycle_state='ready' AND enabled=1",
+            params![
+                instance_id,
+                generation,
+                pid,
+                nonce,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )? == 1)
     }
-    Ok(())
+
+    pub fn mark_running(
+        &self,
+        instance_id: &str,
+        generation: u64,
+        pid: u32,
+        nonce: &str,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE instances SET lifecycle_state='running',updated_at=?5
+             WHERE instance_id=?1 AND desired_generation=?2
+             AND applied_generation=?2 AND lifecycle_state='ready' AND enabled=1
+             AND process_id=?3 AND process_nonce=?4",
+            params![
+                instance_id,
+                generation,
+                pid,
+                nonce,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )? == 1)
+    }
+
+    pub fn mark_pending(&self, instance_id: &str, generation: u64) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE instances SET lifecycle_state='pending',process_id=NULL,process_nonce=NULL,
+             updated_at=?3 WHERE instance_id=?1 AND desired_generation=?2",
+            params![instance_id, generation, chrono::Utc::now().to_rfc3339()],
+        )? == 1)
+    }
+
+    pub fn mark_error(
+        &self,
+        instance_id: &str,
+        generation: u64,
+        code: &str,
+        retry_at: i64,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE instances SET lifecycle_state='error',process_id=NULL,process_nonce=NULL,
+             failure_count=failure_count+1,retry_at_unix_ms=?4,last_exit=?3,updated_at=?5
+             WHERE instance_id=?1 AND desired_generation=?2",
+            params![
+                instance_id,
+                generation,
+                code,
+                retry_at,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )? == 1)
+    }
+
+    pub fn decrypt_credential(
+        &self,
+        instance_id: &str,
+        key: &[u8; 32],
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        let row = self.get(instance_id)?.context("instance unknown")?;
+        secret_store::decrypt(&row.credential_envelope, key)
+    }
+
+    pub fn decrypt_subject_grant(
+        &self,
+        instance_id: &str,
+        key: &[u8; 32],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
+        let row = self.get(instance_id)?.context("instance unknown")?;
+        row.subject_grant_envelope
+            .as_deref()
+            .map(|value| secret_store::decrypt(value, key))
+            .transpose()
+    }
+
+    pub fn clear_subject_grant(&self, instance_id: &str, generation: u64) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE instances SET subject_grant_envelope=NULL WHERE instance_id=?1 AND desired_generation=?2",
+            params![instance_id, generation],
+        )? == 1)
+    }
+
+    fn transition(&self, id: &str, generation: u64, from: &str, to: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE instances SET lifecycle_state=?4,updated_at=?5
+             WHERE instance_id=?1 AND desired_generation=?2 AND lifecycle_state=?3",
+            params![id, generation, from, to, chrono::Utc::now().to_rfc3339()],
+        )? == 1)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn legacy_fixture(path: &Path) {
-        let conn = Connection::open(path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE agents (agent_id TEXT PRIMARY KEY, name TEXT);
-             CREATE TABLE agent_nostr_config (
-               agent_id TEXT PRIMARY KEY, secret_key TEXT, relays_json TEXT, filter_json TEXT,
-               enabled INTEGER, owner_pubkey TEXT, self_pubkey TEXT, updated_at TEXT
-             );
-             CREATE TABLE session_watches (
-               id INTEGER PRIMARY KEY, agent_id TEXT, session_id TEXT, interval_secs INTEGER,
-               filter_json TEXT, created_at TEXT
-             );
-             CREATE TABLE trusted_users (agent_id TEXT, platform TEXT, user_id TEXT);
-             CREATE TABLE trusted_co_agents (agent_id TEXT, co_agent_id TEXT);
-             INSERT INTO agents VALUES ('a1', 'Agent One'), ('a2', 'Agent Two');
-             INSERT INTO agent_nostr_config VALUES
-               ('a1', 'nsec1plain', '[\"wss://relay.test\"]', '{}', 1, 'owner-key', 'self-one', 'now'),
-               ('a2', 'nsec1peer', '[]', '{}', 0, '', 'self-two', 'now');
-             INSERT INTO session_watches VALUES (7, 'a1', 'session-a1', 60, '{}', 'now');
-             INSERT INTO trusted_users VALUES ('a1', 'nostr', 'trusted-key');
-             INSERT INTO trusted_co_agents VALUES ('a1', 'a2');",
-        )
-        .unwrap();
-    }
-
     #[test]
-    fn legacy_import_is_one_shot_and_runtime_reads_gateway_store_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let legacy = dir.path().join("legacy.db");
-        let gateway = dir.path().join("gateway.db");
-        legacy_fixture(&legacy);
-
-        let mut store = GatewayStore::open(&gateway).unwrap();
-        assert!(store.import_legacy_once(&legacy).unwrap());
-        assert!(!store.import_legacy_once(&legacy).unwrap());
-        std::fs::remove_file(&legacy).unwrap();
-
-        let rows = store.list_enabled().unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].agent_name, "Agent One");
-        assert_eq!(store.watches("a1").unwrap()[0].session_id, "session-a1");
-        let keys = store.allow_keys("a1").unwrap();
-        assert_eq!(keys.owner, vec!["owner-key"]);
-        assert_eq!(keys.trusted_users, vec!["trusted-key"]);
+    fn s5_nostr_store_encrypts_secret_and_persists_lifecycle_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nostr.db");
+        let key = [7_u8; 32];
+        let store = NostrStore::open(&path).unwrap();
+        let generation = store
+            .upsert_desired(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "agent",
+                7,
+                "Y29uZmln",
+                &["opaque-address".into()],
+                "token-secret",
+                Some("grant-secret-at-rest"),
+                true,
+                &key,
+            )
+            .unwrap();
+        let row = store
+            .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.lifecycle_state, LifecycleState::Pending);
+        assert!(!row.credential_envelope.contains("token-secret"));
+        assert!(store
+            .mark_provisioning(&row.instance_id, generation)
+            .unwrap());
+        assert!(store
+            .mark_verified(
+                &row.instance_id,
+                generation,
+                3,
+                "digest",
+                &["binding".into()],
+                true
+            )
+            .unwrap());
+        drop(store);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!bytes
+            .windows(b"token-secret".len())
+            .any(|window| window == b"token-secret"));
+        assert!(!bytes
+            .windows(b"grant-secret-at-rest".len())
+            .any(|window| window == b"grant-secret-at-rest"));
+        let reopened = NostrStore::open(&path).unwrap();
+        let row = reopened
+            .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap()
+            .unwrap();
+        assert!(row.lifecycle().child_may_start());
         assert_eq!(
-            keys.co_agent_identities,
-            vec![("self-two".to_string(), "a2".to_string())]
+            &*reopened.decrypt_credential(&row.instance_id, &key).unwrap(),
+            b"token-secret"
         );
     }
 
     #[test]
-    fn plaintext_secrets_are_encrypted_and_reopenable() {
-        let dir = tempfile::tempdir().unwrap();
-        let legacy = dir.path().join("legacy.db");
-        let gateway = dir.path().join("gateway.db");
-        legacy_fixture(&legacy);
-        let mut store = GatewayStore::open(&gateway).unwrap();
-        store.import_legacy_once(&legacy).unwrap();
+    fn identity_projections_are_gateway_access_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NostrStore::open(&temp.path().join("nostr.db")).unwrap();
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        store
+            .upsert_desired(
+                id,
+                "agent",
+                7,
+                "Y29uZmln",
+                &["opaque-address".into()],
+                "token",
+                None,
+                true,
+                &[8; 32],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO identity_projections(instance_id,role,external_id,relationship_id,relationship_revision)
+                 VALUES (?1,'owner',?2,NULL,NULL),
+                        (?1,'trusted_user',?3,NULL,NULL),
+                        (?1,'followee',?4,NULL,NULL),
+                        (?1,'co_agent',?5,'peer-agent',NULL)",
+                params![
+                    id,
+                    "11".repeat(32),
+                    "22".repeat(32),
+                    "33".repeat(32),
+                    "44".repeat(32),
+                ],
+            )
+            .unwrap();
 
-        assert_eq!(store.encrypt_plaintext_secrets(&[9; 32]).unwrap(), 2);
-        assert_eq!(store.encrypt_plaintext_secrets(&[9; 32]).unwrap(), 0);
-        let secret = store.get("a1").unwrap().unwrap().secret_key;
-        assert!(opencrab_core::secret_box::is_encrypted(&secret));
-        let clear = opencrab_core::secret_box::decrypt(&secret, &[9; 32]).unwrap();
-        assert_eq!(clear.as_slice(), b"nsec1plain");
+        let row = store.get(id).unwrap().unwrap();
+        assert_eq!(row.access.owner, vec!["11".repeat(32)]);
+        assert_eq!(row.access.trusted_users, vec!["22".repeat(32)]);
+        assert_eq!(row.access.followees, vec!["33".repeat(32)]);
+        assert_eq!(
+            row.access
+                .co_agents
+                .get(&"44".repeat(32))
+                .map(String::as_str),
+            Some("peer-agent")
+        );
+    }
+
+    #[test]
+    fn s5_nostr_disabled_and_nonready_instances_never_eligible() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NostrStore::open(&temp.path().join("nostr.db")).unwrap();
+        let generation = store
+            .upsert_desired(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "agent",
+                7,
+                "Y29uZmln",
+                &[],
+                "token",
+                None,
+                false,
+                &[8; 32],
+            )
+            .unwrap();
+        let pending = store
+            .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap()
+            .unwrap();
+        assert!(!pending.lifecycle().child_may_start());
+        store
+            .mark_provisioning(&pending.instance_id, generation)
+            .unwrap();
+        store
+            .mark_verified(&pending.instance_id, generation, 2, "digest", &[], false)
+            .unwrap();
+        let disabled = store.get(&pending.instance_id).unwrap().unwrap();
+        assert_eq!(disabled.lifecycle_state, LifecycleState::Disabled);
+        assert!(!disabled.lifecycle().child_may_start());
     }
 }

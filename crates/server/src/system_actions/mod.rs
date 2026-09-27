@@ -52,14 +52,6 @@ pub struct SystemGatewayActions {
     /// ユーザー応答の受け取りは transport にしか作れない。`Some` のときだけ `send_ui`
     /// を露出する（描画できない transport のターンに「必ず失敗するツール」を出さない）。
     a2ui: Option<Arc<opencrab_core::a2ui::A2uiSurface>>,
-    /// transport が提供する素テキストの配送口（#157 S7）。`inner` から 1 度だけ引く。
-    ///
-    /// `request_peer_review` の実体は gateway 非依存層（`crate::peer_review`）にあるが、
-    /// 宛先検査・メンション記法・1 通の上限・送信そのものは transport にしか作れない。
-    /// `a2ui` と違い**露出は絞らない**（配送口の無い transport でも定義に出す）: ツールが
-    /// transport の有無で消えないようにするのが #157 の目的で、無いときは実行だけが
-    /// 明示エラーになる。
-    text_delivery: Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>>,
 }
 
 /// `report_progress` が登録簿から引く、進捗通知に要る項目だけの写し。
@@ -97,14 +89,12 @@ impl SystemGatewayActions {
         completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
     ) -> Self {
         let a2ui = inner.as_ref().and_then(|i| i.a2ui_surface());
-        let text_delivery = inner.as_ref().and_then(|i| i.text_delivery());
         Self {
             state,
             inner,
             subtask_registry,
             completion_sink,
             a2ui,
-            text_delivery,
         }
     }
 
@@ -138,7 +128,6 @@ include!("definitions/subtasks_progress.rs");
 include!("definitions/memory_commands_skill.rs");
 include!("definitions/heartbeat_schedules.rs");
 include!("definitions/webhooks.rs");
-include!("definitions/peer_review.rs");
 include!("definitions.rs");
 
 include!("execution/subtasks_memory.rs");

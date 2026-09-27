@@ -2,7 +2,6 @@ use rusqlite::{params, Connection, Transaction};
 
 use crate::delivery_mode::DeliveryMode;
 use crate::error::{ErrorCode, GateError};
-use crate::ids::decode_config_b64;
 use crate::registry::ExtgateState;
 
 use super::SaidOutcome;
@@ -66,9 +65,10 @@ pub(super) fn load_origin_row(
     tx: &Transaction<'_>,
     instance_id: &str,
     binding_id: &str,
+    delivery_mode: DeliveryMode,
 ) -> Result<Option<OriginRow>, GateError> {
     let result = tx.query_row(
-        "SELECT b.instance_id, i.kind_id, b.address, a.agent_id, b.closed_at, i.config_b64
+        "SELECT b.instance_id, i.kind_id, b.address, a.agent_id, b.closed_at
          FROM gate_bindings b
          JOIN gate_instances i ON i.instance_id = b.instance_id
          JOIN agents a ON a.subject_id = i.subject_id
@@ -81,21 +81,16 @@ pub(super) fn load_origin_row(
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, Option<i64>>(4)?,
-                r.get::<_, String>(5)?,
             ))
         },
     );
     match result {
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(_) => Err(GateError::store()),
-        Ok((inst, _kind_id, address, agent_id, closed, config_b64)) => {
+        Ok((inst, _kind_id, address, agent_id, closed)) => {
             if inst != instance_id || closed.is_some() {
                 return Ok(None);
             }
-            let config_bytes = decode_config_b64(&config_b64)?;
-            let delivery_mode =
-                crate::delivery_mode::delivery_mode_from_config_bytes(&config_bytes)
-                    .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
             Ok(Some(OriginRow {
                 instance_id: inst,
                 address,
@@ -115,16 +110,15 @@ pub(super) fn load_origin_row(
 pub(crate) struct BindingContext {
     pub instance_id: String,
     pub agent_id: String,
-    pub delivery_mode: DeliveryMode,
 }
 
 pub(crate) fn resolve_binding_context(
     conn: &Connection,
     binding_id: &str,
 ) -> Option<BindingContext> {
-    let (instance_id, kind_id, agent_id, config_b64) = conn
+    let (instance_id, kind_id, agent_id) = conn
         .query_row(
-            "SELECT b.instance_id, i.kind_id, a.agent_id, i.config_b64
+            "SELECT b.instance_id, i.kind_id, a.agent_id
              FROM gate_bindings b
              JOIN gate_instances i ON i.instance_id = b.instance_id
              JOIN agents a ON a.subject_id = i.subject_id
@@ -135,18 +129,13 @@ pub(crate) fn resolve_binding_context(
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
                 ))
             },
         )
         .ok()?;
-    let config_bytes = decode_config_b64(&config_b64).ok()?;
-    let delivery_mode =
-        crate::delivery_mode::delivery_mode_from_config_bytes(&config_bytes).ok()?;
     let _ = kind_id;
     Some(BindingContext {
         instance_id,
         agent_id,
-        delivery_mode,
     })
 }

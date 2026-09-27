@@ -91,10 +91,10 @@ fn assert_v43_schema(conn: &Connection) {
 /// 新規 DB（SCHEMA_SQL 経路）で v43 スキーマが揃うこと。
 #[test]
 fn v43_fresh_db_has_transplant_schema() {
-    let conn = crate::init_memory().expect("init");
+    let conn = super::init_historical_schema_fixture().expect("init");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
     let pre = {
-        let tmp = crate::init_memory().expect("pre");
+        let tmp = super::init_historical_schema_fixture().expect("pre");
         setup_pre_v43(&tmp);
         user_tables(&tmp)
     };
@@ -120,7 +120,7 @@ fn v43_fresh_db_has_transplant_schema() {
 /// 既存 DB（user_version=42）へ v43 を適用し、既存行は動かず新スキーマだけ届くこと。
 #[test]
 fn v43_from_user_version_42_leaves_existing_rows_untouched() {
-    let conn = crate::init_memory().expect("init");
+    let conn = super::init_historical_schema_fixture().expect("init");
     setup_pre_v43(&conn);
     assert_eq!(schema_version(&conn).unwrap(), 42);
     assert!(!column_exists(&conn, "sessions", "policy_json").unwrap());
@@ -194,7 +194,7 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
 /// v43: outcome / interval CHECK が DDL で閉じていること。
 #[test]
 fn v43_check_constraints_reject_invalid_rows() {
-    let conn = crate::init_memory().expect("init");
+    let conn = super::init_historical_schema_fixture().expect("init");
     let bad_outcome = conn.execute(
         "INSERT INTO tool_logs (agent_id, tool_name, args_json, outcome)
          VALUES ('ag-a', 't', '{}', 'unknown')",
@@ -229,7 +229,7 @@ fn v43_check_constraints_reject_invalid_rows() {
 /// session_watches は同一 session_id の複数行を許す（UNIQUE 無し）。
 #[test]
 fn v43_session_watches_allows_multiple_rows_per_session() {
-    let conn = crate::init_memory().expect("init");
+    let conn = super::init_historical_schema_fixture().expect("init");
     conn.execute_batch(
         "INSERT INTO session_watches (session_id, agent_id, interval_secs, filter_json, created_at)
          VALUES
@@ -266,8 +266,8 @@ fn v43_schema_parity_fresh_vs_migrated() {
         .collect()
     };
 
-    let fresh = crate::init_memory().expect("fresh");
-    let migrated = crate::init_memory().expect("migrated");
+    let fresh = super::init_historical_schema_fixture().expect("fresh");
+    let migrated = super::init_historical_schema_fixture().expect("migrated");
     setup_pre_v43(&migrated);
     initialize(&migrated).expect("re-migrate");
 

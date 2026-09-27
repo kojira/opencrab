@@ -17,19 +17,19 @@
   "coverage": {
     "claim": "Only nonempty observations satisfying their facet predicate are fixed by this artifact; every uncollected or not_applicable entry is an explicit non-claim.",
     "http_facets": {
-      "effects_observed": 35,
+      "effects_observed": 30,
       "effects_uncollected": 0,
       "not_applicable": 1,
-      "uncollected": 32,
-      "valid_rejections": 28
+      "uncollected": 24,
+      "valid_rejections": 25
     },
     "http_observed_status_classes": {
-      "2xx": 121,
-      "4xx": 40,
+      "2xx": 111,
+      "4xx": 32,
       "5xx": 4
     },
     "tool_effects_observed": 44,
-    "tool_success_uncollected_count": 8
+    "tool_success_uncollected_count": 7
   },
   "http": {
     "probes": [
@@ -1228,398 +1228,6 @@
             }
           ],
           "status": 200
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": null,
-        "name": "get___api_agents_id_channel-configs__normal",
-        "request": {
-          "body": null,
-          "method": "GET",
-          "uri": "/api/agents/baseline-agent/channel-configs"
-        },
-        "response": {
-          "body": {
-            "agent_id": "baseline-agent",
-            "configs": [
-              {
-                "agent_id": "baseline-agent",
-                "channel_id": "baseline-channel",
-                "channel_name": "baseline",
-                "guild_id": "baseline-guild",
-                "heartbeat_enabled": false,
-                "heartbeat_interval_secs": null,
-                "readable": true,
-                "whitelisted": true,
-                "writable": true
-              }
-            ],
-            "count": 1,
-            "guild_id": ""
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "get___api_agents_id_channel-configs__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "GET",
-          "uri": "/api/agents/baseline-missing/channel-configs"
-        },
-        "response": {
-          "body": {
-            "agent_id": "baseline-missing",
-            "configs": [],
-            "count": 0,
-            "guild_id": ""
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": {
-              "agent_id": "baseline-agent",
-              "configs": [
-                {
-                  "agent_id": "baseline-agent",
-                  "channel_id": "baseline-channel",
-                  "channel_name": "baseline",
-                  "guild_id": "baseline-guild",
-                  "heartbeat_enabled": false,
-                  "heartbeat_interval_secs": null,
-                  "readable": true,
-                  "whitelisted": true,
-                  "writable": true
-                },
-                {
-                  "agent_id": "baseline-agent",
-                  "channel_id": "baseline-new-channel",
-                  "channel_name": "new",
-                  "guild_id": "baseline-guild",
-                  "heartbeat_enabled": true,
-                  "heartbeat_interval_secs": null,
-                  "readable": true,
-                  "whitelisted": true,
-                  "writable": true
-                }
-              ],
-              "count": 2,
-              "guild_id": ""
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "agent_id": "baseline-agent",
-              "configs": [
-                {
-                  "agent_id": "baseline-agent",
-                  "channel_id": "baseline-channel",
-                  "channel_name": "baseline",
-                  "guild_id": "baseline-guild",
-                  "heartbeat_enabled": false,
-                  "heartbeat_interval_secs": null,
-                  "readable": true,
-                  "whitelisted": true,
-                  "writable": true
-                }
-              ],
-              "count": 1,
-              "guild_id": ""
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/channel-configs"
-          },
-          "status": "observed"
-        },
-        "name": "put___api_agents_id_channel-configs__normal",
-        "request": {
-          "body": {
-            "channel_id": "baseline-new-channel",
-            "channel_name": "new",
-            "guild_id": "baseline-guild",
-            "readable": true,
-            "whitelisted": true,
-            "writable": true
-          },
-          "method": "PUT",
-          "uri": "/api/agents/baseline-agent/channel-configs"
-        },
-        "response": {
-          "body": {
-            "agent_id": "baseline-agent",
-            "channel_id": "baseline-new-channel",
-            "message": "channel config upserted"
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "put___api_agents_id_channel-configs__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "PUT",
-          "uri": "/api/agents/baseline-agent/channel-configs"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": {
-              "agent_id": "baseline-agent",
-              "configs": [],
-              "count": 0,
-              "guild_id": ""
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "agent_id": "baseline-agent",
-              "configs": [
-                {
-                  "agent_id": "baseline-agent",
-                  "channel_id": "baseline-channel",
-                  "channel_name": "baseline",
-                  "guild_id": "baseline-guild",
-                  "heartbeat_enabled": false,
-                  "heartbeat_interval_secs": null,
-                  "readable": true,
-                  "whitelisted": true,
-                  "writable": true
-                }
-              ],
-              "count": 1,
-              "guild_id": ""
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/channel-configs"
-          },
-          "status": "observed"
-        },
-        "name": "delete___api_agents_id_channel-configs_channel_id__normal",
-        "request": {
-          "body": null,
-          "method": "DELETE",
-          "uri": "/api/agents/baseline-agent/channel-configs/baseline-channel"
-        },
-        "response": {
-          "body": {
-            "channel_id": "baseline-channel",
-            "message": "channel config deleted"
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "delete___api_agents_id_channel-configs_channel_id__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "DELETE",
-          "uri": "/api/agents/baseline-missing/channel-configs/baseline-missing"
-        },
-        "response": {
-          "body": "",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 404
         },
         "selection": "resource_absence_or_empty_state"
       },
@@ -5493,512 +5101,6 @@
       },
       {
         "effect": null,
-        "name": "get___api_agents_id_trusted-users__normal",
-        "request": {
-          "body": null,
-          "method": "GET",
-          "uri": "/api/agents/baseline-agent/trusted-users"
-        },
-        "response": {
-          "body": [
-            {
-              "agent_id": "baseline-agent",
-              "created_at": "<timestamp>",
-              "created_by": "owner",
-              "display_name": "Baseline User",
-              "id": "baseline-trusted-row",
-              "permission": "user",
-              "platform": "baseline-source",
-              "user_id": "baseline-user"
-            }
-          ],
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "get___api_agents_id_trusted-users__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "GET",
-          "uri": "/api/agents/baseline-missing/trusted-users"
-        },
-        "response": {
-          "body": [],
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": [
-              {
-                "agent_id": "baseline-agent",
-                "created_at": "<timestamp>",
-                "created_by": "owner",
-                "display_name": "Baseline User",
-                "id": "baseline-trusted-row",
-                "permission": "user",
-                "platform": "baseline-source",
-                "user_id": "baseline-user"
-              },
-              {
-                "agent_id": "baseline-agent",
-                "created_at": "<timestamp>",
-                "created_by": "owner",
-                "display_name": "Baseline New User",
-                "id": "<uuid>",
-                "permission": "user",
-                "platform": "web",
-                "user_id": "baseline-new-user"
-              }
-            ],
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": [
-              {
-                "agent_id": "baseline-agent",
-                "created_at": "<timestamp>",
-                "created_by": "owner",
-                "display_name": "Baseline User",
-                "id": "baseline-trusted-row",
-                "permission": "user",
-                "platform": "baseline-source",
-                "user_id": "baseline-user"
-              }
-            ],
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/trusted-users"
-          },
-          "status": "observed"
-        },
-        "name": "post___api_agents_id_trusted-users__normal",
-        "request": {
-          "body": {
-            "display_name": "Baseline New User",
-            "permission": "user",
-            "platform": "web",
-            "user_id": "baseline-new-user"
-          },
-          "method": "POST",
-          "uri": "/api/agents/baseline-agent/trusted-users"
-        },
-        "response": {
-          "body": {
-            "agent_id": "baseline-agent",
-            "created_at": "<timestamp>",
-            "created_by": "owner",
-            "display_name": "Baseline New User",
-            "id": "<uuid>",
-            "permission": "user",
-            "platform": "web",
-            "user_id": "baseline-new-user"
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "post___api_agents_id_trusted-users__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "POST",
-          "uri": "/api/agents/baseline-agent/trusted-users"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": [],
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": [
-              {
-                "agent_id": "baseline-agent",
-                "created_at": "<timestamp>",
-                "created_by": "owner",
-                "display_name": "Baseline User",
-                "id": "baseline-trusted-row",
-                "permission": "user",
-                "platform": "baseline-source",
-                "user_id": "baseline-user"
-              }
-            ],
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/trusted-users"
-          },
-          "status": "observed"
-        },
-        "name": "delete___api_agents_id_trusted-users_user_id__normal",
-        "request": {
-          "body": null,
-          "method": "DELETE",
-          "uri": "/api/agents/baseline-agent/trusted-users/baseline-trusted-row"
-        },
-        "response": {
-          "body": {
-            "deleted": true
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "delete___api_agents_id_trusted-users_user_id__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "DELETE",
-          "uri": "/api/agents/baseline-missing/trusted-users/baseline-missing"
-        },
-        "response": {
-          "body": {
-            "deleted": false
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": [
-              {
-                "agent_id": "baseline-agent",
-                "created_at": "<timestamp>",
-                "created_by": "owner",
-                "display_name": "Renamed",
-                "id": "baseline-trusted-row",
-                "permission": "user",
-                "platform": "baseline-source",
-                "user_id": "baseline-user"
-              }
-            ],
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": [
-              {
-                "agent_id": "baseline-agent",
-                "created_at": "<timestamp>",
-                "created_by": "owner",
-                "display_name": "Baseline User",
-                "id": "baseline-trusted-row",
-                "permission": "user",
-                "platform": "baseline-source",
-                "user_id": "baseline-user"
-              }
-            ],
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/trusted-users"
-          },
-          "status": "observed"
-        },
-        "name": "patch___api_agents_id_trusted-users_user_id__normal",
-        "request": {
-          "body": {
-            "display_name": "Renamed"
-          },
-          "method": "PATCH",
-          "uri": "/api/agents/baseline-agent/trusted-users/baseline-trusted-row"
-        },
-        "response": {
-          "body": {
-            "updated": true
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "patch___api_agents_id_trusted-users_user_id__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "PATCH",
-          "uri": "/api/agents/baseline-agent/trusted-users/baseline-trusted-row"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
-        "effect": null,
         "name": "get___api_agents_id_workspace__normal",
         "request": {
           "body": null,
@@ -6268,103 +5370,6 @@
           "status": 400
         },
         "selection": "malformed_json_rejection"
-      },
-      {
-        "name": "delete___api_gate-bindings_binding_id__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "DELETE",
-          "uri": "/api/gate-bindings/00000000-0000-4000-8000-000000000001"
-        },
-        "response": {
-          "body": {
-            "error": {
-              "code": "unauthorized",
-              "detail": null
-            }
-          },
-          "headers": [
-            {
-              "name": "content-type",
-              "value": "application/json; charset=utf-8"
-            }
-          ],
-          "status": 401
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "name": "delete___api_gate-instances_instance_id__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "DELETE",
-          "uri": "/api/gate-instances/00000000-0000-4000-8000-000000000000"
-        },
-        "response": {
-          "body": {
-            "error": {
-              "code": "unauthorized",
-              "detail": null
-            }
-          },
-          "headers": [
-            {
-              "name": "content-type",
-              "value": "application/json; charset=utf-8"
-            }
-          ],
-          "status": 401
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": null,
-        "name": "get___api_gate-instances_instance_id__normal",
-        "request": {
-          "body": null,
-          "method": "GET",
-          "uri": "/api/gate-instances/11111111-1111-4111-8111-111111111111"
-        },
-        "response": {
-          "body": {
-            "error": {
-              "code": "unauthorized",
-              "detail": null
-            }
-          },
-          "headers": [
-            {
-              "name": "content-type",
-              "value": "application/json; charset=utf-8"
-            }
-          ],
-          "status": 401
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "get___api_gate-instances_instance_id__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "GET",
-          "uri": "/api/gate-instances/00000000-0000-4000-8000-000000000000"
-        },
-        "response": {
-          "body": {
-            "error": {
-              "code": "unauthorized",
-              "detail": null
-            }
-          },
-          "headers": [
-            {
-              "name": "content-type",
-              "value": "application/json; charset=utf-8"
-            }
-          ],
-          "status": 401
-        },
-        "selection": "resource_absence_or_empty_state"
       },
       {
         "effect": null,
@@ -9021,7 +8026,7 @@
         "selection": "resource_absence_or_empty_state"
       }
     ],
-    "source_route_count": 74,
+    "source_route_count": 67,
     "uncollected": [
       {
         "branch": "normal",
@@ -9181,75 +8186,6 @@
         "name": "post___api_agents_id_soul_presets_preset_id_apply__reject_or_absent",
         "path": "/api/agents/{id}/soul/presets/{preset_id}/apply",
         "reason": "bodyless action; a missing-resource branch is not yet proven by this catalog",
-        "status": "uncollected"
-      },
-      {
-        "branch": "normal",
-        "level": "L3",
-        "method": "DELETE",
-        "name": "delete___api_gate-bindings_binding_id__normal",
-        "path": "/api/gate-bindings/{binding_id}",
-        "reason": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
-        "status": "uncollected"
-      },
-      {
-        "branch": "normal",
-        "level": "L3",
-        "method": "PUT",
-        "name": "put___api_gate-bindings_binding_id__normal",
-        "path": "/api/gate-bindings/{binding_id}",
-        "reason": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
-        "status": "uncollected"
-      },
-      {
-        "branch": "input_rejection",
-        "method": "PUT",
-        "name": "put___api_gate-bindings_binding_id__reject_or_absent",
-        "path": "/api/gate-bindings/{binding_id}",
-        "reason": "operator Bearer admin; L2 does not hold the operator token",
-        "status": "uncollected"
-      },
-      {
-        "branch": "normal",
-        "level": "L3",
-        "method": "DELETE",
-        "name": "delete___api_gate-instances_instance_id__normal",
-        "path": "/api/gate-instances/{instance_id}",
-        "reason": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
-        "status": "uncollected"
-      },
-      {
-        "branch": "normal",
-        "level": "L3",
-        "method": "PUT",
-        "name": "put___api_gate-instances_instance_id__normal",
-        "path": "/api/gate-instances/{instance_id}",
-        "reason": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
-        "status": "uncollected"
-      },
-      {
-        "branch": "input_rejection",
-        "method": "PUT",
-        "name": "put___api_gate-instances_instance_id__reject_or_absent",
-        "path": "/api/gate-instances/{instance_id}",
-        "reason": "operator Bearer admin; L2 does not hold the operator token",
-        "status": "uncollected"
-      },
-      {
-        "branch": "normal",
-        "level": "L3",
-        "method": "POST",
-        "name": "post___api_gate-instances_instance_id_revisions__normal",
-        "path": "/api/gate-instances/{instance_id}/revisions",
-        "reason": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
-        "status": "uncollected"
-      },
-      {
-        "branch": "input_rejection",
-        "method": "POST",
-        "name": "post___api_gate-instances_instance_id_revisions__reject_or_absent",
-        "path": "/api/gate-instances/{instance_id}/revisions",
-        "reason": "operator Bearer admin; L2 does not hold the operator token",
         "status": "uncollected"
       },
       {
@@ -9423,10 +8359,6 @@
           "kind": "uncollected",
           "reason": "bodyless action; a missing-resource branch is not yet proven by this catalog"
         },
-        "POST /api/gate-instances/{instance_id}/revisions": {
-          "kind": "uncollected",
-          "reason": "operator Bearer admin; L2 does not hold the operator token"
-        },
         "POST /api/llm/providers/reload": {
           "kind": "not_applicable",
           "reason": "bodyless global reload action has no request-body rejection facet"
@@ -9434,14 +8366,6 @@
         "POST /api/llm/providers/{name}/test": {
           "kind": "uncollected",
           "reason": "bodyless provider-network action; live provider success is L3"
-        },
-        "PUT /api/gate-bindings/{binding_id}": {
-          "kind": "uncollected",
-          "reason": "operator Bearer admin; L2 does not hold the operator token"
-        },
-        "PUT /api/gate-instances/{instance_id}": {
-          "kind": "uncollected",
-          "reason": "operator Bearer admin; L2 does not hold the operator token"
         }
       },
       "expansion": "For every path×method in baseline/l1/opencrab-l1.json, capture a normal/local-precondition probe and an input-rejection or resource-absence probe. Normal branches that require an external credential, live service, LLM, or operator workspace are emitted as uncollected L3 entries.",
@@ -9453,10 +8377,6 @@
         "DELETE /api/agents/{id}/allowed-commands/{command}": {
           "method": "GET",
           "path": "/api/agents/{id}/allowed-commands"
-        },
-        "DELETE /api/agents/{id}/channel-configs/{channel_id}": {
-          "method": "GET",
-          "path": "/api/agents/{id}/channel-configs"
         },
         "DELETE /api/agents/{id}/co-agents/{co_agent_id}": {
           "method": "GET",
@@ -9478,10 +8398,6 @@
           "method": "GET",
           "path": "/api/agents/{id}/soul/presets"
         },
-        "DELETE /api/agents/{id}/trusted-users/{user_id}": {
-          "method": "GET",
-          "path": "/api/agents/{id}/trusted-users"
-        },
         "DELETE /api/schedules/{sid}": {
           "method": "GET",
           "path": "/api/agents/{id}/schedules"
@@ -9493,10 +8409,6 @@
         "PATCH /api/agents/{id}": {
           "method": "GET",
           "path": "/api/agents/{id}"
-        },
-        "PATCH /api/agents/{id}/trusted-users/{user_id}": {
-          "method": "GET",
-          "path": "/api/agents/{id}/trusted-users"
         },
         "PATCH /api/schedules/{sid}": {
           "method": "GET",
@@ -9550,10 +8462,6 @@
           "method": "GET",
           "path": "/api/agents/{id}"
         },
-        "POST /api/agents/{id}/trusted-users": {
-          "method": "GET",
-          "path": "/api/agents/{id}/trusted-users"
-        },
         "POST /api/hooks/{source}": {
           "db_query": "agent_inbox"
         },
@@ -9564,10 +8472,6 @@
         "PUT /api/agents/{id}": {
           "method": "GET",
           "path": "/api/agents/{id}"
-        },
-        "PUT /api/agents/{id}/channel-configs": {
-          "method": "GET",
-          "path": "/api/agents/{id}/channel-configs"
         },
         "PUT /api/agents/{id}/mcp": {
           "method": "GET",
@@ -9601,9 +8505,6 @@
       "normal_bodies": {
         "PATCH /api/agents/{id}": {
           "personality": "updated personality"
-        },
-        "PATCH /api/agents/{id}/trusted-users/{user_id}": {
-          "display_name": "Renamed"
         },
         "PATCH /api/schedules/{sid}": {
           "enabled": true
@@ -9656,12 +8557,6 @@
           "persona_name": "Baseline",
           "preset_name": "Baseline"
         },
-        "POST /api/agents/{id}/trusted-users": {
-          "display_name": "Baseline New User",
-          "permission": "user",
-          "platform": "web",
-          "user_id": "baseline-new-user"
-        },
         "POST /api/hooks/{source}": {
           "data": {
             "id": "baseline-event"
@@ -9681,14 +8576,6 @@
         "PUT /api/agents/{id}": {
           "name": "Updated Baseline Agent",
           "persona_name": "Updated"
-        },
-        "PUT /api/agents/{id}/channel-configs": {
-          "channel_id": "baseline-new-channel",
-          "channel_name": "new",
-          "guild_id": "baseline-guild",
-          "readable": true,
-          "whitelisted": true,
-          "writable": true
         },
         "PUT /api/agents/{id}/mcp": {
           "args": [],
@@ -9723,8 +8610,6 @@
         "PUT /api/voice/config": {}
       },
       "normal_uncollected_l3": {
-        "DELETE /api/gate-bindings/{binding_id}": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
-        "DELETE /api/gate-instances/{instance_id}": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
         "PATCH /api/system/log-level": "changes process-global tracing state and has no isolated production fixture",
         "POST /api/agents/{id}/daily-log-index/rebuild": "successful branch schedules LLM-backed indexing",
         "POST /api/agents/{id}/daily-log-index/run": "successful branch schedules LLM-backed indexing",
@@ -9734,12 +8619,9 @@
         "POST /api/agents/{id}/memory/index/merge": "successful mutation requires an LLM-backed merge; the local no-provider branch has no state change to claim",
         "POST /api/agents/{id}/memory/index/rebuild": "successful branch schedules LLM-backed indexing",
         "POST /api/agents/{id}/skills/seed-standard": "standard skill packaging differs between test and production compilation and is not a stable L2 fixture",
-        "POST /api/gate-instances/{instance_id}/revisions": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
         "POST /api/import/execute": "depends on an operator-selected external workspace",
         "POST /api/import/scan": "depends on an operator-selected external workspace",
-        "POST /api/llm/providers/{name}/test": "provider network endpoint",
-        "PUT /api/gate-bindings/{binding_id}": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
-        "PUT /api/gate-instances/{instance_id}": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN"
+        "POST /api/llm/providers/{name}/test": "provider network endpoint"
       },
       "path_overrides": {
         "/api/agents/{id}/skills/{skill_id}/restore": {
@@ -9764,14 +8646,6 @@
           "missing": "baseline-missing",
           "normal": "baseline-agent"
         },
-        "binding_id": {
-          "missing": "<uuid>",
-          "normal": "<uuid>"
-        },
-        "channel_id": {
-          "missing": "baseline-missing",
-          "normal": "baseline-channel"
-        },
         "co_agent_id": {
           "missing": "baseline-missing",
           "normal": "baseline-peer"
@@ -9787,10 +8661,6 @@
         "id": {
           "missing": "baseline-missing",
           "normal": "baseline-agent"
-        },
-        "instance_id": {
-          "missing": "<uuid>",
-          "normal": "<uuid>"
         },
         "log_id": {
           "missing": "999999",
@@ -9815,14 +8685,6 @@
         "source": {
           "missing": "baseline-missing",
           "normal": "baseline-source"
-        },
-        "user_id": {
-          "missing": "baseline-missing",
-          "normal": "baseline-trusted-row"
-        },
-        "watch_id": {
-          "missing": "999999",
-          "normal": "1"
         }
       },
       "query_suffixes": {
@@ -10493,7 +9355,6 @@
         "delete_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "get_my_heartbeat": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "get_my_schedules": "requires an inbound gateway session fire descriptor owned by an external gateway process",
-        "request_peer_review": "Success delivers a message through the active transport. A local fake delivery would not fix live delivery behavior.",
         "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
         "set_my_heartbeat": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "set_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
@@ -10705,7 +9566,7 @@
         ],
         "result": {
           "data": null,
-          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——ゲートに接続したセッション——で実行してください。",
+          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——ゲートに接続した会話——で実行してください。",
           "success": false
         },
         "tool": "delete_my_schedule"
@@ -10865,7 +9726,7 @@
         ],
         "result": {
           "data": null,
-          "error": "scope=effectiveのときはchannel_idが必要です",
+          "error": "scope=effectiveのときはsession_idが必要です",
           "success": false
         },
         "tool": "read_heartbeat_instructions"
@@ -10945,18 +9806,6 @@
           "success": false
         },
         "tool": "report_progress"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "content"
-        ],
-        "result": {
-          "data": null,
-          "error": "request_peer_review はこのゲートウェイでは利用できません（メッセージを送信できません）。このターンの transport はテキストを送れないため、ピアレビュー依頼は省略して先へ進んでよい。",
-          "success": false
-        },
-        "tool": "request_peer_review"
       },
       {
         "arguments": {},
@@ -11106,7 +9955,7 @@
         ],
         "result": {
           "data": null,
-          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——ゲートに接続したセッション——で実行してください。",
+          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——ゲートに接続した会話——で実行してください。",
           "success": false
         },
         "tool": "set_my_schedule"
@@ -11234,7 +10083,7 @@
         ],
         "result": {
           "data": null,
-          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——ゲートに接続したセッション——で実行してください。",
+          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——ゲートに接続した会話——で実行してください。",
           "success": false
         },
         "tool": "update_my_schedule"
@@ -15514,10 +14363,10 @@
         },
         "result": {
           "data": {
-            "channel_id": null,
             "length": 26,
             "preview": "baseline heartbeat updated",
             "scope": "agent",
+            "session_id": null,
             "success": true
           },
           "error": null,
@@ -16426,12 +15275,6 @@
       },
       {
         "facet": "success",
-        "reason": "Success delivers a message through the active transport. A local fake delivery would not fix live delivery behavior.",
-        "status": "uncollected",
-        "tool": "request_peer_review"
-      },
-      {
-        "facet": "success",
         "reason": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
         "status": "uncollected",
         "tool": "run_my_heartbeat"
@@ -16513,7 +15356,6 @@
           "reflect_and_learn",
           "remove_allowed_command",
           "report_progress",
-          "request_peer_review",
           "restore_my_skill",
           "retire_my_skill",
           "retract_memory_core",
@@ -16603,7 +15445,6 @@
           "reflect_and_learn",
           "remove_allowed_command",
           "report_progress",
-          "request_peer_review",
           "restore_my_skill",
           "retire_my_skill",
           "retract_memory_core",
@@ -16686,7 +15527,6 @@
           "record_task_progress",
           "reflect_and_learn",
           "report_progress",
-          "request_peer_review",
           "restore_my_skill",
           "retire_my_skill",
           "retract_memory_core",
@@ -16739,7 +15579,6 @@
           "recall_model_experiences",
           "record_task_progress",
           "report_progress",
-          "request_peer_review",
           "restore_my_skill",
           "retire_my_skill",
           "retrieve_memory_nodes",
@@ -16925,7 +15764,6 @@
           "reflect_and_learn",
           "remove_allowed_command",
           "report_progress",
-          "request_peer_review",
           "restore_my_skill",
           "retire_my_skill",
           "retract_memory_core",
@@ -17007,7 +15845,6 @@
           "recall_model_experiences",
           "record_task_progress",
           "report_progress",
-          "request_peer_review",
           "restore_my_skill",
           "retire_my_skill",
           "retrieve_memory_nodes",

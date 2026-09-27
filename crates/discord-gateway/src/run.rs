@@ -86,6 +86,9 @@ pub fn spawn_instance(
         digest,
         SayPolicy::AcceptToLiveQueue,
         Some(operation_declarations()),
+        opencrab_gate_client::RuntimeCapabilities {
+            final_delivery: opencrab_gate_client::FinalDelivery::OperationDriven,
+        },
         invoke_handler,
     );
 

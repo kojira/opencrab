@@ -1,69 +1,37 @@
-// ---- #157 S3: ハートビート指示ツール（Discord から移設） ----
-//
-// 実装は DB のみに依存していたのに Discord gateway にしか無かった。定義・
-// 引数スキーマ・レスポンス JSON は Discord 実装から**1 文字も変えずに**移して
-// いる。実体は `crate::heartbeat_instructions`。
-// 権限は bridge の `OWNER_ONLY_ACTIONS`（update）/ `TRUSTED_ONLY_ACTIONS`
-// （read）が可視性と実行の双方でゲートし、ハンドラ内検査も残す（多層防御）。
-// **チャンネル単位の設定は非対称**（`scope="channel"` が触るのは Discord の
-// チャンネル設定テーブルなので、非 Discord 経路では通常「行が無い」応答に
-// なる）。詳細は `crate::heartbeat_instructions` の doc。
+// Generic heartbeat instructions (Issue #1006 S4). Session targets are opaque core session IDs;
+// external destinations and concrete gateway vocabulary are intentionally absent.
 fn update_heartbeat_instructions_definition() -> GatewayActionDef {
     GatewayActionDef {
-                name: "update_heartbeat_instructions".to_string(),
-                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Dispatchable, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
-                description: "ハートビート（自律発言）時の振る舞い指示を更新する。オーナーが「これからハートビートでは○○して」と明示的に依頼した文脈でのみ呼ぶこと。出力形式（SPEAK/LEARN/IDLE）はランタイムが固定するため、ここでは頻度・トーン・話題・沈黙条件などの方針のみを書く。オーナー限定。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "scope": {
-                            "type": "string",
-                            "enum": ["agent", "channel"],
-                            "description": "agent=エージェント全体のグローバル指示、channel=特定チャンネルの上書き。"
-                        },
-                        "channel_id": {
-                            "type": "string",
-                            "description": "scope=channelのとき必須。対象チャンネルの数値ID。"
-                        },
-                        "guild_id": {
-                            "type": "string",
-                            "description": "scope=channelで新規にチャンネル設定を作成する場合に必要なサーバーの数値ID。"
-                        },
-                        "instructions": {
-                            "type": "string",
-                            "description": "新しいハートビート指示の全文（最大4000字）。"
-                        },
-                        "reason": {
-                            "type": "string",
-                            "description": "変更理由（監査ログに記録される。省略可）。"
-                        }
-                    },
-                    "required": ["scope", "instructions"]
-                }),
-            }
+        name: "update_heartbeat_instructions".to_string(),
+        class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Dispatchable, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
+        description: "ハートビート時の振る舞い指示をエージェント全体または現在の汎用セッション対象について更新する。オーナー限定。".to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "scope": {"type": "string", "enum": ["agent", "session"]},
+                "session_id": {"type": "string", "description": "scope=sessionのとき必須。対象の汎用セッションID。"},
+                "instructions": {"type": "string", "description": "新しいハートビート指示の全文（最大4000字）。"},
+                "reason": {"type": "string", "description": "変更理由（監査ログに記録。省略可）。"}
+            },
+            "required": ["scope", "instructions"]
+        }),
+    }
 }
 
 fn read_heartbeat_instructions_definition() -> GatewayActionDef {
     GatewayActionDef {
-                name: "read_heartbeat_instructions".to_string(),
-                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
-                description: "現在のハートビート指示を読み出す。scope=agentでエージェント全体、scope=channelでチャンネル上書きのみ、scope=effectiveで実際にtickで使われる合成結果（解決ルール適用後）を返す。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "scope": {
-                            "type": "string",
-                            "enum": ["agent", "channel", "effective"],
-                            "description": "agent / channel / effective。channel・effectiveのときはchannel_id必須。"
-                        },
-                        "channel_id": {
-                            "type": "string",
-                            "description": "scope=channel または effective のとき必須。対象チャンネルの数値ID。"
-                        }
-                    },
-                    "required": ["scope"]
-                }),
-            }
+        name: "read_heartbeat_instructions".to_string(),
+        class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
+        description: "現在のハートビート指示をagent、session、またはeffectiveスコープで読み出す。".to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "scope": {"type": "string", "enum": ["agent", "session", "effective"]},
+                "session_id": {"type": "string", "description": "scope=session/effectiveのとき必須。対象の汎用セッションID。"}
+            },
+            "required": ["scope"]
+        }),
+    }
 }
 
 // ---- #247 段階 2: エージェント自身のハートビート設定 ----

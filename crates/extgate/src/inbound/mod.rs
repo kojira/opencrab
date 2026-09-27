@@ -23,8 +23,8 @@ mod turn;
 use attachments::{materialize, promote_local_files, remove_local_files, remove_promoted_files};
 use binding::{binding_said_error, load_origin_row};
 pub(crate) use binding::{resolve_binding_context, BindingContext};
+pub use record::channel_whitelisted;
 pub(crate) use record::seq_for_origin;
-pub use record::{channel_whitelisted, dm_allowed};
 use record::{existing_seq, next_seq, record_inbound};
 use turn::enqueue_turn;
 
@@ -49,17 +49,19 @@ pub fn process_said<R: AgentRuntime>(
     said: &Said,
     runtime: &R,
 ) -> Result<SaidOutcome, GateError> {
-    {
+    let delivery_mode = {
         let reg = state.lock_registry()?;
         match reg.get(instance_id) {
-            Some(live) if live.acknowledged.contains(&said.binding_id) => {}
+            Some(live) if live.acknowledged.contains(&said.binding_id) => {
+                crate::delivery_mode::delivery_mode_from_final_delivery(live.final_delivery)
+            }
             Some(_) => {
                 drop(reg);
                 return binding_said_error(state, instance_id, &said.binding_id);
             }
             None => return Err(GateError::new(ErrorCode::InstanceUnknown)),
         }
-    }
+    };
 
     let mut conn = state
         .db
@@ -69,7 +71,7 @@ pub fn process_said<R: AgentRuntime>(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| GateError::store_logged("said.tx_begin", e))?;
 
-    let row = match load_origin_row(&tx, instance_id, &said.binding_id)? {
+    let row = match load_origin_row(&tx, instance_id, &said.binding_id, delivery_mode)? {
         Some(row) => row,
         None => {
             let _ = tx.rollback();

@@ -85,23 +85,45 @@ fn seed_reused_address(conn: &mut Connection, address: &str) -> (String, String)
 }
 
 #[test]
-fn lookup_canonical_gate_binding_resolves_reused_exact_address_without_writes() {
+fn canonical_lookup_resolves_distinct_generic_aliases_without_writes() {
     let mut conn = crate::init_memory().unwrap();
-    let address = "opaque-existing-session";
-    let (binding, _) = seed_reused_address(&mut conn, address);
+    let first_address = "opaque-first-session";
+    let second_address = "opaque-second-session";
+    let (first_binding, instance) = seed_reused_address(&mut conn, first_address);
+    insert_named_session(&conn, second_address, "a1");
+    let second_binding = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    let tx = conn.transaction().unwrap();
+    create_gate_binding_in_tx(
+        &tx,
+        second_binding,
+        &instance,
+        second_address,
+        second_address,
+        2,
+    )
+    .unwrap();
+    tx.commit().unwrap();
     let changes_before = conn.total_changes();
 
-    for _ in 0..20 {
+    let routes = [
+        (first_address, first_binding.as_str()),
+        (second_address, second_binding),
+    ];
+    for (session_id, binding_id) in routes {
         assert_eq!(
-            lookup_canonical_gate_binding(&conn, address).unwrap(),
+            lookup_canonical_gate_binding(&conn, session_id).unwrap(),
             CanonicalGateBindingLookup::Match(CanonicalGateBinding {
-                binding_id: binding.clone(),
+                binding_id: binding_id.to_string(),
                 agent_id: "a1".into(),
             })
         );
     }
-    assert_eq!(conn.total_changes(), changes_before);
-    assert_eq!(counts(&conn), (1, 1, 1));
+    assert_eq!(
+        conn.total_changes(),
+        changes_before,
+        "fan-out lookup wrote state"
+    );
+    assert_eq!(counts(&conn), (2, 2, 2));
 }
 
 #[test]

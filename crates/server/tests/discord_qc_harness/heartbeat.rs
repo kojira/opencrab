@@ -57,6 +57,10 @@ fn set_hb_instructions(core: &Core, text: &str) {
 /// なる」という前提を明示するために置く（seam 駆動でも観測結果は変わらない）。
 fn seed_hb_config(core: &Core, session_id: &str) {
     let conn = core.extgate.db.lock().unwrap();
+    let projected_override = opencrab_db::queries::get_agent(&conn, AGENT_ID)
+        .unwrap()
+        .unwrap()
+        .heartbeat_instructions;
     opencrab_db::queries::upsert_session_heartbeat_config(
         &conn,
         &opencrab_db::queries::SessionHeartbeatConfigRow {
@@ -69,16 +73,27 @@ fn seed_hb_config(core: &Core, session_id: &str) {
         },
     )
     .unwrap();
+    opencrab_db::queries::upsert_session_heartbeat_instructions(
+        &conn,
+        &opencrab_db::queries::SessionHeartbeatInstructionsRow {
+            agent_id: AGENT_ID.into(),
+            session_id: session_id.into(),
+            override_text: Some(projected_override),
+        },
+    )
+    .unwrap();
 }
 
 /// scheduler 実経路（`resolve_target` → `run_one_heartbeat`）で heartbeat を 1 回起こす。
 /// extgate descriptor 未登録なら `resolve_target` が None を返し発火しない（現 tip の #925 未実装状態）。
 async fn fire_heartbeat_via_scheduler_seam(core: &Core, session_id: &str) {
-    if let Some(target) = core
-        .state
-        .timed_fire_router
-        .resolve_target(session_id, AGENT_ID)
-    {
+    let target = {
+        let conn = core.state.db.lock().unwrap();
+        core.state
+            .timed_fire_router
+            .resolve_persisted_target(&conn, session_id, AGENT_ID)
+    };
+    if let Some(target) = target {
         opencrab_server::heartbeat_fire::run_one_heartbeat(&core.state, AGENT_ID, &target).await;
     }
 }
@@ -185,6 +200,7 @@ async fn heartbeat_h1_two_posts_flag_only_on_last() {
         &format!("{M_HB1} 巡回して報告することがあれば 2 回に分けて投稿して"),
     );
     seed_hb_config(&core, &session_id);
+    set_hb_instructions(&core, "agent fallback must not replace the projected session override");
 
     fire_heartbeat_via_scheduler_seam(&core, &session_id).await;
 

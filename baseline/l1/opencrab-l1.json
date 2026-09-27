@@ -129,7 +129,20 @@
         },
         "response": {
           "body_utf8": "",
-          "headers": [],
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
           "status": 404
         }
       },
@@ -249,7 +262,7 @@
     ]
   },
   "http": {
-    "route_count": 74,
+    "route_count": 67,
     "routes": [
       {
         "activation": "always",
@@ -302,23 +315,6 @@
           "GET"
         ],
         "path": "/api/agents/{id}/analytics/detail",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "GET",
-          "PUT"
-        ],
-        "path": "/api/agents/{id}/channel-configs",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "DELETE"
-        ],
-        "path": "/api/agents/{id}/channel-configs/{channel_id}",
         "source": "opencrab_server::create_router"
       },
       {
@@ -627,24 +623,6 @@
       {
         "activation": "always",
         "methods": [
-          "GET",
-          "POST"
-        ],
-        "path": "/api/agents/{id}/trusted-users",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "DELETE",
-          "PATCH"
-        ],
-        "path": "/api/agents/{id}/trusted-users/{user_id}",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
           "GET"
         ],
         "path": "/api/agents/{id}/workspace",
@@ -657,33 +635,6 @@
           "PUT"
         ],
         "path": "/api/agents/{id}/workspace/{*path}",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "DELETE",
-          "PUT"
-        ],
-        "path": "/api/gate-bindings/{binding_id}",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "DELETE",
-          "GET",
-          "PUT"
-        ],
-        "path": "/api/gate-instances/{instance_id}",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "POST"
-        ],
-        "path": "/api/gate-instances/{instance_id}/revisions",
         "source": "opencrab_server::create_router"
       },
       {
@@ -2025,20 +1976,19 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "現在のハートビート指示を読み出す。scope=agentでエージェント全体、scope=channelでチャンネル上書きのみ、scope=effectiveで実際にtickで使われる合成結果（解決ルール適用後）を返す。",
+          "description": "現在のハートビート指示をagent、session、またはeffectiveスコープで読み出す。",
           "input_schema": {
             "properties": {
-              "channel_id": {
-                "description": "scope=channel または effective のとき必須。対象チャンネルの数値ID。",
-                "type": "string"
-              },
               "scope": {
-                "description": "agent / channel / effective。channel・effectiveのときはchannel_id必須。",
                 "enum": [
                   "agent",
-                  "channel",
+                  "session",
                   "effective"
                 ],
+                "type": "string"
+              },
+              "session_id": {
+                "description": "scope=session/effectiveのとき必須。対象の汎用セッションID。",
                 "type": "string"
               }
             },
@@ -2424,47 +2374,6 @@
             "type": "object"
           },
           "name": "report_progress",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": false
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "blocked"
-          },
-          "description": "自分の成果物（diff・実行結果・トレース等）を、同じ会話にいる別のBot（別モデル）にピアレビューしてもらうため、レビュー依頼を現在の返信先へ投稿する。contentは要約せずRAWのまま part X/N で分割送信される。レビュアーは [Peer Review] で始まる返信（score 0.0-1.0 / gaps / summary）を返す想定。activeタスクがあればタスク台帳に [peer review requested] を自動記録する。",
-          "input_schema": {
-            "properties": {
-              "channel_id": {
-                "description": "投稿先の宛先ID（省略可）。**通常は省略する** — 省略時は今のやりとりの返信先へ投稿される。今の会話とは別の宛先へ送りたいときだけ指定すること（推測した識別子を渡してはならない）。",
-                "type": "string"
-              },
-              "content": {
-                "description": "レビュー対象のRAWコンテンツ（diff・出力・トレース等）。要約せずそのまま渡すこと。上限12000文字（超える場合はワークスペースに保存してdiscord_send_fileで添付する）。",
-                "type": "string"
-              },
-              "instructions": {
-                "description": "レビュアーに重点的に見てほしい観点（省略可）。",
-                "type": "string"
-              },
-              "reviewer": {
-                "description": "指名したいレビュアー（省略可）。システムプロンプトの Peer Reviewers 一覧にある表示名を渡す。指定するとヘッダにメンションが付く。",
-                "type": "string"
-              }
-            },
-            "required": [
-              "content"
-            ],
-            "type": "object"
-          },
-          "name": "request_peer_review",
           "origin": "gateway",
           "visibility": {
             "depth_capped": false,
@@ -3284,31 +3193,26 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "ハートビート（自律発言）時の振る舞い指示を更新する。オーナーが「これからハートビートでは○○して」と明示的に依頼した文脈でのみ呼ぶこと。出力形式（SPEAK/LEARN/IDLE）はランタイムが固定するため、ここでは頻度・トーン・話題・沈黙条件などの方針のみを書く。オーナー限定。",
+          "description": "ハートビート時の振る舞い指示をエージェント全体または現在の汎用セッション対象について更新する。オーナー限定。",
           "input_schema": {
             "properties": {
-              "channel_id": {
-                "description": "scope=channelのとき必須。対象チャンネルの数値ID。",
-                "type": "string"
-              },
-              "guild_id": {
-                "description": "scope=channelで新規にチャンネル設定を作成する場合に必要なサーバーの数値ID。",
-                "type": "string"
-              },
               "instructions": {
                 "description": "新しいハートビート指示の全文（最大4000字）。",
                 "type": "string"
               },
               "reason": {
-                "description": "変更理由（監査ログに記録される。省略可）。",
+                "description": "変更理由（監査ログに記録。省略可）。",
                 "type": "string"
               },
               "scope": {
-                "description": "agent=エージェント全体のグローバル指示、channel=特定チャンネルの上書き。",
                 "enum": [
                   "agent",
-                  "channel"
+                  "session"
                 ],
+                "type": "string"
+              },
+              "session_id": {
+                "description": "scope=sessionのとき必須。対象の汎用セッションID。",
                 "type": "string"
               }
             },

@@ -42,6 +42,13 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) ->
         operation = %inv.operation,
         "invoke"
     );
+    // Validate the complete hello snapshot before the adapter handler can produce any external
+    // effect. This catches stale/missing digests, undeclared operations, policy drift, and
+    // guarantee downgrade on the receiving side.
+    if let Err(code) = client.validate_invocation(&inv) {
+        let _ = send_frame(client, err_frame(&inv.id, code, None)).await;
+        return false;
+    }
     // handler 未配線（能力ゼロ）なら未宣言 operation として fail-closed で operation_unknown
     // （外部 I/O 0・§5.1）。
     let Some(handler) = &client.invoke_handler else {
@@ -53,10 +60,9 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) ->
         .await
     {
         InvokeOutcome::Ok(result) => {
-            // #900: 発話クラス（reply/reaction/repost）の invoke が Ok で決着したら、進行中ターンを
-            // 「発話あり」に印づける。これで ended 時に沈黙（CompletedNoReply → 🤐）を立てない。
-            // 照会・操作クラス（resolve 等）は is_utterance=false なので印づけない（沈黙判定は不変）。
-            if handler.is_utterance(&inv.operation) {
+            // The versioned invocation envelope carries the declaration's generic effect. The
+            // client never classifies an operation by name.
+            if inv.effect == "utterance" {
                 let mut inner = client.inner.lock().await;
                 if let Some(turn) = inner.pending_turn.get_mut(&inv.binding_id) {
                     turn.saw_utterance = true;

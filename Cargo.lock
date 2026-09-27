@@ -1544,13 +1544,16 @@ name = "opencrab-db"
 version = "0.2.17"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
+ "getrandom 0.3.4",
  "r2d2",
  "r2d2_sqlite",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -1576,8 +1579,14 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "chacha20poly1305",
+ "chrono",
+ "getrandom 0.2.17",
+ "libc",
  "opencrab-gate-client",
+ "opencrab-process-supervisor",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "serenity",
@@ -1587,6 +1596,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1598,6 +1608,7 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
+ "getrandom 0.3.4",
  "http-body-util",
  "libc",
  "opencrab-actions",
@@ -1619,12 +1630,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
 name = "opencrab-gate-client"
 version = "0.2.17"
 dependencies = [
+ "anyhow",
  "async-trait",
  "serde",
  "serde_json",
@@ -1632,6 +1645,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1650,6 +1664,28 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "opencrab-gateway-migrate"
+version = "0.2.17"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "libc",
+ "opencrab-db",
+ "opencrab-discord-gateway",
+ "opencrab-gate-client",
+ "opencrab-nostr-gateway",
+ "opencrab-web-gateway",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1729,13 +1765,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "chacha20poly1305",
  "chrono",
+ "getrandom 0.2.17",
  "libc",
- "opencrab-core",
- "opencrab-db",
  "opencrab-gate-client",
- "opencrab-gateway",
- "opencrab-nostr",
+ "opencrab-process-supervisor",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1750,12 +1785,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "opencrab-process-supervisor"
+version = "0.2.17"
+dependencies = [
+ "async-trait",
+ "futures",
+ "libc",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "opencrab-server"
 version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64",
  "chrono",
  "chrono-tz",
  "croner",
@@ -1817,10 +1866,15 @@ version = "0.2.17"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
+ "chacha20poly1305",
+ "chrono",
  "futures",
+ "getrandom 0.2.17",
  "http-body-util",
  "opencrab-db",
  "opencrab-gate-client",
+ "opencrab-process-supervisor",
  "reqwest",
  "rusqlite",
  "serde",
@@ -1832,6 +1886,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

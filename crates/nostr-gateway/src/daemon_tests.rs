@@ -1,411 +1,648 @@
 use super::*;
-use opencrab_gateway::process_supervisor::{ChildSpawner, SupervisedChild};
-use std::process::{Child, Command, Stdio};
+use opencrab_process_supervisor::{ChildSpawner, SupervisedChild};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
 use tokio::sync::Notify;
 
-const SIGNAL_FIXTURE_ENV: &str = "OPENCRAB_NOSTR_SHUTDOWN_SIGNAL_FIXTURE";
-const SCRIPT_ENV: &str = "OPENCRAB_NOSTR_SHUTDOWN_SCRIPT";
-const PID_FILE_ENV: &str = "OPENCRAB_NOSTR_SHUTDOWN_PID_FILE";
-const READY_FILE_ENV: &str = "OPENCRAB_NOSTR_SHUTDOWN_READY_FILE";
-const PID_OUTPUT_ENV: &str = "OPENCRAB_TEST_PID_FILE";
+struct FakeGate;
+#[async_trait]
+impl GateReconciler for FakeGate {
+    async fn observe(
+        &self,
+        desired: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
+        Ok(if desired.enabled {
+            opencrab_process_supervisor::lifecycle::CoreObservation::ExactEnabled
+        } else {
+            opencrab_process_supervisor::lifecycle::CoreObservation::ExactDisabled
+        })
+    }
 
-struct ChildGuard(Option<Child>);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(child) = &mut self.0 {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+    async fn reconcile(
+        &self,
+        desired: &InstanceRow,
+        subject_grant: Option<&str>,
+    ) -> Result<VerifiedInstance> {
+        assert!(subject_grant.is_none() || subject_grant == Some("grant-secret"));
+        Ok(VerifiedInstance {
+            revision: 4,
+            digest: "digest".into(),
+            bindings: desired.addresses.clone(),
+            enabled: desired.enabled,
+        })
     }
 }
 
-struct ProcessGuard(Vec<i32>);
+struct OfflineGate;
+#[async_trait]
+impl GateReconciler for OfflineGate {
+    async fn observe(
+        &self,
+        _: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
+        Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Unavailable)
+    }
 
-struct TrackingChild {
+    async fn reconcile(&self, _: &InstanceRow, _: Option<&str>) -> Result<VerifiedInstance> {
+        anyhow::bail!("core server is stopped")
+    }
+}
+
+struct RecoveryGate(opencrab_process_supervisor::lifecycle::CoreObservation);
+#[async_trait]
+impl GateReconciler for RecoveryGate {
+    async fn observe(
+        &self,
+        _: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
+        Ok(self.0)
+    }
+
+    async fn reconcile(&self, _: &InstanceRow, _: Option<&str>) -> Result<VerifiedInstance> {
+        anyhow::bail!("reconciliation not expected during startup matrix")
+    }
+}
+
+struct RecoveryFactory {
+    observation: opencrab_process_supervisor::lifecycle::ProcessObservation,
+    reaped: Arc<AtomicUsize>,
+    cleaned: Arc<AtomicUsize>,
+    exit: Arc<Notify>,
     kills: Arc<AtomicUsize>,
 }
-
-#[async_trait::async_trait]
-impl SupervisedChild for TrackingChild {
-    async fn wait_exit(&mut self) -> String {
-        std::future::pending().await
+impl SpawnerFactory for RecoveryFactory {
+    fn observe_process(
+        &self,
+        _: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::ProcessObservation> {
+        Ok(self.observation)
     }
+    fn reap_stale(&self, _: &InstanceRow) -> Result<()> {
+        self.reaped.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn cleanup_artifacts(&self, _: &InstanceRow) -> Result<()> {
+        self.cleaned.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn adopted_child(&self, _: &InstanceRow) -> Result<Option<Box<dyn SupervisedChild>>> {
+        Ok(Some(Box::new(FakeChild {
+            exit: self.exit.clone(),
+            kills: self.kills.clone(),
+        })))
+    }
+    fn for_instance(
+        &self,
+        _: &InstanceRow,
+        _: zeroize::Zeroizing<Vec<u8>>,
+        _: &str,
+    ) -> Result<Arc<dyn ChildSpawner>> {
+        anyhow::bail!("spawn not expected during startup matrix")
+    }
+}
 
+struct FakeChild {
+    exit: Arc<Notify>,
+    kills: Arc<AtomicUsize>,
+}
+#[async_trait]
+impl SupervisedChild for FakeChild {
+    async fn wait_exit(&mut self) -> String {
+        self.exit.notified().await;
+        "crash".into()
+    }
     async fn kill(&mut self) {
         self.kills.fetch_add(1, Ordering::SeqCst);
     }
-
     fn pid(&self) -> Option<u32> {
         Some(4242)
     }
 }
 
-struct TrackingSpawner {
-    spawned: Arc<Notify>,
+struct FakeSpawner {
+    target: String,
+    started: Arc<AtomicUsize>,
+    exit: Arc<Notify>,
     kills: Arc<AtomicUsize>,
 }
-
-#[async_trait::async_trait]
-impl ChildSpawner for TrackingSpawner {
+#[async_trait]
+impl ChildSpawner for FakeSpawner {
     async fn spawn(&self) -> std::io::Result<Box<dyn SupervisedChild>> {
-        self.spawned.notify_one();
-        Ok(Box::new(TrackingChild {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(FakeChild {
+            exit: self.exit.clone(),
             kills: self.kills.clone(),
         }))
     }
-
-    fn agent_id(&self) -> &str {
-        "identity-a"
+    fn target_id(&self) -> &str {
+        &self.target
+    }
+    fn service_name(&self) -> &str {
+        "nostr-adapter"
     }
 }
 
-impl Drop for ProcessGuard {
-    fn drop(&mut self) {
-        for pid in &self.0 {
-            // SAFETY: the test records positive pids for processes that it spawned.
-            let _ = unsafe { libc::kill(*pid, libc::SIGKILL) };
-        }
+struct FakeFactory {
+    started: Arc<AtomicUsize>,
+    exit: Arc<Notify>,
+    kills: Arc<AtomicUsize>,
+}
+impl SpawnerFactory for FakeFactory {
+    fn for_instance(
+        &self,
+        row: &InstanceRow,
+        credential: zeroize::Zeroizing<Vec<u8>>,
+        _: &str,
+    ) -> Result<Arc<dyn ChildSpawner>> {
+        assert_eq!(&*credential, b"token-secret");
+        Ok(Arc::new(FakeSpawner {
+            target: row.instance_id.clone(),
+            started: self.started.clone(),
+            exit: self.exit.clone(),
+            kills: self.kills.clone(),
+        }))
     }
 }
 
-async fn wait_for_path(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !path.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {}",
-            path.display()
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-fn read_pids(path: &Path) -> (i32, i32) {
-    let text = std::fs::read_to_string(path).unwrap();
-    let mut fields = text.split_whitespace().map(|field| field.parse().unwrap());
-    (fields.next().unwrap(), fields.next().unwrap())
-}
-
-fn process_exists(pid: i32) -> bool {
-    // SAFETY: signal 0 only probes the positive pid and has no side effects.
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-async fn assert_processes_gone(pids: (i32, i32)) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while (process_exists(pids.0) || process_exists(pids.1)) && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(
-        !process_exists(pids.0),
-        "gateway child {} survived shutdown",
-        pids.0
-    );
-    assert!(
-        !process_exists(pids.1),
-        "gateway descendant {} survived shutdown",
-        pids.1
-    );
-}
-
-async fn replace_process_tree(
-    supervisors: &Arc<GatewaySupervisorSet>,
-    script: PathBuf,
-    pid_file: &Path,
+fn daemon(
+    enabled: bool,
+) -> (
+    tempfile::TempDir,
+    NostrDaemon<FakeGate, FakeFactory>,
+    Arc<AtomicUsize>,
+    Arc<Notify>,
 ) {
-    let spawner = Arc::new(GatewayChildSpawner::with_secret_env(
-        PathBuf::from("/bin/sh"),
-        script,
-        pid_file.to_string_lossy().into_owned(),
-        PID_OUTPUT_ENV,
-        "nostr-gateway-test",
-        "identity-a".into(),
-    ));
-    // Exercise the same public spawner used by reconciliation, not a fake child.
-    assert_eq!(spawner.agent_id(), "identity-a");
-    supervisors.start("identity-a", spawner).await;
-    wait_for_path(pid_file).await;
-}
-
-async fn start_process_tree(script: PathBuf, pid_file: &Path) -> Arc<GatewaySupervisorSet> {
-    let supervisors = GatewaySupervisorSet::new(SupervisorConfig::default());
-    replace_process_tree(&supervisors, script, pid_file).await;
-    supervisors
-}
-
-fn assert_isolated_process_group(pids: (i32, i32)) {
-    // SAFETY: getpgid only inspects the live positive pids written by the fixture.
-    let gateway_group = unsafe { libc::getpgid(pids.0) };
-    let descendant_group = unsafe { libc::getpgid(pids.1) };
-    assert_eq!(
-        gateway_group, pids.0,
-        "gateway must lead its isolated process group"
-    );
-    assert_eq!(
-        descendant_group, gateway_group,
-        "descendant must inherit the group"
-    );
-    // SAFETY: getpgrp has no preconditions.
-    assert_ne!(gateway_group, unsafe { libc::getpgrp() });
-}
-
-async fn signal_fixture() {
-    let script = PathBuf::from(std::env::var_os(SCRIPT_ENV).unwrap());
-    let pid_file = PathBuf::from(std::env::var_os(PID_FILE_ENV).unwrap());
-    let ready_file = PathBuf::from(std::env::var_os(READY_FILE_ENV).unwrap());
-    // Both signal streams are registered before any supervised process is started.
-    let signal = shutdown_signal().unwrap();
-    let supervisors = start_process_tree(script, &pid_file).await;
-    std::fs::write(ready_file, b"ready").unwrap();
-    shutdown_supervisors_on_exit(supervisors, std::future::pending(), signal)
-        .await
+    let temp = tempfile::tempdir().unwrap();
+    let store = NostrStore::open(&temp.path().join("owner.db")).unwrap();
+    store
+        .upsert_desired(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "agent",
+            7,
+            "e30=",
+            &["opaque-address".into()],
+            "token-secret",
+            Some("grant-secret"),
+            enabled,
+            &[9; 32],
+        )
         .unwrap();
-}
-
-async fn run_signal_case(signal: i32) {
-    let dir = tempfile::tempdir().unwrap();
-    let script = dir.path().join("gateway-tree.sh");
-    let pid_file = dir.path().join("pids");
-    let ready_file = dir.path().join("ready");
-    std::fs::write(
-        &script,
-        "(trap '' TERM INT; while :; do sleep 60; done) &\n\
-             descendant=$!\n\
-             printf '%s %s\\n' \"$$\" \"$descendant\" > \"$OPENCRAB_TEST_PID_FILE\"\n\
-             wait \"$descendant\"\n",
-    )
-    .unwrap();
-    let child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "daemon::tests::daemon_signals_reap_isolated_gateway_process_group",
-            "--nocapture",
-        ])
-        .env(SIGNAL_FIXTURE_ENV, "1")
-        .env(SCRIPT_ENV, &script)
-        .env(PID_FILE_ENV, &pid_file)
-        .env(READY_FILE_ENV, &ready_file)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut owner = ChildGuard(Some(child));
-    wait_for_path(&ready_file).await;
-    let pids = read_pids(&pid_file);
-    let process_guard = ProcessGuard(vec![pids.0, pids.1]);
-    assert_isolated_process_group(pids);
-
-    let owner_pid = owner.0.as_ref().unwrap().id() as i32;
-    // SAFETY: owner_pid is the live subprocess created above.
-    assert_eq!(unsafe { libc::kill(owner_pid, signal) }, 0);
-    let deadline = Instant::now() + Duration::from_secs(8);
-    let status = loop {
-        if let Some(status) = owner.0.as_mut().unwrap().try_wait().unwrap() {
-            break status;
-        }
-        assert!(Instant::now() < deadline, "signal fixture did not exit");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
-    owner.0 = None;
-    assert!(status.success(), "signal fixture exited with {status}");
-    assert_processes_gone(pids).await;
-    drop(process_guard);
-}
-
-fn placement(config_b64: &str) -> opencrab_nostr::gate_provision::NostrPlacementPlan {
-    opencrab_nostr::gate_provision::NostrPlacementPlan {
-        agent_id: "agent".into(),
-        instance_id: "instance".into(),
-        revision: 7,
-        address: "address".into(),
-        config_b64: config_b64.into(),
-    }
-}
-
-#[test]
-fn changed_active_instance_stops_before_revision_and_restart() {
-    assert_eq!(
-        reconciliation_steps(
-            Some(&placement("old")),
-            Some("old-fingerprint"),
-            "new-fingerprint",
-            "new"
-        ),
-        [
-            ReconcileStep::Stop,
-            ReconcileStep::Revise,
-            ReconcileStep::Start
-        ]
-    );
-}
-
-#[test]
-fn unchanged_active_instance_does_not_churn() {
-    assert!(reconciliation_steps(
-        Some(&placement("same")),
-        Some("same-fingerprint"),
-        "same-fingerprint",
-        "same"
-    )
-    .is_empty());
-}
-
-#[test]
-fn absent_instance_is_provisioned_before_start() {
-    assert_eq!(
-        reconciliation_steps(None, None, "new-fingerprint", "new"),
-        [ReconcileStep::Provision, ReconcileStep::Start]
-    );
-}
-
-#[test]
-fn secret_only_change_stops_without_revising_core_config() {
-    assert_eq!(
-        reconciliation_steps(
-            Some(&placement("same")),
-            Some("old-fingerprint"),
-            "new-fingerprint",
-            "same"
-        ),
-        [ReconcileStep::Stop, ReconcileStep::Start]
-    );
-}
-
-#[test]
-fn daemon_config_requires_absolute_database_and_socket() {
-    let config = DaemonConfig {
-        database_path: "relative.db".into(),
-        core_database_path: "/tmp/core.db".into(),
-        legacy_database_path: None,
-        admin_socket: "/tmp/nostr-admin.sock".into(),
-        core_socket: "/tmp/gate.sock".into(),
-        nostaro_bin: "nostaro".into(),
-        placement_dir: "data/gate/nostr".into(),
-        workspace_base: default_workspace_base(),
-        reconcile_secs: 5,
-    };
-    assert!(config
-        .validate()
-        .unwrap_err()
-        .to_string()
-        .contains("database_path"));
-    let config = DaemonConfig {
-        database_path: "/tmp/opencrab.db".into(),
-        core_socket: "relative.sock".into(),
-        ..config
-    };
-    assert!(config
-        .validate()
-        .unwrap_err()
-        .to_string()
-        .contains("core_socket"));
-}
-
-#[tokio::test]
-async fn normal_daemon_exit_reaps_isolated_gateway_process_group() {
-    let dir = tempfile::tempdir().unwrap();
-    let script = dir.path().join("gateway-tree.sh");
-    let first_pid_file = dir.path().join("first-pids");
-    let replacement_pid_file = dir.path().join("replacement-pids");
-    std::fs::write(
-        &script,
-        "(trap '' TERM INT; while :; do sleep 60; done) &\n\
-             descendant=$!\n\
-             printf '%s %s\\n' \"$$\" \"$descendant\" > \"$OPENCRAB_TEST_PID_FILE\"\n\
-             wait \"$descendant\"\n",
-    )
-    .unwrap();
-    let supervisors = start_process_tree(script.clone(), &first_pid_file).await;
-    let first_pids = read_pids(&first_pid_file);
-    let mut process_guard = ProcessGuard(vec![first_pids.0, first_pids.1]);
-    assert_isolated_process_group(first_pids);
-
-    replace_process_tree(&supervisors, script, &replacement_pid_file).await;
-    assert_processes_gone(first_pids).await;
-    let replacement_pids = read_pids(&replacement_pid_file);
-    process_guard
-        .0
-        .extend([replacement_pids.0, replacement_pids.1]);
-    assert_isolated_process_group(replacement_pids);
-
-    shutdown_supervisors_on_exit(supervisors, async { Ok(()) }, std::future::pending())
-        .await
-        .unwrap();
-    assert_processes_gone(replacement_pids).await;
-    drop(process_guard);
-}
-
-#[tokio::test]
-async fn shutdown_interrupts_blocked_reconciliation_and_cleans_its_supervisor() {
-    let supervisors = GatewaySupervisorSet::new(SupervisorConfig::default());
-    let spawned = Arc::new(Notify::new());
-    let kills = Arc::new(AtomicUsize::new(0));
-    let spawner = Arc::new(TrackingSpawner {
-        spawned: spawned.clone(),
-        kills: kills.clone(),
+    let started = Arc::new(AtomicUsize::new(0));
+    let exit = Arc::new(Notify::new());
+    let factory = Arc::new(FakeFactory {
+        started: started.clone(),
+        exit: exit.clone(),
+        kills: Arc::new(AtomicUsize::new(0)),
     });
-    let work_supervisors = supervisors.clone();
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(shutdown_supervisors_on_exit(
-        supervisors,
-        async move {
-            work_supervisors.start("identity-a", spawner).await;
-            std::future::pending().await
-        },
-        async move {
-            shutdown_rx
-                .await
-                .map_err(|_| anyhow::anyhow!("shutdown sender dropped"))
-        },
-    ));
+    (
+        temp,
+        NostrDaemon::new(store, [9; 32], Arc::new(FakeGate), factory).unwrap(),
+        started,
+        exit,
+    )
+}
 
-    spawned.notified().await;
-    shutdown_tx.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .expect("shutdown must interrupt blocked reconciliation")
+#[tokio::test]
+async fn s5_nostr_daemon_runs_and_crash_state_persists_while_server_is_stopped() {
+    let (_temp, daemon, started, exit) = daemon(true);
+    daemon.reconcile_once().await.unwrap();
+    for _ in 0..100 {
+        if started.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+    let store = daemon.store();
+    let ready = store
+        .lock()
+        .unwrap()
+        .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
         .unwrap()
         .unwrap();
-    assert_eq!(kills.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn work_error_is_preserved_after_supervisor_cleanup() {
-    let supervisors = GatewaySupervisorSet::new(SupervisorConfig::default());
-    let spawned = Arc::new(Notify::new());
-    let kills = Arc::new(AtomicUsize::new(0));
-    let spawner = Arc::new(TrackingSpawner {
-        spawned: spawned.clone(),
-        kills: kills.clone(),
-    });
-    let work_supervisors = supervisors.clone();
-
-    let error = shutdown_supervisors_on_exit(
-        supervisors,
-        async move {
-            work_supervisors.start("identity-a", spawner).await;
-            spawned.notified().await;
-            anyhow::bail!("original reconciliation error")
-        },
-        std::future::pending(),
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error.to_string(), "original reconciliation error");
-    assert_eq!(kills.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn daemon_signals_reap_isolated_gateway_process_group() {
-    if std::env::var_os(SIGNAL_FIXTURE_ENV).is_some() {
-        signal_fixture().await;
-        return;
+    assert_eq!(
+        ready.lifecycle_state,
+        opencrab_process_supervisor::lifecycle::LifecycleState::Ready
+    );
+    let nonce = ready.process_nonce.clone().unwrap();
+    assert!(daemon
+        .confirm_child_ready(&ready.instance_id, ready.desired_generation, 4242, &nonce)
+        .unwrap());
+    exit.notify_one();
+    for _ in 0..100 {
+        if store
+            .lock()
+            .unwrap()
+            .get(&ready.instance_id)
+            .unwrap()
+            .unwrap()
+            .lifecycle_state
+            == opencrab_process_supervisor::lifecycle::LifecycleState::Error
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
     }
-    run_signal_case(libc::SIGTERM).await;
-    run_signal_case(libc::SIGINT).await;
+    let crashed = store
+        .lock()
+        .unwrap()
+        .get(&ready.instance_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        crashed.lifecycle_state,
+        opencrab_process_supervisor::lifecycle::LifecycleState::Error
+    );
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        1,
+        "durable daemon, not utility, owns retry"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1_050)).await;
+    daemon.reconcile_once().await.unwrap();
+    assert_eq!(
+        daemon
+            .store()
+            .lock()
+            .unwrap()
+            .get(&ready.instance_id)
+            .unwrap()
+            .unwrap()
+            .lifecycle_state,
+        opencrab_process_supervisor::lifecycle::LifecycleState::Pending
+    );
+    daemon.reconcile_once().await.unwrap();
+    for _ in 0..100 {
+        if started.load(Ordering::SeqCst) == 2 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(started.load(Ordering::SeqCst), 2);
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn s5_nostr_restart_starts_persisted_ready_child_while_server_is_stopped() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("owner.db");
+    let store = NostrStore::open(&path).unwrap();
+    let generation = store
+        .upsert_desired(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "agent",
+            7,
+            "e30=",
+            &["opaque-address".into()],
+            "token-secret",
+            Some("grant-secret"),
+            true,
+            &[9; 32],
+        )
+        .unwrap();
+    assert!(store
+        .mark_provisioning("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation)
+        .unwrap());
+    assert!(store
+        .mark_verified(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            generation,
+            4,
+            "digest",
+            &["binding".into()],
+            true,
+        )
+        .unwrap());
+    drop(store);
+
+    let started = Arc::new(AtomicUsize::new(0));
+    let daemon = NostrDaemon::new(
+        NostrStore::open(&path).unwrap(),
+        [9; 32],
+        Arc::new(OfflineGate),
+        Arc::new(FakeFactory {
+            started: started.clone(),
+            exit: Arc::new(Notify::new()),
+            kills: Arc::new(AtomicUsize::new(0)),
+        }),
+    )
+    .unwrap();
+    daemon.reconcile_once().await.unwrap();
+    for _ in 0..100 {
+        if started.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn s5_nostr_disabled_and_nonready_instances_never_spawn() {
+    let (_temp, daemon, started, _) = daemon(false);
+    daemon.reconcile_once().await.unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(started.load(Ordering::SeqCst), 0);
+    let row = daemon
+        .store()
+        .lock()
+        .unwrap()
+        .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.lifecycle_state,
+        opencrab_process_supervisor::lifecycle::LifecycleState::Disabled
+    );
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_and_core_observations() {
+    use opencrab_process_supervisor::lifecycle::{
+        CoreObservation, LifecycleState, ProcessObservation,
+    };
+    for state in [
+        LifecycleState::Disabled,
+        LifecycleState::Pending,
+        LifecycleState::Provisioning,
+        LifecycleState::Ready,
+        LifecycleState::Running,
+        LifecycleState::Error,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NostrStore::open(&temp.path().join("owner.db")).unwrap();
+        let enabled = state != LifecycleState::Disabled;
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let generation = store
+            .upsert_desired(
+                id,
+                "agent",
+                7,
+                "e30=",
+                &[],
+                "token",
+                None,
+                enabled,
+                &[9; 32],
+            )
+            .unwrap();
+        if !matches!(state, LifecycleState::Pending) {
+            store.mark_provisioning(id, generation).unwrap();
+        }
+        if matches!(
+            state,
+            LifecycleState::Disabled
+                | LifecycleState::Ready
+                | LifecycleState::Running
+                | LifecycleState::Error
+        ) {
+            store
+                .mark_verified(id, generation, 1, "digest", &[], enabled)
+                .unwrap();
+        }
+        if matches!(state, LifecycleState::Running) {
+            store.record_started(id, generation, 4242, "nonce").unwrap();
+            store.mark_running(id, generation, 4242, "nonce").unwrap();
+        }
+        if matches!(state, LifecycleState::Error) {
+            store
+                .mark_error(
+                    id,
+                    generation,
+                    "failed",
+                    chrono::Utc::now().timestamp_millis() + 60_000,
+                )
+                .unwrap();
+        }
+        let reaped = Arc::new(AtomicUsize::new(0));
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let daemon = NostrDaemon::new(
+            store,
+            [9; 32],
+            Arc::new(RecoveryGate(if enabled {
+                CoreObservation::ExactEnabled
+            } else {
+                CoreObservation::ExactDisabled
+            })),
+            Arc::new(RecoveryFactory {
+                observation: if state == LifecycleState::Running {
+                    ProcessObservation::ExactLive
+                } else {
+                    ProcessObservation::Missing
+                },
+                reaped: reaped.clone(),
+                cleaned: cleaned.clone(),
+                exit: Arc::new(Notify::new()),
+                kills: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .unwrap();
+        daemon.recover_startup().await.unwrap();
+        let recovered = daemon.store().lock().unwrap().get(id).unwrap().unwrap();
+        let expected = match state {
+            LifecycleState::Provisioning => LifecycleState::Pending,
+            other => other,
+        };
+        assert_eq!(recovered.lifecycle_state, expected, "{state:?}");
+        assert_eq!(
+            reaped.load(Ordering::SeqCst),
+            usize::from(state != LifecycleState::Running),
+            "{state:?}"
+        );
+        assert_eq!(
+            cleaned.load(Ordering::SeqCst),
+            usize::from(state != LifecycleState::Running),
+            "{state:?}"
+        );
+        daemon.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error() {
+    use opencrab_process_supervisor::lifecycle::{
+        CoreObservation, LifecycleState, ProcessObservation,
+    };
+    for observation in [ProcessObservation::Missing, ProcessObservation::StaleLive] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NostrStore::open(&temp.path().join("owner.db")).unwrap();
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let generation = store
+            .upsert_desired(id, "agent", 7, "e30=", &[], "token", None, true, &[9; 32])
+            .unwrap();
+        store.mark_provisioning(id, generation).unwrap();
+        store
+            .mark_verified(id, generation, 1, "digest", &[], true)
+            .unwrap();
+        store.record_started(id, generation, 4242, "nonce").unwrap();
+        store.mark_running(id, generation, 4242, "nonce").unwrap();
+        let reaped = Arc::new(AtomicUsize::new(0));
+        let daemon = NostrDaemon::new(
+            store,
+            [9; 32],
+            Arc::new(RecoveryGate(CoreObservation::ExactEnabled)),
+            Arc::new(RecoveryFactory {
+                observation,
+                reaped: reaped.clone(),
+                cleaned: Arc::new(AtomicUsize::new(0)),
+                exit: Arc::new(Notify::new()),
+                kills: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .unwrap();
+        daemon.recover_startup().await.unwrap();
+        assert_eq!(
+            daemon
+                .store()
+                .lock()
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .unwrap()
+                .lifecycle_state,
+            LifecycleState::Error
+        );
+        assert_eq!(reaped.load(Ordering::SeqCst), 1);
+        daemon.shutdown().await;
+    }
+}
+
+#[test]
+fn production_placement_uses_gateway_access_and_opaque_core_config() {
+    use crate::config::{decode_config_b64, parse_instance_config, AccessConfig};
+    use opencrab_process_supervisor::lifecycle::LifecycleState;
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_config = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "relays": ["wss://example.invalid"],
+                "self_pubkey": "aa".repeat(32),
+                "name": "crab",
+                "access": { "owner": ["bb".repeat(32)] }
+            }))
+            .unwrap(),
+        )
+    };
+    let row = InstanceRow {
+        instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+        agent_id: "agent".into(),
+        subject_id: 7,
+        config_b64: runtime_config,
+        addresses: vec!["nostr-a1".into()],
+        credential_envelope: String::new(),
+        subject_grant_envelope: None,
+        enabled: true,
+        desired_generation: 1,
+        applied_generation: Some(1),
+        lifecycle_state: LifecycleState::Ready,
+        core_revision: Some(4),
+        core_digest: Some("digest".into()),
+        core_bindings: vec![],
+        process_id: None,
+        process_nonce: None,
+        failure_count: 0,
+        retry_at_unix_ms: None,
+        access: AccessConfig {
+            trusted_users: vec!["cc".repeat(32)],
+            ..AccessConfig::default()
+        },
+    };
+    let factory = ProductionFactory {
+        child_binary: "/bin/true".into(),
+        core_socket: "/tmp/opencrab-core.sock".into(),
+        placement_dir: temp.path().into(),
+        nostaro_bin: "/bin/true".into(),
+    };
+
+    let _spawner = factory
+        .for_instance(&row, zeroize::Zeroizing::new(b"secret".to_vec()), "nonce")
+        .unwrap();
+    let placement_path = temp.path().join(format!("{}.json", row.instance_id));
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(placement_path).unwrap()).unwrap();
+    let instance = &value["instances"][0];
+    assert_eq!(instance["core_config_b64"], DEFAULT_CORE_CONFIG_B64);
+    let cfg = parse_instance_config(
+        &decode_config_b64(instance["config_b64"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        cfg.access.owner.is_empty(),
+        "legacy config access must not survive"
+    );
+    assert_eq!(cfg.access.trusted_users, vec!["cc".repeat(32)]);
+}
+
+#[test]
+fn production_placement_fails_loud_without_gateway_access() {
+    use crate::config::AccessConfig;
+    use opencrab_process_supervisor::lifecycle::LifecycleState;
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_config = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "relays": ["wss://example.invalid"],
+                "self_pubkey": "aa".repeat(32),
+                "name": "crab",
+                "access": { "owner": ["bb".repeat(32)] }
+            }))
+            .unwrap(),
+        )
+    };
+    let row = InstanceRow {
+        instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+        agent_id: "agent".into(),
+        subject_id: 7,
+        config_b64: runtime_config,
+        addresses: vec!["nostr-a1".into()],
+        credential_envelope: String::new(),
+        subject_grant_envelope: None,
+        enabled: true,
+        desired_generation: 1,
+        applied_generation: Some(1),
+        lifecycle_state: LifecycleState::Ready,
+        core_revision: Some(4),
+        core_digest: Some("digest".into()),
+        core_bindings: vec![],
+        process_id: None,
+        process_nonce: None,
+        failure_count: 0,
+        retry_at_unix_ms: None,
+        access: AccessConfig::default(),
+    };
+    let factory = ProductionFactory {
+        child_binary: "/bin/true".into(),
+        core_socket: "/tmp/opencrab-core.sock".into(),
+        placement_dir: temp.path().into(),
+        nostaro_bin: "/bin/true".into(),
+    };
+
+    let result = factory.for_instance(&row, zeroize::Zeroizing::new(b"secret".to_vec()), "nonce");
+    let Err(err) = result else {
+        panic!("placement unexpectedly accepted empty gateway access");
+    };
+    assert!(err.to_string().contains("access"), "{err}");
+}
+
+#[test]
+fn s5_nostr_runtime_config_rejects_core_and_legacy_database_paths() {
+    let value = serde_json::json!({
+        "database_path":"/tmp/nostr.db","admin_socket":"/tmp/admin.sock",
+        "gate_admin_socket":"/tmp/gate-admin.sock","gate_admin_credential":"/tmp/token",
+        "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place","nostaro_bin":"/bin/true",
+        "core_database_path":"/tmp/core.db"
+    });
+    assert!(serde_json::from_value::<DaemonConfig>(value).is_err());
+    let legacy = serde_json::json!({
+        "database_path":"/tmp/nostr.db","admin_socket":"/tmp/admin.sock",
+        "gate_admin_socket":"/tmp/gate-admin.sock","gate_admin_credential":"/tmp/token",
+        "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place","nostaro_bin":"/bin/true",
+        "legacy_database_path":"/tmp/core.db"
+    });
+    assert!(serde_json::from_value::<DaemonConfig>(legacy).is_err());
 }

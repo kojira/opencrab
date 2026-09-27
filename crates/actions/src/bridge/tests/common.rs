@@ -49,50 +49,6 @@ impl GatewayActions for MockGatewayActions {
     }
 }
 
-/// Discord 送信系アクションを含むモック（depth ゲートの検証用）。
-pub(super) struct MockGatewayDiscord;
-
-#[async_trait]
-impl GatewayActions for MockGatewayDiscord {
-    fn definitions(&self) -> Vec<GatewayActionDef> {
-        vec![
-            GatewayActionDef {
-                name: "request_peer_review".to_string(),
-                class: opencrab_gateway::ToolClass {
-                    dispatch: opencrab_gateway::DispatchMode::Inline,
-                    sub_engine: opencrab_gateway::SubEngineAccess::Blocked,
-                    sharing: opencrab_gateway::ToolSharing::AgentBound,
-                },
-                description: "peer review".to_string(),
-                parameters: json!({"type": "object", "properties": {}}),
-            },
-            GatewayActionDef {
-                name: "report_progress".to_string(),
-                class: opencrab_gateway::ToolClass {
-                    dispatch: opencrab_gateway::DispatchMode::Inline,
-                    sub_engine: opencrab_gateway::SubEngineAccess::Allowed,
-                    sharing: opencrab_gateway::ToolSharing::AgentBound,
-                },
-                description: "progress".to_string(),
-                parameters: json!({"type": "object", "properties": {}}),
-            },
-        ]
-    }
-
-    async fn execute(
-        &self,
-        _name: &str,
-        _args: &serde_json::Value,
-        _ctx: &opencrab_gateway::GatewayCallContext,
-    ) -> GatewayActionResult {
-        GatewayActionResult {
-            success: true,
-            data: None,
-            error: None,
-        }
-    }
-}
-
 /// update_heartbeat_instructions / read_heartbeat_instructions を含むモック。
 pub(super) struct MockGatewayHeartbeat;
 

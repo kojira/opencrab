@@ -116,7 +116,12 @@ async fn binding_put_reuse_membership_mismatch_conflicts() {
                 .header(header::AUTHORIZATION, auth())
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    json!({"instance_id": instance_id, "address": "owned-by-2"}).to_string(),
+                    json!({
+                        "instance_id": instance_id,
+                        "address": "owned-by-2",
+                        "session": {"session_id": "owned-by-2", "title": "x"}
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )

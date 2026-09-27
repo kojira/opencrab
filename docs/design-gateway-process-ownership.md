@@ -1,71 +1,589 @@
-# Gateway process ownership
+# Gateway process and storage ownership
 
-## Decision
+Status: **draft design for Issue #1006; not authoritative until architecture review approves it**. If approved, this decision rejects the prior bidirectional ownership and runtime-import design. There is no compatibility fallback.
 
-個別 gateway の設定・秘密・外部 I/O・受信判定・表示整形・起動・再起動は、gateway daemon だけが所有する。`core` / `actions` / `db` / `extgate` / `gate-client` / `server` は gateway 名を解釈しない。
+This is a design-stage correction, not a rejection of every existing component. The generic runtime UDS framing, opaque `kind_id`/config/address storage, generic caller roles, the existing single core delivery ledger semantics, and dynamically declared operation capabilities are retained because they satisfy the invariants below. Direct core-SQLite access, runtime legacy import, core-owned concrete settings/identities, server concrete administration, and placement-only Discord ownership are rejected and redesigned. Issue #1006 is strict behavior-preserving separation: it does not add an external-emission ledger, prepared-request recovery, negotiated delivery-guarantee labels, reconnect replay, or a stronger platform delivery promise. Every such category-B enhancement is deferred together to the separate follow-up proposed in `docs/evidence/issue-1006-strict-separation-redesign.md`; that follow-up is explicitly not a #1006 completion or release gate.
 
-## Process boundary
+### Relationship to the other architecture documents
+
+This document refines [design-plugin-architecture.md](design-plugin-architecture.md) and [DESIGN.md](DESIGN.md), which use the same terms and target diagram below. “Core owns plugin state/configuration” means only durable **generic conversation/execution state** needed across interchangeable gateways: agents, subjects, sessions, history, session locks, generic schedules and heartbeat state where explicitly decided, subtasks, generic gate rows, and the existing delivery ledger. It does not include a concrete platform's endpoint/account identifiers, credentials, admission or delivery policy, external-identity projection, subscriptions, display behavior, schema, administration, or child lifecycle; the concrete gateway daemon owns those. Concrete gateways preserve one generic frame/handler invocation and the historical adapter-call behavior and terminal outcomes, without a second durable emission ledger.
+
+Likewise, “transport is send/receive-only” excludes generic conversation execution but does not make a gateway stateless. A gateway owns platform storage, authentication, authorization projection, policy, display behavior, external I/O, and its instance children. Generic external-service supervision utilities may be shared, but `server` neither owns nor supervises a concrete gateway daemon. These ownership decisions are closed here and are not implementation choices.
+
+## 1. Requirements and primary invariant
+
+**New-gateway litmus test:** adding an entirely new concrete gateway requires all of the following:
+
+- zero changes to core, shared, or server source;
+- zero core database schema or data migration changes;
+- zero core redeployment;
+- only a new independently deployed gateway implementation, its gateway-owned schema/admin interface, and generic protocol configuration.
+
+Core sees only opaque `kind_id`, opaque non-secret config bytes, opaque addresses, generic subject/instance/binding/revision identifiers, generic caller roles/events, and dynamically declared operation capabilities. If a future gateway cannot be implemented with the protocol, the remedy is a platform-neutral protocol primitive usable without naming or recognizing that gateway. A concrete core field, table, API, enum variant, prefix branch, or dependency is always rejected.
+
+A concrete gateway is the only owner of its platform configuration, external identities, credentials, authorization projection, policy, display semantics, schema, local administration, and lifecycle. Core treats gateway identifiers and configuration as opaque bytes and never branches on a gateway kind.
 
 ```text
-operator
-        |
-        | gateway-owned admin interface
-        v
-gateway daemon ---------------- gateway-owned SQLite / secrets
-        |
-        | generic gate admin: instance + binding config bytes
-        v
-core extgate UDS -------------- core-owned conversation DB
+operator -- concrete local admin --> gateway daemon --> gateway-owned store/secrets
+                                      |       |
+                                      |       +-- supervises --> gateway instance child
+                                      |                            |
+                                      +-- generic gate-admin UDS   +-- generic runtime UDS
+                                                   |                            |
+                                                   v                            v
+                                              core gate admin <---------- core runtime
+                                                   |                            |
+                                                   +------ core conversation store ---+
+
+server ---------------- generic core APIs only --------------------------> core
+       (never configures, spawns, or supervises a concrete gateway daemon)
 ```
 
-### Core/server owns
+The control-plane UDS, runtime UDS, and each gateway's local admin UDS are distinct paths with mode `0600`. Core's public HTTP server does not expose gate-admin routes.
 
-- subject と session
-- opaque `kind_id`、instance、binding、revision、config bytes
-- Said dedup、会話記録、ターン直列化、LLM、Say delivery
+The dependency direction is one-way:
 
-### Gateway daemon owns
+- `core`, `db`, `gateway`, `actions`, `extgate`, `gate-client`, and `server` have no production dependency on a concrete gateway crate;
+- `server` does not spawn, supervise, proxy, configure, or identify a concrete gateway;
+- a concrete daemon may depend on generic `gate-client` and shared process utilities, but not on `db`, `server`, or core SQLite types;
+- a platform implementation may not depend back on its daemon crate;
+- offline migration tooling is the sole exception allowed to depend on `db` and concrete gateway store libraries. It is a separate executable and is never linked into a daemon binary.
 
-- platform設定DBとschema
-- secretの取得・暗号化・復号・環境変数scrub
-- platform設定からopaque instance/bindingを敷設する処理
-- 外部CLI/API childの起動、停止、再起動、backoff
-- admission、watch、bundle、attachment URL、reply target、表示文脈
-- gateway固有admin operationとvalidation
+## 2. Single owner by data class
 
-## Compatibility
+| Data class | Canonical owner | Notes |
+|---|---|---|
+| agents, subjects, sessions, session membership | core | Gateways hold only copied immutable references needed to provision. |
+| conversation history, model/tool state, attachments inbox | core | Historical transport-looking text is conversation data, not configuration. |
+| session locks, subtasks, generic schedules and heartbeat state | core | Generic execution/conversation coordination remains single-copy in core; platform subscriptions, destinations, and display policy do not. |
+| internal agent-to-agent trust relationship | core | No external account identifier is stored with it. |
+| generic gate instance ID, opaque kind ID, subject ID, revision, enabled flag, opaque non-secret config bytes/digest | core | Core compares/stores values but does not enumerate or decode kind/config. |
+| generic binding ID, instance ID, opaque address, session ID, liveness timestamps | core | Core enforces subject/session membership and address uniqueness only. |
+| inbound deduplication and the existing outbound delivery ledger | core | Core assigns opaque delivery IDs and preserves the existing `sending`/`delivered`/`failed`/`indeterminate` state machine. It never stores a platform nonce, event, or message reference. Existing rows and keys are preserved byte-for-byte through migration. There is no gateway-side durable emission ledger in Issue #1006. |
+| platform endpoint IDs, account/application/bot IDs, names, filters, relays, channel policy, reactions, delivery settings | the corresponding gateway store | Never named columns or interpreted values in core. |
+| external owner/co-agent/trusted identities and their generic role projection | the corresponding gateway store | Gateway authenticates the external ID and supplies the generic caller role. Issue #1006 preserves the `1c3b782` admitted caller-role snapshot semantics; it does not add current relationship/revision revalidation to already-admitted work. |
+| watches, polling intervals, platform subscription filters | the corresponding gateway store | A gateway may trigger a generic core session; core does not understand the filter. |
+| platform credentials and tokens | the corresponding gateway daemon/store | Encrypted at rest; never in opaque core config. |
+| gateway child state, backoff, desired/applied generation, reconciliation errors | the corresponding gateway daemon/store | The daemon is the sole lifecycle authority. |
+| non-gateway API principals | core `api_principals` | This model has no platform discriminator and cannot contain gateway account IDs. |
 
-- 境界違反のserver内gateway管理HTTP APIは削除し、gateway daemon自身のadmin interfaceへ置換する。
-- Rust内部のplatform固有trait・enum・定数はgateway crateへ移す。
-- core-owned `gate_instances.kind_id` は保存・照合にだけ使い、値を列挙・比較しない。
+### Discord
 
-## Dependency direction
+`discord-gatewayd` owns a Discord SQLite database and a local admin UDS. It owns channel/guild/application/bot-user IDs, channel admission/read/write policy, platform delivery behavior, reactions, owner/co-agent/trusted mappings, bot credentials, and all Discord schema. Generic per-session heartbeat configuration and instructions remain in core; Discord owns only platform watches/subscriptions and display behavior. It supervises one `discord-gateway-instance` child per enabled instance. The current placement-only executable becomes that child; placement files are generated only by `discord-gatewayd` and are not canonical storage.
 
-- shared crates (`core` / `db` / `gateway` / `actions`) must not depend on any concrete gateway crate.
-- a concrete gateway daemon may depend inward on shared crates and its platform implementation crate.
-- the platform implementation crate must not depend back on its gateway daemon crate.
-- `server` must not depend on a concrete gateway crate in production dependencies.
-- CI verifies the reverse dependency tree of each concrete gateway has no shared/server production crate.
+### Nostr
 
-## Startup and lifecycle
+`nostr-gatewayd` owns a Nostr SQLite database and a local admin UDS. It owns relay/filter settings, watches, public-key mappings, owner/co-agent/trusted mappings, encrypted secret keys, and all Nostr schema. It supervises one `nostr-gateway-instance` child per enabled instance.
 
-- serverはgateway childをspawn/superviseしない。
-- gateway daemonはserverと別のservice unitから常時起動する。
-- gateway daemonは自分の設定DBを読み、enabled instanceを起動する。
-- 設定更新はdaemon内で stop → revision/provision → start の単一経路を通る。
-- 旧server内managerとの並走、fallback、feature flagは作らない。
+### Web and CLI
 
-## Migration
+The Web and CLI gateways remain independently launched generic-runtime clients. Web owns its loopback HTTP bind, historically credential-free fixed-Owner admission, browser identity projection, display/SSE behavior, and a Web-owned durable identity/policy SQLite store with a mode-`0600` local admin UDS whenever migrated or configured Web identities exist (D-1006-WEB-01). It never opens core SQLite. CLI owns terminal selection, local display, and input policy and needs no durable store today. If CLI gains durable concrete configuration, its independently deployed process/store owns it under the same invariant; it is not added to core or `server`. REST core administration is not a concrete gateway and remains a core API.
 
-1. gateway daemonとgateway-owned admin UDSを先に実装する。
-2. gateway daemonの一回限りimportで既存platform設定をgateway DBへ移す。秘密はgateway process内でのみ復号する。
-3. serverのplatform管理API、manager、secret field、provision、child supervisionを削除する。
-4. gateway daemon自身に必要なadmin interfaceを実装する。
-5. shared production sourceのplatform語彙auditをallowlistなしで有効化する。
-6. isolated QC後に旧設定表へのruntime参照を削除する。履歴migrationは新規runtime判断に使わない。
+No concrete gateway daemon accepts a core database path or a legacy database path, and none opens core SQLite. Placement-only Discord, Web, and CLI executables are instance children or operator-launched instances, not canonical configuration owners; where durable concrete state exists, a gateway daemon owns it.
 
-## Failure rules
+## 3. Evidence-backed AS-IS violation inventory
 
-- gateway daemon不在時にserver側fallbackはしない。
-- secret、raw admin socket path、内部SQLはHTTP・logへ出さない。
-- gateway設定更新とcore instance revisionの片方だけが成功した場合、gatewayは起動せずfail-loudにする。
+This inventory was verified against Issue #1006 and the production source at this design revision. “Production violation” means a normal/build dependency or code compiled into a production target, even if the current launch path does not exercise it. Tests, comments, historical migrations, and persisted conversation text are classified separately so cleanup does not erase evidence or history mechanically.
+
+| ID | Coupling category and concrete path | AS-IS evidence | Classification | Valid component to preserve |
+|---|---|---|---|---|
+| V01 | Dependency direction — Nostr daemon | `crates/nostr-gateway/Cargo.toml` has normal dependencies on `opencrab-core`, `opencrab-db`, `opencrab-gateway`, and `opencrab-nostr`; `daemon.rs` imports core secret-box, DB, Nostr provisioning, and shared supervisor types. | Production runtime violation. | `opencrab-gate-client`, runtime UDS framing, Nostr parsing/post/watch logic. |
+| V02 | Storage/protocol — Nostr daemon | `DaemonConfig` accepts `core_database_path`; `Daemon::new` opens it with `opencrab_db::Db`; reconciliation calls `opencrab_nostr::gate_provision::*` against that connection. | Production runtime violation; bypasses generic gate-admin. | Generic gate-admin operations already implemented in `crates/extgate/src/admin.rs`. |
+| V03 | Migration/runtime fallback — Nostr daemon | `DaemonConfig` accepts `legacy_database_path`; startup calls `GatewayStore::import_legacy_once`; `store.rs` reads core-shaped `agent_nostr_config`, `session_watches`, and `trusted_users`. | Production runtime violation. | Gateway-owned store and encrypted-secret conversion, moved to the offline migrator. |
+| V04 | Lifecycle — Discord path | `crates/discord-gateway` is a placement-driven one-instance executable and has no owning daemon/store/admin plane. | Production architecture gap. | Discord runtime instance, mapping, operations, token env injection, and runtime UDS client. |
+| V05 | Lifecycle utility leakage — shared path | `crates/gateway/src/process_supervisor.rs` is generic behavior but names `discord-gateway`; Nostr daemon consumes it. | Production shared-code vocabulary violation, not a reason to discard the utility. | Restart/backoff/reap implementation after platform-neutral naming and tests. |
+| V06 | Core schema/query coupling — mixed external identities and generic subject transition | Core schema/query production modules contain `channel_config`, mixed `trusted_users.platform`, and `session_watches`; legal identity rows include Discord/Nostr, `rest`, `extgate`, Web, and arbitrary opaque values. Current numeric `agents.subject_id` values and gate associations must also be preserved, while generic monotonic allocation, tombstones, and single-use association grants are absent from the transition. | Concrete schema/query modules are production violations; incomplete row-level identity disposition and missing generic subject safeguards are migration gaps. Historical fixtures remain evidence until guarded cleanup. | Generic sessions, membership, heartbeat/schedules, gate rows, ledgers, existing positive-integer subject IDs/associations, and genuine non-gateway `api_principals`. |
+| V07 | Server API/control plane — concrete identities and public generic gate-admin seam | `server/src/api/channel_configs.rs`, `server/src/api/trusted_users.rs`, and routes in `server/src/lib.rs` administer concrete state publicly. Separately, `server::create_router_with_gate` and the production route inventory merge `opencrab_extgate::admin_router` plus extensions into the ordinary permissive-CORS public TCP router, exposing the six generic gate-admin operations; production can reach the empty-token constructor. | Production security and ownership violation. | Generic agent/session APIs, non-gateway `api_principals`, and the six generic operations only on a distinct protected core gate-admin UDS. |
+| V08 | Server/shared lifecycle model | `actions/src/agent_gateway.rs` defines DB-restored concrete transport lifecycle/key/identity capabilities; `AppState.gateways` carries that registry. No concrete crate is a normal server dependency now, but this still directs future work toward server-owned lifecycle. | Compiled production architectural coupling; currently no concrete normal dependency from server. | Generic conversation runtime and generic runtime-gate registry in `extgate`. |
+| V09 | Timed fire/routing | `actions/src/timed_fire.rs` carries platform-shaped `channel_id`/`guild_id`, static descriptors, and in-process sinks; scheduler comments and state retain old Discord/Nostr distinctions. The production server now registers only generic `ExtgateFire`, which resolves persisted bindings. | Mixed: platform-shaped shared API is a production violation; generic extgate binding resolution is valid and retained. Platform names in `#[cfg(test)]` examples/comments are evidence, not runtime branches. | Core-owned generic schedules/heartbeat, session locks, and `ExtgateTimedFireSink` using binding IDs. |
+| V10 | Authorization/dispatch by tool name | `extgate/src/operations.rs` declares sharing/sub-engine and optional `utterance`; `ops_projection.rs` falls back to `is_known_utterance_op(name)`. Existing bridge policy also has name sets for built-ins. | Production extensibility violation for gateway operations: a new operation can need a shared allowlist/classification change. Built-in core tool policy remains core-owned. | Hello-time dynamic declarations, schema validation, live snapshots, generic invoke/callback delivery. |
+| V11 | Platform knowledge in shared/server source | Production modules still expose `channel_config`, external `platform`, old gateway lifecycle, and platform-shaped fire fields. Some additional matches are comments describing history or `#[cfg(test)]` fixtures. | Production symbols/branches are violations; explanatory comments/tests are not mechanically deleted unless they compile into behavior or assert the obsolete contract. | Existing no-platform AST audit, expanded to all shared/server production targets. |
+| V12 | Web concrete path | `crates/web-gateway` is already an independently launched HTTP/SSE-to-runtime-UDS process using `opencrab-gate-client`, without core DB dependencies. Its placement carries concrete HTTP/author information, but no Web-owned durable identity/policy store or local admin destination exists for migrated Web/ambiguous identity rows. | Independent process/runtime client is valid; missing Web-owned migration destination is an architecture gap. | Entire generic runtime client and independent process boundary. |
+| V13 | CLI concrete path | `crates/cli-gateway` is independently launched, selects an opaque placement, and talks through the runtime protocol; it has no core DB dependency. | Valid current path. | Entire CLI runtime/client, signal ownership, and terminal UI. |
+| V14 | Dev-only QC dependencies | `crates/server/Cargo.toml` normal dependencies contain no concrete gateway crate; dev-dependencies include Nostr/Discord gateway crates and gate-client solely for offline QC harnesses. | Valid test-only dependency. It must stay dev-only and be excluded from production dependency audits, not removed. | Isolated end-to-end QC coverage. |
+| V15 | Dead/legacy code and persisted history | `crates/discord`, much of `crates/nostr`, stale design descriptions, old migrations, tests, comments, and stored session/history metadata contain platform vocabulary. Some Nostr library code is still linked by the daemon, so it is not all dead. | Classify by reachability before deletion: linked production coupling must move/remove; dead code may be deleted deliberately; migrations/tests/comments may remain as labeled history; persisted conversation history must remain byte-preserved. | Historical evidence and all generic conversation records. |
+| V16 | New-gateway change points | Current lifecycle registry, static timed-fire descriptors, platform-shaped APIs/schema, operation-name fallback, and server routes each invite edits in core/shared/server for a new kind. A delivery design that needs a platform field or a per-kind core migration would recreate the same violation. | Production extensibility violation. | Opaque kind/config/address rows, dynamic hello capabilities, generic gate-admin/runtime protocols, and the platform-neutral existing delivery frame/outcome contract. |
+
+The inventory is complete only if the implementation audit enumerates every production Cargo edge and every production AST occurrence in `core`, `db`, `gateway`, `actions`, `extgate`, `gate-client`, and `server`, then classifies each occurrence as V01–V16, valid generic behavior, dev-only QC, dead/legacy, test, comment, historical migration fixture, or persisted history. An unclassified occurrence blocks cleanup and release.
+
+## 4. One-to-one TO-BE transition and completion map
+
+| IDs | TO-BE countermeasure | Transition step | Objective completion evidence |
+|---|---|---|---|
+| V01 | Nostr daemon depends only on gateway-owned libraries plus generic client/process utilities. | Move secret-box/store helpers behind a Nostr-owned store crate and remove normal core/db/server dependencies. | `cargo tree --edges no-dev` and AST audit show no core/db/server dependency in the daemon. |
+| V02 | Nostr provisioning uses gate-admin UDS only. | Replace every direct core SQL provision/read with the saga in §7; remove the core DB path/open. | Daemon audit shows no core SQLite open; protocol tests cover all reconciliation operations. |
+| V03 | Import exists only in `opencrab-gateway-migrate`. | Remove runtime field/import code after offline import, projection-marker/read-only-freeze verification, and cleanup-record design are implemented. | Daemon config rejects both legacy/core DB fields; production daemon binary has no import symbols; rerun/conflict migration tests pass. |
+| V04 | `discord-gatewayd` is canonical owner and supervisor; existing executable becomes its child. | Add Discord store/admin/reconciliation, import existing placement/config, then launch child only from verified state. | Discord can be administered and restarted with server stopped; no operator-authored placement is canonical. |
+| V05 | Shared supervisor is platform-neutral and daemon-owned. | Rename vocabulary/API without changing proven backoff/reap semantics; both daemons consume it or equivalent local utility. | Shared-source audit finds no platform names; server has no supervisor/spawn edge to a concrete daemon. |
+| V06 | Every mixed external-identity row receives a lossless approved disposition; concrete policy/identity/subscription rows move to participating gateway stores while core retains only explicit `api_principals` plus kind-neutral subject safeguards. | Build a source-fingerprint-keyed disposition manifest covering every legal/opaque value and every approved fan-out edge; copy/verify all participating destinations, preserve numeric subject IDs/associations, run the sole generic core projection, run read-only `verify-freeze`, then guard the atomic cleanup transaction. | Zero source rows are unmapped, guessed, silently duplicated, or dropped; destination row/digest proofs match every edge; subject preservation/non-reuse/grant tests and fresh/upgraded schema tests pass. |
+| V07 | Concrete administration moves to gateway-local UDS, while generic gate-admin moves off public TCP to a separate core-owned mode-`0600` UDS with a configured nonempty scoped bearer principal. | Remove `create_router_with_gate` production use and all gate-admin route merges/extensions/descriptions from the permissive-CORS router; make socket permission and token/principal setup succeed before accepting UDS requests; forbid the empty-token constructor in production. | Public TCP returns 404 for all six operations; only the protected UDS serves them; empty/missing/wrong/out-of-scope tokens fail redacted; mode/token setup failure aborts startup. |
+| V08 | Server owns no concrete gateway lifecycle; each daemon owns its children. | Delete `AgentGatewayLifecycle`/server registry after external daemons cover live routing; retain only generic extgate liveness. | Server starts and serves generic core APIs with no concrete daemon present and contains no concrete spawn/config/lifecycle path. |
+| V09 | Core schedules generic session turns and owns the existing delivery state machine; runtime delivery resolves only canonical generic binding/session IDs. | Replace platform-shaped fire fields/descriptors with binding-based generic envelopes while preserving one core ledger and the pre-separation mapping from one generic frame/handler invocation to adapter behavior; preserve one core session-lock/subtask/schedule/heartbeat implementation. | Synthetic-kind timed-fire tests require no shared change; parity tests prove the same delivered/failed/indeterminate outcomes, disconnect/startup terminalization without replay, Discord's historical ordered per-chunk API calls, Nostr's one command attempt, and no shared parser that knows a platform prefix. |
+| V10 | Every gateway operation declaration requires `authorization`, `dispatch`, `sub_engine`, `sharing`, and `effect` metadata. | Version hello declaration; migrate Discord/Nostr declarations; remove gateway-name fallback/allowlists after compatibility-free cutover. | Arbitrary valid new operation names project, authorize, and dispatch from metadata alone; missing/unknown metadata and either direction of utterance mismatch fail hello; `operation_driven` without a valid utterance operation fails; only collision with a built-in name is rejected. |
+| V11 | Expand static audits from core-only identifiers to all shared/server production AST and macro/manifests. | Classify allowed historical/test/comment occurrences separately; permit no production platform vocabulary. | A fixture adding a kind branch or platform schema/query/route symbol fails CI. |
+| V12 | Web remains independently deployed and owns Web authentication/policy/display state in its durable store when such rows exist. | Add the Web-owned SQLite identity/policy destination and local admin UDS; require `--web-db` (or a repeatable generic destination adapter) whenever a disposition edge targets Web; never open core DB at runtime. | Web identity imports, collisions, reruns, local-admin authorization, snapshots, and rollback pass without core schema/source changes; no Web policy column/route appears in core/server. |
+| V13 | CLI remains an operator-launched independent generic-runtime client. | Keep current path and opaque placement; do not add CLI-specific core policy. | CLI builds/runs against the generic protocol with no core/shared/server change. |
+| V14 | QC concrete dependencies remain dev-only. | Preserve harnesses while production audits use `--edges no-dev`; separately assert no dev dependency is promoted. | Cargo metadata proves the concrete crates occur only on dev edges and QC still runs. |
+| V15 | Cleanup is semantic, not a repository-wide word deletion. | Use reachability and migration classification; preserve byte-identical histories and required old migrations/fixtures; delete obsolete reachable code deliberately. | Migration preservation checks pass; audit report lists every retained historical occurrence and why it cannot affect production behavior. |
+| V16 | New-gateway extension has no shared/server change point. | Remove static lifecycle/fire descriptors, platform API/schema, and name-policy branches; use the existing platform-neutral delivery frame/outcome contract; enforce the litmus test in review and CI. | A synthetic new kind provisions, runs, declares operations, receives timed work, and emits a parity delivery result without core/shared/server source, schema, migration, or redeployment changes. |
+
+### Dynamic operation policy contract
+
+For protocol version 3, every operation declaration contains these required, digest-covered generic fields in addition to name, description, and schemas:
+
+- `authorization.allowed_callers`: a non-empty, sorted subset of `owner`, `co_agent`, `trusted`, and `guest`; core compares only the gateway-authenticated generic caller classification and fails closed;
+- `dispatch`: `inline`, `background`, or `utterance`; `utterance` uses one generic frame and one gateway delivery-handler invocation with the same terminal-outcome mapping as before separation and is never converted into a background subtask; concrete adapter calls remain historical (Discord one ordered `create_message` per produced chunk until success/first failure; Nostr one command attempt);
+- `sub_engine`: `not_exposed`, `blocked`, or `allowed`;
+- `sharing`: `agent_bound` or `conversation_bound`;
+- `effect`: `read_only`, `state_change`, or `utterance`; `dispatch=utterance` **if and only if** `effect=utterance` (both directions are validated).
+
+The complete dispatch/effect compatibility rule is: `effect=utterance` requires `dispatch=utterance`; `dispatch=utterance` requires `effect=utterance`; either `read_only` or `state_change` may use either `inline` or `background`. Authorization, sub-engine, and sharing values are independently interpreted as declared and add no implicit compatibility matrix. Unknown enum values, missing required fields, duplicate names, invalid schemas, a violation of either explicit rule, or collision with a built-in core tool name rejects hello. Core may reserve its own built-in names, but it has no gateway-operation allowlist, prefix rule, “known utterance” list, or per-name authorization/dispatch branch. The live declaration snapshot is the sole authority for visibility, authorization, dispatch, sub-engine exposure, sharing, invocation, and callback validation. Thus a new tool name requires only a new gateway declaration.
+
+## 5. Gateway-owned reference records and stable IDs
+
+`subject_id` remains the current opaque immutable **positive integer** in the wire protocol and every store. This transition does not convert it to a UUID, renumber it, or recalculate it. Every existing `agents.subject_id` value and every existing gate-instance subject association is preserved byte-for-byte. A gateway may compare or copy this integer but may not infer platform meaning from it.
+
+Core enforces permanent non-reuse with generic, kind-neutral schema:
+
+- `subject_id_allocator` is a singleton monotonic high-water/next-ID record. Allocation and increment occur in one transaction, never decrement, and choose an ID greater than every previously allocated ID;
+- `subject_tombstones(subject_id PRIMARY KEY, deleted_at, deletion_revision)` is written transactionally before a subject is deleted and is never removed or reused;
+- `subject_association_grants(grant_hash PRIMARY KEY, agent_id, subject_id, expires_at, consumed_at, consumed_instance_id)` stores only a salted hash of a random short-lived capability. Consumption atomically checks the live agent/subject pair, expiry, tombstone, and unused state, then permanently records the consuming instance. Expired and consumed rows remain denial/audit tombstones under the retention policy.
+
+The stopped core projection in §9 initializes the allocator above the maximum extant positive subject ID, verifies every existing ID is positive and unique under its current contract, and records existing associations as grandfathered. It neither grants nor rewrites them. Fresh schema creates these three generic objects directly. Thereafter deletion plus tombstone insertion and monotonic allocation make every allocated integer permanently non-reusable.
+
+A gateway instance record contains the generic references required to operate without querying core storage:
+
+- stable core `agent_id` (operator display/correlation only; never an authorization key);
+- immutable positive-integer core `subject_id`;
+- gateway-owned display name;
+- canonical `instance_id`;
+- desired platform configuration and encrypted credentials;
+- desired binding records, each containing canonical `binding_id`, canonical `session_id`, and opaque `address`;
+- desired generation plus last verified core revision/config digest/binding inventory.
+
+The read-only import copies existing IDs and associations into gateway stores exactly as stored; it cannot issue grants or mutate core. Existing associated gate instances require no grant and remain byte-identical. After cutover, generic core agent/subject operator administration may atomically create/export `(agent_id, subject_id, subject_grant)`. `subject_grant` is bound to that exact pair. A genuinely new first `PUT instance` association must present it; core atomically consumes it and makes the instance-to-subject association immutable. A retry of the byte-identical associated instance succeeds without another grant. Reuse, expiry, ID change, association to a tombstoned/missing subject, or attaching another subject fails closed and is audited. The guarded stopped projection backfills only schema/allocator/grandfathering proof, never grants for existing associations. Core never provides agent-name lookup to a gateway, and an unvalidated copied `(agent_id, subject_id)` pair is never accepted for a new association.
+
+New gateway-owned IDs use UUIDv5 with committed, per-gateway namespace UUID constants:
+
+- instance name bytes: `instance\0` followed by UTF-8 `agent_id`;
+- session name bytes: `session\0` followed by the canonical external conversation locator;
+- binding name bytes: `binding\0` followed by canonical `instance_id`, `\0`, and canonical `session_id`.
+
+The concrete gateway defines and tests its external locator canonicalization. IDs are materialized in its store and are never recalculated after creation. Migration preserves an existing core instance/binding/session ID when one exists, even if an older algorithm produced it. Renaming a display label never changes an ID. A conflicting UUID or locator is a hard migration/provisioning error.
+
+## 6. Generic gate-admin protocol
+
+Gate admin is HTTP/1.1 over the dedicated core-owned gate-admin UDS configured by the required, separate `[gate_admin]` section (`listen_socket`, `bootstrap_credential_file`). It is distinct from `[gate].listen_socket`, which remains the generic runtime UDS, from every gateway-local concrete admin UDS, and from public TCP. The ordinary permissive-CORS public router must not merge, nest, describe, proxy, or attach extensions for these routes. `server::create_router_with_gate` and every public-router production merge/description/extension for `opencrab_extgate::admin_router` are removed; that generic router is mounted only by the protected UDS server. The empty-token constructor is removed from production reachability; an empty-token helper may exist only in isolated tests that cannot build into a production target. Public TCP returns 404 rather than forwarding or returning gate-admin authentication errors.
+
+S1 owns one narrow, platform-neutral core schema migration for gate-admin security metadata and audit only. It creates:
+
+- `gate_admin_principals`: opaque `principal_id` primary key (1–128 ASCII bytes limited to letters, digits, `.`, `_`, and `-`); 32-byte random `credential_salt`; 32-byte `credential_hash`; `scope_mode` checked to `exact` or `creation_namespace`; integer UTC Unix-nanosecond `created_at`, `expires_at`, nullable monotonic `revoked_at`, and nullable `sealed_at`; nullable `predecessor_principal_id` plus `overlap_deadline`. Hashing is exactly `SHA-256("opencrab/gate-admin/bearer/v1\0" || credential_salt || decoded_32_byte_token)`. The table checks blob lengths, `expires_at > created_at`, `sealed_at IS NULL OR sealed_at >= created_at`, `revoked_at IS NULL OR (sealed_at IS NOT NULL AND revoked_at >= created_at)`, a predecessor/deadline all-or-none pair, `overlap_deadline > created_at`, and no self-predecessor; the predecessor foreign key is `ON DELETE RESTRICT` and uniquely identifies at most one direct successor. An index covers `(revoked_at, expires_at)` and another covers `predecessor_principal_id`. Triggers forbid delete and every update except exactly one field per statement: one `sealed_at: NULL -> timestamp` transition while `revoked_at IS NULL`, or separately one `revoked_at: NULL -> timestamp` transition on an already sealed row; either timestamp cannot be cleared or changed, and no statement may combine sealing with revocation or alter another column. Plaintext bearer bytes are never stored.
+- `gate_admin_principal_operations`: `(principal_id, operation)` primary key and `ON DELETE RESTRICT` foreign key. `operation` is one of the six closed generic identifiers `instance.read`, `instance.put`, `instance.delete`, `instance.revise`, `binding.put`, and `binding.delete`; an empty or unknown operation is rejected rather than treated as a wildcard.
+- `gate_admin_principal_subjects` and `gate_admin_principal_instances`: `(principal_id, positive_subject_id)` and `(principal_id, canonical_instance_uuid)` primary keys with reverse indexes on target then principal. These rows are immutable after the principal is sealed.
+- `gate_admin_principal_creation_namespaces`: at most one `(principal_id, canonical_namespace_uuid)` row per principal. A namespace-mode principal has a nonempty subject set, no explicit instance rows, and exactly one namespace row; it authorizes only instance UUIDv5 values derived by the existing generic `instance\0` plus canonical agent-ID rule for one of those subjects. An exact-target principal has nonempty subject and instance sets and no namespace row. Insert triggers enforce the principal's `scope_mode` and permit scope insertion only while `sealed_at IS NULL`; all scope tables always reject update/delete. The sealing repository verifies the nonempty and exactly-one cardinalities, then performs the sole legal seal transition in the same creation transaction. Neither mode means all subjects or all instances.
+- `gate_admin_request_audit`: append-only `audit_id` primary key, server-generated UUID request ID, attempt timestamp, nullable matched `principal_id`, closed generic operation identifier, nullable authorized subject/instance IDs, and `result_class` checked to `succeeded`, `idempotent`, `unauthorized`, `bad_request`, `not_found`, `conflict`, or `store_error`. Indexes cover `(principal_id, attempted_at)` and unique `request_id`. Update/delete triggers reject audit mutation. A denied attempt records no raw presented token or target; target IDs are populated only after credential and scope authorization. No row contains body, config, socket/file path, SQL, hash/salt, header, or token bytes.
+
+Bootstrap uses exactly one operator-created regular file owned by the core service process's effective UID with mode `0600`, referenced by `bootstrap_credential_file`; it is UID 0 owned only when the core service itself runs with effective UID 0. It is strict versioned JSON with duplicate and unknown fields rejected. Version 1 has this exact shape:
+
+```json
+{
+  "version": 1,
+  "principal_id": "opaque-id",
+  "bearer_token": "unpadded-base64url-32-bytes",
+  "operations": ["instance.read"],
+  "scope": {
+    "subject_ids": [1],
+    "instance_ids": ["canonical-uuid"],
+    "creation_namespace": null
+  },
+  "expires_at": "2030-01-01T00:00:00Z",
+  "rotation": null
+}
+```
+
+`rotation`, when non-null, is exactly `{ "predecessor_principal_id": "opaque-id", "overlap_deadline": "RFC3339-UTC" }`. Arrays are treated as sets for comparison but duplicate values are invalid. UTC timestamps must use a canonical `Z` representation and round-trip exactly to integer Unix nanoseconds. The bearer token must strictly decode from unpadded base64url to exactly 32 bytes; operations are the closed identifiers above; subject IDs are positive; and the scope has either nonempty canonical instance IDs with `creation_namespace=null`, or empty instance IDs with one canonical namespace. Structural length/encoding validation is the enforceable high-entropy requirement; the 256-bit token must originate from an operator CSPRNG. The core opens the absolute path without following any symlink component, requires a regular `0600` inode whose owner equals the core process effective UID, reads it once before any listener starts, and zeroizes the file buffer, decoded token, parser temporaries, and derived comparison bytes as soon as setup finishes. A differently owned file fails closed; there is no privileged handoff, ownership override, or root-only alternate path.
+
+For an absent principal, bootstrap begins one immediate write transaction, rejects any pre-existing unsealed principal row, then full-scans every other sealed principal inside that transaction, recomputes the candidate token hash with each row's own salt, compares all hashes in constant time without early return, and rejects creation if any other row uses the same decoded bearer. Still inside that serialized transaction, it generates a new salt with the core CSPRNG, inserts a principal with `sealed_at=NULL`, inserts normalized scopes, verifies cardinalities, and performs the one legal seal transition. Expiry must be in the future. Rotation follows the same serialized duplicate-bearer scan and additionally requires an existing, unrevoked predecessor and a future overlap deadline no later than either principal's expiry. For an existing principal ID, startup performs no write: it rejects the database if that row or any principal row is unsealed, scans every sealed row, requires exactly one bearer match and that match to be the requested principal, then requires exact equality of expiry, normalized operation/subject/instance-or-namespace sets, predecessor, and overlap deadline. Zero, duplicate, or wrong-principal matches and any metadata difference are hard conflicts; bootstrap never implicitly rescopes, rotates, unrevokes, or extends expiry. An expired or revoked stored principal remains authoritative and aborts startup. Principal identity, credential, scope mode, expiry, lineage, and seal are immutable. Rescope therefore means issuing a new rotated principal, not editing an old one.
+
+Each request accepts only exact `Authorization: Bearer <unpadded-base64url-token>` syntax. Authentication uses one consistent read transaction, rejects any unsealed principal row as invalid security state, loads every sealed principal row and successor-overlap metadata from core, recomputes and constant-time compares every candidate hash without secret-dependent early return, and requires exactly one matching principal before checking that principal's current expiry/revocation, operation, and target subject/instance or bounded namespace. Zero or multiple matches collapse to the same sanitized unauthorized result as every other credential failure and record no matched principal or target in audit; the implementation never selects the first match and never unions scopes from matching rows. A predecessor becomes invalid at the earliest of its own expiry, explicit revocation, or its unique successor's overlap deadline, so omission of a later revocation never extends overlap. Missing, empty, malformed, wrong, expired, revoked, and out-of-scope credentials all return the same sanitized unauthorized status/body. Responses and logs never echo credential, target-on-denial, socket/file path, SQL, request body, or opaque config.
+
+Every request receives a server-generated request UUID. A denied request commits one sanitized audit row in its own short transaction. An authorized read performs its read and appends its outcome in one transaction. A mutation uses an outer transaction plus a savepoint: the mutation is committed together with its sanitized audit outcome on success, while a rejected/conflicting mutation rolls back the savepoint, appends the generic failure outcome, and commits only that audit row. Thus no successful mutation lacks an audit row and no failed mutation leaks a partial state change. If the audit append itself fails, the operation fails closed and a mutation cannot commit. Raw denied target bytes are never persisted; only an already-authorized canonical target may be recorded.
+
+Rotation is an explicit new principal and new credential manifest with predecessor lineage and a bounded overlap deadline. The new principal is independently scoped and valid after its bootstrap commits; the old credential remains valid only until explicit earlier revocation or the overlap deadline. Only generic core operator tooling may issue, revoke, or rescope (by replacement) principals. S1 must provide repository/service primitives and fixture-driven operator mutations for those transitions; a user-facing CLI may be staged later, but neither rotation nor revocation adds a seventh gate-admin route.
+
+Startup order is strict: validate `[gate_admin]`, apply/verify this S1 security migration, validate and bootstrap the credential manifest, validate the absolute socket parent without following symlinks, bind only when the final path is absent, set and verify socket mode `0600` and core-service-effective-UID ownership, construct the protected router, and only then permit generic runtime UDS or public TCP listener startup. The socket parent must be owned by the core service effective UID (UID 0 only when that is the service EUID), be a non-symlink directory, and not be group/other writable. A pre-existing final path, including a stale socket, is never unlinked or reused automatically; startup aborts and requires operator cleanup. On failure or shutdown, core removes only a socket inode created by that attempt after matching its captured device/inode/type/owner identity. Any config, migration, manifest, DB, bind, permission, ownership, or router setup failure aborts before traffic.
+
+The protocol retains six mutating/read operations:
+
+1. `GET /api/gate-instances/{instance_id}`
+2. `PUT /api/gate-instances/{instance_id}`
+3. `DELETE /api/gate-instances/{instance_id}`
+4. `POST /api/gate-instances/{instance_id}/revisions`
+5. `PUT /api/gate-bindings/{binding_id}`
+6. `DELETE /api/gate-bindings/{binding_id}`
+
+`GET instance` is the discovery operation. Its response includes the instance fields and a transactionally consistent, binding-ID-sorted `bindings` array of all open bindings. Each entry contains only `binding_id`, `address`, and `session_id`. Closed bindings are omitted. This makes revision and binding reconciliation possible without a list-by-kind operation or DB access.
+
+`PUT instance` is byte-idempotent. A repeated identical request returns the stored object; any difference conflicts. First association requires the single-use subject grant from §5; the subject link is then immutable. Grants are issued only through generic core agent/subject operator administration and consumed by this existing operation; they do not add a seventh gateway-specific gate-admin operation.
+
+`POST revision` requires the current revision and a non-live instance. It atomically changes only enabled/config bytes/digest and increments revision. Stale revision or a live instance conflicts.
+
+`PUT binding` contains `instance_id`, opaque `address`, and a generic session envelope:
+
+```json
+{
+  "instance_id": "uuid",
+  "address": "opaque non-empty string",
+  "session": {
+    "session_id": "stable id",
+    "title": "opaque display title"
+  }
+}
+```
+
+In one core transaction it:
+
+1. verifies an undeleted instance and its immutable subject association; non-live or disabled instances may be provisioned;
+2. creates the session and subject membership if the session is absent;
+3. otherwise verifies exact session title and subject membership;
+4. creates the binding, or returns the existing byte-identical binding;
+5. rejects ID conflicts, address reuse, or cross-subject membership.
+
+Core stores the title as ordinary conversation metadata and does not parse it. `CoreBindingService` is the sole creation authority and cannot update an existing session; the scoped admin and runtime entry points below both delegate to it.
+
+`DELETE binding` closes one binding idempotently. Both admin `PUT binding` and runtime lazy `create_binding` call the same internal `CoreBindingService` transaction above: admin is used for daemon desired-state reconciliation; runtime is allowed only for an authenticated live instance discovering an external conversation. Before runtime creation, the child must send the discovery over its private daemon control channel, the daemon must commit it to the desired generation, and only then acknowledge the child. A crash therefore leaves either no binding or a locally desired binding that reconciliation can idempotently create. Neither path can create for another instance or update a session. `DELETE instance` requires it to be non-live and atomically tombstones it and closes all open bindings. No API lists by kind, decodes config, resolves an agent name, or exposes platform vocabulary.
+
+Runtime hello, unlike provisioning, requires an enabled, undeleted instance with matching revision/digest. It declares operation capabilities dynamically using generic operation names, schemas, authorization, dispatch, sharing, sub-engine, and effect metadata defined in §4, plus required `final_delivery` (`automatic` or `operation_driven`). During the staged transition, hello fails closed unless `final_delivery` agrees in both directions with the legacy opaque-config delivery setting; this prevents duplicate runtime authorities until the later owning stage removes the legacy reader. Once accepted, the immutable hello snapshot is the sole runtime completion authority. For `automatic`, core emits the normalized final response over the existing generic delivery frame. For `operation_driven`, no implicit final text is emitted and the validated declaration set must contain at least one operation with `dispatch=utterance` and `effect=utterance`; an empty or non-utterance-only set rejects hello. Delivery preserves the pre-separation one-frame/one-handler mapping, historical adapter calls, and terminal outcomes. Hello and invocation envelopes contain no negotiated delivery-guarantee label, prepared-request protocol, or reconnect-replay promise. Core uses live operation metadata and does not interpret opaque config or store platform request fields.
+
+Inbound events carry only the binding, external event ID as opaque dedup material, normalized content/attachments, and a gateway-authenticated generic caller classification (`owner`, `co_agent`, `trusted`, or `guest`). Issue #1006 preserves the `1c3b782` authorization snapshot: the admitted generic caller role travels with queued/continued work and core does not add current relationship/revision lookups at later model, queue, tool, continuation, or delivery boundaries. Revoking or revising a co-agent affects newly classified/admitted work under the existing behavior; immediate invalidation of already-admitted work is deferred to Issue #1015 and is not a #1006 gate. The gateway remains sole owner of external-ID authentication/mapping, and other external identity/policy data never reaches core. Generic role transport plus opaque placement, not repeated relationship lookup, supplies the separation boundary.
+
+Before approving any protocol or schema change, reviewers must apply the litmus test. A change that requires core to know a new kind, locator syntax, role, event meaning, operation name, display convention, or credential format is invalid even when represented as a nominally generic string column.
+
+## 7. Lifecycle and reconciliation saga
+
+There is no distributed transaction between a gateway database and core. Each gateway store persists exactly these saga states:
+
+- `disabled`: the applied generation is verified disabled in core; no placement exists and no child may run;
+- `pending`: a desired generation is committed locally but not yet verified in core;
+- `provisioning`: no child is live while idempotent core operations run;
+- `ready`: an **enabled** generation, exact core revision/digest, and complete binding inventory are verified, but the child is not yet ready;
+- `running`: the child for that enabled verified generation completed runtime hello and all bind acknowledgements;
+- `error`: reconciliation or child execution failed; no child is live, and generic error code, failure count, and retry deadline are persisted.
+
+`recovering` is not a persisted saga state. It is a transient in-memory startup procedure entered only when the daemon opens a row persisted as `running`. Before serving admin work, daemon startup deterministically handles **every** persisted state:
+
+- `disabled`: terminate/reap any recorded process, remove placement, and verify the applied core instance remains disabled; an exact match stays `disabled`, otherwise atomically move to `pending`;
+- `pending`: terminate/reap any recorded process, remain `pending`, and enqueue reconciliation immediately;
+- `provisioning`: treat daemon loss as an interrupted saga, terminate/reap any recorded process, atomically normalize to `pending`, and reconcile from observed core state;
+- `ready`: terminate/reap any unacknowledged/stale process, re-GET the core instance; only an exact enabled generation stays `ready` and proceeds to child start, while mismatch or newly desired disable moves to `pending`;
+- `running`: enter transient `recovering` and follow the adoption/loss mapping below;
+- `error`: ensure no process is live; a newer desired generation cancels the old deadline and moves to `pending`, the same generation before its persisted deadline remains `error`, and the same generation at/after the deadline moves to `pending`.
+
+A required process operation or core GET that cannot complete maps to persisted `error` with `startup_recovery_failed` and backoff rather than guessing. Every startup write compares desired generation, so stale recovery cannot overwrite newer admin intent.
+
+All gateway admin changes first commit a new desired generation and `pending` state in one local transaction. The sole reconciliation path is:
+
+1. ensure the row is `pending`, stop and fully reap any existing child, then persist `provisioning`;
+2. `GET instance`;
+3. create it if absent, accept it if byte-identical, or revise it from the observed revision if config/enabled differs;
+4. idempotently put every desired binding;
+5. delete obsolete bindings only after all desired bindings exist;
+6. `GET instance` again and compare revision, digest, enabled value, and the complete binding inventory;
+7. if desired `enabled=false`, remove any placement, atomically commit applied generation plus `disabled`, and finish without creating or starting a child;
+8. if desired `enabled=true`, atomically commit applied generation plus `ready`;
+9. materialize a non-secret placement and start the child;
+10. mark `running` only after the child completes runtime hello and every bind acknowledgement.
+
+A reconciliation failure at any step maps the row to persisted `error`, guarantees no child is live, and schedules retry from observed core state. At retry deadline, an enabled or disabled desired row moves atomically from `error` to `pending` and re-enters the same path. If revision succeeded but a binding failed, retry does not add another revision when the digest already matches. If local verification commit fails after core success, retry rediscovers the exact state. A child is never started from `disabled`, `pending`, `provisioning`, or `error`; `ready` is reachable only for an enabled instance.
+
+Daemon and child have a private inherited control channel, distinct from both core UDS paths. The child reports `started`, runtime hello/bind readiness, discovered-binding requests, structured fatal exit reason, and graceful-stop acknowledgement. The daemon persists PID/start nonce, desired generation, consecutive failures, next retry time, and last exit before changing state. `running` requires matching nonce/generation plus hello and all bind acknowledgements.
+
+During transient startup recovery of a persisted `running` row, an exact process nonce/generation match **and** matching core runtime liveness is adopted back to `running`. No process, a mismatched/stale process, failed liveness, or a child that exits during recovery maps deterministically to persisted `error` with `child_lost`, after terminating/reaping any stale child and computing backoff. An unexpected child exit from `ready` startup or `running` maps atomically to `error` with `child_start_exit` or `child_exit` respectively and a persisted exponential-backoff deadline with bounded jitter; stable uptime resets the counter. An expected stop is initiated only after the desired generation is already `pending` (or deletion is recorded), so its exit cannot overwrite the newer state. Operator disable/delete cancels backoff and stale timers compare generation before writing.
+
+Disabling uses the same path: commit desired disabled as `pending`, stop/reap, revise core to disabled, optionally close bindings according to operator policy, verify, remove placement, then commit `disabled`. Deletion is stop/reap, close bindings, delete instance, verify `instance_unknown`, then delete local non-secret configuration; credentials require a separate explicit destructive confirmation.
+
+Core owns runtime connection liveness but never starts a process. A daemon owns child startup, restart, backoff, placement generation, secret injection, and shutdown. Two daemon instances contending for one gateway database are prevented with an exclusive process lock.
+
+## 8. Secret acquisition
+
+The core bootstraps gate-admin principal metadata only from the strict core-service-effective-UID-owned mode-`0600` credential manifest in §6. A daemon receives the corresponding bearer from a separately provisioned operator-owned mode-`0600` secret file or a one-shot environment variable removed immediately after startup; it never reads the core bootstrap manifest. The token is retained only in a redacted, zeroizing memory type. It is not accepted in daemon JSON, gateway rows, placement files, command arguments, logs, metrics, HTTP responses, or errors. The schema, exact-target-or-bounded-namespace scope, per-request DB revalidation, append-only audit, and explicit replacement-principal rotation rules are those in §6. Only the generic core operator plane can issue, revoke, or replace these principals; a concrete gateway cannot administer them.
+
+Platform credentials are encrypted in the owning gateway database with authenticated encryption. The gateway master key is independently obtained from a mode-`0600` file or a one-shot scrubbed environment variable and is never shared with core. Plaintext exists only in gateway memory and a child's scrubbed inherited environment/pipe for the shortest startup interval. Updating a credential follows the same stop/provision/verify/start saga even when opaque core config is unchanged.
+
+## 9. Offline migration and completeness proof
+
+`opencrab-gateway-migrate` is a separate, offline executable. Daemons do not link it and contain no import code. The critical-path S8-D1–D7 contract is [docs/evidence/issue-1006-s8-contract.md](evidence/issue-1006-s8-contract.md); it is authoritative for schema 56 required columns, REST `api_principals`, source fingerprints, current S5 destination mappings, credentials, matched-backup restore, and heartbeat edges. S8 is a one-release stopped cutover tool, not a generalized migration framework. Additional durability/hardening is non-gating Issue #1016.
+
+It requires all services stopped and explicit absolute paths for:
+
+- source core SQLite opened read-only;
+- a repeatable destination adapter/path for **every participating gateway database** (`--discord-db`, `--nostr-db`, `--web-db`, or generic `--gateway-destination kind_id=…,path=…`); currently Discord and Nostr always participate, and Web participates whenever any approved disposition targets Web;
+- backup directory;
+- gateway master-key sources needed to encrypt imported credentials in each participating destination;
+- input operator disposition approvals and output verification manifest.
+
+The tool refuses symlink/nonregular database inputs, a destination edge without its listed database/key source, an unlisted writable destination, an incomplete backup set, a changing source fingerprint, or conflicting migration-owned destination values. Before copying it creates one SQLite-consistent matched backup set covering core and every participating destination. If any destination or projection step fails, the operator restores the whole set and restarts; #1006 does not resume or adopt partial progress. An ordinary rerun after successful completion accepts semantically identical mapped rows and rejects conflicts.
+
+It copies concrete Discord/Nostr/Web settings, external identity projections, watches, Discord/Nostr credentials, stable generic references, and desired placements to their approved owners. Web's historical HTTP route has no bearer credential; any previously stored S5 Web envelope is retained inert, not reinstalled or used for admission (D-1006-WEB-01). Internal co-agent relationships remain in core; their external identity projections are copied only along approved gateway edges. Histories, agents, subjects, sessions, generic gate rows, inbound-dedup rows, and the existing core delivery rows are not moved or rewritten.
+
+Every schema-55 `trusted_users.platform` value is handled losslessly; there is no `source` column in the supported table. `rest` alone maps to core `api_principals`; Discord/Nostr/Web and opaque values require the explicit existing-instance edges defined by the S8 contract. Empty, unknown, `extgate`, conflicting, and otherwise ambiguous values are never inferred. The migrator computes a canonical SHA-256 source-row fingerprint from source schema/version plus the length-delimited canonical encoding of every source column. The manifest has exactly one disposition record per fingerprint and one or more explicitly approved destination edges per record; each edge names either a concrete gateway `instance_id` and destination store or core `api_principals`, plus canonical destination-key digest and operator-approval fingerprint. A row may fan out only through those recorded edges. Duplicate fingerprints with non-identical source bytes, destination key collisions, unapproved duplicate edges, or zero edges fail closed.
+
+Derivable Discord and Nostr rows map to their instance stores. Only a source row whose platform is exactly `rest` maps to core `api_principals`, preserving the existing REST caller lookup. `extgate`, Web, arbitrary, empty, conflicting, and otherwise ambiguous rows are never inferred and require explicit fingerprint-bound operator mapping to one or more existing concrete gateway instances; they cannot target `api_principals`. To preserve old global `extgate` semantics when intended, the tool may propose all currently relevant bound gateway instances, but the operator must confirm every fan-out edge and the manifest records each separately. An edge to Web requires its Web-owned durable identity/policy store and `--web-db`/generic destination adapter. There is no guess, fallback precedence, implicit all-gateways copy, silent duplication, or drop.
+
+Discord mapping is field-specific: `channel_config.channel_id/agent_id/guild_id/channel_name/readable/writable/whitelisted` becomes the Discord store endpoint plus admission/read/write policy. For a channel, a non-empty exact `agent_id` row retains precedence over the `agent_id=''` global fallback; exact and global rows map to distinct instance-policy and gateway-wide-fallback records, and counts/digests prove that no pair is collapsed. Heartbeat fields are not copied to Discord and are projected in the single writable-core phase below. Application/bot-user/display/delivery/reaction fields become the Discord instance profile; `trusted_users` rows whose platform is Discord become owner/trusted external projections; external co-agent IDs become gateway projections pointing at the unchanged internal co-agent relationship ID/revision; token/credential columns become encrypted credential records; existing positive-integer subject IDs, generic instance/binding IDs, subject associations, and opaque addresses are copied into the gateway store byte-for-byte. Nostr config, watches, relay/filter rows, public keys, role projections, and secret keys map analogously to the named Nostr store tables/classes. This read-only phase cannot allocate/tombstone a subject, issue/consume a grant, or otherwise write core.
+
+Credential import has no silent fallback precedence. For each present participating instance, zero candidates fails; multiple non-empty candidates must decrypt to identical bytes or the approval selects one exact source. An existing destination credential is accepted only when it decrypts to the selected bytes. Files use the existing owner/mode/non-symlink checks and destination encryption; plaintext is never logged or emitted in evidence. The stronger read-once/TOCTOU protocol is deferred to Issue #1016.
+
+Delivery migration preserves the existing core `deliveries` table and every row byte-for-byte. It does not invent a platform receipt, reconstruct a request, classify a guarantee, create a gateway emission row, or replay a `sending` row. The pre-existing runtime rule remains authoritative: disconnect ambiguity becomes terminal `indeterminate`, and startup converts stale `sending` rows to terminal `indeterminate` before accepting traffic. The manifest records the single core-table count/digest as retained generic state. No gateway delivery schema is added.
+
+### First direct-write phase: single generic projection
+
+Exactly **two** stopped/offline migration programs may open core directly read-write. The first is the single `opencrab-gateway-migrate project-core-state` transaction here, before QC. It is the **sole generic legacy-state projection phase** and the only phase allowed to create, backfill, or project retained migration-target state from legacy gateway data. The second is the separately guarded destructive-cleanup transaction in §11, after post-QC freeze and read-only `verify-freeze`; it may only verify authorization lineage, delete/drop legacy concrete source state, preserve retained generic state, and record the cleanup migration. No daemon/runtime path or third offline migration phase may write core directly; all live gateway writes use gate-admin. Ordinary core-owned schema migrations, S1 principal bootstrap, request audit, and generic operator-plane principal revocation/issuance are core administration and neither read nor project gateway-owned legacy data, so they are not an additional offline direct-write phase.
+
+The import above reads source core SQLite read-only. After it succeeds, while every core, server, daemon, and child remains stopped, `project-core-state` runs one immediate guarded transaction. In that transaction it (a) creates/backfills the generic subject allocator, permanent tombstone, and hashed grant schema from §5 without rewriting any existing subject ID or gate association; (b) validates all existing associations and records them as grandfathered, requiring no grant; (c) idempotently materializes only manifest-approved `api_principals` disposition edges while retaining their source rows for guarded cleanup; (d) creates the generic heartbeat-instructions schema if absent and projects the heartbeat targets below; and (e) writes one `separation_migrations` projection marker. It cannot change delivery rows, gateway rows, binding/session/history content, existing associations, subject values, or legacy source rows. A fresh database creates the same generic subject and heartbeat schema while retaining the existing delivery table shape. No daemon contains this path.
+
+The subject backfill verifies every existing `agents.subject_id` is a positive INTEGER, validates every gate association against its existing agent/subject without rewriting it, and initializes the monotonic allocator above the maximum existing/high-water value. Existing tombstones/grant records, if any, must be semantically identical or the transaction fails. New grants are issued only later by generic agent/subject operator administration. Hard deletion must insert the permanent subject tombstone in the same transaction before removing the agent/subject row; allocation never selects an ID at or below committed high-water or present in a tombstone.
+
+The projection marker separates immutable lineage from mutable live state. Its first-phase commit records operation identity, migration version, canonical source digest, subject/association lineage digest, heartbeat edge digest, and the initial target fingerprint. Transaction rollback leaves none of these changes; startup, `verify-freeze`, and cleanup never modify the marker.
+
+An ordinary rerun after a successfully observed completion opens core read-only and returns `already_applied` only when current mapped rows, marker, source/edge/lineage digests, and retained-state digests match; mismatch fails. #1006 does not reconstruct byte-identical inserted-versus-accepted provenance after an unobserved lost response. Mutable runtime fields such as `last_fired_at` are excluded from long-lived lineage equality and are captured by the later post-QC freeze.
+
+The generic heartbeat targets are:
+
+- `session_heartbeat_config`, keyed by existing composite `(agent_id, session_id)`, containing `enabled`, `interval_secs`, scheduling anchor, and last-fired state; and
+- `session_heartbeat_instructions`, with the same composite primary key and foreign key to `session_heartbeat_config(agent_id, session_id)` (and `session_id` to `sessions`), containing nullable opaque `override_text` and `updated_at`. `NULL` means resolve the current core-owned `agents.heartbeat_instructions`, then the generic default; it does not mean an empty platform override.
+
+The stopped projection transaction adds `session_heartbeat_instructions` to upgraded core schema; fresh-schema initialization creates the same table and composite constraints directly. For each target composite key, an absent config/instructions pair is created and a byte/semantic-identical existing pair is accepted. Any non-identical pre-projection row fails for explicit operator resolution: projection never overwrites a scheduling anchor, `last_fired_at`, instructions, or user-edited generic heartbeat configuration. This conflict check is made against the stopped initial state and is distinct from the post-start rule that allows legitimate mutable target fields to advance.
+
+For **every existing open Discord binding/session and agent**, projection resolves config and instruction sources independently. `enabled`/`interval_secs` use the exact `(channel_id, agent_id)` row when it exists, otherwise `(channel_id, agent_id='')`. Instruction override uses the existing field-specific chain: non-empty exact-agent channel instructions, else non-empty global-channel instructions, else `override_text=NULL` so runtime uses the current `agents.heartbeat_instructions`, else the generic default. An exact channel row with empty instructions therefore never suppresses a non-empty global override. Projection materializes exactly one config row and exactly one instruction row for the bound `(agent_id, session_id)`. A global config or instruction source fans out to every eligible bound agent/session; an exact source shadows it only for the corresponding field and agent/session. The manifest records separate `config_source` and `instruction_source` for every source-row-to-target composite-key edge plus per-source fan-out counts, so neither two per-agent rows nor an exact/global pair can collapse into one target. It also records the subject high-water before/after, canonical existing-subject and grandfathered-association digests, subject-schema version, the retained single core-delivery-table digest, immutable projection lineage/edge/source digests, and the initial target fingerprint. Duplicate/ambiguous bindings, a non-default heartbeat source with no resolvable bound agent/session, missing membership, an existing-target conflict, a non-positive/non-integer subject ID, an invalid association, or any count/digest mismatch aborts the transaction. This one generic projection occurs exactly once after read-only import and before QC, `verify-freeze`, or destructive cleanup.
+
+The tool then verifies:
+
+- source and imported counts by data class and gateway instance;
+- canonical sorted-row SHA-256 digests by data class and instance;
+- every imported credential decrypts inside the corresponding gateway store library without printing plaintext;
+- every subject/session reference exists and has the expected membership;
+- every existing positive-integer subject ID and gate association is byte-identical, the allocator high-water is above them, and no existing association consumed a grant;
+- each desired instance/config digest/binding inventory is equivalent to existing generic placement;
+- every eligible Discord binding/agent has exactly one projected generic heartbeat config/instruction pair at `(agent_id, session_id)`, with separate config/instruction precedence choices, existing-target disposition, and source fan-out edges matching the manifest;
+- the entire existing core `deliveries` table is byte/logically unchanged, with no fabricated gateway receipt, guarantee classification, request reconstruction, or replay;
+- every mixed external-identity source fingerprint has exactly one approved disposition record, at least one verified destination edge, and exact fan-out counts/digests; every core edge exists in `api_principals`, every gateway edge exists in its listed participating store, and no unknown/ambiguous/colliding/unmapped row remains;
+- the participating-destination inventory equals the set required by disposition/config/credential edges, including Web whenever targeted.
+
+The tool-produced non-secret verification output records required tool/schema versions, matched backup inventory/digest, per-class counts/fingerprint digests, approved edges, destination before/after digests/counts, core projection digests, heartbeat targets, and the retained delivery-table count/digest. Required fields are typed and no arbitrary input is passed through. It contains no credential plaintext, external identity, config bytes, DB path, or socket path. Generalized strict manifest evolution/unknown-field behavior is Issue #1016.
+
+### Read-only post-QC freeze preflight
+
+After isolated QC, all core/gateway processes are stopped again and an external post-QC freeze set is created: one SQLite-consistent core snapshot plus a snapshot of **every participating gateway database in the manifest** (currently Discord/Nostr and Web when targeted), each with file SHA-256, logical canonical-row digest, schema version, and a shared freeze ID. The external freeze manifest binds that inventory, the migration/manifest digest, every disposition edge, and the committed projection marker's immutable lineage/edge/source digests.
+
+`verify-freeze` opens core and every participating gateway database strictly read-only. It validates the unchanged projection marker (without updating it), disposition edges, snapshot/live equality, freeze ID, schema versions, manifest digest, and every file/logical digest. It writes nothing to core, a gateway database, or any marker. It does **not** require current mutable heartbeat anchors to equal the initial projection fingerprint; legitimate live changes are already captured in the post-QC frozen core digest. A before/after file and logical digest check proves the preflight changed no database.
+
+The external post-QC freeze set plus its manifest—not a pre-cleanup database marker mutation—authorize and identify destructive cleanup. The cleanup transaction in §11 re-runs all lineage/disposition/live-digest checks, so any source or destination change after `verify-freeze` aborts before deletion. Thus live scheduling mutations before the freeze cannot invalidate cleanup, while conflicting rows present before projection still failed closed in the stopped transaction. The authorization lineage is post-import and post-QC, not the pre-import backup hash. The exact rollback set after QC is the core snapshot plus every participating gateway snapshot, external freeze manifest, binaries, and configuration/key-source versions recorded by the freeze ID; pre-import backups of that same complete set are used only for rollback before QC acceptance.
+
+## 10. Cutover and rollback
+
+The only supported cutover order is:
+
+1. stop core, public server, and every participating gateway process/child named by the manifest;
+2. create and verify matched backups of core and every participating gateway database;
+3. run the read-only-core import into all approved gateway destinations and destination completeness verification;
+4. with all processes still stopped, run the first permitted direct-write phase—the single generic-projection `project-core-state` transaction—and verify identity disposition, subject/association preservation, byte/logical preservation of the existing delivery table, heartbeat projection, and immutable/initial marker digests;
+5. install the target core/server binaries while stopped; configure the strict `[gate_admin]` UDS plus core-service-effective-UID-owned `0600` versioned credential manifest, start core, and before any runtime/public traffic verify exact-idempotent bootstrap, bind ownership/mode `0600`, scoped authentication/audit, and all six protected operations; startup does not modify the immutable projection marker and fails closed on any config/schema/manifest/socket/principal error;
+6. start the ordinary public TCP server only after its gate-admin merges/descriptions/extensions are removed, and prove all six paths return 404; keep every gateway child stopped and abort cutover on any exposure;
+7. run every participating gateway process in provision-only mode: enabled instances reach `ready`; disabled instances reach `disabled` with no placement/child; verify generic GET snapshots through the protected core UDS and verify each separate gateway-local admin UDS;
+8. start children for enabled instances only and perform isolated inbound dedup, caller-role snapshot, history, identity-policy, and delivery-parity checks: one generic frame invokes one gateway handler; Discord retains its ordered one-`create_message`-per-produced-chunk sequence with fail-fast behavior and no automatic retry; Nostr retains one current post/reply command attempt; and disconnect/startup ambiguity retains the existing terminal `indeterminate` outcome;
+9. stop all services again, create the external core-plus-all-participating-destinations post-QC freeze set/manifest, and run strictly read-only `verify-freeze`; assert no database changed;
+10. apply the second and only other permitted direct-write phase—the guarded destructive-cleanup transaction—against that freeze lineage;
+11. restart core protected UDS, public server, and participating gateways in that order and repeat isolation/security checks.
+
+There is no dual-run, shadow read, feature flag, runtime import, or fallback.
+
+Before QC acceptance, rollback uses the matched pre-import core-plus-all-participating-gateway backups and prior binaries/config. After the post-QC freeze (including after step 9), rollback means stop all processes and restore the exact core-plus-all-participating-gateway post-QC snapshots plus the binaries, configuration, and key-source versions named by the same freeze ID. Reverse reconstruction from opaque config is forbidden.
+
+## 11. Second direct-write phase: guarded legacy deletion
+
+This destructive-cleanup transaction is the second and only other permitted stopped/offline direct writer after `project-core-state`. It cannot create, backfill, or re-project retained generic state. It only verifies the committed projection lineage and external freeze/disposition manifest, deletes or drops authorized legacy concrete source state, preserves all retained generic state, and inserts/updates a **separate cleanup/applied record**. It never mutates the immutable projection marker. Runtime/daemon direct DB writes remain forbidden, and live writes remain gate-admin-only.
+
+Cleanup first opens immutable handles/read locks on every stopped participating gateway database, then begins one core write transaction while retaining those handles/locks through commit or rollback. Inside that transaction it re-runs every `verify-freeze` check against the external freeze manifest: the unchanged projection marker, freeze ID, exact pre-cleanup core logical digest, complete sorted participating-gateway file/logical digests and schema versions, every disposition edge/destination proof, migration version, and manifest digest. Any source/destination mutation between preflight and cleanup aborts before deletion. There is no pre-cleanup freeze-marker write and no digest exclusion for a marker mutation.
+
+In one transaction it:
+
+- verifies each `trusted_users` source-row fingerprint has exactly its approved destination edge set and destination row/digest proof, then removes that source row; any missing, extra, ambiguous, colliding, or unmapped disposition aborts the whole transaction;
+- preserves the already projected genuine non-gateway and explicitly approved `api_principals` rows with no platform column;
+- verifies the committed generic core-projection marker, immutable lineage/edge/source digests, and post-QC freeze digests, then drops `channel_config`; drops platform `session_watches`, `agent_discord_config`, `agent_nostr_config`, their indexes/triggers, and obsolete secret columns;
+- removes old mixed identity tables only after every source fingerprint and all approved fan-out destinations are verified;
+- preserves agents, positive-integer subjects, permanent subject tombstones/high-water/grant tombstones, sessions, membership, histories, internal co-agent relationships, opaque gate instances/bindings, and every existing core delivery row; gateway stores contain no Issue #1006 emission ledger;
+- atomically inserts/updates the separate cleanup/applied record with the applied generic separation cleanup, freeze ID, and external manifest digest in core as part of this same destructive transaction; the immutable projection marker remains byte/logically unchanged.
+
+Fresh schema initialization omits all removed objects. Production `db` query modules for those objects and server channel/trusted-gateway routes are deleted in the same release. Server may expose generic agent/subject/session administration and non-gateway `api_principals`; it may not proxy a gateway admin API.
+
+### Behavior-preserving delivery, timed turns, and disconnects
+
+Core retains schedule/heartbeat rows, fire/subtask ledgers, session locks, completion state, inbound deduplication, and the existing generic `deliveries` table. Each due event retains its stable generic `fire_id`; each external attempt retains an opaque `delivery_id` scoped to `binding_id`. No platform field is added.
+
+The delivery state machine remains the one present at `1c3b782`: core commits the speech/session-log row and `deliveries.state='sending'` in the existing transaction, then writes one generic `say` or utterance frame to a live acknowledged binding. That frame invokes the concrete gateway delivery handler once. The handler performs the historical adapter path and returns the existing success, permanent-rejection, or unknown/disconnect result. Core maps those results to `delivered`, `failed`, or `indeterminate` exactly as before separation. Generic frame/handler counts are distinct from platform API-call counts.
+
+A write failure or connection close terminalizes affected `sending` rows as `indeterminate`. Startup terminalizes stale `sending` rows as `indeterminate` before traffic. Neither path automatically replays external I/O. There is no gateway emission ledger, prepared request, adapter-protocol digest, capability upgrade/downgrade matrix, retention handshake, or delivery-guarantee label in Issue #1006. The known send-before-receipt ambiguity remains unchanged rather than being silently strengthened.
+
+Discord preserves sequential chunking, fail-fast behavior, no automatic retry, and its existing returned-message-reference/reaction behavior: one gateway handler invocation issues one ordered `create_message` platform API call per produced chunk until every chunk succeeds or the first call fails. Nostr preserves exactly one existing `nostaro` post/reply command attempt per handler invocation and its failure mapping. Issue #1006 does not add durable Discord nonce recovery or persisted Nostr signed-event replay and makes no exactly-once claim.
+
+A subtask captures only `session_id`, `binding_id`, opaque reply target, the admitted generic caller-role snapshot, and delivery ID. Core preserves the historical snapshot semantics and does not add later current relationship/revision revalidation. Schedule/heartbeat fire, subtask completion, automatic final delivery, and operation-driven utterances all use the same generic frame/outcome path. Platform watches/subscriptions merely create inbound events and never become core schedules.
+
+## 12. Enforcement and release gate
+
+CI scans production Rust and manifests, excluding historical SQL migration fixtures and tests, and fails on:
+
+- concrete gateway crate dependencies from shared/server crates;
+- `opencrab-db` or core SQLite dependencies in concrete daemon production targets;
+- daemon fields or code for core/legacy database paths or runtime imports;
+- production shared/server schema, query, route, DTO, or branch vocabulary for concrete platform settings/identities/secrets;
+- gate-admin exposure on public TCP HTTP, including any reachable `create_router_with_gate`/`admin_router` merge, route description, or extension;
+- production reachability of an empty-token constructor or startup before gate-admin UDS mode/nonempty-principal verification;
+- config decoding or kind enumeration in core;
+- plaintext secret fields in opaque config or placement files.
+
+Protocol tests prove byte-idempotent create, conflicting create, grant-required first association, grant expiry/single consumption, grandfathered-association retry, non-live-only revision, stable stale-revision errors, atomic generic session/binding creation, duplicate-address rejection, complete sorted binding discovery, sanitized errors, token/path/body/config redaction, `dispatch=utterance` iff `effect=utterance`, and rejection of `operation_driven` without a valid utterance operation. They also prove that delivery frames contain only generic IDs/content and retain the pre-separation one-frame/one-handler terminal mapping. Gate-admin isolation tests enumerate all six operations: public TCP returns 404; only the mode-`0600` core UDS serves them; fresh/populated security migration and rollback pass; only `sealed_at NULL -> timestamp` and, in a separate statement, `revoked_at NULL -> timestamp` are legal principal transitions, scopes insert only before sealing, and auth/restart reject any unsealed row; manifest/path/bootstrap exact-idempotence and conflict cases pass against the actual core service effective UID; absent-principal issuance and rotation reject a bearer matching any other sealed principal after a full scan; request authentication requires exactly one match and proves zero/multiple matches share the common unauthorized response without first-match selection or scope union; empty/missing/wrong/expired/revoked/out-of-operation/out-of-target/out-of-namespace tokens collapse to that response; rotation overlap and immediate revocation use current DB state; audit rows are append-only, redacted, and atomic with mutation/savepoint outcomes; production cannot select the empty-token constructor; and stale path, socket mode/owner, bind, manifest, migration, or principal failure prevents every later listener. Authorization parity tests prove gateway-owned classification and generic caller-role transport without adding post-admission current relationship/revision revalidation.
+
+Daemon and delivery-parity tests prove role classification, deterministic/preserved IDs, stop-before-change, persisted/transient lifecycle transitions, disabled-without-child behavior, deterministic exit/recovery mapping, retry convergence, secret encryption/redaction, and the exact pre-separation external-send behavior. They assert one core delivery row, one generic frame, and one gateway handler invocation; unchanged delivered/failed/indeterminate result mapping; disconnect/startup terminalization without replay; Discord's ordered one-`create_message`-per-produced-chunk calls until success/first failure without automatic retry; and one Nostr post/reply command attempt. Frame/handler and platform API-call counters are asserted separately. A synthetic gateway proves the same generic frame works without a core/shared/server platform branch or schema change.
+
+Migration tests enforce the exactly-two offline gateway-legacy writer allowlist and the minimum stopped S8 path: v56 required columns, complete present-row disposition/mapping, destination semantic conflicts, credential selection with no plaintext evidence, one matched all-store backup, whole-set restore on any failure, atomic projection, ordinary successful rerun, heartbeat precedence/completeness, and byte/logical preservation of IDs/history/bindings/deliveries. `verify-freeze` and cleanup tests separately prove read-only preflight, mutation abort, retained gateway locks, and atomic cleanup record. Full-schema equality, generalized lifecycle reconciliation, read-once TOCTOU, partial artifacts/resume/adoption, lost-response provenance, free-space/stale-backup protocols, and generalized manifest evolution are explicitly non-gating Issue #1016.
+
+Release is blocked until isolated QC demonstrates existing agent/subject/binding continuity, zero-unmapped approved external-identity dispositions across every participating store, Web identity ownership when present, subject non-reuse and grant behavior, public-TCP/core-UDS/gateway-local-UDS isolation, gateway-owned Owner/CoAgent/Trusted classification plus historical admitted caller-role snapshot semantics, history preservation, inbound deduplication, the existing single core delivery state machine, and external delivery parity for Discord/Nostr. QC must prove disconnect/startup ambiguity remains terminal `indeterminate` without automatic resend and that a synthetic new gateway requires zero core/shared/server source, schema, migration, or redeployment changes. Production deployment is an operator action outside repository implementation work.
+
+### Design-review completion criteria
+
+Architecture review is blocked until this file, `design-plugin-architecture.md`, and `DESIGN.md` use the same **generic conversation/execution state** versus **concrete platform state/lifecycle** vocabulary and target dependency diagram; none says that all plugin configuration belongs in core, that a transport is storage/policy-free, that Issue #1006 strengthens external delivery, or that `server` owns/supervises a concrete gateway. Every V01–V16 item must have one transition and measurable completion criterion. The exactly-two offline direct-write phases, read-only `verify-freeze`, atomic cleanup record, row-level identity disposition, public gate-admin isolation, historical caller-role snapshot parity, positive-integer subject transition, mutable-versus-immutable digest rule, operation compatibility rule, and behavior-preserving single-ledger delivery parity must have executable tests. The superseded two-ledger design is inventoried in `docs/evidence/issue-1006-strict-separation-redesign.md` and is not an Issue #1006 acceptance criterion.
+
+## 13. Staged assertion-level TDD execution plan
+
+Architecture approval fixes the target, not the implementation. Every stage below follows the same mandatory loop: add a named assertion whose pre-change failure demonstrates the exact missing behavior; retain the RED command/output; make the smallest production change that satisfies only that assertion; run the stage and regression gates; obtain implementation review; and record a rollback checkpoint before advancing. A compile failure, broad snapshot change, or test that fails for an unrelated setup error is not an acceptable RED. If a later stage exposes an earlier design/implementation defect, return to that owning stage rather than patching around it.
+
+No stage authorizes production deployment. The real destructive-cleanup invocation and production deployment remain separate operator-authorized gates. Runtime compatibility import/fallback is never permitted. The only offline programs allowed to open core read-write remain (1) the single pre-QC `project-core-state` transaction and (2) the post-QC guarded destructive-cleanup transaction; test fixtures may exercise those programs against disposable databases but cannot introduce another writer. Ordinary core-owned schema migration and the S1 startup transaction that creates an absent gate-admin principal are normal core administration inside the core process, not a gateway/daemon direct write and not either offline projection/cleanup phase. They cannot project, import, or delete gateway state.
+
+### Sequence, dependencies, and rollback points
+
+| Stage | Depends on | Executable outcome | Rollback checkpoint | Timing |
+|---|---|---|---|---|
+| S0 | approved architecture | Boundary-audit harness rejects new violations and inventories existing ones. | Pre-implementation commit plus complete classified audit output. | Tests first; no cutover. |
+| S1 | S0 | Generic gate-admin is authenticated/scoped/audited on its protected UDS and absent from public TCP. | Pre-S1 database fixture plus binary/config/credential-manifest tuple before listener/route change. | Early; only the narrow generic security schema in §6. |
+| S2 | S1 | Generic subject allocation, grants, tombstones, and one binding authority work through gate-admin. | Pre-subject-schema database fixture and matched snapshot restore proof. | Early; subject/binding schema only. |
+| S3 | S1–S2 | Dynamic operation metadata and generic binding/session routing replace names and platform-shaped shared semantics. | Last compatible runtime-protocol fixture and declaration digest. | Early. |
+| S4 | S2–S3 | Generic heartbeat instructions and exact/global precedence replace platform watches in live paths. | Pre-projection heartbeat fixture and scheduler transcript. | Early; no legacy deletion. |
+| S5 | S1–S4 | Discord, Nostr, and Web own stores and local admin; Discord/Nostr own credentials and child lifecycle, while Web preserves its old credential-free Owner HTTP admission (D-1006-WEB-01). | Per-gateway store snapshot plus previous independently runnable binary/config. | Early implementation, no production cutover. |
+| S6 | S3, S5 | Historical admitted caller-role snapshot semantics are restored by unwinding all repeated current relationship/revision checks while retaining gateway-owned classification and generic role transport. | `1c3b782` authorization fixture plus pre-S6 binaries. | Correction/unwind before replacement S7. |
+| S7 | S3, S5–S6 | Generic cross-process delivery preserves the pre-separation one-frame/one-handler terminal mapping and historical concrete adapter calls using the existing single core ledger. | Pre-separation parity fixture plus matched core/gateway runtime protocol fixture. | Early implementation, before migration; no schema or guarantee addition. |
+| S8 | S2, S4–S7 | Offline import/disposition and first writer `project-core-state` are complete and idempotent on disposable and QC copies. | Matched pre-migration core plus all participating-gateway snapshots. | Late migration gate; no cleanup. |
+| S9 | S8 | Isolated Discord/Nostr/Web and synthetic-gateway QC passes after provision-only cutover. | Exact S8 snapshot set and QC deployment manifest. | Post-migration, pre-freeze. |
+| S10 | S9 | Read-only `verify-freeze` and the second writer perform guarded cleanup with a separate record. | External post-QC freeze set/manifest, retained until release acceptance. | Destructive gate; operator authorization required for real data. |
+| S11 | S10 | Matched rollback rehearsal, final audits, and production-readiness evidence pass. | Both pre-migration and post-QC matched snapshot sets remain restorable. | Last; deployment still separately authorized. |
+
+Tests for S0–S7 and disposable-database tests for S8/S10 should be introduced as early as their dependencies permit. That does not authorize running phase 1 against a real cutover copy, creating the post-QC freeze, invoking phase 2, or deploying: those actions remain ordered S8 → S9 → S10 → S11.
+
+### S0 — architecture and static boundary guards
+
+- **RED:** Extend `crates/server/tests/webgate_static_audit.rs` or add a focused `gateway_boundary_static_audit` category with mutation fixtures. Assertions must initially show that a forbidden normal concrete-gateway dependency, concrete platform schema/DTO/route/name branch, direct core-SQLite open, or public `admin_router` merge is not rejected. A Cargo-metadata assertion must separately distinguish allowed dev-only QC edges from production `--edges no-dev` edges.
+- **Minimal GREEN:** Add only the reusable manifest/AST/route audit and a reviewed, line-specific burn-down inventory for already-known V01–V16 occurrences; do not suppress new or unclassified matches. This stage prevents regression while later stages remove the inventory.
+- **Gate/evidence:** Store RED output, negative-fixture GREEN output, full classified occurrence report, production/dev dependency trees, and `git diff --check`. Review must confirm every allowlisted occurrence has an owner stage and expiry.
+- **Still forbidden:** Treating comments, historical migrations, tests, and reachable production code as equivalent; broad word deletion; adding a new exception; changing runtime behavior before its owning RED.
+
+### S1 — protected generic gate-admin and public isolation
+
+- **RED:** Name separate assertions for (1) populated/fresh security-schema migration and rollback, including legal unsealed-create/scope-insert/separate-seal/separate-revoke transitions and rejection of scope-after-seal, combined seal+revoke, reseal, unseal, unrevocation, timestamp change, auth of unsealed rows, and restart with any unsealed row; (2) absent-principal bootstrap plus read-only exact-idempotent restart and metadata/token/scope/lineage conflicts, including a full constant-time all-other-principal scan that rejects duplicate bearer reuse for bootstrap and rotation; (3) duplicate/unknown manifest fields, insecure/nonregular/symlinked/wrong-core-service-EUID-or-mode credential paths, weak/malformed tokens, and byte zeroization hooks; (4) missing/empty/wrong/expired/revoked/out-of-operation/out-of-subject/out-of-instance/out-of-namespace credentials plus synthetic duplicate stored bearer credentials collapsing to one redacted unauthorized result, with an assertion that exactly one match is required and neither first-match selection nor scope union occurs; (5) immediate fixture-driven revoke and bounded rotation overlap; (6) append-only audit redaction and mutation/audit atomicity including denied reads and rolled-back savepoints; (7) all six public TCP paths returning 404 while only the dedicated core admin UDS succeeds; and (8) secure socket mode/ownership, pre-existing stale-path refusal, created-inode cleanup identity, and config/migration/manifest/bind/permission/principal failure before runtime/public traffic. The current public merge, plaintext singleton token, absent security schema/audit, and fail-open listener ordering must make the corresponding assertions fail for the named reason.
+- **Minimal GREEN:** Add only the §6 platform-neutral principal/scope/audit migration and repository, strict `[gate_admin]` manifest bootstrap, per-request database-backed authorizer/auditor, and securely prepared core-owned admin UDS. Remove every production public-router merge/description/extension for the six operations and start runtime/public listeners only after protected-admin preparation succeeds. Keep the six generic request/response meanings; add no gateway-specific field and no seventh route.
+- **Gate/evidence:** Retain RED output and then pass fresh/populated migration plus downgrade/rollback restore; legal/illegal seal/revoke/scope transition matrix; exact-idempotent/conflict bootstrap plus bootstrap/rotation duplicate-bearer matrix; core-service-EUID manifest/file/path and stale-socket negative controls; operation/subject/instance/namespace/expiry/revocation/rotation matrix; full-scan constant-time zero/one/multiple-match tests proving no first-match or scope union; audit append-only/redaction/savepoint fault injection; six-path public/UDS matrix; socket inode mode/owner and cleanup proof; startup-order fault injection; route inventory; and production reachability audit. Pin the GREEN database schema digest and binary/config/credential-manifest shape, but never retain a token in evidence. Independent review verifies no public proxy, hidden seventh operation, or S2 subject/binding behavior.
+- **Rollback checkpoint:** Before GREEN, preserve a restorable populated pre-S1 database fixture and the prior binary/config pair. Rollback stops all listeners, restores that database and pair together, and removes only the captured admin-socket inode created by the failed/new process. The bootstrap manifest/token is secret rollback input, not an evidence artifact.
+- **S1/S2 boundary:** S1 may create only `gate_admin_principals`, normalized immutable principal scope tables, creation-namespace scope, and append-only generic request audit. S2 starts `subject_id_allocator`, tombstones, association grants, and the single binding authority. S1 authorization may read existing generic agent/subject/instance/binding rows to evaluate its fixed scope but cannot allocate, tombstone, grant, migrate, or rewrite them.
+- **Still forbidden:** Empty-token production constructors, permissive-CORS exposure, concrete gateway administration on this UDS, daemon core-DB access, runtime compatibility fallback, implicit bootstrap rescope/rotation, committed/unaccepted unsealed principals, duplicate bearer reuse, first-match authentication, scope union, UID-0-only manifest rules or privileged handoff, arbitrary stale-path unlink, S2 schema/behavior, or deployment before later data stages.
+
+### S2 — generic subject safeguards and one binding authority
+
+- **RED:** In `crates/db/src/schema/tests`, gate-binding query tests, and extgate gate-admin protocol tests, assert byte-identical preservation of positive INTEGER subject IDs/associations, allocator high-water monotonicity, tombstone-before-hard-delete and permanent non-reuse, hashed single-use/expiry-bound grants for first association, grandfathered existing associations, duplicate-address refusal, idempotent create, conflicting-create rejection, and atomic session/binding creation. Each assertion must fail against the absent or split authority.
+- **Minimal GREEN:** Add only kind-neutral allocator/tombstone/grant state and the scoped idempotent gate-admin binding service. Route both operator provisioning and runtime lazy discovery through that one service; preserve opaque kind/config/address values.
+- **Gate/evidence:** Populated-upgrade and fresh-schema suites, concurrent create/grant consumption tests, exact ID/association digest comparison, and sanitized protocol errors pass.
+- **Still forbidden:** Platform columns/enums/prefix rules, subject renumbering, a second binding writer, daemon direct SQL, or consuming a grant for a pre-existing association.
+
+### S3 — dynamic operations and platform-neutral routing
+
+- **RED:** In extgate hello/operations tests, `transport_fire_registry`, action routing tests, and QC utterance contracts, assert arbitrary names work solely from digest-covered `authorization`, `dispatch`, `sub_engine`, `sharing`, and `effect`; missing/unknown metadata fails hello; `dispatch=utterance` iff `effect=utterance`; `operation_driven` requires a valid utterance operation; and exact/global binding routing uses only generic IDs. Add an assertion that the protocol does not require a post-separation delivery-guarantee field. Add static assertions that platform-shaped timed-fire fields, operation-name fallbacks, concrete lifecycle registries, and production kind branches remain detectable.
+- **Minimal GREEN:** Version the dynamic declaration/invocation envelopes, validate the dispatch/effect compatibility rules, remove gateway-operation name classification, and replace platform-shaped fire/sink/lifecycle paths with generic binding/session envelopes and generic extgate liveness. Selectively unwind S3 `delivery_guarantee`/`required_delivery_guarantee` fields while retaining all other metadata and declaration-digest checks. Preserve core-owned built-in tool policy and CLI's opaque generic client behavior.
+- **Gate/evidence:** Protocol vectors without guarantee fields, stale/live declaration digest cases, exact/global fan-out, timed/subtask/automatic continuation, and arbitrary synthetic operation-name tests pass; S0 burn-down entries for V08–V10 close.
+- **Still forbidden:** Static gateway operation allowlists, platform IDs in shared envelopes, server supervision of concrete daemons, or adding a delivery-guarantee negotiation API in Issue #1006.
+
+### S4 — generic heartbeat instructions
+
+- **RED:** In DB schema/query, scheduler, gate-admin, and heartbeat QC tests, assert composite `(agent_id, session_id)` instructions, exact-over-global precedence, empty-exact fallback, NULL inheritance to current agent/default, non-identical pre-projection target refusal, stopped projection of initial anchors, and legitimate post-start `last_fired_at` updates. Existing `session_watches` or platform destinations must cause the target assertions/static audit to fail.
+- **Minimal GREEN:** Add the generic heartbeat-instructions schema/API and make the scheduler emit binding/session work only. Keep initial projection fingerprinting for stopped retry while excluding mutable runtime anchors from long-lived lineage equality.
+- **Gate/evidence:** Deterministic scheduler transcripts, precedence matrix, restart behavior, and immutable-marker/mutable-anchor tests pass without a gateway name in production shared code.
+- **Still forbidden:** A platform watch schema in core, gateway-owned scheduling of generic turns, runtime migration fallback, or deletion of legacy source rows before S10.
+
+### S5 — gateway-owned stores, administration, secrets, and lifecycle
+
+- **RED:** In `discord-gateway` run/daemon tests, `nostr-gateway/src/daemon_tests.rs`, new Web store/admin tests, and process-supervisor tests, assert Discord/Nostr daemons run/administer/restart their children while server is stopped and Web remains independently runnable; disabled/non-ready daemon instances create no placement or child; persisted lifecycle recovery follows §7; local admin is scoped; secrets are encrypted/redacted and injected only into children; and runtime configuration rejects core/legacy DB paths. Assertions must expose today's missing Discord/Web owner, Nostr core DB/import dependency, and concrete shared-supervisor vocabulary.
+- **Minimal GREEN:** Add one gateway-owned SQLite store and protected local-admin endpoint per concrete gateway; move identity/config/policy references into the owner and Discord/Nostr credentials into their daemons, while keeping Web independently launched with its historical credential-free Owner admission; move Discord/Nostr child lifecycle into their daemons; make the process utility platform-neutral; and remove daemon runtime core-SQL/import code. Keep platform SDK/parsing/send/watch behavior inside its gateway and retain QC-only concrete dependencies as dev-only.
+- **Gate/evidence:** Per-gateway fresh/restart/crash/disabled/admin-scope tests, credential redaction scans, `cargo tree --edges no-dev`, no-core-open audit, server-stopped operation, and Web collision/rerun tests pass independently.
+- **Still forbidden:** Server-created placements, operator placement as canonical state, plaintext opaque config, core/shared credential decoding, runtime legacy import, or promoting QC dependencies to production.
+
+### S6 — authorization snapshot parity correction
+
+- **RED:** Against `f25d51a`, add characterization/parity assertions showing that work admitted with a gateway-authenticated generic caller role is incorrectly blocked by the S6-only current relationship/revision checks after admission, unlike `1c3b782`. Separately assert that removing those checks does not move external identity authentication/classification into core and does not remove generic caller-role transport.
+- **Minimal GREEN:** Fully revert S6 commits in reverse order—`cffff1d`, `10bd57e`, then `f707fe2`—and resolve only dependency fallout needed to preserve S3 dynamic metadata and S5 gateway-owned external identity classification. Restore historical admitted caller-role snapshot semantics; add no replacement relationship cache or platform lookup.
+- **Gate/evidence:** `1c3b782` authorization characterization and post-unwind parity pass at initial, queued, tool, continuation, timed/subtask, and delivery paths; gateway-owned Owner/CoAgent/Trusted classification and generic role transport remain intact; no production boundary performs a newly introduced current relationship/revision lookup. `docs/evidence/issue-1006-s6-tdd.md` is superseded/non-gating.
+- **Still forbidden:** Core lookup of concrete external identity/policy, moving classification back into core/server, retaining any of the seven new S6 rechecks, or treating immediate-revocation Issue #1015 as a #1006 gate.
+
+### S7 — generic cross-process delivery parity
+
+- **RED:** Against the real extgate/gate-client/Discord/Nostr seams, compare with `1c3b782` and assert one existing core `sending` row, one generic frame, and one gateway handler invocation; unchanged delivered/failed/indeterminate mapping; connection-close and startup-stale terminalization without replay; Discord's historical ordered one-`create_message`-per-produced-chunk sequence until success/first failure, no automatic retry, and last-message reference behavior; Nostr one current post/reply command attempt and current failure mapping; automatic versus operation-driven completion from metadata; and a synthetic gateway using only generic IDs/frames. Add negative assertions that no v57 guarantee/prepared columns, gateway emission table, reconnect drain, prepared-protocol digest, nonce strengthening, or retention handshake is present.
+- **Minimal GREEN:** Fully revert `f25d51a`, then make only the smallest generic-frame adjustments needed to preserve the pre-separation behavior across the owner/process boundary. Keep the existing core delivery schema and state transitions. No S7 schema migration is permitted.
+- **Gate/evidence:** Retained pre/post parity transcripts, core delivery-table logical digest, separate generic frame/handler and platform API-call counters, disconnect/startup state assertions, Discord/Nostr observable-output comparisons, authorization-snapshot parity, and synthetic zero-platform-knowledge delivery pass.
+- **Still forbidden:** A second emission ledger, prepared request/protocol evidence, automatic reconnect resend, capability upgrade/downgrade matrix, retention handshake, new adapter guarantee labels, stronger Nostr/Discord delivery claims, or any platform branch in core/shared/server.
+
+### S8 — offline disposition/import and first direct writer
+
+- **RED:** In disposable populated databases, assert strict v56 plus required-column checks; complete present-row identity/channel/watch/heartbeat/credential mapping; REST-only core mapping; Web/current-destination constraints; zero-unmapped proof; matched all-store backup; restore-on-any-failure; ordinary successful rerun/conflict behavior; unchanged IDs/history/bindings/deliveries; atomic `project-core-state`; and the exactly-two offline-writer audit.
+- **Minimal GREEN:** Implement only the stopped importer, tool-produced non-secret verification output, matched-backup restore path, and one immediate `project-core-state` transaction. Copy every present approved row before projection and leave legacy sources intact. Do not implement Issue #1016 hardening.
+- **Gate/evidence:** Current-schema populated fixture, identity/channel/watch/heartbeat matrix, credential-no-plaintext proof, source/destination digests, whole-set failure restore, ordinary idempotent rerun, retained-data proof, and marker immutability pass. Commit `af7a9e3` hardening assertions are superseded/non-gating and must be reverted.
+- **Still forbidden:** Runtime import/fallback, partial destination sets, changing IDs/history/deliveries, partial-progress resume/adoption, lost-response provenance reconstruction, full-schema equality as a gate, a second projection transaction, phase-2 deletion, or production data.
+
+### S9 — isolated cutover QC and synthetic gateway
+
+- **RED:** Before changing the isolated deployment, run the new QC assertions and capture their specific failures for gateway-owned Owner/CoAgent/TrustedUser classification plus admitted caller-role snapshot parity, history/ID continuity, public six-path 404, protected/local UDS auth, server-stopped lifecycle, dynamic operations, heartbeat routing, and pre-separation delivery parity. Add a dev-only synthetic gateway test that initially fails because its fixture cannot yet provision, declare an operation, receive timed work, and emit a parity result while the pinned core/shared/server artifact hashes remain unchanged.
+- **Minimal GREEN:** Make no new product behavior here: add only the dev-only synthetic adapter/QC fixture, deploy reviewed S1–S8 binaries/config to isolated Discord/Nostr/Web environments, run offline import plus phase 1 on their copies, and provision through the protected generic authority. A failure returns to the owning stage and repeats RED→GREEN review.
+- **Gate/evidence:** Signed QC manifest includes before/after logical digests, all identity dispositions, history/tool chronology, exact/global routing, Nostr/Discord observable delivery parity, synthetic gateway diff showing zero core/shared/server change, CLI generic-path smoke, and dev-only QC dependency proof.
+- **Still forbidden:** Production traffic, legacy-source deletion, mutable freeze markers, bypassing failed assertions, or calling a QC deployment a production authorization.
+
+### S10 — read-only freeze and second direct writer
+
+- **RED:** In migrator tests, assert `verify-freeze` opens core and every participating gateway DB read-only and preserves byte/logical digests; missing/extra stores, schema/version/freeze/manifest/disposition/lineage mismatch fails; mutation between preflight and cleanup aborts before deletion; locks survive through commit/rollback; cleanup cannot create/backfill/project generic state; and deletion plus the separate cleanup/applied record is atomic while the projection marker remains unchanged.
+- **Minimal GREEN:** Implement read-only `verify-freeze`, immutable gateway handles/read locks, and one guarded destructive-cleanup core transaction that repeats every check, deletes only authorized legacy concrete state, and records cleanup/freeze/manifest IDs separately. After all services are stopped, the real sequence creates the external post-QC freeze set, runs the read-only preflight, and only then may invoke this second and final offline direct writer.
+- **Gate/evidence:** Before/after digest proof, mutation-race suite, transaction fault injection, retained-state/history proof, immutable projection-marker comparison, and successful restore of the complete post-QC freeze set pass. Real cleanup additionally requires explicit destructive operator authorization.
+- **Still forbidden:** A pre-cleanup marker write, excluding a mutable marker from the digest, a third writer, cleanup after any intervening mutation, deleting retained generic/history state, or proceeding with an incomplete freeze set.
+
+### S11 — rollback proof and production readiness
+
+- **RED:** Make the release checklist executable so it initially fails on any missing artifact: pre-migration and post-QC matched restore, every V01–V16 closure, zero unclassified production occurrence, zero unmapped identity, public/UDS isolation, synthetic zero-core-change proof, delivery-parity evidence, and exact binary/config/schema/manifest hashes.
+- **Minimal GREEN:** Add no compensating runtime behavior. Rehearse restore from both matched snapshot sets in isolated infrastructure, rerun S0–S10 gates on the restored states, and assemble the immutable release evidence. Any product failure returns to its owning stage.
+- **Gate/evidence:** Independent implementation review approves the complete evidence index; rollback restores core and every participating gateway together with matching logical digests; worktree/index and secret scan are clean; deployment inputs are pinned. Production deployment still requires separate operator authorization and the transactional deployer.
+- **Still forbidden:** Partial-store rollback, forward-fixing a failed rollback, secret-bearing evidence, declaring Issue #1006 complete before production QC, or treating readiness review as deployment permission.
+
+### V01–V16 coverage map
+
+The stage evidence supplements, and does not weaken, each measurable criterion in §4.
+
+| Inventory item | Owning stages | Completion evidence |
+|---|---|---|
+| V01 | S0, S5 | Production dependency/AST audit and Nostr daemon no-core dependency. |
+| V02 | S1, S5 | Gate-admin protocol matrix and zero daemon core-SQLite opens. |
+| V03 | S5, S8, S10 | No runtime import symbols; offline rerun/conflict and two-writer proofs. |
+| V04 | S5, S9 | Discord daemon-owned store/admin/lifecycle under server-stopped QC. |
+| V05 | S0, S5 | Platform-neutral process utility and no concrete server supervision. |
+| V06 | S2, S4–S5, S8, S10 | Subject/identity/policy/heartbeat preservation, disposition, and guarded cleanup digests. S6 only removes the out-of-scope revalidation enhancement. |
+| V07 | S1, S5 | Public six-path 404, protected core UDS, and gateway-local admin tests. |
+| V08 | S3, S5 | Generic extgate liveness only; independently owned concrete children. |
+| V09 | S3–S4, S7 | Generic binding/session work plus existing single-ledger delivery parity. |
+| V10 | S3, S7 | Metadata-only operation compatibility and generic utterance routing without guarantee negotiation. |
+| V11 | S0, S3, S10 | Zero unclassified production vocabulary/branch/schema/route occurrence. |
+| V12 | S5, S8–S9 | Web-owned store/admin/import/rollback without runtime core access. |
+| V13 | S3, S9 | CLI remains an opaque generic client in smoke/QC. |
+| V14 | S0, S5, S9 | Concrete dependencies remain dev-only and QC remains runnable. |
+| V15 | S0, S8, S10–S11 | Reachability classification, preserved history/migrations, and matched restores. |
+| V16 | S0, S3, S7, S9 | Synthetic gateway proves generic parity delivery with zero core/shared/server source, schema, migration, or redeployment change. |

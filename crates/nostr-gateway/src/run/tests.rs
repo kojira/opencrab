@@ -1,6 +1,46 @@
 use super::*;
 use crate::watch::plan_watch_args;
 
+fn test_cfg(delivery_mode: Option<&str>) -> InstanceConfig {
+    InstanceConfig {
+        relays: vec!["wss://example.invalid".into()],
+        filter: WatchFilter::default(),
+        self_pubkey: "aa".repeat(32),
+        name: Some("crab".into()),
+        watches: vec![],
+        delivery_mode: delivery_mode.map(str::to_string),
+        access: AccessConfig {
+            owner: vec!["bb".repeat(32)],
+            ..AccessConfig::default()
+        },
+    }
+}
+
+#[test]
+fn say_delivery_uses_automatic_final_delivery_without_operations() {
+    let (operations, capabilities) = runtime_contract_for_config(&test_cfg(Some("say")));
+
+    assert!(
+        operations.is_none(),
+        "say mode must not expose posting tools"
+    );
+    assert_eq!(capabilities.final_delivery, FinalDelivery::Automatic);
+}
+
+#[test]
+fn tool_driven_delivery_keeps_operation_driven_tools() {
+    let (operations, capabilities) = runtime_contract_for_config(&test_cfg(Some("tool_driven")));
+
+    assert_eq!(capabilities.final_delivery, FinalDelivery::OperationDriven);
+    assert!(
+        operations
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|ops| !ops.is_empty()),
+        "tool_driven mode should keep Nostr operation declarations"
+    );
+}
+
 #[test]
 fn watches_present_still_spawns_mention_keyword_lane() {
     let self_pk = "aa".repeat(32);
@@ -12,6 +52,7 @@ fn watches_present_still_spawns_mention_keyword_lane() {
         watches: vec![WatchPlacement {
             id: 3,
             interval_secs: 120,
+            legacy_session_id: None,
             max_items: crate::config::DEFAULT_BUNDLE_MAX_ITEMS,
             filter: WatchFilter {
                 authors: vec!["npub1watched".into()],
@@ -160,6 +201,7 @@ fn dedup_ttl_covers_max_watch_interval() {
     cfg.watches = vec![WatchPlacement {
         id: 1,
         interval_secs: 3600,
+        legacy_session_id: None,
         max_items: crate::config::DEFAULT_BUNDLE_MAX_ITEMS,
         filter: WatchFilter::default(),
         filter_json: None,

@@ -1,4 +1,45 @@
 #[tokio::test]
+async fn s4_gate_admin_binding_rejects_platform_destination_fields_without_partial_targets() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    let binding_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    let session_id = session_id_for_binding(&binding_id);
+    let (status, body) = h
+        .admin(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/gate-bindings/{binding_id}"))
+                .header(header::AUTHORIZATION, auth())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "instance_id": instance_id,
+                        "address": "opaque-address",
+                        "channel_id": "platform-destination",
+                        "session": {"session_id": session_id, "title": "generic"}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err_code(&body), "bad_request");
+    let conn = h.state.db.lock().unwrap();
+    for table in [
+        "gate_bindings",
+        "session_heartbeat_config",
+        "session_heartbeat_instructions",
+    ] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "{table} must remain unchanged");
+    }
+}
+
+#[tokio::test]
 async fn dynamic_binding_put_keeps_old_said_and_new_not_ready() {
     let h = Harness::start().await;
     let (mut s, instance_id, binding_a) = ready_pair(&h).await;
@@ -110,6 +151,245 @@ async fn live_binding_delete_stops_said() {
     assert_eq!(v["code"], "binding_closed");
 }
 
+async fn grandfathered_harness(instance_id: &str) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("grandfathered.sqlite");
+    {
+        let conn = opencrab_db::init_connection(database.to_str().unwrap()).unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS subject_allocator_no_delete;
+             DROP TRIGGER IF EXISTS subject_allocator_monotonic;
+             DROP TRIGGER IF EXISTS subject_tombstones_no_update;
+             DROP TRIGGER IF EXISTS subject_tombstones_no_delete;
+             DROP TRIGGER IF EXISTS subject_grants_no_delete;
+             DROP TRIGGER IF EXISTS subject_grants_consume_once;
+             DROP TRIGGER IF EXISTS agents_subject_id_insert_guard;
+             DROP TRIGGER IF EXISTS agents_subject_id_assign;
+             DROP TRIGGER IF EXISTS agents_subject_id_advance_explicit;
+             DROP TRIGGER IF EXISTS agents_subject_id_update_guard;
+             DROP TRIGGER IF EXISTS agents_subject_tombstone_delete_guard;
+             DROP TABLE subject_association_grants;
+             DROP TABLE subject_tombstones;
+             DROP TABLE subject_id_allocator;
+             ALTER TABLE gate_bindings DROP COLUMN session_id;
+             ALTER TABLE gate_instances DROP COLUMN association_grandfathered;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agents (agent_id, name, persona_name, subject_id)
+             VALUES ('agent-1', 'A', 'p', 41)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO gate_instances
+                 (instance_id, kind_id, subject_id, revision, enabled, config_b64,
+                  config_digest, created_at, updated_at)
+             VALUES (?1, 'opaque-kind', 41, 1, 1, ?2, ?3, 11, 11)",
+            rusqlite::params![instance_id, config_b64(), config_digest()],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version=53;").unwrap();
+    }
+    let db = opencrab_db::Db::open(database.to_str().unwrap()).unwrap();
+    Harness::start_with_db(dir, db, 41).await
+}
+
+fn association_row_bytes(state: &ExtgateState, instance_id: &str) -> Vec<u8> {
+    let conn = state.db.lock().unwrap();
+    let row = conn
+        .query_row(
+            "SELECT instance_id, kind_id, subject_id, revision, enabled, config_b64,
+                    config_digest, created_at, updated_at, deleted_at,
+                    association_grandfathered
+             FROM gate_instances WHERE instance_id=?1",
+            [instance_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, i64>(10)?,
+                ))
+            },
+        )
+        .unwrap();
+    serde_json::to_vec(&row).unwrap()
+}
+
+fn grant_row_bytes(state: &ExtgateState) -> Vec<Vec<u8>> {
+    let conn = state.db.lock().unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT grant_hash, agent_id, subject_id, expires_at, consumed_at, consumed_instance_id
+             FROM subject_association_grants ORDER BY grant_hash",
+        )
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok(serde_json::to_vec(&(
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+            .unwrap())
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    rows
+}
+
+#[tokio::test]
+async fn s2_grandfathered_association_exact_put_needs_no_grant_and_changes_no_bytes() {
+    let grandfathered = "00000000-0000-4000-8000-000000000041";
+    let genuinely_new = "00000000-0000-4000-8000-000000000042";
+    let h = grandfathered_harness(grandfathered).await;
+    let before = association_row_bytes(&h.state, grandfathered);
+    let grants_before = grant_row_bytes(&h.state);
+    let request = |instance_id: &str| {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/gate-instances/{instance_id}"))
+            .header(header::AUTHORIZATION, auth())
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "kind_id": "opaque-kind",
+                    "subject_id": h.subject_id,
+                    "enabled": true,
+                    "config_b64": config_b64()
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let (status, _) = h.admin(request(grandfathered)).await;
+    assert_eq!(status, StatusCode::OK, "grandfathered exact PUT required a grant");
+    let (status, body) = h.admin(request(genuinely_new)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(err_code(&body), "instance_conflict");
+
+    assert_eq!(association_row_bytes(&h.state, grandfathered), before);
+    assert_eq!(
+        grant_row_bytes(&h.state),
+        grants_before,
+        "grandfathered retry changed grant rows"
+    );
+    assert_eq!(
+        h.state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM gate_instances", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "genuinely new grantless association was persisted"
+    );
+}
+
+#[tokio::test]
+async fn s2_new_first_instance_association_without_grant_is_forbidden() {
+    let h = Harness::start().await;
+    let id = uuid();
+    let (status, body) = h
+        .admin(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/gate-instances/{id}"))
+                .header(header::AUTHORIZATION, auth())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "kind_id": "opaque-kind",
+                        "subject_id": h.subject_id,
+                        "enabled": true,
+                        "config_b64": config_b64()
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{status} {}", String::from_utf8_lossy(&body));
+    assert_eq!(err_code(&body), "instance_conflict");
+    let associations: i64 = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM gate_instances", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(associations, 0, "unauthorized first association was persisted");
+}
+
+#[tokio::test]
+async fn s2_subject_grant_is_consumed_once_and_exact_retry_needs_no_second_grant() {
+    let h = Harness::start().await;
+    let first = uuid();
+    let second = uuid();
+    let grant = {
+        let mut conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::issue_subject_association_grant(
+            &mut conn,
+            "agent-1",
+            h.subject_id,
+            i64::MAX,
+            now_nanos(),
+        )
+        .unwrap()
+    };
+    let request = |instance_id: &str, grant: Option<&str>| {
+        let mut body = json!({
+            "kind_id": "opaque-kind",
+            "subject_id": h.subject_id,
+            "enabled": true,
+            "config_b64": config_b64()
+        });
+        if let Some(grant) = grant {
+            body["subject_grant"] = json!(grant);
+        }
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/gate-instances/{instance_id}"))
+            .header(header::AUTHORIZATION, auth())
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    let (status, _) = h.admin(request(&first, Some(&grant))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = h.admin(request(&first, None)).await;
+    assert_eq!(status, StatusCode::OK, "exact retry consumed another grant");
+    let (status, body) = h.admin(request(&second, Some(&grant))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(err_code(&body), "instance_conflict");
+    let consumed_instance: String = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT consumed_instance_id FROM subject_association_grants",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(consumed_instance, first);
+}
+
 #[tokio::test]
 async fn instance_put_idempotent_and_conflict() {
     let h = Harness::start().await;
@@ -162,13 +442,7 @@ async fn instance_put_idempotent_and_conflict() {
 }
 
 #[tokio::test]
-async fn bearer_exact_401_and_env_scrub() {
-    std::env::set_var("OPENCRAB_GATE_OPERATOR_TOKEN", "env-secret");
-    let token = OperatorToken::take_from_env();
-    assert!(std::env::var("OPENCRAB_GATE_OPERATOR_TOKEN").is_err());
-    assert!(format!("{token:?}").contains("redacted"));
-    assert!(!format!("{token:?}").contains("env-secret"));
-
+async fn database_backed_bearer_rejections_are_exact_401() {
     let h = Harness::start().await;
     let id = uuid();
     let cases: Vec<Request<Body>> = vec![
@@ -244,7 +518,6 @@ async fn lookups_unknown_address_is_false() {
     assert!(!opencrab_extgate::channel_whitelisted(
         &conn, "agent-1", "missing", "nope"
     ));
-    let _ = TRUSTED_PLATFORM_EXTGATE;
     let _ = session_id_for_binding("x");
 }
 
@@ -303,7 +576,12 @@ async fn address_in_use_and_binding_closed_reuse() {
                 .header(header::AUTHORIZATION, auth())
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    json!({"instance_id": instance_id, "address": "same"}).to_string(),
+                    json!({
+                        "instance_id": instance_id,
+                        "address": "same",
+                        "session": {"session_id": session_id_for_binding(&b), "title": "same"}
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -329,7 +607,12 @@ async fn address_in_use_and_binding_closed_reuse() {
                 .header(header::AUTHORIZATION, auth())
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    json!({"instance_id": instance_id, "address": "same"}).to_string(),
+                    json!({
+                        "instance_id": instance_id,
+                        "address": "same",
+                        "session": {"session_id": session_id_for_binding(&a), "title": "same"}
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )

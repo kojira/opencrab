@@ -12,10 +12,9 @@ use opencrab_db::Db;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::oneshot;
 
-use crate::bearer::OperatorToken;
 use crate::commands::CommandRegistry;
 use crate::error::{ErrorCode, GateError};
-use crate::operations::GatewayOperationDeclaration;
+use crate::operations::{FinalDelivery, GatewayOperationDeclaration};
 use crate::turn_queue::SessionTurnQueues;
 
 /// hello 済みで未 close の接続。
@@ -27,8 +26,9 @@ pub struct LiveEntry {
     pub pending: HashMap<String, Pending>,
     /// hello で宣言された immutable な能力 snapshot（DI 拡張 §4.1）。欠落=能力ゼロ。
     pub declarations: Arc<Vec<GatewayOperationDeclaration>>,
-    /// 宣言配列の canonical digest（DI-04）。宣言なしは空 string。
+    /// Digest of the full versioned runtime capability snapshot.
     pub declaration_digest: String,
+    pub final_delivery: FinalDelivery,
 }
 
 impl LiveEntry {
@@ -197,7 +197,6 @@ pub type ReservedToolNameFn = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 pub struct ExtgateState {
     pub db: Db,
     pub registry: Mutex<Registry>,
-    pub token: OperatorToken,
     pub halt: AtomicBool,
     halt_notify: tokio::sync::Notify,
     next_identity: AtomicU64,
@@ -220,11 +219,11 @@ pub struct ExtgateState {
 }
 
 impl ExtgateState {
-    pub fn new(db: Db, token: OperatorToken) -> Self {
+    /// Gate-admin authentication is always database-backed.
+    pub fn new_protected(db: Db) -> Self {
         Self {
             db,
             registry: Mutex::new(Registry::default()),
-            token,
             halt: AtomicBool::new(false),
             halt_notify: tokio::sync::Notify::new(),
             next_identity: AtomicU64::new(1),
@@ -236,6 +235,69 @@ impl ExtgateState {
             folded_seqs: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
+        }
+    }
+
+    pub(crate) fn authenticate_admin(
+        &self,
+        headers: &axum::http::HeaderMap,
+        operation: crate::gate_admin_security::Operation,
+    ) -> Result<crate::gate_admin_security::Authenticated, GateError> {
+        let header = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok());
+        let mut conn = self.db.lock().map_err(|_| GateError::store())?;
+        let now = crate::ids::now_nanos();
+        match crate::gate_admin_security::authenticate(&mut conn, header, operation, now) {
+            Ok(authenticated) => Ok(authenticated),
+            Err(crate::gate_admin_security::SecurityError::Store) => Err(GateError::store()),
+            Err(_) => {
+                crate::gate_admin_security::append_audit_for_attempt(
+                    &conn,
+                    uuid::Uuid::new_v4(),
+                    now,
+                    operation,
+                    None,
+                    None,
+                    "unauthorized",
+                )
+                .map_err(|_| GateError::store())?;
+                Err(GateError::new(ErrorCode::Unauthorized))
+            }
+        }
+    }
+
+    pub(crate) fn authorize_admin_target(
+        &self,
+        operation: crate::gate_admin_security::Operation,
+        authenticated: &crate::gate_admin_security::Authenticated,
+        subject_id: i64,
+        instance_id: uuid::Uuid,
+    ) -> Result<crate::gate_admin_security::Authorized, GateError> {
+        let mut conn = self.db.lock().map_err(|_| GateError::store())?;
+        let now = crate::ids::now_nanos();
+        match crate::gate_admin_security::authorize_target(
+            &mut conn,
+            authenticated,
+            subject_id,
+            instance_id,
+            now,
+        ) {
+            Ok(authorized) => Ok(authorized),
+            Err(crate::gate_admin_security::SecurityError::Store) => Err(GateError::store()),
+            Err(_) => {
+                crate::gate_admin_security::append_audit_for_attempt(
+                    &conn,
+                    uuid::Uuid::new_v4(),
+                    now,
+                    operation,
+                    None,
+                    None,
+                    "unauthorized",
+                )
+                .map_err(|_| GateError::store())?;
+                Err(GateError::new(ErrorCode::Unauthorized))
+            }
         }
     }
 
@@ -371,10 +433,7 @@ mod folded_seq_tests {
     use super::*;
 
     fn test_state() -> ExtgateState {
-        ExtgateState::new(
-            opencrab_db::Db::memory().unwrap(),
-            crate::OperatorToken::from_bytes("t"),
-        )
+        ExtgateState::new_protected(opencrab_db::Db::memory().unwrap())
     }
 
     // #933 不変(i): is_folded は fold した seq **だけ** 真（未 fold は偽）。

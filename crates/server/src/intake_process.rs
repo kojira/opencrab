@@ -564,7 +564,6 @@ mod tests {
         router.add_provider(mock as std::sync::Arc<dyn opencrab_llm::traits::LlmProvider>);
         router.set_default_provider("mock");
         let timed = opencrab_actions::TimedFireRouter::new();
-        opencrab_server::register_production_descriptors(&timed);
         AppState {
             db,
             llm_router: opencrab_server::SharedLlmRouter::new(router),
@@ -591,7 +590,6 @@ mod tests {
             intake: std::sync::Arc::new(Default::default()),
             intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
             mcp_manager: None,
-            gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
             subtask_registries: std::sync::Arc::new(
                 opencrab_server::subtask_registries::SubtaskRegistries::new(),
             ),

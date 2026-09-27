@@ -1,4 +1,14 @@
 #[test]
+fn removed_peer_review_is_absent_from_production_action_catalog() {
+    let names: Vec<_> = SystemGatewayActions::own_definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    assert!(!names.iter().any(|name| name == "request_peer_review"));
+    assert!(names.iter().any(|name| name == "report_progress"));
+}
+
+#[test]
 fn own_definition_shape() {
     let defs = SystemGatewayActions::own_definitions();
     let d = defs

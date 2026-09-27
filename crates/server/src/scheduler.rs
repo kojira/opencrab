@@ -138,7 +138,7 @@ fn later_of(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> Option<DateTi
 fn rebuild_entries(
     router: &opencrab_actions::TimedFireRouter,
     conn: &rusqlite::Connection,
-    live_g: bool,
+    _live_g: bool,
     default_interval_secs: u64,
     min_interval_secs: u64,
     attempts: &HashMap<EntryKey, DateTime<Utc>>,
@@ -160,16 +160,6 @@ fn rebuild_entries(
                     );
                     continue;
                 };
-                // G ゲート: G ゲート対象の transport（Discord）は live G が false なら発火しない
-                // （§4.2 ランタイム G ゲート）。対象外（Nostr / web）は G 非依存。**whitelist ゲートは
-                // 掛けない**（設計 §5 N3・現行経路に無い）。対象か否かは descriptor が名乗る（#628）。
-                let g_gated = router
-                    .descriptor(target.kind)
-                    .map(|d| d.is_g_gated())
-                    .unwrap_or(false);
-                if g_gated && !live_g {
-                    continue;
-                }
                 // 壊れた interval（0 以下）は fail-closed で発火しない（§4.3 と同じ意味論）。
                 let Some(interval_secs) = opencrab_db::queries::resolve_session_interval_secs(
                     row.interval_secs,

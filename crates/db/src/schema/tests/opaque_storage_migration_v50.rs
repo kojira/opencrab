@@ -92,8 +92,9 @@ fn v50_migrates_channel_config_without_losing_values_or_leaving_two_authorities(
             .unwrap();
         }
 
+        seed_minimal_s2_prerequisites(&conn);
         initialize(&conn).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 52);
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
         assert!(table_exists(&conn, "channel_config").unwrap());
         assert!(!table_exists(&conn, "discord_channel_config").unwrap());
 
@@ -153,7 +154,7 @@ fn v50_migrates_channel_config_without_losing_values_or_leaving_two_authorities(
     {
         let conn = Connection::open(&path).unwrap();
         initialize(&conn).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 52);
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM channel_config", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
@@ -194,6 +195,7 @@ fn v50_preserves_heartbeat_audit_values_with_opaque_caller_id() {
     )
     .unwrap();
 
+    seed_minimal_s2_prerequisites(&conn);
     run_migrations(&conn, MIGRATION_GROUPS.iter().flat_map(|group| group.iter())).unwrap();
 
     assert!(column_exists(&conn, "heartbeat_instructions_audit", "caller_user_id").unwrap());
