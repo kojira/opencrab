@@ -30,7 +30,7 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 722,
+      "line": 755,
       "snippet": "let store = NostrStore::open(&config.database_path)?;",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",
@@ -40,7 +40,7 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/store.rs",
-      "line": 116,
+      "line": 117,
       "snippet": "let conn = Connection::open(path)?;",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",
@@ -1382,7 +1382,7 @@
       "violation": "V03",
       "classification": "closed-production-violation",
       "path": "crates/nostr-gateway/src/daemon_tests.rs",
-      "line": 512,
+      "line": 633,
       "needle": "s5_nostr_runtime_config_rejects_core_and_legacy_database_paths",
       "owner_stage": "S5",
       "expires_when": "retain runtime legacy-path rejection and absence of import code"
