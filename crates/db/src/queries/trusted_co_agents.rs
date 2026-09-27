@@ -38,7 +38,6 @@ pub fn list_trusted_co_agents(conn: &Connection, agent_id: &str) -> Result<Vec<T
 }
 
 /// `agent_id` にとって `co_agent_id` が信頼済み co-agent として登録されているか。
-
 pub fn is_trusted_co_agent(conn: &Connection, agent_id: &str, co_agent_id: &str) -> Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM trusted_co_agents WHERE agent_id = ?1 AND co_agent_id = ?2",

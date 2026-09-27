@@ -138,6 +138,7 @@ pub fn initialize_destinations(approval: &Approval, inputs: &Inputs) -> Result<(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn import(
     core: &Connection,
     rows: &[SourceRow],
@@ -445,8 +446,8 @@ fn validate_current_against_artifact(conn: &Connection, artifact: &PartialRecord
 
 fn apply_instance(tx: &Transaction<'_>, plan: &InstancePlan, key: Option<&[u8; 32]>) -> Result<(bool, String, Option<String>)> {
     let expected = instance_semantic(plan)?;
-    let expected_hash = row_hash("instances", &[plan.instance_id.clone()], &expected)?;
-    if let Some(existing) = current_semantic(tx, "instances", &[plan.instance_id.clone()])? {
+    let expected_hash = row_hash("instances", std::slice::from_ref(&plan.instance_id), &expected)?;
+    if let Some(existing) = current_semantic(tx, "instances", std::slice::from_ref(&plan.instance_id))? {
         ensure!(existing == expected, "instance conflict");
         validate_instance_progress(tx, plan)?;
         if plan.destination.kind_id == "web" {

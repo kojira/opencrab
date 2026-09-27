@@ -56,6 +56,7 @@ fn legacy_nostr_gateway_fixture(
         core_config_conflict, watch_session_conflict, false, false, false);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn legacy_nostr_gateway_fixture_with_updates(
     encrypted_source: bool,
     missing_association: bool,

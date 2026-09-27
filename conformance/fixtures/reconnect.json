@@ -9,7 +9,10 @@
       "id": "hello2",
       "expect": {
         "m": "hello",
-        "protocol": 2,
+        "protocol": 3,
+        "operation_protocol": 1,
+        "final_delivery": "automatic",
+        "operations": [],
         "instance_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         "revision": 1,
         "config_digest": "3b354e0c676677f4ab5735bc9f8eb2fbb2c74df34e5d54d3b4fd88165b542672"
