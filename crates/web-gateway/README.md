@@ -1,6 +1,6 @@
 # web-gateway
 
-Web 会話の独立 binary。HTTP/SSE を V3 protocol=2（UDS）へ変換するだけ。判断しない。Bearer を持たない。core crate の wire DTO に依存しない。
+Web 会話の独立 binary。HTTP/SSE を V3 protocol=3（UDS）へ変換するだけ。判断しない。Bearer を持たない。core crate の wire DTO に依存しない。
 
 ## 入口
 

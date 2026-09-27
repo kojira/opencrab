@@ -159,8 +159,8 @@ fn validate_legacy_nostr_store(core: &Connection, rows: &[SourceRow], conn: &Con
             .collect::<std::result::Result<Vec<_>,_>>()?;
         for (role, external, mapped) in &old_allowed {
             let represented = match role.as_str() {
-                "owner" => mapped.is_none() && config.access.owner.contains(&external),
-                "trusted" => mapped.is_none() && config.access.trusted_users.contains(&external),
+                "owner" => mapped.is_none() && config.access.owner.contains(external),
+                "trusted" => mapped.is_none() && config.access.trusted_users.contains(external),
                 "co_agent" => config.access.co_agents.get(external) == mapped.as_ref(),
                 _ => false,
             };
