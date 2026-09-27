@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::config::NostrConfig;
 
-/// relays / filter / self pubkey / agents.name / watch 行 / `delivery_mode=say`。
+/// relays / filter / self pubkey / agents.name / watch 行。
 /// watch 行の `filter_json` が object でなければ失敗する（空に置き換えない）。
 /// `name` が空なら失敗する（メンション車線の keyword に載せる名前が必須）。
 pub fn instance_config_value(
@@ -41,10 +41,6 @@ pub fn instance_config_value(
         }));
     }
     Ok(json!({
-        // 返信/投稿は say(gateway) 一本（オーナー裁定 row271/272）。gateway が最終本文を
-        // 発端イベントへの e-tag reply として投稿する。旧 tool_driven（nostr_run/nostr_reply
-        // での自前投稿）は E' で露出撤去済み。
-        "delivery_mode": "say",
         "filter": config.filter,
         "name": name,
         "relays": config.effective_relays(),
@@ -104,14 +100,14 @@ mod tests {
     use crate::config::NostrFilter;
 
     #[test]
-    fn config_is_say_and_has_no_secret() {
+    fn config_has_no_delivery_mode_or_secret() {
         let cfg = NostrConfig {
             relays: vec!["wss://yabu.me".into()],
             filter: NostrFilter::default(),
         };
         let raw = instance_config_bytes("aa".repeat(32).as_str(), "くらぶ", &cfg, &[]).unwrap();
         let text = String::from_utf8(raw).unwrap();
-        assert!(text.contains("\"delivery_mode\":\"say\""), "{text}");
+        assert!(!text.contains("delivery_mode"), "{text}");
         assert!(!text.contains("tool_driven"), "{text}");
         assert!(text.contains("self_pubkey"));
         assert!(text.contains("くらぶ"));
