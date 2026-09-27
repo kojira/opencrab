@@ -145,6 +145,25 @@ async fn protocol_order_before_hello_and_second_hello() {
 }
 
 #[tokio::test]
+async fn malformed_post_hello_provision_is_protocol_order_and_closes() {
+    let h = Harness::start().await;
+    let (mut s, _, _) = ready_pair(&h).await;
+    write_frame(&mut s, &json!({"id":"p2","m":"provision"})).await;
+
+    let response = read_frame(&mut s).await;
+    assert_eq!(response["m"], "err");
+    assert_eq!(response["id"], "p2");
+    assert_eq!(response["code"], "protocol_order");
+
+    let mut remaining = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), s.read_to_end(&mut remaining))
+        .await
+        .expect("post-hello provision did not close")
+        .expect("read after post-hello provision");
+    assert!(remaining.is_empty(), "unexpected frames after close: {remaining:?}");
+}
+
+#[tokio::test]
 async fn response_invalid_unknown_and_consumed_ids() {
     let h = Harness::start().await;
     let (mut s, _, _) = ready_pair(&h).await;

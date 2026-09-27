@@ -469,7 +469,7 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
         }
         (ConnState::Running, InboundMsg::Invalid { id, code, m }) => {
             let inst = instance_id.as_deref().unwrap();
-            if m == "hello" {
+            if m == "hello" || m == "provision" {
                 close_live(
                     state,
                     Some(inst),
