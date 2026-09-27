@@ -1,6 +1,9 @@
 //! Nostr-owned lifecycle daemon. Core is reached only through a generic control trait.
 
-use crate::store::{InstanceRow, NostrStore};
+use crate::{
+    config,
+    store::{InstanceRow, NostrStore},
+};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use opencrab_process_supervisor::{
@@ -30,6 +33,10 @@ pub struct DaemonConfig {
 fn default_reconcile_millis() -> u64 {
     1_000
 }
+
+// Core retains only generic final-delivery compatibility. Runtime Nostr config and
+// gateway admission authority stay gateway-owned.
+const OPAQUE_CORE_CONFIG_B64: &str = "eyJkZWxpdmVyeV9tb2RlIjoidG9vbF9kcml2ZW4ifQ==";
 
 fn retry_deadline(row: &InstanceRow) -> i64 {
     let shift = row.failure_count.min(6);
@@ -148,7 +155,7 @@ impl GateReconciler for UdsGateReconciler {
                 kind_id: &self.kind_id,
                 subject_id: desired.subject_id,
                 enabled: desired.enabled,
-                config_b64: &desired.config_b64,
+                config_b64: OPAQUE_CORE_CONFIG_B64,
                 subject_grant,
                 addresses: &desired.addresses,
             })
@@ -685,13 +692,18 @@ impl SpawnerFactory for ProductionFactory {
             row.addresses.len() == 1,
             "Nostr instance requires exactly one address"
         );
+        let runtime_config_b64 = config::canonicalize_config_b64_with_gateway_access(
+            &row.config_b64,
+            row.access.clone(),
+        )?;
         let value = serde_json::json!({
             "core_socket": self.core_socket,
             "nostaro_bin": self.nostaro_bin,
             "control_socket":self.control_socket(row,"").expect("production control socket"),
             "start_nonce":start_nonce,
             "instances": [{"instance_id":row.instance_id,"revision":revision,
-                "address":row.addresses[0],"config_b64":row.config_b64}]
+                "address":row.addresses[0],"config_b64":runtime_config_b64,
+                "core_config_b64": OPAQUE_CORE_CONFIG_B64}]
         });
         let temporary = path.with_extension("json.tmp");
         std::fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;

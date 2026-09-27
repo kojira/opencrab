@@ -14,7 +14,12 @@ pub struct InstancePlacement {
     pub instance_id: String,
     pub revision: u64,
     pub address: String,
+    /// Gateway-owned runtime config. Core must not interpret this payload.
     pub config_b64: String,
+    /// Optional core-owned opaque config used only for hello digest compatibility.
+    /// If absent, legacy placements use `config_b64` for both runtime and hello digest.
+    #[serde(default)]
+    pub core_config_b64: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -35,7 +40,7 @@ pub struct InstanceConfig {
     pub access: AccessConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccessConfig {
     #[serde(default)]
@@ -46,6 +51,15 @@ pub struct AccessConfig {
     pub co_agents: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub trusted_users: Vec<String>,
+}
+
+impl AccessConfig {
+    pub fn is_empty(&self) -> bool {
+        self.owner.is_empty()
+            && self.trusted_users.is_empty()
+            && self.followees.is_empty()
+            && self.co_agents.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -130,6 +144,9 @@ impl Placement {
             let bytes = decode_config_b64(&inst.config_b64)?;
             let cfg = parse_instance_config(&bytes)?;
             validate_instance_config(&cfg)?;
+            if let Some(core_config_b64) = &inst.core_config_b64 {
+                let _ = decode_config_b64(core_config_b64)?;
+            }
         }
         Ok(())
     }
@@ -150,6 +167,21 @@ pub fn config_digest(bytes: &[u8]) -> String {
 pub fn canonicalize_config_b64(config_b64: &str) -> anyhow::Result<String> {
     use base64::Engine as _;
     let config = parse_instance_config(&decode_config_b64(config_b64)?)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config)?))
+}
+
+pub fn canonicalize_config_b64_with_gateway_access(
+    config_b64: &str,
+    gateway_access: AccessConfig,
+) -> anyhow::Result<String> {
+    use base64::Engine as _;
+    let mut config: InstanceConfig = serde_json::from_slice(&decode_config_b64(config_b64)?)
+        .map_err(|e| anyhow::anyhow!("instance config is not valid JSON object: {e}"))?;
+    if config.delivery_mode.is_none() {
+        config.delivery_mode = Some("tool_driven".into());
+    }
+    config.access = gateway_access;
+    validate_instance_config(&config)?;
     Ok(base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config)?))
 }
 
@@ -186,12 +218,10 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
         None | Some("say") | Some("tool_driven") => {}
         Some(_) => anyhow::bail!("delivery_mode must be say or tool_driven"),
     }
-    if cfg.access.owner.is_empty()
-        && cfg.access.trusted_users.is_empty()
-        && cfg.access.followees.is_empty()
-        && cfg.access.co_agents.is_empty()
-    {
-        anyhow::bail!("access must contain at least one owner, trusted_user, followee, or co_agent");
+    if cfg.access.is_empty() {
+        anyhow::bail!(
+            "access must contain at least one owner, trusted_user, followee, or co_agent"
+        );
     }
     for watch in &cfg.watches {
         if watch.interval_secs <= 0 {
@@ -313,6 +343,7 @@ mod tests {
                         .unwrap(),
                     )
                 },
+                core_config_b64: Some("e30=".into()),
             }],
         };
         p.validate().unwrap();
@@ -337,6 +368,39 @@ mod tests {
         });
         let err = parse_instance_config(&serde_json::to_vec(&value).unwrap()).unwrap_err();
         assert!(err.to_string().contains("access"), "{err}");
+    }
+
+    #[test]
+    fn gateway_access_overlay_is_the_runtime_authority() {
+        use base64::Engine as _;
+
+        let legacy_core_access = serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab",
+            "access": { "owner": ["bb".repeat(32)] }
+        });
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&legacy_core_access).unwrap());
+
+        let err = canonicalize_config_b64_with_gateway_access(&encoded, AccessConfig::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("access"), "{err}");
+
+        let runtime = canonicalize_config_b64_with_gateway_access(
+            &encoded,
+            AccessConfig {
+                trusted_users: vec!["cc".repeat(32)],
+                ..AccessConfig::default()
+            },
+        )
+        .unwrap();
+        let cfg = parse_instance_config(&decode_config_b64(&runtime).unwrap()).unwrap();
+        assert!(
+            cfg.access.owner.is_empty(),
+            "legacy config access must not survive"
+        );
+        assert_eq!(cfg.access.trusted_users, vec!["cc".repeat(32)]);
     }
 
     #[test]
@@ -397,7 +461,10 @@ mod tests {
             }]
         });
         let cfg = parse_instance_config(&serde_json::to_vec(&value).unwrap()).unwrap();
-        assert_eq!(cfg.watches[0].legacy_session_id.as_deref(), Some("legacy-session"));
+        assert_eq!(
+            cfg.watches[0].legacy_session_id.as_deref(),
+            Some("legacy-session")
+        );
         assert_eq!(cfg.delivery_mode.as_deref(), Some("tool_driven"));
 
         let canonical = serde_json::to_value(&cfg).unwrap();

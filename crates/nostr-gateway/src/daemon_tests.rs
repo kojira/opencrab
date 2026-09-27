@@ -509,6 +509,127 @@ async fn s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error() {
 }
 
 #[test]
+fn production_placement_uses_gateway_access_and_opaque_core_config() {
+    use crate::config::{decode_config_b64, parse_instance_config, AccessConfig};
+    use opencrab_process_supervisor::lifecycle::LifecycleState;
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_config = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "relays": ["wss://example.invalid"],
+                "self_pubkey": "aa".repeat(32),
+                "name": "crab",
+                "access": { "owner": ["bb".repeat(32)] }
+            }))
+            .unwrap(),
+        )
+    };
+    let row = InstanceRow {
+        instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+        agent_id: "agent".into(),
+        subject_id: 7,
+        config_b64: runtime_config,
+        addresses: vec!["nostr-a1".into()],
+        credential_envelope: String::new(),
+        subject_grant_envelope: None,
+        enabled: true,
+        desired_generation: 1,
+        applied_generation: Some(1),
+        lifecycle_state: LifecycleState::Ready,
+        core_revision: Some(4),
+        core_digest: Some("digest".into()),
+        core_bindings: vec![],
+        process_id: None,
+        process_nonce: None,
+        failure_count: 0,
+        retry_at_unix_ms: None,
+        access: AccessConfig {
+            trusted_users: vec!["cc".repeat(32)],
+            ..AccessConfig::default()
+        },
+    };
+    let factory = ProductionFactory {
+        child_binary: "/bin/true".into(),
+        core_socket: "/tmp/opencrab-core.sock".into(),
+        placement_dir: temp.path().into(),
+        nostaro_bin: "/bin/true".into(),
+    };
+
+    let _spawner = factory
+        .for_instance(&row, zeroize::Zeroizing::new(b"secret".to_vec()), "nonce")
+        .unwrap();
+    let placement_path = temp.path().join(format!("{}.json", row.instance_id));
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(placement_path).unwrap()).unwrap();
+    let instance = &value["instances"][0];
+    assert_eq!(instance["core_config_b64"], OPAQUE_CORE_CONFIG_B64);
+    let cfg = parse_instance_config(
+        &decode_config_b64(instance["config_b64"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        cfg.access.owner.is_empty(),
+        "legacy config access must not survive"
+    );
+    assert_eq!(cfg.access.trusted_users, vec!["cc".repeat(32)]);
+}
+
+#[test]
+fn production_placement_fails_loud_without_gateway_access() {
+    use crate::config::AccessConfig;
+    use opencrab_process_supervisor::lifecycle::LifecycleState;
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_config = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "relays": ["wss://example.invalid"],
+                "self_pubkey": "aa".repeat(32),
+                "name": "crab",
+                "access": { "owner": ["bb".repeat(32)] }
+            }))
+            .unwrap(),
+        )
+    };
+    let row = InstanceRow {
+        instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+        agent_id: "agent".into(),
+        subject_id: 7,
+        config_b64: runtime_config,
+        addresses: vec!["nostr-a1".into()],
+        credential_envelope: String::new(),
+        subject_grant_envelope: None,
+        enabled: true,
+        desired_generation: 1,
+        applied_generation: Some(1),
+        lifecycle_state: LifecycleState::Ready,
+        core_revision: Some(4),
+        core_digest: Some("digest".into()),
+        core_bindings: vec![],
+        process_id: None,
+        process_nonce: None,
+        failure_count: 0,
+        retry_at_unix_ms: None,
+        access: AccessConfig::default(),
+    };
+    let factory = ProductionFactory {
+        child_binary: "/bin/true".into(),
+        core_socket: "/tmp/opencrab-core.sock".into(),
+        placement_dir: temp.path().into(),
+        nostaro_bin: "/bin/true".into(),
+    };
+
+    let result = factory.for_instance(&row, zeroize::Zeroizing::new(b"secret".to_vec()), "nonce");
+    let Err(err) = result else {
+        panic!("placement unexpectedly accepted empty gateway access");
+    };
+    assert!(err.to_string().contains("access"), "{err}");
+}
+
+#[test]
 fn s5_nostr_runtime_config_rejects_core_and_legacy_database_paths() {
     let value = serde_json::json!({
         "database_path":"/tmp/nostr.db","admin_socket":"/tmp/admin.sock",

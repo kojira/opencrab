@@ -78,7 +78,10 @@ pub fn spawn_instance(
         );
     }
     let cfg = parse_instance_config(config_bytes)?;
-    let digest = config_digest(config_bytes);
+    let digest = match place.core_config_b64.as_deref() {
+        Some(core_config_b64) => config_digest(&crate::config::decode_config_b64(core_config_b64)?),
+        None => config_digest(config_bytes),
+    };
     // 返信本文を nostaro reply で投稿するための relays だけの config（鍵は env 注入・config に載せない）。
     let post_config = post::post_config_path(&socket, &place.instance_id);
     post::write_relays_config(&post_config, &cfg.relays).map_err(|e| {

@@ -1,6 +1,6 @@
 //! Nostr-owned durable configuration, policy, identity, credential, and lifecycle store.
 
-use crate::secret_store;
+use crate::{config::AccessConfig, secret_store};
 use anyhow::{Context as _, Result};
 use opencrab_process_supervisor::lifecycle::{LifecycleState, PersistedLifecycle};
 use rusqlite::{params, Connection, OptionalExtension as _};
@@ -82,6 +82,7 @@ pub struct InstanceRow {
     pub process_nonce: Option<String>,
     pub failure_count: u32,
     pub retry_at_unix_ms: Option<i64>,
+    pub access: AccessConfig,
 }
 
 impl InstanceRow {
@@ -178,7 +179,7 @@ impl NostrStore {
     }
 
     pub fn get(&self, instance_id: &str) -> Result<Option<InstanceRow>> {
-        self.conn.query_row(
+        let Some(mut row) = self.conn.query_row(
             "SELECT instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,
                     subject_grant_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,
                     core_digest,binding_inventory_json,process_id,process_nonce,failure_count,retry_at_unix_ms
@@ -205,9 +206,42 @@ impl NostrStore {
                     process_nonce: row.get(15)?,
                     failure_count: u32::try_from(failures).unwrap_or(u32::MAX),
                     retry_at_unix_ms: row.get(17)?,
+                    access: AccessConfig::default(),
                 })
             },
-        ).optional().map_err(Into::into)
+        ).optional()? else { return Ok(None); };
+        row.access = self.access_config(instance_id)?;
+        Ok(Some(row))
+    }
+
+    pub fn access_config(&self, instance_id: &str) -> Result<AccessConfig> {
+        let mut access = AccessConfig::default();
+        let mut stmt = self.conn.prepare(
+            "SELECT role,external_id,relationship_id FROM identity_projections
+             WHERE instance_id=?1 ORDER BY role,external_id",
+        )?;
+        let rows = stmt.query_map(params![instance_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (role, external_id, relationship_id) = row?;
+            match role.as_str() {
+                "owner" => access.owner.push(external_id),
+                "trusted" | "trusted_user" => access.trusted_users.push(external_id),
+                "followee" => access.followees.push(external_id),
+                "co_agent" => {
+                    access
+                        .co_agents
+                        .insert(external_id, relationship_id.unwrap_or_default());
+                }
+                _ => {}
+            }
+        }
+        Ok(access)
     }
 
     pub fn retry_due_error(
@@ -438,6 +472,55 @@ mod tests {
         assert_eq!(
             &*reopened.decrypt_credential(&row.instance_id, &key).unwrap(),
             b"token-secret"
+        );
+    }
+
+    #[test]
+    fn identity_projections_are_gateway_access_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NostrStore::open(&temp.path().join("nostr.db")).unwrap();
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        store
+            .upsert_desired(
+                id,
+                "agent",
+                7,
+                "Y29uZmln",
+                &["opaque-address".into()],
+                "token",
+                None,
+                true,
+                &[8; 32],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO identity_projections(instance_id,role,external_id,relationship_id,relationship_revision)
+                 VALUES (?1,'owner',?2,NULL,NULL),
+                        (?1,'trusted_user',?3,NULL,NULL),
+                        (?1,'followee',?4,NULL,NULL),
+                        (?1,'co_agent',?5,'peer-agent',NULL)",
+                params![
+                    id,
+                    "11".repeat(32),
+                    "22".repeat(32),
+                    "33".repeat(32),
+                    "44".repeat(32),
+                ],
+            )
+            .unwrap();
+
+        let row = store.get(id).unwrap().unwrap();
+        assert_eq!(row.access.owner, vec!["11".repeat(32)]);
+        assert_eq!(row.access.trusted_users, vec!["22".repeat(32)]);
+        assert_eq!(row.access.followees, vec!["33".repeat(32)]);
+        assert_eq!(
+            row.access
+                .co_agents
+                .get(&"44".repeat(32))
+                .map(String::as_str),
+            Some("peer-agent")
         );
     }
 
