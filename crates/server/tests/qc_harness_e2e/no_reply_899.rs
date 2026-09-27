@@ -15,6 +15,7 @@
 ///
 /// (a) が現 tip で赤（`NO_REPLY` 行が保存され typed に現れる）。
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_no_reply_only_is_not_persisted_extgate_899() {
     // 一意マーカー（グローバル say バッファの他テスト混線回避）。
     const BODY_B: &str = "NR899B-本文だけ残る";

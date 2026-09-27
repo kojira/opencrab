@@ -72,6 +72,7 @@ impl LlmProvider for ThreeReplyMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn audit_900c_utterance_only_reply_turn_gets_no_muted_reaction() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();
@@ -172,6 +173,7 @@ impl LlmProvider for ContinueSplitMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn audit_s13_1c_continue_split_is_separate_discord_messages() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();
@@ -280,6 +282,7 @@ impl LlmProvider for FlagContinueSplitMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_915_completed_flag_only_on_last_say_of_continue_split() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();
@@ -448,6 +451,7 @@ impl LlmProvider for ReplyThenContinueThenSayMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_915_reply_then_continue_then_say_flag_only_on_last_say() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();

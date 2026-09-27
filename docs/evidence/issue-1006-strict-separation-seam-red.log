@@ -1,4 +1,4 @@
-   Compiling opencrab-extgate v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/extgate)
+   Compiling opencrab-extgate v0.2.17 (<repo>/crates/extgate)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 26.04s
      Running tests/conformance.rs (target/debug/deps/conformance-73bd4b8e22776fa0)
 

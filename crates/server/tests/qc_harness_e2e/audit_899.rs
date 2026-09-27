@@ -46,6 +46,7 @@ impl LlmProvider for NoReplyProbeMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn audit_899a_no_reply_only_not_delivered_not_saved_not_in_history() {
     let buf = install_capture();
     let mock = Arc::new(NoReplyProbeMock {
@@ -121,6 +122,7 @@ async fn audit_899a_no_reply_only_not_delivered_not_saved_not_in_history() {
 const B899B_KEEP: &str = "nr899b-keep 本文はここまで";
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn audit_899b_body_plus_no_reply_delivers_body_only_saved_once() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());

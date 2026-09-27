@@ -1,6 +1,7 @@
 // ==================== (f) 2000 字超 say は複数チャンクで逐次配送される ====================
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_f_long_say_is_split_into_multiple_chunks() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());

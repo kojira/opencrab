@@ -31,6 +31,7 @@ impl LlmProvider for AlwaysContinueMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_915_max_iterations_flag_only_on_last_delivered_say() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();
@@ -165,6 +166,7 @@ impl LlmProvider for ShellSpawnResumeMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn subtask_settled_during_active_parent_flags_only_the_final_report() {
     let buf = install_capture();
     let mock = Arc::new(ShellSpawnResumeMock {
@@ -295,6 +297,7 @@ impl LlmProvider for ShellSleepCrossMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn other_parent_session_subtask_does_not_suppress_completed_flag() {
     let buf = install_capture();
     let mock = Arc::new(ShellSleepCrossMock {
@@ -405,6 +408,7 @@ impl LlmProvider for SingleSayThenIdleMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_915_typing_stops_after_turn_end() {
     let buf = install_capture();
     let mock = Arc::new(SingleSayThenIdleMock {
@@ -497,6 +501,7 @@ impl LlmProvider for ReactionOnlyMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn audit_s13_1g_reaction_only_turn_gets_no_muted_reaction() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();

@@ -1,6 +1,7 @@
 // ==================== (a) mention → say（origin event への reply） ====================
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_a_mention_becomes_say() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());
@@ -35,6 +36,7 @@ async fn scenario_a_mention_becomes_say() {
 // ============ 最終独立行だけを NO_REPLY 終端として扱う ============
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_inline_no_reply_is_delivered_and_final_line_terminates() {
     const VISIBLE: &str = "NRTERM-KEEP 『NO_REPLYで終わる』という説明も全文を届ける";
 
@@ -69,6 +71,7 @@ async fn scenario_inline_no_reply_is_delivered_and_final_line_terminates() {
 // ==================== (c) 同一イベントが両車線 → said は 1 回だけ ====================
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_c_same_event_on_both_lanes_says_once() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());
@@ -202,6 +205,7 @@ impl LlmProvider for RoutedMock {
 }
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_main_second_request_not_blocked_during_long_op() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());

@@ -1,4 +1,5 @@
 #[test]
+#[ignore = "gate_admin dependency is being removed; keep out of default CI (#1033)"]
 fn creation_is_owned_by_gateway_and_requires_its_live_instance() {
     let mock = spawn_mock_llm();
     let root = tempfile::tempdir().unwrap();

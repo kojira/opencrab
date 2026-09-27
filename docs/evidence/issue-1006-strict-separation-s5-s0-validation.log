@@ -1,4 +1,4 @@
-   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
+   Compiling opencrab-gate-client v0.2.17 (<repo>/crates/gate-client)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 4.85s
      Running unittests src/lib.rs (target/debug/deps/opencrab_gate_client-5c78c38c2de53c9a)
 
@@ -14,8 +14,8 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
 
-   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
-   Compiling opencrab-discord-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/discord-gateway)
+   Compiling opencrab-gate-client v0.2.17 (<repo>/crates/gate-client)
+   Compiling opencrab-discord-gateway v0.2.17 (<repo>/crates/discord-gateway)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 40.59s
      Running unittests src/lib.rs (target/debug/deps/opencrab_discord_gateway-c81ebf297fcda212)
 
@@ -97,8 +97,8 @@ test daemon::tests::s5_discord_daemon_runs_and_crash_state_persists_while_server
 
 test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s
 
-   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
-   Compiling opencrab-nostr-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/nostr-gateway)
+   Compiling opencrab-gate-client v0.2.17 (<repo>/crates/gate-client)
+   Compiling opencrab-nostr-gateway v0.2.17 (<repo>/crates/nostr-gateway)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 3.64s
      Running unittests src/lib.rs (target/debug/deps/opencrab_nostr_gateway-ea8cf54f52989c88)
 
@@ -175,9 +175,9 @@ test watch::tests::child_receives_env_secret_not_argv ... ok
 
 test result: ok. 69 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.75s
 
-   Compiling opencrab-db v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/db)
-   Compiling opencrab-gate-client v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/gate-client)
-   Compiling opencrab-web-gateway v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/web-gateway)
+   Compiling opencrab-db v0.2.17 (<repo>/crates/db)
+   Compiling opencrab-gate-client v0.2.17 (<repo>/crates/gate-client)
+   Compiling opencrab-web-gateway v0.2.17 (<repo>/crates/web-gateway)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 52.68s
      Running unittests src/lib.rs (target/debug/deps/opencrab_web_gateway-5d0ffe01320b6c88)
 
@@ -329,8 +329,8 @@ UNCLASSIFIED shared-concrete-schema crates/gate-client/src/wire.rs:244: TrustedU
 STALE baseline entry (remove/review it): ('shared-concrete-schema', 'crates/extgate/src/protocol.rs', 225, 'TrustedUser,')
 STALE baseline entry (remove/review it): ('shared-concrete-schema', 'crates/extgate/src/protocol.rs', 521, 'Some("trusted_user") => Ok(SaidCaller::TrustedUser),')
 STALE baseline entry (remove/review it): ('shared-concrete-schema', 'crates/gate-client/src/wire.rs', 274, 'TrustedUser,')
-coverage anchor changed: V15 /Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/docs/design-gateway-process-ownership.md:105
-   Compiling opencrab-server v0.2.17 (/Users/kojira/develop/worktrees/opencrab-piiko/fix-gateway-storage-boundary-1006/crates/server)
+coverage anchor changed: V15 <repo>/docs/design-gateway-process-ownership.md:105
+   Compiling opencrab-server v0.2.17 (<repo>/crates/server)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 43.78s
      Running tests/webgate_static_audit.rs (target/debug/deps/webgate_static_audit-dc9a0f13330d7e5a)
 

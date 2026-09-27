@@ -441,14 +441,15 @@ impl Harness {
         hasher.update(token);
         let hash = hasher.finalize().to_vec();
         let principal_id = format!("conformance-{sequence}");
+        let expires_at = 4_000_000_000_i64 * 1_000_000_000;
         {
             let conn = self.state.db.lock().unwrap();
             conn.execute(
                 "INSERT INTO gate_admin_principals
                  (principal_id, credential_salt, credential_hash, scope_mode, created_at,
                   expires_at, revoked_at, sealed_at, predecessor_principal_id, overlap_deadline)
-                 VALUES (?1, ?2, ?3, 'exact', 1, 4000000000000000000, NULL, NULL, NULL, NULL)",
-                rusqlite::params![principal_id, salt.as_slice(), hash],
+                 VALUES (?1, ?2, ?3, 'exact', 1, ?4, NULL, NULL, NULL, NULL)",
+                rusqlite::params![principal_id, salt.as_slice(), hash, expires_at],
             )
             .unwrap();
             conn.execute(

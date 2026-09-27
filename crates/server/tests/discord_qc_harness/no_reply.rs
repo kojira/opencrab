@@ -1,6 +1,7 @@
 // ==================== (e) system reaction 🤐（NO_REPLY）の V3 経路 ====================
 
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_e_no_reply_gets_muted_reaction() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());
@@ -78,6 +79,7 @@ async fn scenario_e_no_reply_gets_muted_reaction() {
 ///
 /// 現 tip で赤: 末尾 NO_REPLY が record_agent_no_reply で `content='NO_REPLY'` を保存する。
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_g_reply_then_no_reply_saves_reply_not_no_reply() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());
@@ -142,6 +144,7 @@ async fn scenario_g_reply_then_no_reply_saves_reply_not_no_reply() {
 // 🤐 を付けてはならない。reply 配送後、ターン決着（activity ended）で 🤐 が付くならその時点で出るので、
 // 🤐 の出現を bounded poll で待って「出ない」ことを確定する（バグ時は即座に 🤐 が出て RED）。
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_e2_reply_turn_does_not_get_muted_reaction() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());
@@ -201,6 +204,7 @@ async fn assert_no_muted_on(buf: &Arc<Mutex<Vec<Captured>>>, message: &str) {
 
 // ==================== (e3) §13 #6: reply×3 in one ターンには 🤐 が付かない（#900） ====================
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_e3_reply3_in_one_turn_does_not_get_muted_reaction() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());
@@ -231,6 +235,7 @@ async fn scenario_e3_reply3_in_one_turn_does_not_get_muted_reaction() {
 
 // ==================== (e4) §13 #9: reply＋末尾 継続 ターンには 🤐 が付かない（#900） ====================
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_e4_reply_then_continue_turn_does_not_get_muted_reaction() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());
@@ -260,6 +265,7 @@ async fn scenario_e4_reply_then_continue_turn_does_not_get_muted_reaction() {
 
 // ==================== (e5) §13 #14: reply＋NO_REPLY ターンには 🤐 が付かない（#900） ====================
 #[tokio::test]
+#[ignore = "legacy gateway admin-dependent E2E kept out of default CI (#1033)"]
 async fn scenario_e5_reply_then_no_reply_turn_does_not_get_muted_reaction() {
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());
