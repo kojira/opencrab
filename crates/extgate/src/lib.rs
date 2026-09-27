@@ -1,7 +1,5 @@
 //! External gate V3 最小形。
 
-pub mod admin;
-pub mod admin_socket;
 pub mod close;
 pub mod commands;
 pub mod completion;
@@ -9,7 +7,6 @@ pub mod delivery;
 pub mod delivery_mode;
 pub mod error;
 pub mod fire;
-pub mod gate_admin_security;
 pub mod ids;
 pub mod inbound;
 pub mod json;
@@ -20,10 +17,8 @@ pub mod ops_projection;
 pub mod protocol;
 pub mod race;
 pub mod registry;
-mod secure_path;
 pub mod turn_queue;
 
-pub use admin::admin_router;
 pub use commands::{CommandError, CommandRegistry};
 pub use delivery_mode::{
     adjust_inbound_effect, delivery_mode_from_config_bytes, dispatches_v3_say, DeliveryMode,

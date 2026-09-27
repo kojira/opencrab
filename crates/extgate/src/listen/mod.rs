@@ -4,6 +4,7 @@ mod activity;
 mod bind;
 mod create_binding;
 mod hello;
+mod provision;
 mod response;
 
 pub use activity::{emit_activity, emit_ended_activity, emit_turn_failed};
@@ -33,6 +34,7 @@ use crate::registry::ExtgateState;
 
 use create_binding::handle_create_binding;
 use hello::handle_hello;
+use provision::handle_provision;
 use response::handle_response;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -267,6 +269,10 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
         }
     };
     match (*phase, parsed) {
+        (ConnState::PreHello, InboundMsg::Provision(request)) => {
+            let _ = handle_provision(state, writer, request).await;
+            Err(())
+        }
         (ConnState::PreHello, InboundMsg::Hello(hello)) => {
             match handle_hello(state, writer, identity, hello).await {
                 Ok(id) => {
@@ -338,7 +344,7 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
             Err(())
         }
         (ConnState::PreHello, InboundMsg::Invalid { id, code, m }) => {
-            let reason = if m == "hello" {
+            let reason = if m == "hello" || m == "provision" {
                 code
             } else {
                 ErrorCode::ProtocolOrder
@@ -349,6 +355,18 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
                 Some(identity),
                 reason,
                 id.as_deref(),
+                Some(writer),
+            )
+            .await;
+            Err(())
+        }
+        (ConnState::Running, InboundMsg::Provision(request)) => {
+            close_live(
+                state,
+                instance_id.as_deref(),
+                Some(identity),
+                ErrorCode::ProtocolOrder,
+                Some(&request.id),
                 Some(writer),
             )
             .await;

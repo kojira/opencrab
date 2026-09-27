@@ -173,7 +173,7 @@ pub fn parse_instance_config(bytes: &[u8]) -> anyhow::Result<InstanceConfig> {
     Ok(cfg)
 }
 
-fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
+pub fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
     if cfg.agent_id.trim().is_empty() {
         anyhow::bail!("agent_id must be nonempty");
     }

@@ -230,6 +230,26 @@ pub struct CreateBinding {
     pub session_theme: String,
 }
 
+/// One pre-hello declarative generic projection. Platform configuration never appears here.
+#[derive(Debug, Clone)]
+pub struct Provision {
+    pub id: String,
+    pub instance_id: String,
+    pub kind_id: String,
+    pub subject_id: i64,
+    pub subject_grant: Option<String>,
+    pub adopt_existing: bool,
+    pub enabled: bool,
+    pub config_b64: String,
+    pub bindings: Vec<ProvisionBinding>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProvisionBinding {
+    pub binding_id: String,
+    pub address: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Command {
     pub id: String,
@@ -287,6 +307,7 @@ pub struct WireResponse {
 #[derive(Debug)]
 pub enum InboundMsg {
     Hello(Hello),
+    Provision(Provision),
     CreateBinding(CreateBinding),
     Command(Command),
     Said(Said),
@@ -355,6 +376,14 @@ pub fn parse_inbound(obj: &Value) -> Result<InboundMsg, GateError> {
                 m,
             }),
         },
+        "provision" => match parse_provision(obj) {
+            Ok(request) => Ok(InboundMsg::Provision(request)),
+            Err(e) => Ok(InboundMsg::Invalid {
+                id: opt_id(obj),
+                code: e.code,
+                m,
+            }),
+        },
         "create_binding" => match parse_create_binding(obj) {
             Ok(request) => Ok(InboundMsg::CreateBinding(request)),
             Err(e) => Ok(InboundMsg::Invalid {
@@ -390,6 +419,98 @@ pub fn parse_inbound(obj: &Value) -> Result<InboundMsg, GateError> {
         "bind" | "say" | "activity" => Ok(InboundMsg::Reverse { id: opt_id(obj), m }),
         _ => Ok(InboundMsg::Unknown { id: opt_id(obj), m }),
     }
+}
+
+fn parse_provision(obj: &Value) -> Result<Provision, GateError> {
+    const FIELDS: &[&str] = &[
+        "m",
+        "id",
+        "instance_id",
+        "kind_id",
+        "subject_id",
+        "subject_grant",
+        "adopt_existing",
+        "enabled",
+        "config_b64",
+        "bindings",
+    ];
+    let source = obj
+        .as_object()
+        .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
+    if source.keys().any(|key| !FIELDS.contains(&key.as_str())) {
+        return Err(GateError::new(ErrorCode::BadRequest));
+    }
+    let id = parse_request_id(&require_str(obj, "id")?)?;
+    let instance_id = parse_uuid(&require_str(obj, "instance_id")?)?;
+    let kind_id = nonempty_str(obj, "kind_id")?;
+    let subject_id = match obj.get("subject_id") {
+        Some(Value::Number(value)) => value.as_i64().filter(|value| *value > 0),
+        _ => None,
+    }
+    .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
+    let subject_grant = match obj.get("subject_grant") {
+        None => None,
+        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        _ => return Err(GateError::new(ErrorCode::BadRequest)),
+    };
+    let adopt_existing = match obj.get("adopt_existing") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        _ => return Err(GateError::new(ErrorCode::BadRequest)),
+    };
+    let enabled = match obj.get("enabled") {
+        Some(Value::Bool(value)) => *value,
+        _ => return Err(GateError::new(ErrorCode::BadRequest)),
+    };
+    let config_b64 = nonempty_str(obj, "config_b64")?;
+    crate::ids::decode_config_b64(&config_b64)?;
+    let values = obj
+        .get("bindings")
+        .and_then(Value::as_array)
+        .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
+    let mut binding_ids = std::collections::HashSet::new();
+    let mut addresses = std::collections::HashSet::new();
+    let mut bindings = Vec::with_capacity(values.len());
+    for value in values {
+        let binding = value
+            .as_object()
+            .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
+        if binding.len() != 2
+            || !binding.contains_key("binding_id")
+            || !binding.contains_key("address")
+        {
+            return Err(GateError::new(ErrorCode::BadRequest));
+        }
+        let binding_id = binding
+            .get("binding_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
+        let binding_id = parse_uuid(binding_id)?;
+        let address = binding
+            .get("address")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?
+            .to_string();
+        if !binding_ids.insert(binding_id.clone()) || !addresses.insert(address.clone()) {
+            return Err(GateError::new(ErrorCode::BadRequest));
+        }
+        bindings.push(ProvisionBinding {
+            binding_id,
+            address,
+        });
+    }
+    Ok(Provision {
+        id,
+        instance_id,
+        kind_id,
+        subject_id,
+        subject_grant,
+        adopt_existing,
+        enabled,
+        config_b64,
+        bindings,
+    })
 }
 
 fn parse_hello(obj: &Value) -> Result<Hello, GateError> {

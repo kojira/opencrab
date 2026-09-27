@@ -17,8 +17,6 @@ pub struct DaemonConfig {
     pub admin_socket: PathBuf,
     #[serde(default)]
     pub admin_instance_ids: Vec<String>,
-    pub gate_admin_socket: PathBuf,
-    pub gate_admin_credential: PathBuf,
     pub core_socket: PathBuf,
     pub child_binary: PathBuf,
     pub placement_dir: PathBuf,
@@ -49,8 +47,6 @@ impl DaemonConfig {
         for (name, path) in [
             ("database_path", &self.database_path),
             ("admin_socket", &self.admin_socket),
-            ("gate_admin_socket", &self.gate_admin_socket),
-            ("gate_admin_credential", &self.gate_admin_credential),
             ("core_socket", &self.core_socket),
             ("child_binary", &self.child_binary),
             ("placement_dir", &self.placement_dir),
@@ -87,53 +83,37 @@ pub trait GateReconciler: Send + Sync {
     ) -> Result<VerifiedInstance>;
 }
 
-pub struct UdsGateReconciler {
-    client: opencrab_gate_client::admin::GateAdminClient,
+fn core_config_b64_for_runtime_config(config_b64: &str) -> Result<String> {
+    use base64::Engine as _;
+    let bytes = crate::config::decode_config_b64(config_b64)?;
+    let config = crate::config::parse_instance_config(&bytes)?;
+    crate::config::validate_instance_config(&config)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(br#"{"delivery_mode":"tool_driven"}"#))
+}
+
+pub struct V3ProvisionReconciler {
+    client: opencrab_gate_client::ProvisionClient,
     kind_id: String,
 }
 
-impl UdsGateReconciler {
-    pub fn new(
-        client: opencrab_gate_client::admin::GateAdminClient,
-        kind_id: impl Into<String>,
-    ) -> Self {
+impl V3ProvisionReconciler {
+    pub fn new(socket: PathBuf, kind_id: impl Into<String>) -> Self {
         Self {
-            client,
+            client: opencrab_gate_client::ProvisionClient::new(socket),
             kind_id: kind_id.into(),
         }
     }
 }
 
 #[async_trait]
-impl GateReconciler for UdsGateReconciler {
+impl GateReconciler for V3ProvisionReconciler {
     async fn observe(
         &self,
-        desired: &InstanceRow,
+        _: &InstanceRow,
     ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        use opencrab_process_supervisor::lifecycle::CoreObservation;
-        let Some(observed) = self.client.get_instance(&desired.instance_id).await? else {
-            return Ok(CoreObservation::Mismatch);
-        };
-        let mut bindings: Vec<_> = observed
-            .bindings
-            .into_iter()
-            .map(|value| value.binding_id)
-            .collect();
-        bindings.sort();
-        let mut expected = desired.core_bindings.clone();
-        expected.sort();
-        if observed.revision == desired.core_revision.unwrap_or(0)
-            && observed.config_digest == desired.core_digest.as_deref().unwrap_or_default()
-            && bindings == expected
-        {
-            Ok(if observed.enabled {
-                CoreObservation::ExactEnabled
-            } else {
-                CoreObservation::ExactDisabled
-            })
-        } else {
-            Ok(CoreObservation::Mismatch)
-        }
+        // V3 has no read/control plane. Recovery safely stops any child before its idempotent
+        // declaration is sent, so an unavailable projection is never treated as live.
+        Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Mismatch)
     }
 
     async fn reconcile(
@@ -141,15 +121,19 @@ impl GateReconciler for UdsGateReconciler {
         desired: &InstanceRow,
         subject_grant: Option<&str>,
     ) -> Result<VerifiedInstance> {
+        let core_config_b64 = core_config_b64_for_runtime_config(&desired.config_b64)?;
         let observed = self
             .client
-            .reconcile(opencrab_gate_client::admin::ReconcileDesired {
+            .provision(opencrab_gate_client::ProvisionDesired {
                 instance_id: &desired.instance_id,
                 kind_id: &self.kind_id,
                 subject_id: desired.subject_id,
-                enabled: desired.enabled,
-                config_b64: &desired.config_b64,
                 subject_grant,
+                // Existing locally reconciled rows may still be runtime-authority projections.
+                // The core treats this as the one-way inactive transfer and exact retries as no-ops.
+                adopt_existing: desired.core_revision.is_some(),
+                enabled: desired.enabled,
+                config_b64: &core_config_b64,
                 addresses: &desired.addresses,
             })
             .await?;
@@ -723,14 +707,13 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let mut raw = [0_u8; 32];
     raw.copy_from_slice(&key[..]);
     let store = DiscordStore::open(&config.database_path)?;
-    let client = opencrab_gate_client::admin::GateAdminClient::from_credential_file(
-        config.gate_admin_socket.clone(),
-        &config.gate_admin_credential,
-    )?;
     let daemon = DiscordDaemon::new(
         store,
         raw,
-        Arc::new(UdsGateReconciler::new(client, "discord")),
+        Arc::new(V3ProvisionReconciler::new(
+            config.core_socket.clone(),
+            "discord",
+        )),
         Arc::new(ProductionFactory {
             child_binary: config.child_binary.clone(),
             core_socket: config.core_socket.clone(),
