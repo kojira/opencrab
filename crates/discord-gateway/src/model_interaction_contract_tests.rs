@@ -18,6 +18,21 @@ fn model_interaction_maps_to_command_and_never_to_said() {
 }
 
 #[test]
+fn empty_model_autocomplete_query_returns_the_available_catalog() {
+    let models = ["anthropic:claude-sonnet-4", "openai:gpt-6-sol"].map(str::to_string);
+
+    assert_eq!(
+        autocomplete_choices(&models, ""),
+        ["anthropic:claude-sonnet-4", "openai:gpt-6-sol"].map(|canonical| {
+            AutocompleteChoice {
+                name: canonical.to_string(),
+                value: canonical.to_string(),
+            }
+        })
+    );
+}
+
+#[test]
 fn model_autocomplete_orders_case_insensitive_matches_and_returns_canonical_values() {
     let models = [
         "zeta:model-gpt",
