@@ -265,7 +265,7 @@ mod tests {
         assert!(inspect.lock().unwrap().get(instance_id).unwrap().is_none());
 
         let config = base64::engine::general_purpose::STANDARD.encode(
-            br#"{"relays":["wss://relay.example"],"self_pubkey":"0000000000000000000000000000000000000000000000000000000000000000","name":"bot"}"#,
+            br#"{"relays":["wss://relay.example"],"self_pubkey":"0000000000000000000000000000000000000000000000000000000000000000","name":"bot","access":{"owner":["1111111111111111111111111111111111111111111111111111111111111111"]}}"#,
         );
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         let request = json!({"id":"2","op":"upsert","scope_instance_id":instance_id,

@@ -186,6 +186,13 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
         None | Some("say") | Some("tool_driven") => {}
         Some(_) => anyhow::bail!("delivery_mode must be say or tool_driven"),
     }
+    if cfg.access.owner.is_empty()
+        && cfg.access.trusted_users.is_empty()
+        && cfg.access.followees.is_empty()
+        && cfg.access.co_agents.is_empty()
+    {
+        anyhow::bail!("access must contain at least one owner, trusted_user, followee, or co_agent");
+    }
     for watch in &cfg.watches {
         if watch.interval_secs <= 0 {
             anyhow::bail!(
@@ -278,7 +285,10 @@ mod tests {
             name: Some("crab".into()),
             watches: vec![],
             delivery_mode: Some("tool_driven".into()),
-            access: AccessConfig::default(),
+            access: AccessConfig {
+                owner: vec!["bb".repeat(32)],
+                ..AccessConfig::default()
+            },
         }
     }
 
@@ -298,6 +308,7 @@ mod tests {
                             "relays": ["wss://example.invalid"],
                             "self_pubkey": "aa".repeat(32),
                             "name": "crab",
+                            "access": { "owner": ["bb".repeat(32)] },
                         }))
                         .unwrap(),
                     )
@@ -315,6 +326,17 @@ mod tests {
         );
         let bytes = decode_config_b64(&encoded).unwrap();
         assert!(serde_json::from_slice::<InstanceConfig>(&bytes).is_err());
+    }
+
+    #[test]
+    fn missing_access_is_fail_loud_before_watch_starts() {
+        let value = serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab"
+        });
+        let err = parse_instance_config(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("access"), "{err}");
     }
 
     #[test]
@@ -340,6 +362,7 @@ mod tests {
             "relays": ["wss://example.invalid"],
             "self_pubkey": "aa".repeat(32),
             "name": "crab",
+            "access": { "owner": ["bb".repeat(32)] },
             "watches": [{
                 "id": 17,
                 "interval_secs": 30,
@@ -365,6 +388,7 @@ mod tests {
             "relays": ["wss://example.invalid"],
             "self_pubkey": "aa".repeat(32),
             "name": "crab",
+            "access": { "owner": ["bb".repeat(32)] },
             "watches": [{
                 "id": 1,
                 "session_id": "legacy-session",
@@ -385,7 +409,8 @@ mod tests {
         let value = serde_json::json!({
             "relays": ["wss://example.invalid"],
             "self_pubkey": "aa".repeat(32),
-            "name": "crab"
+            "name": "crab",
+            "access": { "owner": ["bb".repeat(32)] }
         });
         let cfg = parse_instance_config(&serde_json::to_vec(&value).unwrap()).unwrap();
         assert_eq!(cfg.delivery_mode.as_deref(), Some("tool_driven"));
@@ -400,6 +425,7 @@ mod tests {
             "relays": ["wss://example.invalid"],
             "self_pubkey": "aa".repeat(32),
             "name": "crab",
+            "access": { "owner": ["bb".repeat(32)] },
             "watches": [{
                 "id": 1,
                 "interval_secs": 30,
@@ -417,6 +443,7 @@ mod tests {
             "relays": ["wss://example.invalid"],
             "self_pubkey": "aa".repeat(32),
             "name": "crab",
+            "access": { "owner": ["bb".repeat(32)] },
             "watches": [{
                 "id": 1,
                 "interval_secs": 30,
