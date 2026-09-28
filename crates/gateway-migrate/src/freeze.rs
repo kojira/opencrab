@@ -141,7 +141,7 @@ pub fn verify(args: VerifyArgs<'_>) -> Result<()> {
         let record = &snapshot.record;
         let key = (record.kind_id.clone(), record.path_id.clone());
         let expected_schema = if key == ("core".into(), "core".into()) {
-            "core-v56"
+            "core-v57"
         } else {
             approval
                 .destinations
@@ -176,7 +176,7 @@ pub fn verify(args: VerifyArgs<'_>) -> Result<()> {
         );
         if key == &("core".into(), "core".into()) {
             ensure!(
-                conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? == 56,
+                conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? == 57,
                 "freeze core schema mismatch"
             );
         } else {
@@ -207,12 +207,12 @@ pub fn verify(args: VerifyArgs<'_>) -> Result<()> {
     )?;
     let marker = core.query_row(
         "SELECT operation_id,approval_sha256,backup_set_sha256,source_core_sha256,\
-         source_fingerprint_sha256,subject_lineage_sha256,heartbeat_lineage_sha256,\
+         source_fingerprint_sha256,subject_lineage_sha256,\
          initial_projection_sha256,destination_manifest_sha256 \
          FROM separation_migrations WHERE operation_id=?1",
         [&approval.operation_id],
         |row| {
-            (0..9)
+            (0..8)
                 .map(|index| row.get::<_, String>(index))
                 .collect::<rusqlite::Result<Vec<_>>>()
         },

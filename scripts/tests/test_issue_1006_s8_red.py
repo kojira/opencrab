@@ -27,7 +27,7 @@ def lp(value: bytes) -> bytes:
 def source_fingerprint(table: str, columns: list[tuple[str, object]]) -> str:
     encoded = bytearray(b"opencrab/s8/source-row/v1\0")
     encoded += lp(table.encode())
-    encoded += struct.pack(">Q", 56)
+    encoded += struct.pack(">Q", 57)
     encoded += struct.pack(">I", len(columns))
     for name, value in columns:
         encoded += lp(name.encode())
@@ -55,7 +55,7 @@ class S8PublishedContractVectors(unittest.TestCase):
                     ("created_at", "2026-01-01T00:00:00Z"),
                     ("display_name", "Crab"), ("platform", "rest"),
                 ],
-                "2c6850f418281b0b4ede33a1a3ab379cef850e7a85dfd7d2679ee9209a5526a7",
+                "8addb00d52490e57c4ae221cc3383599f563af00527e786ebe72107ba8b9a6f6",
             ),
             "channel_config": (
                 [
@@ -66,7 +66,7 @@ class S8PublishedContractVectors(unittest.TestCase):
                     ("heartbeat_instructions", "Ping"),
                     ("updated_at", "2026-01-01T00:00:00Z"),
                 ],
-                "e9099467f8ece3abb668571cab576378cf02d894f2eaf911005c85c5c50f6348",
+                "38c5adc34e58b2fb8a26b851dc6034d8fb284ac8b4b81b1b4e6963b3fe013366",
             ),
             "session_watches": (
                 [
@@ -74,7 +74,7 @@ class S8PublishedContractVectors(unittest.TestCase):
                     ("interval_secs", 600), ("filter_json", '{"authors":["abc"]}'),
                     ("created_at", "2026-01-01T00:00:00Z"),
                 ],
-                "8150c628708b328fe4c4dfdf816caa806738fda29ea2fac1304532c62ae8911d",
+                "1d1b6f63fd285176be583a8e0f9bf6eff9341ec58e4feeb767522053f9091300",
             ),
             "agent_discord_config": (
                 [
@@ -82,7 +82,7 @@ class S8PublishedContractVectors(unittest.TestCase):
                     ("owner_discord_id", "42"), ("enabled", 1),
                     ("updated_at", "2026-01-01T00:00:00Z"), ("bot_user_id", "99"),
                 ],
-                "0db7c5133b00d98943329f5fa1cb9fff1bc6f262f37a111875246f831da5514e",
+                "4c07ecde5c01d1ccd062c72f0a1a22ae487466a1f0eb7804a9863e991a799a84",
             ),
             "agent_nostr_config": (
                 [
@@ -92,7 +92,7 @@ class S8PublishedContractVectors(unittest.TestCase):
                     ("updated_at", "2026-01-01T00:00:00Z"),
                     ("owner_pubkey", "owner-pub"), ("self_pubkey", "self-pub"),
                 ],
-                "f37159af0363c135d48435ed493b34f05ecea5ae3869294712ec82a6214cc788",
+                "80ba03a96109ec47692292bd1ccb52bcb5b4ccd595d887381e15823765a6221a",
             ),
         }
         for table, (columns, expected) in vectors.items():
@@ -106,7 +106,7 @@ class S8PublishedContractVectors(unittest.TestCase):
             "source_core_sha256", "destinations", "identity_dispositions",
             "channel_edges", "watch_edges", "credential_sources",
         ])
-        self.assertEqual(approval["core_user_version"], 56)
+        self.assertEqual(approval["core_user_version"], 57)
         self.assertEqual(
             [(x["kind_id"], x["path_id"]) for x in approval["destinations"]],
             sorted((x["kind_id"], x["path_id"]) for x in approval["destinations"]),
@@ -132,7 +132,7 @@ class S8ProductionSeamsRed(unittest.TestCase):
         self._require_migrator("offline executable")
 
     def test_strict_manifests_and_current_schema_refusal(self) -> None:
-        self._require_migrator("strict approval/verification JSON, v54/newer-than-56 refusal, and strict v56 acceptance")
+        self._require_migrator("strict approval/verification JSON, v54/newer-than-57 refusal, and strict v57 acceptance")
 
     def test_required_and_optional_table_shapes_fail_closed(self) -> None:
         self._require_migrator("required-table absence and optional concrete-table exact-shape refusal")

@@ -4,7 +4,7 @@ use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-pub const SOURCE_VERSION: u64 = 56;
+pub const SOURCE_VERSION: u64 = 57;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cell {
@@ -128,22 +128,6 @@ const REQUIRED_TABLES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "session_heartbeat_config",
-        &[
-            "agent_id",
-            "session_id",
-            "enabled",
-            "interval_secs",
-            "anchor_at",
-            "last_fired_at",
-            "updated_at",
-        ],
-    ),
-    (
-        "session_heartbeat_instructions",
-        &["agent_id", "session_id", "override_text", "updated_at"],
-    ),
-    (
         "api_principals",
         &[
             "id",
@@ -168,7 +152,7 @@ pub fn validate(conn: &Connection) -> Result<Vec<SourceRow>> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     ensure!(
         version == SOURCE_VERSION as i64,
-        "core schema must be exactly 56"
+        "core schema must be exactly 57"
     );
     for (table, columns) in REQUIRED_TABLES.iter().chain(
         CONCRETE_TABLES
