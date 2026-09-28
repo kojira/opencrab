@@ -53,7 +53,6 @@ pub fn start_config_watcher(
     db: opencrab_db::Db,
     running_default_model: String,
     tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
-    heartbeat_config_tx: tokio::sync::watch::Sender<opencrab_core::heartbeat::HeartbeatConfig>,
 ) -> JoinHandle<()> {
     let config_dir = config_dir.as_ref().to_path_buf();
 
@@ -122,7 +121,7 @@ pub fn start_config_watcher(
                     }
                 };
 
-                // #412: 検証に落ちた設定は**一切適用しない**。tools も heartbeat も
+                // #412: 検証に落ちた設定は**一切適用しない**。tools を
                 // 触らずに次のイベントを待つ（旧設定のまま動き続ける）。
                 if let Err(e) = validate_reloaded_config(&db, &running_default_model, &cfg) {
                     tracing::error!(
@@ -141,13 +140,6 @@ pub fn start_config_watcher(
                         tracing::error!("Failed to acquire write lock for tools_config: {}", e);
                     }
                 }
-
-                // Heartbeat設定もホットリロード
-                let hb_config = opencrab_core::heartbeat::HeartbeatConfig {
-                    interval_secs: cfg.agent.heartbeat_interval_secs,
-                    enabled: cfg.agent.heartbeat_enabled,
-                };
-                let _ = heartbeat_config_tx.send(hb_config);
             }
         }
     })
@@ -243,8 +235,8 @@ mod reload_validation_tests {
     }
 }
 
-/// watcher 本体の振る舞い（#412）: 拒否したリロードが `tools_config` にも
-/// heartbeat 通知にも**到達しない**こと。
+/// watcher 本体の振る舞い（#412）: 拒否したリロードが `tools_config` に
+/// **到達しない**こと。
 ///
 /// 検証の単体テストだけでは「Err を返す」までしか押さえられず、呼び出し側が
 /// その Err を無視していても気づけない。ここはファイルを実際に書いて watcher を
@@ -268,11 +260,10 @@ mod watcher_rejection_tests {
     /// 延々とリセットして一度も発火しない。
     const REWRITE_INTERVAL: Duration = Duration::from_millis(500);
 
-    fn config_text(provider: &str, model: &str, tools_enabled: bool, hb_secs: u64) -> String {
+    fn config_text(provider: &str, model: &str, tools_enabled: bool) -> String {
         format!(
             "[llm]\ndefault_provider = \"{provider}\"\ndefault_model = \"{model}\"\n\
-             [tools]\nenabled = {tools_enabled}\n\
-             [agent]\nheartbeat_interval_secs = {hb_secs}\n"
+             [tools]\nenabled = {tools_enabled}\n"
         )
     }
 
@@ -305,115 +296,44 @@ mod watcher_rejection_tests {
     }
 
     #[test]
-    fn rejected_reload_touches_neither_tools_nor_heartbeat() {
+    fn rejected_reload_does_not_touch_tools() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("test.toml");
-        std::fs::write(&path, config_text("p1", "m1", false, 60)).unwrap();
+        std::fs::write(&path, config_text("p1", "m1", false)).unwrap();
 
         // `model_pricing` は空。よって「変えたら拒否 / 変えなければ通る」の両方が出る。
         let db = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
         let tools_config = Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default()));
-        let (hb_tx, hb_rx) =
-            tokio::sync::watch::channel(opencrab_core::heartbeat::HeartbeatConfig {
-                interval_secs: 60,
-                enabled: false,
-            });
-
-        let _handle = start_config_watcher(
-            dir.path(),
-            db,
-            RUNNING.to_string(),
-            tools_config.clone(),
-            hb_tx,
-        );
+        let _handle =
+            start_config_watcher(dir.path(), db, RUNNING.to_string(), tools_config.clone());
 
         // 陽性対照（前）: default_model を変えない編集は適用される（watcher が生きている証拠）。
         assert!(
-            poll_with_rewrites(
-                &path,
-                &config_text("p1", "m1", true, 90),
-                APPLY_WAIT,
-                || { tools_config.read().unwrap().enabled && hb_rx.borrow().interval_secs == 90 }
-            ),
+            poll_with_rewrites(&path, &config_text("p1", "m1", true), APPLY_WAIT, || {
+                tools_config.read().unwrap().enabled
+            }),
             "default_model を変えない編集は適用されるはず（watcher が動いていない）"
         );
 
-        // 本題: 未登録モデルへ差し替える編集は、tools も heartbeat も動かさない。
+        // 本題: 未登録モデルへ差し替える編集は tools を動かさない。
         assert!(
             !poll_with_rewrites(
                 &path,
-                &config_text("p1", "m2", false, 120),
+                &config_text("p1", "m2", false),
                 REJECT_WINDOW,
-                || { !tools_config.read().unwrap().enabled || hb_rx.borrow().interval_secs == 120 }
+                || !tools_config.read().unwrap().enabled
             ),
-            "拒否したリロードが tools_config / heartbeat のどちらかへ到達した"
+            "拒否したリロードが tools_config へ到達した"
         );
 
         // 陽性対照（後）: 窓の**あと**にも適用が通ること。前の対照だけだと、窓の途中で
         // watcher が死んでいても「届かなかった」を「拒否された」と読んでしまう。
         // ここが通れば、窓のあいだ watcher は生きていたことになる。
         assert!(
-            poll_with_rewrites(
-                &path,
-                &config_text("p1", "m1", true, 150),
-                APPLY_WAIT,
-                || { tools_config.read().unwrap().enabled && hb_rx.borrow().interval_secs == 150 }
-            ),
+            poll_with_rewrites(&path, &config_text("p1", "m1", false), APPLY_WAIT, || {
+                !tools_config.read().unwrap().enabled
+            }),
             "陰性の窓のあとも watcher は生きているはず（窓の間に止まっていた）"
-        );
-    }
-
-    /// `heartbeat_enabled`（live G / global kill-switch）の変更が watch へ push されることを、
-    /// 実ファイル書き換えで両方向（true→false→true）確認する。
-    ///
-    /// **これは live G の心臓**。watcher が enabled を config から読み直さず起動時の値へ固定
-    /// （＝起動時スナップショット）に退行すると、**運用者が `heartbeat_enabled = false` にしても
-    /// discord- が止まらない**。上の `rejected_reload_touches_neither_tools_nor_heartbeat` は
-    /// `interval_secs` しか見ておらず enabled の追従を担保していなかったので、ここで別途固定する。
-    fn hb_config_text(enabled: bool) -> String {
-        format!(
-            "[llm]\ndefault_provider = \"p1\"\ndefault_model = \"m1\"\n\
-             [tools]\nenabled = true\n\
-             [agent]\nheartbeat_interval_secs = 60\nheartbeat_enabled = {enabled}\n"
-        )
-    }
-
-    #[test]
-    fn heartbeat_enabled_toggle_propagates_to_watch() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("hb.toml");
-        std::fs::write(&path, hb_config_text(true)).unwrap();
-
-        let db = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
-        let tools_config = Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default()));
-        let (hb_tx, hb_rx) =
-            tokio::sync::watch::channel(opencrab_core::heartbeat::HeartbeatConfig {
-                interval_secs: 60,
-                enabled: true,
-            });
-
-        let _handle = start_config_watcher(
-            dir.path(),
-            db,
-            RUNNING.to_string(),
-            tools_config.clone(),
-            hb_tx,
-        );
-
-        // G=false へ落とす編集が watch へ届く（default_model は不変なので validate を通る）。
-        assert!(
-            poll_with_rewrites(&path, &hb_config_text(false), APPLY_WAIT, || {
-                !hb_rx.borrow().enabled
-            }),
-            "heartbeat_enabled=false が watch へ push されない（live G kill-switch が壊れる＝起動時スナップショットに退行）"
-        );
-
-        // 逆方向: G=true へ戻す編集も届く。
-        assert!(
-            poll_with_rewrites(&path, &hb_config_text(true), APPLY_WAIT, || {
-                hb_rx.borrow().enabled
-            }),
-            "heartbeat_enabled=true への復帰が watch へ push されない"
         );
     }
 }

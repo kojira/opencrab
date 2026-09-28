@@ -1,9 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use opencrab_core::heartbeat::HeartbeatConfig;
 use opencrab_server::{config, config::AppConfig, AppState};
-use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 /// Owned results of the pre-spawn startup phase.
@@ -14,8 +12,6 @@ pub(super) struct BootstrapContext {
     pub(super) gate_admin_listener: tokio::net::UnixListener,
     pub(super) gate_admin_cleanup: opencrab_extgate::admin_socket::SocketCleanup,
     pub(super) gate_admin_router: axum::Router,
-    pub(super) heartbeat_config_tx: watch::Sender<HeartbeatConfig>,
-    pub(super) heartbeat_config_rx: watch::Receiver<HeartbeatConfig>,
     pub(super) state: AppState,
 }
 
@@ -158,17 +154,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     // 個別コマンドは実行時に run_agent_response 内でそのエージェント分だけ適用する。
     let tools_cfg = cfg.tools.clone();
 
-    // ハートビートの初期設定と live G の watch チャネル。
-    //
-    // **AppState 構築より前に作る**のは、`get_my_heartbeat`（PR3）が 会話セッションの
-    // ゲート理由（G=false）を本人へ見せるために live G を `AppState::heartbeat_config_rx` から
-    // 読むため（scheduler が発火時に読むのと同一源・hot-reload 追従）。tx は config watcher へ、
-    // rx は AppState と scheduler へ配る（受信端は clone 可能）。
-    let (heartbeat_config_tx, heartbeat_config_rx) = watch::channel(HeartbeatConfig {
-        interval_secs: cfg.agent.heartbeat_interval_secs,
-        enabled: cfg.agent.heartbeat_enabled,
-    });
-
     #[allow(unused_mut)]
     let mut state = AppState {
         db,
@@ -208,17 +193,12 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         // 外**で 1 度だけ解決し、以降の利用者（gateway 非依存の管理ツール / lifecycle
         // 通知 / Discord gateway_actions）は全てこの 1 つの値を参照する。
         default_subtask_webhook: cfg.default_subtask_webhook(),
-        // エージェントが自分で触るハートビート設定の境界（#247）。下限は運用者が
-        // `[agent] heartbeat_min_interval_secs` で決める。
-        heartbeat_limits: cfg.agent.heartbeat_limits(),
-        // 中央スケジューラの起床通知（#437 / #439）。発火ターン完了・global config 変更に
-        // 加え、set_my_heartbeat（PR3）からも鳴らして即時反映させる。
+        // 中央スケジューラの起床通知（#437 / #439）。発火ターン完了と schedule CRUD
+        // から鳴らして即時反映させる。
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
         // 受信箱消化ループの起床通知（#499）。webhook が新規イベントを積んだ直後に鳴らし、
         // ポーリング間隔を待たずに即消化させる（ポーリングは安全網として残す）。
         intake_wake: Arc::new(tokio::sync::Notify::new()),
-        // live G を読む口（#394 / 設計 §13.1）。scheduler と同一の watch 源。
-        heartbeat_config_rx: heartbeat_config_rx.clone(),
         // #588 TimedFire: 時刻発火の受け口レジストリ。各ゲートウェイのループが起動時に自分の
         // 受け口を登録し、scheduler が発火時に per-agent→共有で引く（空で作り後から register）。
         timed_fire_router: Arc::new(opencrab_actions::TimedFireRouter::new()),
@@ -231,8 +211,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         gate_admin_listener,
         gate_admin_cleanup,
         gate_admin_router,
-        heartbeat_config_tx,
-        heartbeat_config_rx,
         state,
     })
 }

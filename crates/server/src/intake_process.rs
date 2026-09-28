@@ -600,11 +600,7 @@ mod tests {
             subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
             subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
             default_subtask_webhook: None,
-            heartbeat_limits: opencrab_server::config::HeartbeatLimits::default(),
             scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-            heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(
-                opencrab_core::heartbeat::HeartbeatConfig::default(),
-            ),
         }
     }
 

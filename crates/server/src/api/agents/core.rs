@@ -120,8 +120,6 @@ pub struct PutAgentBody {
     pub personality: Option<String>,
     #[serde(default)]
     pub instructions: String,
-    #[serde(default)]
-    pub heartbeat_instructions: String,
     pub model: Option<String>,
     pub metadata_json: Option<String>,
 }
@@ -162,7 +160,6 @@ pub async fn put_agent(
         persona_name: body.persona_name,
         personality: body.personality,
         instructions: body.instructions,
-        heartbeat_instructions: body.heartbeat_instructions,
         model: body.model,
         reasoning_effort: existing_effort,
         web_search: existing_web_search,
