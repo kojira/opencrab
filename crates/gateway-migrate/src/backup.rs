@@ -28,7 +28,7 @@ pub fn create_or_load_set(
     let mut inputs = vec![(
         "core".to_string(),
         "core".to_string(),
-        "core-v56".to_string(),
+        "core-v57".to_string(),
         core_path.to_path_buf(),
     )];
     inputs.extend(destinations.iter().map(|(item, path)| {
