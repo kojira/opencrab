@@ -187,6 +187,85 @@ pub fn map_event(
     })
 }
 
+/// Owner keys from this instance's gateway access config, stated in every turn's context so the
+/// agent can recognise its owner from the hex author id shown in the Nostr prompt. Owner
+/// changes follow the gateway config automatically. Returns `None` when no owner is configured.
+pub fn owner_context(owners: &[String]) -> Option<String> {
+    let mut keys = owners
+        .iter()
+        .filter_map(|key| normalize_author_id(key))
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    if keys.is_empty() {
+        return None;
+    }
+    let listed = keys
+        .iter()
+        .map(|hex| match npub_of_hex(hex) {
+            Some(npub) => format!("{npub}（hex: {hex}）"),
+            None => hex.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("、");
+    Some(format!(
+        "[Nostr] あなたのオーナーの公開鍵: {listed}。投稿者の公開鍵がこれと一致すれば、その投稿はオーナー本人のものです。"
+    ))
+}
+
+fn npub_of_hex(hex: &str) -> Option<String> {
+    const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    let mut data = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for byte in bytes {
+        acc = (acc << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            data.push(((acc >> bits) & 31) as u8);
+        }
+    }
+    if bits > 0 {
+        data.push(((acc << (5 - bits)) & 31) as u8);
+    }
+    let hrp = b"npub";
+    let mut values = hrp.iter().map(|c| c >> 5).collect::<Vec<_>>();
+    values.push(0);
+    values.extend(hrp.iter().map(|c| c & 31));
+    values.extend(&data);
+    values.extend([0u8; 6]);
+    let polymod = values.iter().fold(1u32, |chk, value| {
+        let top = chk >> 25;
+        let mut chk = ((chk & 0x01ff_ffff) << 5) ^ u32::from(*value);
+        for (i, gen) in [
+            0x3b6a_57b2,
+            0x2650_8e6d,
+            0x1ea1_19fa,
+            0x3d42_33dd,
+            0x2a14_62b3,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if (top >> i) & 1 == 1 {
+                chk ^= gen;
+            }
+        }
+        chk
+    }) ^ 1;
+    let checksum = (0..6).map(|i| ((polymod >> (5 * (5 - i))) & 31) as u8);
+    let encoded = data
+        .into_iter()
+        .chain(checksum)
+        .map(|v| CHARSET[v as usize] as char)
+        .collect::<String>();
+    Some(format!("npub1{encoded}"))
+}
+
 pub fn bundle_members_line(origins: &[String]) -> String {
     format!(
         "[NOSTRBUNDLE/V1 {}]",
@@ -384,6 +463,20 @@ mod tests {
             content: "hello".into(),
             tags,
         }
+    }
+
+    #[test]
+    fn owner_context_lists_configured_owner_keys_as_npub_and_hex() {
+        // BIP-173 / NIP-19 reference vector.
+        let hex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        let npub = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
+        let context = owner_context(&[hex.to_ascii_uppercase(), hex.to_string()]).unwrap();
+        assert!(
+            context.contains(&format!("{npub}（hex: {hex}）")),
+            "{context}"
+        );
+        assert_eq!(context.matches(npub).count(), 1, "{context}");
+        assert_eq!(owner_context(&[]), None);
     }
 
     #[test]
