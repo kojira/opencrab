@@ -591,3 +591,46 @@ fn merge_definitions_dedups_report_progress_from_inner() {
         "merge 後も report_progress は1件（own 優先で dedup）"
     );
 }
+
+/// #612 RED-6: 旧ハートビートのツールはカタログに無く、手動発火は `run_my_schedule`（owner / co_agent
+/// だけに見える）に置き換わる。
+#[test]
+fn unified_trigger_catalog_has_no_heartbeat_tools_and_run_my_schedule_is_owner_only() {
+    let names: Vec<_> = SystemGatewayActions::own_definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    for removed in [
+        "get_my_heartbeat",
+        "set_my_heartbeat",
+        "run_my_heartbeat",
+        "update_heartbeat_instructions",
+        "read_heartbeat_instructions",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == removed),
+            "{removed} must be removed"
+        );
+    }
+    for kept in [
+        "get_my_schedules",
+        "set_my_schedule",
+        "update_my_schedule",
+        "delete_my_schedule",
+        "run_my_schedule",
+    ] {
+        assert!(names.iter().any(|name| name == kept), "{kept} missing");
+    }
+    let policy = opencrab_actions::tool_policy("run_my_schedule");
+    assert!(policy.owner_only, "run_my_schedule is owner / co_agent only");
+    for removed in [
+        "get_my_heartbeat",
+        "set_my_heartbeat",
+        "run_my_heartbeat",
+        "update_heartbeat_instructions",
+        "read_heartbeat_instructions",
+    ] {
+        assert!(!opencrab_actions::OWNER_ONLY_ACTIONS.contains(&removed));
+        assert!(!opencrab_actions::TRUSTED_ONLY_ACTIONS.contains(&removed));
+    }
+}

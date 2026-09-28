@@ -100,3 +100,45 @@ fn persisted_resolution_db_lock_failure_is_fail_closed() {
     assert!(!result.success);
     assert!(result.error.unwrap().contains("再試行"));
 }
+
+/// #612 I1〜I3: update_my_schedule の式変更・再有効化は last_fired_at を保持し、次回は now より後。
+#[test]
+fn update_my_schedule_keeps_last_fired_and_fires_after_now() {
+    let session_id = "opaque-schedule-session";
+    let state = state_with_alias(session_id);
+    let context = context(session_id);
+    let created = set_my_schedule(
+        &state,
+        &json!({"cron_expr": "@every 3h", "message": "patrol"}),
+        &context,
+    );
+    assert!(created.success, "create: {:?}", created.error);
+    let id = created.data.unwrap()["id"].as_i64().unwrap();
+    let last_fired = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+    {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::set_agent_schedule_last_fired(&conn, id, &last_fired).unwrap();
+    }
+    let after_now = |data: &serde_json::Value| {
+        let next = data["next_fire_at"].as_str().expect("next_fire_at");
+        chrono::DateTime::parse_from_rfc3339(next).unwrap() > chrono::Utc::now()
+    };
+
+    let changed = update_my_schedule(
+        &state,
+        &json!({"id": id, "cron_expr": "0 7 * * *"}),
+        &context,
+    );
+    assert!(changed.success, "cron change: {:?}", changed.error);
+    let data = changed.data.unwrap();
+    assert_eq!(data["last_fired_at"], last_fired.as_str());
+    assert!(after_now(&data), "cron 変更直後に即発火しない");
+
+    let disabled = update_my_schedule(&state, &json!({"id": id, "enabled": false}), &context);
+    assert!(disabled.success, "disable: {:?}", disabled.error);
+    let enabled = update_my_schedule(&state, &json!({"id": id, "enabled": true}), &context);
+    assert!(enabled.success, "enable: {:?}", enabled.error);
+    let data = enabled.data.unwrap();
+    assert_eq!(data["last_fired_at"], last_fired.as_str());
+    assert!(after_now(&data), "再有効化直後に即発火しない");
+}

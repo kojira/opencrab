@@ -428,3 +428,95 @@ fn rebuild_rejects_wrong_owner_for_heartbeat_and_schedule() {
     .unwrap();
     assert!(rebuild_entries(&test_router(), &conn, true, 1800, 300, &HashMap::new()).is_empty());
 }
+
+/// #612 §8.2 / RED-4: 同じセッションで `@every` と cron の 2 行が同時に due になったら、
+/// 両方とも TimedFire sink に届き、各プロンプトは自分の message を含む。
+#[tokio::test]
+async fn same_session_every_and_cron_rows_both_reach_timed_fire_sink_with_own_message() {
+    let mock = Arc::new(crate::bin_test_support::FixedTextMock::new("NO_REPLY"));
+    let state = crate::bin_test_support::app_state_with_agent(mock, AGENT_UUID);
+    let session_id = "opaque-concurrent-session";
+    let long_ago = (Utc::now() - Duration::days(2)).to_rfc3339();
+    let binding_id = {
+        let mut conn = state.db.lock().unwrap();
+        let (_, binding_id) = seed_generic_alias_binding(&mut conn, AGENT_UUID, session_id);
+        for (cron_expr, message) in [
+            ("@every 10m", "interval trigger message"),
+            ("0 7 * * *", "daily trigger message"),
+        ] {
+            opencrab_db::queries::insert_agent_schedule(
+                &conn,
+                &AgentScheduleRow {
+                    id: None,
+                    agent_id: AGENT_UUID.into(),
+                    session_id: session_id.into(),
+                    cron_expr: cron_expr.into(),
+                    timezone: "Asia/Tokyo".into(),
+                    message: message.into(),
+                    enabled: true,
+                    anchor_at: Some(long_ago.clone()),
+                    last_fired_at: None,
+                },
+            )
+            .unwrap();
+        }
+        binding_id
+    };
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let delivered = Arc::new(tokio::sync::Notify::new());
+    state
+        .timed_fire_router
+        .register_sink(Arc::new(CollectingS4Sink {
+            requests: Arc::clone(&requests),
+            delivered: Arc::clone(&delivered),
+        }));
+    let (_config_tx, config_rx) = watch::channel(HeartbeatConfig {
+        interval_secs: 600,
+        enabled: true,
+    });
+    let scheduler = tokio::spawn(run_scheduler(state.clone(), config_rx));
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if requests.lock().unwrap().len() >= 2 {
+                break;
+            }
+            delivered.notified().await;
+        }
+    })
+    .await
+    .expect("both due rows must reach the timed-fire sink");
+    scheduler.abort();
+    let _ = scheduler.await;
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        assert_eq!(request.binding_id, binding_id);
+        assert_eq!(request.session_id, session_id);
+    }
+    let interval: Vec<_> = requests
+        .iter()
+        .filter(|r| r.prompt.contains("interval trigger message"))
+        .collect();
+    let daily: Vec<_> = requests
+        .iter()
+        .filter(|r| r.prompt.contains("daily trigger message"))
+        .collect();
+    assert_eq!(
+        interval.len(),
+        1,
+        "interval row prompt carries its own message"
+    );
+    assert_eq!(daily.len(), 1, "daily row prompt carries its own message");
+    assert!(!interval[0].prompt.contains("daily trigger message"));
+    drop(requests);
+
+    let conn = state.db.lock().unwrap();
+    for row in opencrab_db::queries::list_agent_schedules(&conn, AGENT_UUID).unwrap() {
+        assert!(
+            row.last_fired_at.is_some(),
+            "sink accepted → last_fired_at advances"
+        );
+    }
+}

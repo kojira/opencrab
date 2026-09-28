@@ -188,3 +188,66 @@ async fn s3_timed_continuation_routes_generic_binding_session_once_after_reconne
     }
     assert_eq!(say_count, 1, "one accepted fire must deliver exactly once");
 }
+
+/// #612 §8.2 / RED-4: 同じセッションへ同時に 2 本の時刻トリガーが届いたら、捨てず・束ねず、
+/// 共有 `SessionLocks` の下で別々のターンとして直列に走る。各ターンは自分の message を持つ。
+#[tokio::test]
+async fn same_session_timed_fires_run_as_separate_serialized_turns() {
+    let h = Harness::start().await;
+    *h.runtime.reply.lock().unwrap() = "NO_REPLY".into();
+    let session_id = "opaque-concurrent-triggers";
+    let instance_id = uuid();
+    let binding_id = uuid();
+    insert_named_session(&h, session_id);
+    put_instance(&h, &instance_id, true).await;
+    put_binding(&h, &binding_id, &instance_id, session_id).await;
+    let mut stream = h.connect().await;
+    hello_ok(&mut stream, &instance_id, 1).await;
+    assert_eq!(ack_bind(&mut stream).await, binding_id);
+    wait_binding_acknowledged(&h, &instance_id, &binding_id).await;
+
+    let (release_tx, release_rx) = oneshot::channel();
+    *h.runtime.hold_rx.lock().unwrap() = Some(release_rx);
+    let entered = h.runtime.turn_entered.notified();
+    tokio::pin!(entered);
+
+    let sink = ExtgateTimedFireSink::new(Arc::clone(&h.state), h.runtime.clone());
+    let mut interval = timed_fire_request(&binding_id, session_id, "agent-1");
+    interval.prompt = "interval trigger message".into();
+    let mut daily = timed_fire_request(&binding_id, session_id, "agent-1");
+    daily.prompt = "daily trigger message".into();
+    sink.fire_timed_turn(interval);
+    sink.fire_timed_turn(daily);
+
+    tokio::time::timeout(Duration::from_secs(3), &mut entered)
+        .await
+        .expect("first timed turn did not start");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        h.runtime.system_prompts.lock().unwrap().len(),
+        1,
+        "second trigger waits for the session lock (turns must not overlap)"
+    );
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
+
+    release_tx.send(()).unwrap();
+    for _ in 0..200 {
+        if h.runtime.turns.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 2, "both triggers ran");
+    let prompts = h.runtime.system_prompts.lock().unwrap().clone();
+    assert_eq!(prompts.len(), 2);
+    let interval_turns = prompts
+        .iter()
+        .filter(|p| p.contains("interval trigger message") && !p.contains("daily trigger message"))
+        .count();
+    let daily_turns = prompts
+        .iter()
+        .filter(|p| p.contains("daily trigger message") && !p.contains("interval trigger message"))
+        .count();
+    assert_eq!(interval_turns, 1, "interval turn carries only its own message");
+    assert_eq!(daily_turns, 1, "daily turn carries only its own message");
+}

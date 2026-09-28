@@ -203,30 +203,37 @@ mod tests {
         assert_eq!(enabled[0].agent_id, "a1");
     }
 
+    /// I2（#612）: `update_agent_schedule` は `last_fired_at` を書かない。別の値を渡しても DB は不変。
     #[test]
-    fn update_overwrites_and_last_fired_can_reset() {
+    fn update_agent_schedule_never_writes_last_fired_at() {
         let conn = crate::init_memory().unwrap();
         let id = insert_agent_schedule(&conn, &sample("a1", true)).unwrap();
         set_agent_schedule_last_fired(&conn, id, "2026-08-09T07:00:00+09:00").unwrap();
+
+        let mut row = get_agent_schedule(&conn, id).unwrap().unwrap();
+        row.cron_expr = "@every 3h".to_string();
+        row.anchor_at = Some("2026-08-09T10:00:00+09:00".to_string());
+        row.last_fired_at = Some("2030-01-01T00:00:00+00:00".to_string());
+        update_agent_schedule(&conn, &row).unwrap();
+        let got = get_agent_schedule(&conn, id).unwrap().unwrap();
+        assert_eq!(got.cron_expr, "@every 3h");
+        assert_eq!(got.anchor_at.as_deref(), Some("2026-08-09T10:00:00+09:00"));
+        assert_eq!(
+            got.last_fired_at.as_deref(),
+            Some("2026-08-09T07:00:00+09:00"),
+            "update は last_fired_at を変えない"
+        );
+
+        row.last_fired_at = None;
+        update_agent_schedule(&conn, &row).unwrap();
         assert_eq!(
             get_agent_schedule(&conn, id)
                 .unwrap()
                 .unwrap()
-                .last_fired_at,
-            Some("2026-08-09T07:00:00+09:00".to_string())
-        );
-
-        // 明示の cron 変更 → anchor=now, last_fired=NULL でリセットできる（API 層の方針）。
-        let mut row = get_agent_schedule(&conn, id).unwrap().unwrap();
-        row.cron_expr = "@every 3h".to_string();
-        row.anchor_at = Some("2026-08-09T10:00:00+09:00".to_string());
-        row.last_fired_at = None;
-        update_agent_schedule(&conn, &row).unwrap();
-        let got = get_agent_schedule(&conn, id).unwrap().unwrap();
-        assert_eq!(got.cron_expr, "@every 3h");
-        assert_eq!(
-            got.last_fired_at, None,
-            "明示変更で last_fired をリセットできる"
+                .last_fired_at
+                .as_deref(),
+            Some("2026-08-09T07:00:00+09:00"),
+            "None を渡しても消えない"
         );
     }
 

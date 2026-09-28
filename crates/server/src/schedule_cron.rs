@@ -275,6 +275,34 @@ mod tests {
         assert_ne!(jst, utc_tz, "tz が発火時刻に効いている");
     }
 
+    // ---- I1（#612）: base = max(last_fired_at, anchor_at) ----
+
+    #[test]
+    fn next_fire_does_not_repeat_the_last_fired_slot() {
+        // 発火直後（base = last_fired = スロットちょうど）に同じスロットを返さない。
+        let slot = utc("2026-08-08T22:00:00Z"); // 07:00 JST
+        let anchor = utc("2026-08-01T00:00:00Z");
+        let next = schedule_next_fire_at("0 7 * * *", "Asia/Tokyo", Some(anchor), Some(slot))
+            .unwrap()
+            .unwrap();
+        assert_eq!(next, utc("2026-08-09T22:00:00Z"), "翌日のスロット");
+    }
+
+    #[test]
+    fn next_fire_after_expression_change_does_not_go_back_to_past_slots() {
+        // 式変更で anchor=now、last_fired は古いまま保持 → 新しい式で過去へ遡らない。
+        let now = Utc::now();
+        let old_last = now - Duration::days(3);
+        let cron = schedule_next_fire_at("0 7 * * *", "Asia/Tokyo", Some(now), Some(old_last))
+            .unwrap()
+            .unwrap();
+        assert!(cron > now, "cron: 次回は now より後 ({cron} <= {now})");
+        let every = schedule_next_fire_at("@every 3h", "Asia/Tokyo", Some(now), Some(old_last))
+            .unwrap()
+            .unwrap();
+        assert_eq!(every, now + Duration::hours(3), "@every: anchor 起点");
+    }
+
     #[test]
     fn next_fire_cron_none_base_is_immediate() {
         assert_eq!(
