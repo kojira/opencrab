@@ -38,8 +38,7 @@
 - **Co-Agent Management** — Trust relationships between agents with configurable permission levels (owner/agent/co-agent)
 - **Trusted User Whitelist** — Per-agent Discord user trust management
 - **Sandboxed Workspace** — Per-agent file operations with path traversal protection
-- **Heartbeat Loop** — Periodic autonomous agent activity with configurable interval and graceful shutdown. Firing is **per agent**: an agent that opted in gets its own tick (so an agent with no Discord channel — a Nostr-only one, for example — still runs), and agents that have not opted in keep the older per-channel firing. The speech outlet is transport-independent, so what a tick produces is delivered by whichever gateway the agent has
-- **Self-Configured Heartbeat** — Agents read and write their own heartbeat settings (`get_my_heartbeat` / `set_my_heartbeat`); intervals below the configured floor are rejected in the same turn so the agent can retry with a valid value. The stored settings are re-read on every tick, so an agent that already has a heartbeat loop running switches to per-agent firing immediately; what is fixed at startup is only the *set of agents a loop is started for*, so an agent with no loop yet (a Nostr-only one, with no entry under `gateway.discord.agent_ids`) begins firing after the next restart
+- **Time Triggers** — Interval (`@every 30m`) and time-of-day (cron) triggers are the same thing: rows in `agent_schedules`, several per session, each with its own `message` (the prompt the agent receives when it fires). One central scheduler fires every row through the same TimedFire path into the session's gateway; triggers that land on the same session run as separate, serialized turns. Changing a row's expression or re-enabling it never fires immediately — the next fire is always after now
 - **Attachment Anchors** — Discord attachments leave a trace in the stored conversation, not just in the model call: images are passed as vision content parts *and* noted in the message body as `[画像添付: name (type)]`, non-image files as `[添付ファイル: name (type), NB]`. Without the anchor an image left no record in `session_logs`, and later turns concluded the agent had made it up
 - **Self-Learning** — Experience-based learning, peer learning, reflection, and skill creation
 - **LLM Self-Selection** — Agents dynamically select LLMs per task based on past experience
@@ -282,8 +281,7 @@ only exist on that transport's turns.
 | **Memory** | `rebuild_memory_index`, `update_memory_index_config` | all turns (`crates/server`) |
 | **Tool Permissions** | `add_allowed_command`, `list_allowed_commands`, `remove_allowed_command`, `manage_allowed_commands` | all turns (`crates/server/src/agent_management.rs`, `system_actions.rs`) |
 | **Subtask** | `spawn_subtask`, `cancel_subtask`, `steer_subtask`, `report_progress` | all turns (`crates/server`) |
-| **Heartbeat** | `update_heartbeat_instructions`, `read_heartbeat_instructions`, `get_my_heartbeat`, `set_my_heartbeat`, `run_my_heartbeat` | all turns (`crates/server/src/heartbeat_instructions.rs`, `agent_heartbeat.rs`) — channel-scoped instruction overrides only mean something on Discord, but the `*_my_heartbeat` pair (an agent's own enable flag and interval) applies anywhere; `run_my_heartbeat` (#599, owner/co_agent only) fires a heartbeat now without waiting, through the exact same path as a timed fire (`heartbeat_fire::run_one_heartbeat`), and does not update `last_fired_at` |
-| **Schedules (#455, #477)** | `get_my_schedules`, `set_my_schedule`, `update_my_schedule`, `delete_my_schedule` | all turns (`crates/server/src/agent_schedule.rs`) — an agent registers/reads/updates/deletes its own cron / `@every` schedules for the current session (fires a message into the session on the central scheduler); update/delete take an id from `get_my_schedules` and only touch rows that belong to the caller's own agent id and current session; not gated by `heartbeat_enabled` |
+| **Schedules (#455, #477, #612)** | `get_my_schedules`, `set_my_schedule`, `update_my_schedule`, `delete_my_schedule`, `run_my_schedule` | all turns (`crates/server/src/agent_schedule.rs`) — an agent registers/reads/updates/deletes its own cron / `@every` triggers for the current session (each fires its own message into the session on the central scheduler); update/delete/run take an id from `get_my_schedules` and only touch rows that belong to the caller's own agent id and current session; `run_my_schedule` (owner/co_agent only) fires a row now without waiting, through the exact same path as a timed fire (`heartbeat_fire::run_one_heartbeat`), and does not update `last_fired_at` |
 | **Nostr identity** | `nostr_generate_key`, `nostr_list_keys`, `nostr_switch_identity` | all turns (`crates/server/src/system_actions.rs`) — bootstrap tools, exposed **before** any key exists (see [Nostr](#nostr)) |
 | **Nostr relay target** | `get_my_nostr_relay`, `set_my_nostr_relay` | all turns (`crates/server/src/agent_nostr_relay.rs`) — where the agent's inbound Nostr events get mirrored (a Discord webhook URL); also editable from the dashboard |
 | **Nostr messaging** | `nostr_post`, `nostr_reply`, `nostr_zap`, `nostr_upload` | Nostr turns only (`crates/nostr`) — the reply path used while handling an inbound Nostr event; `nostr_zap` carried a trusted-only gate until #306 dropped it. **`nostr_dm` was removed by #514** (DM is not handled at all — receive discarded, send forbidden; see [Nostr](#nostr)) |
@@ -296,7 +294,7 @@ only exist on that transport's turns.
 
 The rows above name every action in `SystemGatewayActions::own_definitions()` (the "all turns"
 rows) and every action in `DiscordGatewayActions::definitions()`. Each action is defined in
-exactly one place: `cancel_subtask`, the two heartbeat-instruction actions, the six
+exactly one place: `cancel_subtask`, the six
 webhook-target actions, `create_skill` and `request_peer_review` used to be defined by Discord
 as well, but #157 S2/S3/S5/S6/S7 removed those definitions so the transport-independent
 implementation is the only one. The three Nostr bootstrap tools are the reverse case: they are
@@ -315,10 +313,10 @@ definition sets against constants, not against this table, so those rows can sti
 without a test failing.
 
 Visibility is not uniform. `configure_*`, `manage_allowed_commands`,
-`update_heartbeat_instructions` and the core action `update_instructions` are owner-only —
+`run_my_schedule` and the core action `update_instructions` are owner-only —
 that is `OWNER_ONLY_ACTIONS` in full. `nostr_list_keys`, `nostr_switch_identity`,
-the `*_my_nostr_relay` and `*_my_heartbeat` pairs,
-`read_heartbeat_instructions`, the voice actions and `create_skill` are trusted-only, meaning
+the `*_my_nostr_relay` pair, the schedule CRUD tools,
+the voice actions and `create_skill` are trusted-only, meaning
 they are neither listed nor executable on a turn driven by an untrusted external user. That gate
 is what keeps an inbound Nostr note from talking the agent into swapping its own key:
 `nostr_switch_identity` is unreachable from a `caller=Agent` turn, and the passthrough refuses
@@ -431,7 +429,7 @@ Standard skills defined in `skills/`:
 
 Configuration is loaded from `config/default.toml` and **hot-reloaded** when files in `config/` change:
 
-- **Agent settings** — `heartbeat_interval_secs`, `heartbeat_enabled`, `heartbeat_min_interval_secs` (the floor `set_my_heartbeat` enforces, 300; the ceiling is a code constant of 24h), `workspace_path`, `max_workspace_size_mb`. Watch the two layers of default: the shipped `config/default.toml` sets `heartbeat_interval_secs = 1800` and `heartbeat_enabled = true`, while the code fallbacks used when a key is *absent* are 29 and `false` (`crates/server/src/config.rs`). These are the global values; an agent that has opted in via `set_my_heartbeat` fires on its own stored interval instead (the dashboard's heartbeat fields under Agent Channels are the older per-Discord-channel setting, a separate table)
+- **Agent settings** — `workspace_path`, `max_workspace_size_mb`. The legacy `heartbeat_interval_secs`, `heartbeat_enabled` and `heartbeat_min_interval_secs` keys are still accepted but no longer read: time triggers live in `agent_schedules` (#612)
 - **LLM providers** — Default provider and default model (`[llm] default_provider` / `default_model`), per-use-case model selection, fallback chains, model aliases, self-selection toggle. Provider settings are also editable from the dashboard and saved to the DB, which then takes precedence over this file
 - **Gateway settings** — REST port (8080), per-agent Discord token (DB-persisted), per-agent Nostr key/relays/filter (DB-persisted), CLI toggle
 - **Database** — SQLite path

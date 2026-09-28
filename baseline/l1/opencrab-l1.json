@@ -1137,7 +1137,7 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "自分（このエージェント）の人格・モデル・推論強度・web 検索などの設定を変更する（owner 限定）。model/reasoning_effort/web_search の変更は次ターン以降に反映される。指示文の変更は update_instructions / update_heartbeat_instructions を使う。省略したフィールドは変更しない。null で解除（既定に戻す。persona_name は解除不可）。",
+          "description": "自分（このエージェント）の人格・モデル・推論強度・web 検索などの設定を変更する（owner 限定）。model/reasoning_effort/web_search の変更は次ターン以降に反映される。指示文の変更は update_instructions を使う。省略したフィールドは変更しない。null で解除（既定に戻す。persona_name は解除不可）。",
           "input_schema": {
             "properties": {
               "job_title": {
@@ -1549,28 +1549,7 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "自分（呼び出し元エージェント）のハートビート設定を、いま話しているセッションについて読み出す。返り値: enabled（有効か）、interval_secs（実効間隔・秒）、next_fire_at（このセッションのハートビートがゲートされていない場合に次に発火する予定時刻。照会した時点で anchor_at と最終発火時刻から算出する値で、UTC の RFC3339 文字列。無効・発火経路なし・間隔が不正などでは null。gated=true のときはこの時刻が来ても実際には発火しない）、anchor_at / last_fired_at（起点と最終発火時刻。同じく UTC RFC3339 か null）、min/max/default_interval_secs（設定できる下限・上限・既定）。設定したことが無ければ無効。有効なのに発火しないときは gated=true と、その理由 gated_reason（例: グローバルのハートビートが無効化されている / 間隔が不正）を返すので、なぜ発火しないのかを自分で把握できる。他のエージェントの設定は読めない。",
-          "input_schema": {
-            "properties": {},
-            "type": "object"
-          },
-          "name": "get_my_heartbeat",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": true
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "自分（呼び出し元エージェント）の定時実行スケジュールを、いま話しているセッションについて一覧で読み出す。各要素: id、cron_expr（cron 式または @every 形式）、timezone、message（発火時に自分へ渡される指示文）、enabled、next_fire_at（次に発火する予定時刻。照会時に anchor と最終発火時刻から算出する UTC の RFC3339 文字列。無効・式が不正などでは null）、gated / gated_reason（enabled なのに発火しない状態とその理由）、anchor_at / last_fired_at。他のエージェントや別セッションのスケジュールは読めない。定時実行はハートビート（固定短間隔）とは別物で、「毎朝 7 時」「3 時間ごと」のような時刻・周期ベースの自律実行。",
+          "description": "自分（呼び出し元エージェント）の定時実行スケジュールを、いま話しているセッションについて一覧で読み出す。各要素: id、cron_expr（cron 式または @every 形式）、timezone、message（発火時に自分へ渡される指示文）、enabled、next_fire_at（次に発火する予定時刻。照会時に anchor と最終発火時刻から算出する UTC の RFC3339 文字列。無効・式が不正などでは null）、gated / gated_reason（enabled なのに発火しない状態とその理由）、anchor_at / last_fired_at。他のエージェントや別セッションのスケジュールは読めない。「毎朝 7 時」のような定時実行も「30 分ごと」のような定期（間隔）実行も同じスケジュールで表す（@every 形式が定期実行）。",
           "input_schema": {
             "properties": {},
             "type": "object"
@@ -1962,43 +1941,6 @@
           },
           "name": "plan_next_memory_window",
           "origin": "dispatcher",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": true
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "現在のハートビート指示をagent、session、またはeffectiveスコープで読み出す。",
-          "input_schema": {
-            "properties": {
-              "scope": {
-                "enum": [
-                  "agent",
-                  "session",
-                  "effective"
-                ],
-                "type": "string"
-              },
-              "session_id": {
-                "description": "scope=session/effectiveのとき必須。対象の汎用セッションID。",
-                "type": "string"
-              }
-            },
-            "required": [
-              "scope"
-            ],
-            "type": "object"
-          },
-          "name": "read_heartbeat_instructions",
-          "origin": "gateway",
           "visibility": {
             "depth_capped": false,
             "owner_only": false,
@@ -2539,17 +2481,20 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "自分（呼び出し元エージェント）のハートビートを、次の発火時刻を待たずに今すぐ手動で発火する。テストや動作確認に使う（時間発火とまったく同じ経路——宣言→サブタスク→継続→投稿——を通るので、待たずに一連の流れを検証できる）。対象は省略すると「いま話しているセッション」、session_id を渡せばそのセッション。発火先は現在のセッションに登録された配送経路で、経路の無いセッションは拒否される。実際のターンは今のターンが終わってから走る（すぐに投げて返る）。time-fire の位相をずらさないため last_fired_at は更新しない（次回の定期発火時刻は変わらない）。オーナーまたは co_agent のみ実行できる。",
+          "description": "自分（呼び出し元エージェント）の定時実行スケジュールを、id 指定で、次の発火時刻を待たずに今すぐ手動で発火する。id は get_my_schedules が返したもの（他のエージェントや別セッションのスケジュールは発火できない）。テストや動作確認に使う（定時発火とまったく同じ経路を通る）。実際のターンは今のターンが終わってから同じセッションで走る（すぐに投げて返る）。定時発火の位相をずらさないため last_fired_at は更新しない（次回の定期発火時刻は変わらない）。オーナーまたは co_agent のみ実行できる。",
           "input_schema": {
             "properties": {
-              "session_id": {
-                "description": "発火する対象セッションの session_id。省略すると、いま話しているセッションを発火する。",
-                "type": "string"
+              "id": {
+                "description": "発火するスケジュールの id（get_my_schedules が返した値）。",
+                "type": "integer"
               }
             },
+            "required": [
+              "id"
+            ],
             "type": "object"
           },
-          "name": "run_my_heartbeat",
+          "name": "run_my_schedule",
           "origin": "gateway",
           "visibility": {
             "depth_capped": false,
@@ -2878,37 +2823,7 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "自分（呼び出し元エージェント）のハートビート（自律実行）の有効/無効と間隔を、いま話しているセッションに対して設定する。対象は常にこのセッションで、配送経路を選ぶ必要はない。他のエージェントや別のチャンネルの設定は変えられない。間隔には運用者が決めた下限があり、それより短い値は拒否される（丸められない）ので、拒否されたらエラーに載っている下限以上で指定し直すこと。有効にした直後から次回発火時刻が算出され、再起動を待たず即時に反映される。発火タイミングは非対称: 一度も発火していないセッションを初めて有効化したときは間隔をまるごと待つ（今すぐは発火しない）が、既に発火したことがあるセッションの再有効化や間隔の短縮では、前回発火（や起点）＋新しい間隔が既に過ぎていれば直ちに発火する（設定変更で発火の記録は消えない）。今すぐ試したいなら run_my_heartbeat を使う。ハートビートで何をするかの指示文はこのツールでは変えられない（オーナー限定の別ツール）。",
-          "input_schema": {
-            "properties": {
-              "enabled": {
-                "description": "自律実行を有効にするか。省略すると現在の値を保つ。",
-                "type": "boolean"
-              },
-              "interval_secs": {
-                "description": "ハートビートの間隔（秒）。下限は get_my_heartbeat の min_interval_secs、上限は max_interval_secs。null を渡すと運用者の既定に戻る。省略すると現在の値を保つ。",
-                "type": "integer"
-              }
-            },
-            "type": "object"
-          },
-          "name": "set_my_heartbeat",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": true
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "自分（呼び出し元エージェント）の定時実行スケジュールを、いま話しているセッションに対して登録する。ハートビート（固定短間隔の tick）とは別の、時刻・周期ベースの自律実行。対象は常にこのセッションで、配送経路を選ぶ必要はない。cron_expr は「標準 5 フィールド cron」（例: `0 7 * * *` = 毎朝 7 時、`0 */3 * * *` = 3 時間ごとの 0 分）か「@every 形式」（例: `@every 3h`、`@every 1h30m`、`@every 45m`）で指定する。timezone は cron の評価に使う IANA 名で、省略時は Asia/Tokyo。message は発火時に自分へ渡される指示文（例: ニュースを巡回して要約を書く）。cron 式が不正なら登録は拒否され、その場でエラーが返る（実行時に黙って発火しないことはない）ので、エラーが出たら直して呼び直すこと。enabled は省略時 true（登録するとそのまま定期実行が始まる）。登録直後から次回発火時刻が算出され、再起動を待たず即時に反映される。運用者がハートビートを無効化していても、定時実行は止まらない（別概念）。",
+          "description": "自分（呼び出し元エージェント）の定時実行スケジュールを、いま話しているセッションに対して登録する。定時実行も定期（間隔）実行もこのツールで登録する。同じセッションに複数登録でき、スケジュールごとに message を持つ。対象は常にこのセッションで、配送経路を選ぶ必要はない。cron_expr は「標準 5 フィールド cron」（例: `0 7 * * *` = 毎朝 7 時、`0 */3 * * *` = 3 時間ごとの 0 分）か「@every 形式」（例: `@every 30m`、`@every 3h`、`@every 1h30m`）で指定する。間隔実行は `@every 30m` のように書く。timezone は cron の評価に使う IANA 名で、省略時は Asia/Tokyo。message は発火時に自分へ渡される指示文（例: ニュースを巡回して要約を書く）。cron 式が不正なら登録は拒否され、その場でエラーが返る（実行時に黙って発火しないことはない）ので、エラーが出たら直して呼び直すこと。enabled は省略時 true（登録するとそのまま定期実行が始まる）。登録直後から次回発火時刻が算出され、再起動を待たず即時に反映される。登録直後に即発火はしない（最初の発火は次のスロット）。今すぐ試したいなら run_my_schedule を使う（オーナー / co_agent のみ）。",
           "input_schema": {
             "properties": {
               "cron_expr": {
@@ -3183,51 +3098,6 @@
             "depth_capped": false,
             "owner_only": false,
             "trusted_only": true
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "dispatchable",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "ハートビート時の振る舞い指示をエージェント全体または現在の汎用セッション対象について更新する。オーナー限定。",
-          "input_schema": {
-            "properties": {
-              "instructions": {
-                "description": "新しいハートビート指示の全文（最大4000字）。",
-                "type": "string"
-              },
-              "reason": {
-                "description": "変更理由（監査ログに記録。省略可）。",
-                "type": "string"
-              },
-              "scope": {
-                "enum": [
-                  "agent",
-                  "session"
-                ],
-                "type": "string"
-              },
-              "session_id": {
-                "description": "scope=sessionのとき必須。対象の汎用セッションID。",
-                "type": "string"
-              }
-            },
-            "required": [
-              "scope",
-              "instructions"
-            ],
-            "type": "object"
-          },
-          "name": "update_heartbeat_instructions",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": true,
-            "trusted_only": false
           }
         },
         {

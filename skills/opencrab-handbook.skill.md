@@ -47,8 +47,10 @@ OpenCrab の設定はほぼすべて **(a) ダッシュボード** と **(b) エ
   codex/cursor/acp などの subprocess プロバイダは適用後に起動確認し、失敗したら
   **自動的に直前の設定へロールバック**して、その旨を結果で知らせます。api_key だけは
   安全上このツールから変更不可（ダッシュボードで設定）。
-- **自分の指示 / heartbeat 指示**: `update_instructions` /
-  `update_heartbeat_instructions`（owner 限定）。
+- **自分の指示**: `update_instructions`（owner 限定）。
+- **定期実行 / 定時実行**: `set_my_schedule` / `get_my_schedules` / `update_my_schedule` /
+  `delete_my_schedule`（間隔は `@every 30m`、定時は cron。行ごとに message を持つ）。
+  今すぐ試すなら `run_my_schedule`（owner / co_agent 限定）。
 - **その他（Nostr / Discord / MCP / Voice / 許可コマンド / チャンネル設定 等）**:
   現状は主にダッシュボードから。エージェントツール化は順次拡張中。無いツールを
   探す前に、まず関数定義一覧に該当ツールがあるか確認してください。
