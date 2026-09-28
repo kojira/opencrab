@@ -15,33 +15,33 @@ pub struct NoReplyTermination {
     discarded: Option<String>,
 }
 
-/// 応答の最終行全体が `NO_REPLY` の場合だけ終端解釈する。
-/// 文中・引用内・途中行の `NO_REPLY` は通常の発話としてそのまま保持する。
+/// 応答の最終行が `NO_REPLY` で終わる場合だけ終端解釈する。
+/// 最終行全体が `NO_REPLY` の場合と、本文末尾に同行で付いた場合（#1038）の両方を含む。
+/// 直前が語の一部（英数字・`_`）なら終端ではない。文中・引用内・途中行の
+/// `NO_REPLY` は通常の発話としてそのまま保持する。
 pub fn terminate_at_no_reply(response: &str) -> NoReplyTermination {
     let without_trailing_whitespace = response.trim_end();
-    let line_start = without_trailing_whitespace
-        .rfind('\n')
-        .map_or(0, |idx| idx + 1);
-    let final_line = &without_trailing_whitespace[line_start..];
-
-    if final_line.trim() != NO_REPLY_SENTINEL {
-        return NoReplyTermination {
-            kept: response.to_string(),
-            discarded: None,
-        };
+    let Some(before_marker) = without_trailing_whitespace.strip_suffix(NO_REPLY_SENTINEL) else {
+        return ordinary(response);
+    };
+    if before_marker
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    {
+        return ordinary(response);
     }
-
-    let mut kept_end = line_start.saturating_sub(1);
-    if response[..kept_end].ends_with('\r') {
-        kept_end -= 1;
-    }
-    let marker_start = line_start
-        + final_line
-            .find(NO_REPLY_SENTINEL)
-            .expect("trimmed final line equals sentinel");
+    let marker_start = before_marker.len();
     NoReplyTermination {
-        kept: response[..kept_end].to_string(),
+        kept: before_marker.trim_end().to_string(),
         discarded: Some(response[marker_start..].to_string()),
+    }
+}
+
+fn ordinary(response: &str) -> NoReplyTermination {
+    NoReplyTermination {
+        kept: response.to_string(),
+        discarded: None,
     }
 }
 
@@ -162,6 +162,35 @@ mod tests {
         assert!(!termination.terminated());
         assert_eq!(termination.speech(), Some(text));
         assert_eq!(termination.kept(), text);
+    }
+
+    /// #1038: 最終行末尾に同行で付いた NO_REPLY も終端。前の本文は1回だけ配送する。
+    #[test]
+    fn observed_labomi_trailing_same_line_no_reply_terminates() {
+        let raw = "元気だよ〜！気にかけてくれてありがとね。今回はこれだけにしておくね。 NO_REPLY\n";
+        let termination = terminate_at_no_reply(raw);
+        assert!(termination.terminated());
+        assert_eq!(
+            termination.speech(),
+            Some("元気だよ〜！気にかけてくれてありがとね。今回はこれだけにしておくね。")
+        );
+        assert_eq!(termination.trailing_discard(), None);
+    }
+
+    #[test]
+    fn trailing_no_reply_directly_after_punctuation_terminates() {
+        let termination = terminate_at_no_reply("一行目\n了解だよ。NO_REPLY");
+        assert!(termination.terminated());
+        assert_eq!(termination.speech(), Some("一行目\n了解だよ。"));
+    }
+
+    #[test]
+    fn trailing_marker_glued_to_word_is_ordinary_speech() {
+        for text in ["設定値は FOO_NO_REPLY", "変数 xNO_REPLY"] {
+            let termination = terminate_at_no_reply(text);
+            assert!(!termination.terminated(), "{text}");
+            assert_eq!(termination.speech(), Some(text));
+        }
     }
 
     #[test]
