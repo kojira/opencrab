@@ -32,36 +32,24 @@ impl TimedFireSink for CollectingS4Sink {
 }
 
 #[tokio::test]
-async fn s4_scheduler_emits_generic_binding_session_with_session_instructions_and_advances_anchor()
-{
+async fn s4_scheduler_emits_generic_binding_session_with_row_message_and_advances_last_fired() {
     let mock = Arc::new(crate::bin_test_support::FixedTextMock::new("NO_REPLY"));
     let state = crate::bin_test_support::app_state_with_agent(mock, AGENT_UUID);
     let session_id = "opaque-s4-session";
-    let binding_id = {
+    let (binding_id, schedule_id) = {
         let mut conn = state.db.lock().unwrap();
         let (_, binding_id) = seed_generic_alias_binding(&mut conn, AGENT_UUID, session_id);
-        opencrab_db::queries::upsert_session_heartbeat_config(
+        let schedule_id = opencrab_db::queries::insert_agent_schedule(
             &conn,
-            &SessionHeartbeatConfigRow {
-                agent_id: AGENT_UUID.into(),
-                session_id: session_id.into(),
-                enabled: true,
-                interval_secs: Some(600),
-                anchor_at: Some((Utc::now() - Duration::hours(1)).to_rfc3339()),
-                last_fired_at: None,
-            },
+            &every_row(
+                AGENT_UUID,
+                session_id,
+                "generic S4 instruction",
+                Some((Utc::now() - Duration::hours(1)).to_rfc3339()),
+            ),
         )
         .unwrap();
-        opencrab_db::queries::upsert_session_heartbeat_instructions(
-            &conn,
-            &opencrab_db::queries::SessionHeartbeatInstructionsRow {
-                agent_id: AGENT_UUID.into(),
-                session_id: session_id.into(),
-                override_text: Some("generic S4 instruction".into()),
-            },
-        )
-        .unwrap();
-        binding_id
+        (binding_id, schedule_id)
     };
 
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -72,14 +60,10 @@ async fn s4_scheduler_emits_generic_binding_session_with_session_instructions_an
             requests: Arc::clone(&requests),
             delivered: Arc::clone(&delivered),
         }));
-    let (_config_tx, config_rx) = watch::channel(HeartbeatConfig {
-        interval_secs: 600,
-        enabled: true,
-    });
-    let scheduler = tokio::spawn(run_scheduler(state.clone(), config_rx));
+    let scheduler = tokio::spawn(run_scheduler(state.clone()));
     tokio::time::timeout(std::time::Duration::from_secs(3), delivered.notified())
         .await
-        .expect("generic heartbeat did not fire");
+        .expect("generic schedule did not fire");
     scheduler.abort();
     let _ = scheduler.await;
 
@@ -91,19 +75,34 @@ async fn s4_scheduler_emits_generic_binding_session_with_session_instructions_an
     drop(requests);
 
     let conn = state.db.lock().unwrap();
-    let row = opencrab_db::queries::get_session_heartbeat_config(&conn, AGENT_UUID, session_id)
+    let row = opencrab_db::queries::get_agent_schedule(&conn, schedule_id)
         .unwrap()
         .unwrap();
     assert!(
         row.last_fired_at.is_some(),
         "successful live fire advances last_fired_at"
     );
-    let rebuilt = rebuild_entries(&test_router(), &conn, true, 600, 300, &HashMap::new());
-    let heartbeat = rebuilt
-        .iter()
-        .find(|entry| matches!(entry.kind, FireKind::Heartbeat { .. }))
-        .unwrap();
-    assert!(heartbeat.next_fire_at.unwrap() > Utc::now());
+    let rebuilt = rebuild_entries(&test_router(), &conn, &HashMap::new());
+    assert!(rebuilt[0].next_fire_at.unwrap() > Utc::now());
+}
+
+fn every_row(
+    agent_id: &str,
+    session_id: &str,
+    message: &str,
+    anchor_at: Option<String>,
+) -> AgentScheduleRow {
+    AgentScheduleRow {
+        id: None,
+        agent_id: agent_id.into(),
+        session_id: session_id.into(),
+        cron_expr: "@every 10m".into(),
+        timezone: "UTC".into(),
+        message: message.into(),
+        enabled: true,
+        anchor_at,
+        last_fired_at: None,
+    }
 }
 
 #[tokio::test]
@@ -155,16 +154,9 @@ async fn s3_scheduler_fans_authentic_exact_and_global_sources_to_canonical_desti
 
         let old_anchor = (Utc::now() - Duration::hours(1)).to_rfc3339();
         for session_id in [EXACT_ADDRESS, global_session.as_str()] {
-            opencrab_db::queries::upsert_session_heartbeat_config(
+            opencrab_db::queries::insert_agent_schedule(
                 &conn,
-                &SessionHeartbeatConfigRow {
-                    agent_id: AGENT_UUID.into(),
-                    session_id: session_id.into(),
-                    enabled: true,
-                    interval_secs: Some(600),
-                    anchor_at: Some(old_anchor.clone()),
-                    last_fired_at: None,
-                },
+                &every_row(AGENT_UUID, session_id, "run", Some(old_anchor.clone())),
             )
             .unwrap();
         }
@@ -178,12 +170,7 @@ async fn s3_scheduler_fans_authentic_exact_and_global_sources_to_canonical_desti
             destinations: Arc::clone(&destinations),
             delivered: Arc::clone(&delivered),
         }));
-    let (_config_tx, config_rx) = watch::channel(HeartbeatConfig {
-        interval_secs: 600,
-        enabled: true,
-    });
-
-    let scheduler = tokio::spawn(run_scheduler(state.clone(), config_rx));
+    let scheduler = tokio::spawn(run_scheduler(state.clone()));
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             if destinations.lock().unwrap().len() >= 2 {
@@ -209,7 +196,7 @@ async fn s3_scheduler_fans_authentic_exact_and_global_sources_to_canonical_desti
 }
 
 #[test]
-fn persisted_physical_session_still_admits_heartbeat_and_schedule() {
+fn persisted_physical_session_still_admits_schedule() {
     let mut conn = opencrab_db::init_memory().unwrap();
     let (instance_id, _) =
         seed_generic_alias_binding(&mut conn, AGENT_UUID, "opaque-existing-session");
@@ -226,36 +213,14 @@ fn persisted_physical_session_still_admits_heartbeat_and_schedule() {
     )
     .unwrap();
     tx.commit().unwrap();
-    opencrab_db::queries::upsert_session_heartbeat_config(
-        &conn,
-        &SessionHeartbeatConfigRow {
-            agent_id: AGENT_UUID.into(),
-            session_id: session_id.clone(),
-            enabled: true,
-            interval_secs: Some(600),
-            anchor_at: None,
-            last_fired_at: None,
-        },
-    )
-    .unwrap();
     opencrab_db::queries::insert_agent_schedule(
         &conn,
-        &AgentScheduleRow {
-            id: None,
-            agent_id: AGENT_UUID.into(),
-            session_id,
-            cron_expr: "@every 10m".into(),
-            timezone: "UTC".into(),
-            message: "run".into(),
-            enabled: true,
-            anchor_at: None,
-            last_fired_at: None,
-        },
+        &every_row(AGENT_UUID, &session_id, "run", None),
     )
     .unwrap();
 
-    let entries = rebuild_entries(&test_router(), &conn, true, 1800, 300, &HashMap::new());
-    assert_eq!(entries.len(), 2);
+    let entries = rebuild_entries(&test_router(), &conn, &HashMap::new());
+    assert_eq!(entries.len(), 1);
 }
 
 fn seed_generic_alias_scheduler_rows(
@@ -264,38 +229,21 @@ fn seed_generic_alias_scheduler_rows(
     session_id: &str,
 ) -> (String, String) {
     let ids = seed_generic_alias_binding(conn, agent_id, session_id);
-    opencrab_db::queries::upsert_session_heartbeat_config(
-        conn,
-        &SessionHeartbeatConfigRow {
-            agent_id: agent_id.into(),
-            session_id: session_id.into(),
-            enabled: true,
-            interval_secs: Some(600),
-            anchor_at: Some((Utc::now() - Duration::hours(1)).to_rfc3339()),
-            last_fired_at: None,
-        },
-    )
-    .unwrap();
     opencrab_db::queries::insert_agent_schedule(
         conn,
-        &AgentScheduleRow {
-            id: None,
-            agent_id: agent_id.into(),
-            session_id: session_id.into(),
-            cron_expr: "@every 10m".into(),
-            timezone: "UTC".into(),
-            message: "run".into(),
-            enabled: true,
-            anchor_at: Some((Utc::now() - Duration::hours(1)).to_rfc3339()),
-            last_fired_at: None,
-        },
+        &every_row(
+            agent_id,
+            session_id,
+            "run",
+            Some((Utc::now() - Duration::hours(1)).to_rfc3339()),
+        ),
     )
     .unwrap();
     ids
 }
 
 #[test]
-fn rebuild_requires_persisted_alias_for_heartbeat_and_schedule_without_writes() {
+fn rebuild_requires_persisted_alias_for_schedule_without_writes() {
     let mut conn = opencrab_db::init_memory().unwrap();
     let session_id = "opaque-existing-session";
     let (instance_id, binding_id) =
@@ -303,19 +251,9 @@ fn rebuild_requires_persisted_alias_for_heartbeat_and_schedule_without_writes() 
     let router = test_router();
     let changes = conn.total_changes();
 
-    let entries = rebuild_entries(&router, &conn, true, 1800, 300, &HashMap::new());
-    assert_eq!(
-        entries.len(),
-        2,
-        "valid alias must admit heartbeat and schedule"
-    );
-    assert!(entries
-        .iter()
-        .any(|entry| matches!(entry.kind, FireKind::Heartbeat { .. })));
-    assert!(entries
-        .iter()
-        .any(|entry| matches!(entry.kind, FireKind::ScheduledMessage { .. })));
-    let repeated = rebuild_entries(&router, &conn, true, 1800, 300, &HashMap::new());
+    let entries = rebuild_entries(&router, &conn, &HashMap::new());
+    assert_eq!(entries.len(), 1, "valid alias must admit the schedule");
+    let repeated = rebuild_entries(&router, &conn, &HashMap::new());
     assert_eq!(
         repeated.len(),
         entries.len(),
@@ -328,7 +266,7 @@ fn rebuild_requires_persisted_alias_for_heartbeat_and_schedule_without_writes() 
         [&binding_id],
     )
     .unwrap();
-    assert!(rebuild_entries(&router, &conn, true, 1800, 300, &HashMap::new()).is_empty());
+    assert!(rebuild_entries(&router, &conn, &HashMap::new()).is_empty());
     conn.execute(
         "UPDATE gate_bindings SET closed_at = NULL WHERE binding_id = ?1",
         [&binding_id],
@@ -339,7 +277,7 @@ fn rebuild_requires_persisted_alias_for_heartbeat_and_schedule_without_writes() 
         [&instance_id],
     )
     .unwrap();
-    assert!(rebuild_entries(&router, &conn, true, 1800, 300, &HashMap::new()).is_empty());
+    assert!(rebuild_entries(&router, &conn, &HashMap::new()).is_empty());
     conn.execute(
         "UPDATE gate_instances SET deleted_at = NULL WHERE instance_id = ?1",
         [&instance_id],
@@ -367,13 +305,13 @@ fn rebuild_requires_persisted_alias_for_heartbeat_and_schedule_without_writes() 
     )
     .unwrap();
     assert!(
-        rebuild_entries(&router, &conn, true, 1800, 300, &HashMap::new()).is_empty(),
-        "ambiguous aliases must admit neither heartbeat nor schedule"
+        rebuild_entries(&router, &conn, &HashMap::new()).is_empty(),
+        "ambiguous aliases must not admit the schedule"
     );
 }
 
 #[test]
-fn rebuild_rejects_wrong_owner_for_heartbeat_and_schedule() {
+fn rebuild_rejects_wrong_owner_for_schedule() {
     let mut conn = opencrab_db::init_memory().unwrap();
     let session_id = "opaque-owned-session";
     seed_generic_alias_scheduler_rows(&mut conn, AGENT_UUID, session_id);
@@ -388,7 +326,6 @@ fn rebuild_rejects_wrong_owner_for_heartbeat_and_schedule() {
             persona_name: "persona".into(),
             personality: None,
             instructions: String::new(),
-            heartbeat_instructions: String::new(),
             model: None,
             reasoning_effort: None,
             web_search: None,
@@ -396,35 +333,99 @@ fn rebuild_rejects_wrong_owner_for_heartbeat_and_schedule() {
         },
     )
     .unwrap();
-    conn.execute("DELETE FROM session_heartbeat_config", [])
-        .unwrap();
     conn.execute("DELETE FROM agent_schedules", []).unwrap();
-    opencrab_db::queries::upsert_session_heartbeat_config(
-        &conn,
-        &SessionHeartbeatConfigRow {
-            agent_id: "other-agent".into(),
-            session_id: session_id.into(),
-            enabled: true,
-            interval_secs: Some(600),
-            anchor_at: None,
-            last_fired_at: None,
-        },
-    )
-    .unwrap();
     opencrab_db::queries::insert_agent_schedule(
         &conn,
-        &AgentScheduleRow {
-            id: None,
-            agent_id: "other-agent".into(),
-            session_id: session_id.into(),
-            cron_expr: "@every 10m".into(),
-            timezone: "UTC".into(),
-            message: "run".into(),
-            enabled: true,
-            anchor_at: None,
-            last_fired_at: None,
-        },
+        &every_row("other-agent", session_id, "run", None),
     )
     .unwrap();
-    assert!(rebuild_entries(&test_router(), &conn, true, 1800, 300, &HashMap::new()).is_empty());
+    assert!(rebuild_entries(&test_router(), &conn, &HashMap::new()).is_empty());
+}
+
+/// #612 §8.2 / RED-4: 同じセッションで `@every` と cron の 2 行が同時に due になったら、
+/// 両方とも TimedFire sink に届き、各プロンプトは自分の message を含む。
+#[tokio::test]
+async fn same_session_every_and_cron_rows_both_reach_timed_fire_sink_with_own_message() {
+    let mock = Arc::new(crate::bin_test_support::FixedTextMock::new("NO_REPLY"));
+    let state = crate::bin_test_support::app_state_with_agent(mock, AGENT_UUID);
+    let session_id = "opaque-concurrent-session";
+    let long_ago = (Utc::now() - Duration::days(2)).to_rfc3339();
+    let binding_id = {
+        let mut conn = state.db.lock().unwrap();
+        let (_, binding_id) = seed_generic_alias_binding(&mut conn, AGENT_UUID, session_id);
+        for (cron_expr, message) in [
+            ("@every 10m", "interval trigger message"),
+            ("0 7 * * *", "daily trigger message"),
+        ] {
+            opencrab_db::queries::insert_agent_schedule(
+                &conn,
+                &AgentScheduleRow {
+                    id: None,
+                    agent_id: AGENT_UUID.into(),
+                    session_id: session_id.into(),
+                    cron_expr: cron_expr.into(),
+                    timezone: "Asia/Tokyo".into(),
+                    message: message.into(),
+                    enabled: true,
+                    anchor_at: Some(long_ago.clone()),
+                    last_fired_at: None,
+                },
+            )
+            .unwrap();
+        }
+        binding_id
+    };
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let delivered = Arc::new(tokio::sync::Notify::new());
+    state
+        .timed_fire_router
+        .register_sink(Arc::new(CollectingS4Sink {
+            requests: Arc::clone(&requests),
+            delivered: Arc::clone(&delivered),
+        }));
+    let scheduler = tokio::spawn(run_scheduler(state.clone()));
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if requests.lock().unwrap().len() >= 2 {
+                break;
+            }
+            delivered.notified().await;
+        }
+    })
+    .await
+    .expect("both due rows must reach the timed-fire sink");
+    scheduler.abort();
+    let _ = scheduler.await;
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        assert_eq!(request.binding_id, binding_id);
+        assert_eq!(request.session_id, session_id);
+    }
+    let interval: Vec<_> = requests
+        .iter()
+        .filter(|r| r.prompt.contains("interval trigger message"))
+        .collect();
+    let daily: Vec<_> = requests
+        .iter()
+        .filter(|r| r.prompt.contains("daily trigger message"))
+        .collect();
+    assert_eq!(
+        interval.len(),
+        1,
+        "interval row prompt carries its own message"
+    );
+    assert_eq!(daily.len(), 1, "daily row prompt carries its own message");
+    assert!(!interval[0].prompt.contains("daily trigger message"));
+    drop(requests);
+
+    let conn = state.db.lock().unwrap();
+    for row in opencrab_db::queries::list_agent_schedules(&conn, AGENT_UUID).unwrap() {
+        assert!(
+            row.last_fired_at.is_some(),
+            "sink accepted → last_fired_at advances"
+        );
+    }
 }

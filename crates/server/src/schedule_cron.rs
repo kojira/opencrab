@@ -110,7 +110,8 @@ pub fn validate_schedule(cron_expr: &str, timezone: &str) -> Result<(), Schedule
 
 /// 次回発火時刻を UTC で算出する（真実は再計算・キャッシュ列なし・設計 §7.2）。
 ///
-/// - `base = last_fired_at.or(anchor_at)`。
+/// - `base = later_of(last_fired_at, anchor_at)`（I1・#612）。設定変更は `anchor_at = now` だけを
+///   動かすので、変更後の次回は now より後になり、`last_fired` 以前のスロットへも遡らない。
 /// - `@every dur`: `base + dur`。`base` が無ければ `None`（＝起点なし＝即発火可）。
 /// - 標準 cron: `base`（無ければ `None`＝即発火可）以降の**最初のスロット**を `timezone` で
 ///   評価して返す。croner は渡した `DateTime` の tz で評価するので、`base` を `timezone` へ
@@ -124,7 +125,8 @@ pub fn schedule_next_fire_at(
     anchor_at: Option<DateTime<Utc>>,
     last_fired_at: Option<DateTime<Utc>>,
 ) -> Result<Option<DateTime<Utc>>, ScheduleParseError> {
-    let base = last_fired_at.or(anchor_at);
+    // `Option` の順序は `None < Some` なので、`max` が「遅い方（片方だけならそれ）」になる。
+    let base = last_fired_at.max(anchor_at);
 
     if let Some(dur) = parse_every(cron_expr)? {
         // `@every`: 起点 + 周期。起点が無ければ即発火可（None）。
@@ -273,6 +275,34 @@ mod tests {
         let jst = schedule_next_fire_at("0 7 * * *", "Asia/Tokyo", Some(base), None).unwrap();
         let utc_tz = schedule_next_fire_at("0 7 * * *", "UTC", Some(base), None).unwrap();
         assert_ne!(jst, utc_tz, "tz が発火時刻に効いている");
+    }
+
+    // ---- I1（#612）: base = max(last_fired_at, anchor_at) ----
+
+    #[test]
+    fn next_fire_does_not_repeat_the_last_fired_slot() {
+        // 発火直後（base = last_fired = スロットちょうど）に同じスロットを返さない。
+        let slot = utc("2026-08-08T22:00:00Z"); // 07:00 JST
+        let anchor = utc("2026-08-01T00:00:00Z");
+        let next = schedule_next_fire_at("0 7 * * *", "Asia/Tokyo", Some(anchor), Some(slot))
+            .unwrap()
+            .unwrap();
+        assert_eq!(next, utc("2026-08-09T22:00:00Z"), "翌日のスロット");
+    }
+
+    #[test]
+    fn next_fire_after_expression_change_does_not_go_back_to_past_slots() {
+        // 式変更で anchor=now、last_fired は古いまま保持 → 新しい式で過去へ遡らない。
+        let now = Utc::now();
+        let old_last = now - Duration::days(3);
+        let cron = schedule_next_fire_at("0 7 * * *", "Asia/Tokyo", Some(now), Some(old_last))
+            .unwrap()
+            .unwrap();
+        assert!(cron > now, "cron: 次回は now より後 ({cron} <= {now})");
+        let every = schedule_next_fire_at("@every 3h", "Asia/Tokyo", Some(now), Some(old_last))
+            .unwrap()
+            .unwrap();
+        assert_eq!(every, now + Duration::hours(3), "@every: anchor 起点");
     }
 
     #[test]

@@ -252,7 +252,6 @@ fn final_conversation_has_zero_raw_identifiers_across_all_render_paths() {
             persona_name: "くらぶ".into(),
             personality: None,
             instructions: String::new(),
-            heartbeat_instructions: String::new(),
             model: None,
             reasoning_effort: None,
             web_search: None,

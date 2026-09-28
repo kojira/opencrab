@@ -12,9 +12,7 @@ use async_trait::async_trait;
 use opencrab_llm::message::{ChatRequest, ChatResponse, Choice, FinishReason, Message, Usage};
 use opencrab_llm::router::LlmRouter;
 use opencrab_llm::traits::{LlmProvider, ModelInfo};
-use opencrab_server::{
-    config, disconnected_heartbeat_config_rx, subtask_registries, AppState, SharedLlmRouter,
-};
+use opencrab_server::{config, subtask_registries, AppState, SharedLlmRouter};
 
 /// 常に固定テキストを返す最小 mock。生成回数も数える。
 pub(crate) struct FixedTextMock {
@@ -104,7 +102,6 @@ pub(crate) fn app_state_with_agent(provider: Arc<dyn LlmProvider>, agent_id: &st
                 persona_name: "p".to_string(),
                 personality: None,
                 instructions: String::new(),
-                heartbeat_instructions: String::new(),
                 model: None,
                 reasoning_effort: None,
                 web_search: None,
@@ -153,11 +150,7 @@ pub(crate) fn app_state_with_agent(provider: Arc<dyn LlmProvider>, agent_id: &st
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),
         default_subtask_webhook: None,
-        heartbeat_limits: config::HeartbeatLimits::default(),
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
-        heartbeat_config_rx: disconnected_heartbeat_config_rx(
-            opencrab_core::heartbeat::HeartbeatConfig::default(),
-        ),
     }
 }
 

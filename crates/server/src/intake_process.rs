@@ -2,10 +2,9 @@
 //!
 //! # なぜ heartbeat と別ループ・別セッションか
 //!
-//! 中央スケジューラ（#439・#465）のタスク自体は常時起動だが、heartbeat の**発火は enabled な
-//! セッションに対してだけ**行われる（`scheduler.rs` は `list_enabled_session_heartbeat_configs`
-//! で enabled 行だけを発火エントリに組み、`discord-` にはさらに live G ゲートも掛ける）。inbox
-//! 消化を heartbeat の発火へ相乗りさせると、webhook 対象エージェントの heartbeat が無効なとき
+//! 中央スケジューラ（#439・#465）のタスク自体は常時起動だが、時間トリガーの**発火は enabled な
+//! `agent_schedules` 行に対してだけ**行われる（#612）。inbox
+//! 消化を時間トリガーの発火へ相乗りさせると、webhook 対象エージェントのトリガーが無いとき
 //! **inbox が黙って消化されない**（silent no-op）。それを避けるため、heartbeat の有効・無効に
 //! 依存しない常時起動の専用ループにする（`spawn_intake_process_loop`）。
 //!
@@ -551,7 +550,6 @@ mod tests {
                     persona_name: "p".to_string(),
                     personality: None,
                     instructions: String::new(),
-                    heartbeat_instructions: String::new(),
                     model: None,
                     reasoning_effort: None,
                     web_search: None,
@@ -601,11 +599,7 @@ mod tests {
             subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
             subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
             default_subtask_webhook: None,
-            heartbeat_limits: opencrab_server::config::HeartbeatLimits::default(),
             scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-            heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(
-                opencrab_core::heartbeat::HeartbeatConfig::default(),
-            ),
         }
     }
 

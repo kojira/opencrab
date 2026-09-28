@@ -141,7 +141,6 @@ async fn main() -> anyhow::Result<()> {
                         },
                         personality: None,
                         instructions: String::new(),
-                        heartbeat_instructions: String::new(),
                         model: None,
                         reasoning_effort: None,
                         web_search: None,

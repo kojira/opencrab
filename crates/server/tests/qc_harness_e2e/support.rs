@@ -397,7 +397,6 @@ fn upsert_test_agent(db: &opencrab_db::Db) -> i64 {
             persona_name: "p".into(),
             personality: None,
             instructions: String::new(),
-            heartbeat_instructions: String::new(),
             model: None,
             reasoning_effort: None,
             web_search: None,
@@ -453,9 +452,7 @@ fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppSt
         subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
         default_subtask_webhook: None,
-        heartbeat_limits: Default::default(),
         scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-        heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(Default::default()),
         timed_fire_router: std::sync::Arc::new(opencrab_actions::TimedFireRouter::new()),
         progress_debounce: std::sync::Arc::new(
             opencrab_server::subtask_registries::ProgressDebounce::new(),

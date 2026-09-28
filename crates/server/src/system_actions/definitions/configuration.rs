@@ -90,7 +90,7 @@ fn configure_self_definition() -> GatewayActionDef {
                 description:
                     "自分（このエージェント）の人格・モデル・推論強度・web 検索などの設定を変更する\
                 （owner 限定）。model/reasoning_effort/web_search の変更は次ターン以降に反映される。\
-                指示文の変更は update_instructions / update_heartbeat_instructions を使う。\
+                指示文の変更は update_instructions を使う。\
                 省略したフィールドは変更しない。null で解除（既定に戻す。persona_name は解除不可）。"
                         .to_string(),
                 parameters: json!({

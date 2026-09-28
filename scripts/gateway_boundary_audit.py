@@ -102,12 +102,6 @@ DEFERRED_GENERIC_CALLER_ROLE_IDENTITIES = {
         81,
         "GatewayCaller::TrustedUser => CallerIdentity::TrustedUser,",
     ),
-    (
-        "shared-concrete-schema",
-        "crates/server/src/heartbeat_instructions.rs",
-        112,
-        "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
-    ),
 }
 
 VALID_CLASSIFICATIONS = {

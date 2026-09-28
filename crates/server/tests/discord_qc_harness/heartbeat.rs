@@ -38,55 +38,31 @@ const HB4_FABRICATED: &str = "hb4-未接続なのに投稿された（捏造検�
 const M_HB5: &str = "HBFIVEMARK";
 const HB5_REPORT: &str = "hb5-別セッション作業中でも完了";
 
-/// agent 単位の heartbeat 指示文を設定する（`resolve_heartbeat_instructions` の "agent" ソース）。
-/// これが `run_one_heartbeat` の system プロンプトへ載り、mock が heartbeat 起点のターンを識別する。
-fn set_hb_instructions(core: &Core, text: &str) {
+/// 時間トリガー行（#612・`agent_schedules`）を seed し、その id を返す。行の `message` が
+/// `run_one_heartbeat` のプロンプトへ載り、mock が時間トリガー起点のターンを識別する。
+fn seed_schedule_row(core: &Core, session_id: &str, message: &str) -> i64 {
     let conn = core.extgate.db.lock().unwrap();
-    conn.execute(
-        "UPDATE agents SET heartbeat_instructions=?1 WHERE agent_id=?2",
-        [text, AGENT_ID],
-    )
-    .unwrap();
-}
-
-/// heartbeat 設定行を seed する（このセッションが heartbeat 対象という**前提**を実データで置く）。
-///
-/// 本テストは受け口（`resolve_target` → `run_one_heartbeat`）を駆動するので、この行の**列挙**
-/// （`list_and_build_heartbeat_entries`）と interval 計算は通らない（それは bin 側で integration
-/// test から不可視・scheduler 単体テストの範囲）。ここでは「configured なセッションだけが発火先に
-/// なる」という前提を明示するために置く（seam 駆動でも観測結果は変わらない）。
-fn seed_hb_config(core: &Core, session_id: &str) {
-    let conn = core.extgate.db.lock().unwrap();
-    let projected_override = opencrab_db::queries::get_agent(&conn, AGENT_ID)
-        .unwrap()
-        .unwrap()
-        .heartbeat_instructions;
-    opencrab_db::queries::upsert_session_heartbeat_config(
+    opencrab_db::queries::insert_agent_schedule(
         &conn,
-        &opencrab_db::queries::SessionHeartbeatConfigRow {
+        &opencrab_db::queries::AgentScheduleRow {
+            id: None,
             agent_id: AGENT_ID.into(),
             session_id: session_id.into(),
+            cron_expr: "@every 1m".into(),
+            timezone: "UTC".into(),
+            message: message.into(),
             enabled: true,
-            interval_secs: Some(60),
             anchor_at: None,
             last_fired_at: None,
         },
     )
-    .unwrap();
-    opencrab_db::queries::upsert_session_heartbeat_instructions(
-        &conn,
-        &opencrab_db::queries::SessionHeartbeatInstructionsRow {
-            agent_id: AGENT_ID.into(),
-            session_id: session_id.into(),
-            override_text: Some(projected_override),
-        },
-    )
-    .unwrap();
+    .unwrap()
 }
 
-/// scheduler 実経路（`resolve_target` → `run_one_heartbeat`）で heartbeat を 1 回起こす。
+/// scheduler 実経路（`resolve_target` → `run_one_heartbeat`）で時間トリガー行を 1 回発火する。
 /// extgate descriptor 未登録なら `resolve_target` が None を返し発火しない（現 tip の #925 未実装状態）。
-async fn fire_heartbeat_via_scheduler_seam(core: &Core, session_id: &str) {
+async fn fire_heartbeat_via_scheduler_seam(core: &Core, session_id: &str, message: &str) {
+    let schedule_id = seed_schedule_row(core, session_id, message);
     let target = {
         let conn = core.state.db.lock().unwrap();
         core.state
@@ -94,7 +70,14 @@ async fn fire_heartbeat_via_scheduler_seam(core: &Core, session_id: &str) {
             .resolve_persisted_target(&conn, session_id, AGENT_ID)
     };
     if let Some(target) = target {
-        opencrab_server::heartbeat_fire::run_one_heartbeat(&core.state, AGENT_ID, &target).await;
+        opencrab_server::heartbeat_fire::run_one_heartbeat(
+            &core.state,
+            AGENT_ID,
+            &target,
+            schedule_id,
+            message,
+        )
+        .await;
     }
 }
 
@@ -196,14 +179,9 @@ async fn heartbeat_h1_two_posts_flag_only_on_last() {
     let fixture = Fixture::new();
     let (_client, binding_id) = wire_hb(&core, &fixture, CH_HB1).await;
     let session_id = format!("extgate-{binding_id}");
-    set_hb_instructions(
-        &core,
-        &format!("{M_HB1} 巡回して報告することがあれば 2 回に分けて投稿して"),
-    );
-    seed_hb_config(&core, &session_id);
-    set_hb_instructions(&core, "agent fallback must not replace the projected session override");
+    let message = format!("{M_HB1} 巡回して報告することがあれば 2 回に分けて投稿して");
 
-    fire_heartbeat_via_scheduler_seam(&core, &session_id).await;
+    fire_heartbeat_via_scheduler_seam(&core, &session_id, &message).await;
 
     // 現 tip では descriptor 未登録 → 発火せず → 本文2 が出ないのでこの wait は false（→ 下の count 赤）。
     let done = {
@@ -364,10 +342,9 @@ async fn heartbeat_h2_no_reply_stays_silent() {
     let fixture = Fixture::new();
     let (_client, binding_id) = wire_hb(&core, &fixture, CH_HB2).await;
     let session_id = format!("extgate-{binding_id}");
-    set_hb_instructions(&core, &format!("{M_HB2} 特に無ければ何もしないで"));
-    seed_hb_config(&core, &session_id);
+    let message = format!("{M_HB2} 特に無ければ何もしないで");
 
-    fire_heartbeat_via_scheduler_seam(&core, &session_id).await;
+    fire_heartbeat_via_scheduler_seam(&core, &session_id, &message).await;
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     // 発火して 1 ターンは走る（緑）: 現 tip は発火しないので 0 → 赤。
@@ -454,13 +431,9 @@ async fn heartbeat_h3_declaration_then_subtask_then_report() {
     let fixture = Fixture::new();
     let (_client, binding_id) = wire_hb(&core, &fixture, CH_HB3).await;
     let session_id = format!("extgate-{binding_id}");
-    set_hb_instructions(
-        &core,
-        &format!("{M_HB3} 宣言してから subtask で作業して、終わったら報告して"),
-    );
-    seed_hb_config(&core, &session_id);
+    let message = format!("{M_HB3} 宣言してから subtask で作業して、終わったら報告して");
 
-    fire_heartbeat_via_scheduler_seam(&core, &session_id).await;
+    fire_heartbeat_via_scheduler_seam(&core, &session_id, &message).await;
 
     let both = {
         let buf = buf.clone();
@@ -580,8 +553,7 @@ async fn heartbeat_other_parent_subtask_does_not_suppress_completed_flag() {
     let fixture = Fixture::new();
     let (_client, binding_id) = wire_hb(&core, &fixture, CH_HB5).await;
     let session_id = format!("extgate-{binding_id}");
-    set_hb_instructions(&core, &format!("{M_HB5} 完了報告を投稿して"));
-    seed_hb_config(&core, &session_id);
+    let message = format!("{M_HB5} 完了報告を投稿して");
 
     let other_parent_session = "extgate-other-parent";
     let pending = tokio::spawn(std::future::pending::<()>());
@@ -614,7 +586,7 @@ async fn heartbeat_other_parent_subtask_does_not_suppress_completed_flag() {
         "heartbeat の parent session 自体は idle であること"
     );
 
-    fire_heartbeat_via_scheduler_seam(&core, &session_id).await;
+    fire_heartbeat_via_scheduler_seam(&core, &session_id, &message).await;
 
     let completed = {
         let buf = buf.clone();
@@ -689,10 +661,8 @@ async fn heartbeat_h4_unbound_gateway_fires_nothing() {
     // gateway は起動しない（binding 行だけ DB に置く＝未接続）。
     let binding_id = provision_hb_no_gateway(&core, CH_HB4).await;
     let session_id = format!("extgate-{binding_id}");
-    set_hb_instructions(&core, "HBFOURMARK 未接続時の発火を検証する");
-    seed_hb_config(&core, &session_id);
-
-    fire_heartbeat_via_scheduler_seam(&core, &session_id).await;
+    fire_heartbeat_via_scheduler_seam(&core, &session_id, "HBFOURMARK 未接続時の発火を検証する")
+        .await;
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     // 赤の signal（§2.1 warn 1・§1.5 fail-loud）: 未接続 binding へ時刻が到来したら、発火せず

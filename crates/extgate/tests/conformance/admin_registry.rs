@@ -27,11 +27,7 @@ async fn s4_gate_admin_binding_rejects_platform_destination_fields_without_parti
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(err_code(&body), "bad_request");
     let conn = h.state.db.lock().unwrap();
-    for table in [
-        "gate_bindings",
-        "session_heartbeat_config",
-        "session_heartbeat_instructions",
-    ] {
+    for table in ["gate_bindings", "agent_schedules"] {
         let count: i64 = conn
             .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
             .unwrap();

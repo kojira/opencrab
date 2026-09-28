@@ -13,7 +13,6 @@ fn seed_agent_and_instance(conn: &rusqlite::Connection) -> (String, i64) {
             persona_name: "p".into(),
             personality: None,
             instructions: String::new(),
-            heartbeat_instructions: String::new(),
             model: None,
             reasoning_effort: None,
             web_search: None,

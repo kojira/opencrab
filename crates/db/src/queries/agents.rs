@@ -21,9 +21,6 @@ pub struct AgentRow {
     pub personality: Option<String>,
     #[serde(default)]
     pub instructions: String,
-    /// ハートビート専用の自律行動指示。空文字なら既定文言にフォールバックする。
-    #[serde(default)]
-    pub heartbeat_instructions: String,
     pub model: Option<String>,
     /// 推論（thinking）強度。None/空 = 既定に従う。
     #[serde(default)]
@@ -45,7 +42,6 @@ pub struct AgentPatch {
     pub persona_name: Option<String>,
     pub personality: Option<Option<String>>,
     pub instructions: Option<String>,
-    pub heartbeat_instructions: Option<String>,
     pub model: Option<Option<String>>,
     pub reasoning_effort: Option<Option<String>>,
     pub web_search: Option<Option<bool>>,
@@ -55,8 +51,8 @@ pub struct AgentPatch {
 pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO agents (agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, heartbeat_instructions, model, reasoning_effort, web_search, metadata_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        "INSERT INTO agents (agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, model, reasoning_effort, web_search, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(agent_id) DO UPDATE SET
             name = excluded.name,
             job_title = excluded.job_title,
@@ -65,7 +61,6 @@ pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
             persona_name = excluded.persona_name,
             personality = excluded.personality,
             instructions = excluded.instructions,
-            heartbeat_instructions = excluded.heartbeat_instructions,
             model = excluded.model,
             reasoning_effort = excluded.reasoning_effort,
             web_search = excluded.web_search,
@@ -80,7 +75,6 @@ pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
             agent.persona_name,
             agent.personality,
             agent.instructions,
-            agent.heartbeat_instructions,
             agent.model,
             agent.reasoning_effort,
             agent.web_search,
@@ -94,7 +88,7 @@ pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
 
 pub fn get_agent(conn: &Connection, agent_id: &str) -> Result<Option<AgentRow>> {
     let result = conn.query_row(
-        "SELECT agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, heartbeat_instructions, model, reasoning_effort, web_search, metadata_json
+        "SELECT agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, model, reasoning_effort, web_search, metadata_json
          FROM agents WHERE agent_id = ?1",
         params![agent_id],
         |row| {
@@ -107,11 +101,10 @@ pub fn get_agent(conn: &Connection, agent_id: &str) -> Result<Option<AgentRow>> 
                 persona_name: row.get(5)?,
                 personality: row.get(6)?,
                 instructions: row.get(7)?,
-                heartbeat_instructions: row.get(8)?,
-                model: row.get(9)?,
-                reasoning_effort: row.get(10)?,
-                web_search: row.get(11)?,
-                metadata_json: row.get(12)?,
+                model: row.get(8)?,
+                reasoning_effort: row.get(9)?,
+                web_search: row.get(10)?,
+                metadata_json: row.get(11)?,
             })
         },
     );
@@ -176,9 +169,6 @@ pub fn apply_agent_patch(conn: &Connection, agent_id: &str, patch: &AgentPatch) 
     }
     if let Some(ref v) = patch.instructions {
         row.instructions = v.clone();
-    }
-    if let Some(ref v) = patch.heartbeat_instructions {
-        row.heartbeat_instructions = v.clone();
     }
     if let Some(ref v) = patch.model {
         row.model = v.clone();

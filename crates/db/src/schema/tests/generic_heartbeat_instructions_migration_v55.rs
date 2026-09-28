@@ -1,7 +1,21 @@
+/// v57 (#612) drops the heartbeat storage, so v55 is checked on a database stopped at v55.
+fn v55_database() -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(SCHEMA_SQL).unwrap();
+    migrate(&conn).unwrap();
+    conn.execute_batch(&format!("PRAGMA user_version = {BASELINE_VERSION}"))
+        .unwrap();
+    v55_run_migrations_through_55(&conn);
+    conn
+}
+
+fn v55_run_migrations_through_55(conn: &Connection) {
+    run_migrations(conn, MIGRATIONS.iter().filter(|migration| migration.version <= 55)).unwrap();
+}
+
 #[test]
 fn s4_v55_upgrade_creates_composite_generic_heartbeat_instructions() {
-    let conn = Connection::open_in_memory().unwrap();
-    initialize(&conn).unwrap();
+    let conn = v55_database();
 
     assert!(table_exists(&conn, "session_heartbeat_instructions").unwrap());
     let columns: Vec<(String, i64)> = conn
@@ -33,23 +47,20 @@ fn s4_v55_upgrade_creates_composite_generic_heartbeat_instructions() {
         vec!["session_heartbeat_config", "sessions"],
         "instructions must be bound to the composite config target and generic session"
     );
-    assert_eq!(latest_version(), 56);
 }
 
 #[test]
 fn s4_v55_upgrade_and_fresh_schema_are_identical() {
-    let fresh = Connection::open_in_memory().unwrap();
-    initialize(&fresh).unwrap();
+    let fresh = v55_database();
 
-    let upgraded = Connection::open_in_memory().unwrap();
-    initialize(&upgraded).unwrap();
+    let upgraded = v55_database();
     upgraded
         .execute_batch(
             "DROP TABLE session_heartbeat_instructions;
              PRAGMA user_version=54;",
         )
         .unwrap();
-    initialize(&upgraded).unwrap();
+    v55_run_migrations_through_55(&upgraded);
 
     let sql = |conn: &Connection| -> String {
         conn.query_row(

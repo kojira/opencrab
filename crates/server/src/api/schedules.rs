@@ -182,16 +182,13 @@ pub(crate) fn create_schedule_core(
     };
 
     let saved = if let Some(mut row) = existing {
-        // 一致行を更新（同じ id を返す）。**位相の向き（設計 §4.4）**:
-        //   - 無効→有効化（enabling）: anchor=now・last_fired=NULL（新しく回し始める）。
+        // 一致行を更新（同じ id を返す）。**位相の向き（I3・#612）**: `last_fired_at` は触らない。
+        //   - 無効→有効化（enabling）: anchor=now（next は later_of(last_fired, now) から）。
         //   - 既に有効で同じ内容の再登録: **位相を保存**（触らない）——さもないと set のたびに
         //     next_fire が動いて「同じことを 2 回言うと変わる」ことになり冪等でなくなる。
         //     （ただし anchor が欠けていれば打つ。）
         let enabling = enabled && !row.enabled;
-        if enabling {
-            row.anchor_at = Some(now.clone());
-            row.last_fired_at = None;
-        } else if enabled && row.anchor_at.is_none() {
+        if enabling || (enabled && row.anchor_at.is_none()) {
             row.anchor_at = Some(now.clone());
         }
         row.enabled = enabled;
@@ -251,25 +248,25 @@ pub(crate) fn list_session_schedules_core(
         .collect())
 }
 
-/// 更新時のアンカーの向き（設計 §4.4）を計算する共通ロジック。
+/// 更新時のアンカーの向き（I3・#612）を計算する共通ロジック。設定変更で動かすのは `anchor_at` だけ。
 ///
-/// cron 式 / timezone の**明示変更**、または **無効→有効化**では `anchor_at=now`・
-/// `last_fired_at=NULL`（新しい式で「now 以降の最初のスロット / now+周期」から始める）。
+/// cron 式 / timezone の**明示変更**、または **無効→有効化**では `anchor_at=now`
+/// （next は `later_of(last_fired, now)` 以降＝now より後。`last_fired_at` は発火経路だけが書く）。
 /// それ以外（無効化・message だけの変更・変化なし）は**位相を保存**（触らない）。
 /// dashboard の PATCH（[`update_schedule`]）とエージェント向け `update_my_schedule`
 /// （[`update_schedule_core`]）が**同じ規則**を共有する（§4.4 を二重に書かない）。
-fn next_anchor_and_last_fired(
+fn next_anchor(
     existing: &AgentScheduleRow,
     new_cron: &str,
     new_tz: &str,
     new_enabled: bool,
-) -> (Option<String>, Option<String>) {
+) -> Option<String> {
     let timing_changed = new_cron != existing.cron_expr || new_tz != existing.timezone;
     let enabling = new_enabled && !existing.enabled;
     if timing_changed || enabling {
-        (Some(Utc::now().to_rfc3339()), None)
+        Some(Utc::now().to_rfc3339())
     } else {
-        (existing.anchor_at.clone(), existing.last_fired_at.clone())
+        existing.anchor_at.clone()
     }
 }
 
@@ -279,7 +276,7 @@ fn next_anchor_and_last_fired(
 /// （他エージェント・他セッションのもの）や、そもそも存在しない id は、**存在を明かさず**一律の
 /// `BadRequest` にする。`get_my_schedules` が返した id をそのまま渡す想定で、**id を推測して
 /// 他人・他セッションのスケジュールを覗いたり消したりできない**ことを保証する（#477 の決定事項 1）。
-fn load_owned_schedule(
+pub(crate) fn load_owned_schedule(
     state: &AppState,
     agent_id: &str,
     session_id: &str,
@@ -314,7 +311,7 @@ pub(crate) struct SchedulePatch<'a> {
 ///
 /// `agent_id`＋`session_id` の所属チェック（[`load_owned_schedule`]）を通った行だけを更新する。
 /// **`session_id` は変更しない**（別セッションへ付け替えさせない）。cron/tz を検証し、アンカーの
-/// 向きは dashboard PATCH と同じ（[`next_anchor_and_last_fired`]）。成功後 `scheduler_wake`（#437）。
+/// 向きは dashboard PATCH と同じ（[`next_anchor`]）。成功後 `scheduler_wake`（#437）。
 pub(crate) fn update_schedule_core(
     state: &AppState,
     agent_id: &str,
@@ -341,8 +338,7 @@ pub(crate) fn update_schedule_core(
         ));
     }
 
-    let (anchor_at, last_fired_at) =
-        next_anchor_and_last_fired(&existing, &new_cron, &new_tz, new_enabled);
+    let anchor_at = next_anchor(&existing, &new_cron, &new_tz, new_enabled);
 
     let row = AgentScheduleRow {
         id: Some(id),
@@ -353,7 +349,8 @@ pub(crate) fn update_schedule_core(
         message: new_message,
         enabled: new_enabled,
         anchor_at,
-        last_fired_at,
+        // `update_agent_schedule` は `last_fired_at` を書かない（I2）。
+        last_fired_at: existing.last_fired_at.clone(),
     };
     {
         let conn = state.db.lock().unwrap();
@@ -469,8 +466,8 @@ pub struct PatchRequest {
 /// `PATCH /api/schedules/{sid}` — 既存スケジュールを部分更新する。
 ///
 /// **アンカーの向き（設計 §4.4）**:
-/// - cron 式 / timezone の**明示変更**、または **無効→有効化**では `anchor_at=now`・
-///   `last_fired_at=NULL`（新しい式で「now 以降の最初のスロット / now+周期」から始める）。
+/// - cron 式 / timezone の**明示変更**、または **無効→有効化**では `anchor_at=now`
+///   （`last_fired_at` は触らない・I3・#612）。
 /// - **有効→無効化**では anchor/last_fired を**触らない**（意図した疎らさを壊さない）。
 /// - message だけの変更では時刻系を触らない。
 pub async fn update_schedule(
@@ -505,8 +502,7 @@ pub async fn update_schedule(
     }
 
     // アンカーの向き（§4.4）。dashboard PATCH とエージェント向け update で同じ規則を共有する。
-    let (anchor_at, last_fired_at) =
-        next_anchor_and_last_fired(&existing, &new_cron, &new_tz, new_enabled);
+    let anchor_at = next_anchor(&existing, &new_cron, &new_tz, new_enabled);
 
     let row = AgentScheduleRow {
         id: Some(sid),
@@ -517,7 +513,8 @@ pub async fn update_schedule(
         message: new_message,
         enabled: new_enabled,
         anchor_at,
-        last_fired_at,
+        // `update_agent_schedule` は `last_fired_at` を書かない（I2）。
+        last_fired_at: existing.last_fired_at.clone(),
     };
     {
         let conn = state.db.lock().unwrap();

@@ -554,8 +554,6 @@ function ChannelStep({
         readable: true,
         writable: true,
         whitelisted: true,
-        heartbeat_enabled: false,
-        heartbeat_interval_secs: null,
       });
       setMsg(t('setup.channel.saved'));
       onDone();

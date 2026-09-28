@@ -4,7 +4,6 @@ use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-pub mod agent_heartbeat;
 pub mod agent_log;
 pub mod agent_management;
 pub mod agent_runtime_impl;
@@ -13,7 +12,6 @@ pub mod api;
 pub mod caller_identity;
 pub mod config;
 pub mod heartbeat_fire;
-pub mod heartbeat_instructions;
 pub mod hot_reload;
 pub mod intake;
 pub mod llm_adapter;
@@ -157,12 +155,6 @@ pub struct AppState {
     /// **transport の機能フラグに依存しない形**でここへ持ち上げた
     /// （`config::AppConfig::default_subtask_webhook`）。
     pub default_subtask_webhook: Option<opencrab_actions::webhook_target::WebhookConfig>,
-    /// エージェント単位ハートビート設定の境界値（#247）。
-    ///
-    /// エージェント自身が触るツール（`get_my_heartbeat` / `set_my_heartbeat`）が
-    /// 参照する。下限は設定ファイル（`[agent] heartbeat_min_interval_secs`）由来で、
-    /// 運用者が費用と負荷の許容範囲を決める。
-    pub heartbeat_limits: config::HeartbeatLimits,
     /// 外部イベント受信（webhook intake / issue #454）の設定。
     ///
     /// webhook ハンドラ（source→secret の解決 / ルーティング）と、受信箱の消化・catch-up
@@ -178,36 +170,13 @@ pub struct AppState {
     /// 現在の処理が終わったあと 1 回だけ再消化される（多重ターンにならない）。受信箱が空なら
     /// 消化ループ側の非空ゲートで LLM を呼ばない（空振り wake は no-op）。
     pub intake_wake: Arc<tokio::sync::Notify>,
-    /// 中央ハートビートスケジューラの起床通知（#437 / #439 / 設計 §3.5）。
+    /// 中央スケジューラの起床通知（#437 / #439 / 設計 §3.5）。
     ///
     /// スケジューラは `notified()` で起きて DB から発火予定を組み直す（rebuild）。
     /// **payload を載せない**（取りこぼしても次ウェイクで収束する自己回復）。鳴らす源:
-    /// (a) `set_my_heartbeat`（PR3 で配線）・(b) schedule CRUD（PR4）・(c) global config
-    /// 変更・(d) **発火ターンの完了**（in-flight 除去と同じ箇所で鳴らし、走行中に眠って
-    /// いたスケジューラを即座に rebuild させる）。PR2 では (c)(d) を配線する。
+    /// (a) schedule CRUD・(b) **発火ターンの完了**（in-flight 除去と同じ箇所で鳴らし、走行中に
+    /// 眠っていたスケジューラを即座に rebuild させる）。
     pub scheduler_wake: Arc<tokio::sync::Notify>,
-    /// live G（global heartbeat kill-switch = `[agent] heartbeat_enabled`）を読む口
-    /// （#394 / 設計 §13.1）。
-    ///
-    /// 中央スケジューラが発火時に読むのと**同一の watch 源**（hot-reload 追従）。
-    /// `get_my_heartbeat` が `discord-` セッションの「enabled なのに G=false でゲート中」を
-    /// 本人へ見せるために `borrow().enabled` を読む（起動時スナップにしない＝表示と実発火の
-    /// 乖離を防ぐ）。`nostr-` は G 非依存なのでゲート理由に使わない（設計 §5）。
-    pub heartbeat_config_rx:
-        tokio::sync::watch::Receiver<opencrab_core::heartbeat::HeartbeatConfig>,
-}
-
-/// live G を読む「切り離し済み」受信端を作る（送信端を即 drop する）。
-///
-/// テストや、config watcher を配線しない構成で [`AppState::heartbeat_config_rx`] を埋める
-/// ために使う。送信端を落としても `borrow()` は `initial` を返し続けるので、ゲート理由の
-/// 読み取りは動く（このフィールドの読み手は `borrow()` だけで `changed()` は使わない）。
-/// 本番は `main.rs` が hot-reload 配線済みの受信端を渡すので、これは使わない。
-pub fn disconnected_heartbeat_config_rx(
-    initial: opencrab_core::heartbeat::HeartbeatConfig,
-) -> tokio::sync::watch::Receiver<opencrab_core::heartbeat::HeartbeatConfig> {
-    let (_tx, rx) = tokio::sync::watch::channel(initial);
-    rx
 }
 
 impl AppState {
@@ -242,7 +211,7 @@ impl AppState {
 pub(crate) fn test_app_state() -> AppState {
     let conn = opencrab_db::init_memory().unwrap();
     // #628: 本番（main.rs）と同じ transport descriptor を生存非依存で登録する（源は 1 本化・
-    // `register_production_descriptors`）。これが無いと set/get_my_heartbeat・schedule ツールが
+    // `register_production_descriptors`）。これが無いと schedule ツールが
     // 発火先を解決できず（登録簿が空）拒否される。
     let timed_fire_router = opencrab_actions::TimedFireRouter::new();
     AppState {
@@ -274,11 +243,7 @@ pub(crate) fn test_app_state() -> AppState {
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),
         default_subtask_webhook: None,
-        heartbeat_limits: config::HeartbeatLimits::default(),
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
-        heartbeat_config_rx: disconnected_heartbeat_config_rx(
-            opencrab_core::heartbeat::HeartbeatConfig::default(),
-        ),
     }
 }
 

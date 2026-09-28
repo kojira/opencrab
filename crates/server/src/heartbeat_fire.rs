@@ -13,14 +13,20 @@ fn format_heartbeat_prompt(channel_name: &str, instructions_text: &str) -> Strin
     )
 }
 
-fn record_heartbeat_fire(db: &opencrab_db::Db, agent_id: &str, target: &FireTarget, source: &str) {
+fn record_heartbeat_fire(
+    db: &opencrab_db::Db,
+    agent_id: &str,
+    target: &FireTarget,
+    schedule_id: i64,
+) {
     let Ok(conn) = db.lock() else {
         return;
     };
     let result = serde_json::json!({
         "binding_id": target.binding_id,
         "session_id": target.session_id,
-        "source": source,
+        "source": "schedule",
+        "schedule_id": schedule_id,
     });
     if let Err(error) = opencrab_db::queries::insert_heartbeat_log(
         &conn,
@@ -32,24 +38,19 @@ fn record_heartbeat_fire(db: &opencrab_db::Db, agent_id: &str, target: &FireTarg
     }
 }
 
+/// `agent_schedules` の 1 行を TimedFire で発火する（#612・時間トリガーの唯一の発火経路）。
+///
+/// プロンプトは行の `message` をハートビートの枠で包んだもの。scheduler の定時発火と
+/// `run_my_schedule` の手動発火が同じこの関数を通る。`last_fired_at` は刻まない
+/// （刻むのは scheduler の発火ループだけ）。
 pub async fn run_one_heartbeat(
     state: &AppState,
     agent_id: &str,
     target: &FireTarget,
+    schedule_id: i64,
+    message: &str,
 ) -> Option<()> {
-    let (prompt, instructions_source) = {
-        let conn = state.db.lock().ok()?;
-        let resolved = opencrab_db::queries::resolve_session_heartbeat_instructions(
-            &conn,
-            agent_id,
-            &target.session_id,
-        )
-        .ok()?;
-        (
-            format_heartbeat_prompt(HEARTBEAT_NEUTRAL_CHANNEL_LABEL, &resolved.text),
-            resolved.source,
-        )
-    };
+    let prompt = format_heartbeat_prompt(HEARTBEAT_NEUTRAL_CHANNEL_LABEL, message);
     let Some(sink) = state.timed_fire_router.resolve() else {
         tracing::warn!(
             agent_id,
@@ -61,6 +62,7 @@ pub async fn run_one_heartbeat(
     };
     tracing::info!(
         agent_id,
+        schedule_id,
         binding_id = target.binding_id,
         session_id = target.session_id,
         prompt_preview = %opencrab_actions::prompt_preview(&prompt),
@@ -73,6 +75,6 @@ pub async fn run_one_heartbeat(
         prompt,
         caller: CallerIdentity::Owner,
     });
-    record_heartbeat_fire(&state.db, agent_id, target, instructions_source);
+    record_heartbeat_fire(&state.db, agent_id, target, schedule_id);
     Some(())
 }

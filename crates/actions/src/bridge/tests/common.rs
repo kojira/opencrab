@@ -49,25 +49,25 @@ impl GatewayActions for MockGatewayActions {
     }
 }
 
-/// update_heartbeat_instructions / read_heartbeat_instructions を含むモック。
-pub(super) struct MockGatewayHeartbeat;
+/// run_my_schedule（owner 限定）/ get_my_schedules（trusted 限定）を含むモック。
+pub(super) struct MockGatewaySchedule;
 
 #[async_trait]
-impl GatewayActions for MockGatewayHeartbeat {
+impl GatewayActions for MockGatewaySchedule {
     fn definitions(&self) -> Vec<GatewayActionDef> {
         vec![
             GatewayActionDef {
-                name: "update_heartbeat_instructions".to_string(),
+                name: "run_my_schedule".to_string(),
                 class: opencrab_gateway::ToolClass {
-                    dispatch: opencrab_gateway::DispatchMode::Dispatchable,
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
                     sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
                     sharing: opencrab_gateway::ToolSharing::AgentBound,
                 },
-                description: "update".to_string(),
+                description: "run".to_string(),
                 parameters: json!({"type": "object", "properties": {}}),
             },
             GatewayActionDef {
-                name: "read_heartbeat_instructions".to_string(),
+                name: "get_my_schedules".to_string(),
                 class: opencrab_gateway::ToolClass {
                     dispatch: opencrab_gateway::DispatchMode::Inline,
                     sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,

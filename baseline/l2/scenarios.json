@@ -710,14 +710,6 @@
         "guidance": "preserve",
         "name": "Gateway Skill"
       },
-      "update_heartbeat_instructions": {
-        "instructions": "baseline heartbeat updated",
-        "reason": "compatibility capture",
-        "scope": "agent"
-      },
-      "read_heartbeat_instructions": {
-        "scope": "agent"
-      },
       "get_default_webhook": {},
       "get_default_subtask_webhook": {},
       "set_default_subtask_webhook": {
@@ -764,11 +756,9 @@
       }
     },
     "success_uncollected_l3": {
-      "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
+      "run_my_schedule": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
       "delete_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
-      "get_my_heartbeat": "requires an inbound gateway session fire descriptor owned by an external gateway process",
       "get_my_schedules": "requires an inbound gateway session fire descriptor owned by an external gateway process",
-      "set_my_heartbeat": "requires an inbound gateway session fire descriptor owned by an external gateway process",
       "set_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
       "update_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process"
     },
@@ -830,7 +820,6 @@
       "add_allowed_command",
       "remove_allowed_command",
       "create_skill",
-      "update_heartbeat_instructions",
       "set_default_subtask_webhook",
       "set_default_webhook",
       "spawn_subtask",
@@ -854,7 +843,6 @@
       "manage_allowed_commands",
       "mcp__public_local__echo",
       "mcp__trusted_local__echo",
-      "read_heartbeat_instructions",
       "read_my_history",
       "read_skill",
       "recall_model_experiences",
@@ -1064,13 +1052,6 @@
         "tool": "read_skill",
         "arguments": {
           "name": "Gateway Skill"
-        },
-        "expect_success": true
-      },
-      "update_heartbeat_instructions": {
-        "tool": "read_heartbeat_instructions",
-        "arguments": {
-          "scope": "agent"
         },
         "expect_success": true
       },

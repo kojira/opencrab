@@ -125,7 +125,6 @@ mod slash_model_resolution_contract {
                     persona_name: "Agent X".to_string(),
                     personality: None,
                     instructions: String::new(),
-                    heartbeat_instructions: String::new(),
                     model: configured_model.map(str::to_string),
                     reasoning_effort: None,
                     web_search: None,

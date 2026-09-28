@@ -176,12 +176,47 @@ export interface ChannelConfigDto {
   readable: boolean;
   writable: boolean;
   whitelisted: boolean;
-  heartbeat_enabled: boolean;
-  heartbeat_interval_secs: number | null;
 }
 
 export interface ChannelConfigListResponse {
   guild_id: string;
   configs: ChannelConfigDto[];
   count: number;
+}
+
+// Time triggers (agent_schedules). cron_expr is a 5-field cron or `@every <dur>`.
+export interface ScheduleDto {
+  id: number;
+  agent_id: string;
+  session_id: string;
+  cron_expr: string;
+  timezone: string;
+  message: string;
+  enabled: boolean;
+  anchor_at: string | null;
+  last_fired_at: string | null;
+  next_fire_at: string | null;
+  gated: boolean;
+  gated_reason: string | null;
+}
+
+export interface ScheduleListResponse {
+  agent_id: string;
+  schedules: ScheduleDto[];
+  count: number;
+}
+
+export interface CreateScheduleRequest {
+  session_id: string;
+  cron_expr: string;
+  timezone?: string;
+  message: string;
+  enabled?: boolean;
+}
+
+export interface UpdateScheduleRequest {
+  cron_expr?: string;
+  timezone?: string;
+  message?: string;
+  enabled?: boolean;
 }

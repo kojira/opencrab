@@ -83,7 +83,7 @@ impl ActionExecutor for SharedExecutor {
 ///    (b) 書き込みが engine の次イテレーションや配送と競合して「いつのターンから効くか」が
 ///    非決定になる。制御の効き方を保つため inline に残す。
 /// 5. **純粋な読み取りで即答すべきもの**（`list_*` / `get_*` / `ws_read` / `ws_list` /
-///    `search_memory_index` / `retrieve_memory_nodes` / `read_heartbeat_instructions`）:
+///    `search_memory_index` / `retrieve_memory_nodes`）:
 ///    dispatch すると質問 1 つが 2 ターン 2 メッセージに割れるだけで、得るものが無い。
 ///    system prompt が指示する記憶想起フロー（`search_memory_index` →
 ///    `retrieve_memory_nodes`）のような**同ターンの 2 段連鎖**では、背景往復が 2 回 =

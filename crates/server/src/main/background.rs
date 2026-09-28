@@ -1,7 +1,5 @@
 use crate::{intake_process, scheduler};
-use opencrab_core::heartbeat::HeartbeatConfig;
 use opencrab_server::{config::AppConfig, AppState};
-use tokio::sync::watch;
 
 /// Starts the transport-independent maintenance, intake, scheduler, self-check,
 /// and configuration-watcher tasks in their required startup order.
@@ -10,8 +8,6 @@ pub(super) fn spawn_background_tasks(
     state: &AppState,
     cfg: &AppConfig,
     _gate_socket: &Option<std::path::PathBuf>,
-    heartbeat_config_tx: watch::Sender<HeartbeatConfig>,
-    heartbeat_config_rx: watch::Receiver<HeartbeatConfig>,
 ) -> std::thread::JoinHandle<()> {
     // メモリインデックスのアイドル時メンテナンス（増分ビルドの取りこぼし回収 /
     // キーワードバックフィル / 月次ロールアップ）。全エージェントを毎 tick 巡回。
@@ -74,38 +70,20 @@ pub(super) fn spawn_background_tasks(
     // catch-up ポーリング（起動時 + 定期）。source アダプタ未設定なら中で即 return する。
     opencrab_server::intake::spawn_intake_catchup_loop(state.clone());
 
-    // ハートビートの初期設定と live G の watch チャネルは AppState 構築前に作成済み
-    // （`heartbeat_config_tx` / `heartbeat_config_rx`）。tx は下の config watcher へ、
-    // rx は scheduler へ渡す（AppState には clone 済み）。
-
-    // 中央ハートビートスケジューラ（#439 / #437 / #438 / 設計 §3）へ切替。
+    // 中央スケジューラ（#439 / #437 / #438 / #612・設計 §3）。
     //
-    // 旧実装はエージェントごとに `core::heartbeat::heartbeat_loop` を立て、固定グリッド
-    // sleep + メモリ位相（`Instant`）で回していた（再起動で位相消失=#439-1・設定変更が
-    // 張り直しまで効かない=#437・sleep グリッドと設定間隔の乖離=#438）。ここでは**単一
-    // タスク**が `session_heartbeat_config` を毎ウェイクで読み直し、永続アンカーから正確な
-    // 次回発火まで眠り、`scheduler_wake` で即時反映する。
+    // **単一タスク**が `agent_schedules` を毎ウェイクで読み直し、永続アンカーから正確な次回発火まで
+    // 眠り、`scheduler_wake` で即時反映する。時刻が来たら行の `message` を TimedFire イベントとして
+    // 発火先ゲートウェイのループへ 1 本流すだけ（`run_one_heartbeat`）で、以降のターン（配送・ロック・
+    // 記録・継続）はそのループの**通常ルート**が回す。受け口の解決は `AppState::timed_fire_router`。
     //
-    // #588 TimedFire: ハートビートは専用のターン実装・専用配送を持たない。時刻が来たら scheduler は
-    // 発火先ゲートウェイのループへ `TimedFire` イベントを 1 本流すだけ（`run_one_heartbeat`）で、以降の
-    // ターン（配送・ロック・記録・継続）はそのループの**通常ルート**が回す。固有なのは「時間のトリガー＋
-    // 渡すプロンプト」と「発火の記録（`heartbeat_log`）」だけ。受け口の解決は `AppState::timed_fire_router`
-    // （per-agent→共有・#400 と同型）で行うので、scheduler へ Discord 送信ハンドルを渡す必要はなくなった。
-    //
-    // per-session 直列化ロック（`SessionLocks`）の唯一のインスタンスは `AppState` が
-    // 持ち（#588 Stage 2・`AppState::session_locks`）、scheduler・各ゲートウェイの受信ループ
-    // （Discord）・Nostr ランタイムはその `Arc` を clone して**同じ実体**を共有する。これで
+    // per-session 直列化ロック（`SessionLocks`）の唯一のインスタンスは `AppState` が持ち
+    // （#588 Stage 2・`AppState::session_locks`）、各ゲートウェイの受信ループと共有する。これで
     // 時間トリガーと通常メッセージ処理のターンが同一 session id 上で直列化される。
-    //
-    // live G（global kill-switch = `cfg.agent.heartbeat_enabled`）は scheduler が
-    // **発火時に** `heartbeat_config_rx` から読む（hot-reload 追従・起動時スナップにしない。
-    // さもないと後から G=false にしても止まらない退行が出る・設計 §4.2）。config 変更・
-    // set_my_heartbeat（PR3）・schedule CRUD（PR4）・発火ターン完了は `scheduler_wake` で
-    // rebuild を促す。
     {
         let scheduler_state = state.clone();
         tokio::spawn(async move {
-            scheduler::run_scheduler(scheduler_state, heartbeat_config_rx).await;
+            scheduler::run_scheduler(scheduler_state).await;
         });
     }
 
@@ -116,7 +94,6 @@ pub(super) fn spawn_background_tasks(
         // （上の `format!("{provider}:{model}")` と同じ形でないと永久に不一致になる）。
         state.default_model.clone(),
         state.tools_config.clone(),
-        heartbeat_config_tx,
     );
 
     _watcher_handle

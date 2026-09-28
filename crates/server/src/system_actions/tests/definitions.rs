@@ -149,8 +149,7 @@ fn cancel_subtask_is_exposed_in_own_definitions() {
 /// `readme_action_table_matches_the_dispatcher`（`crates/actions/src/dispatcher.rs`）が
 /// あるが、**後半の gateway 表には同じ検査が無かった**。その結果、実装だけが進んで
 /// 表が 7 個（`nostr_list_keys` / `nostr_switch_identity` / `nostr_run` /
-/// `get_my_nostr_relay` / `set_my_nostr_relay` / `get_my_heartbeat` /
-/// `set_my_heartbeat`）を落としたまま誰も気付かず、README は「Config 行に
+/// `get_my_nostr_relay` / `set_my_nostr_relay` と旧ハートビート設定ツール 2 個）を落としたまま誰も気付かず、README は「Config 行に
 /// `nostr_generate_key` だけ」という状態で残っていた。分類の網羅性検査と同じく
 /// **実装（`own_definitions()`）を起点に**走査し、両方向を要求する: ツールを足したら
 /// README に書くまで落ち（漏れ）、README から消しても落ちる（死名）。
@@ -244,7 +243,7 @@ fn server_gateway_action_table_matches_own_definitions() {
 /// `own_definitions()` の属性から直接固定する（3 軸とも「値を書き間違えたら落ちる」状態に
 /// する）:
 /// - **Dispatchable 集合 == {nostr_generate_key, rebuild_memory_index,
-///   update_memory_index_config, update_heartbeat_instructions, create_skill}**（長時間 or
+///   update_memory_index_config, create_skill}**（長時間 or
 ///   同ターンで読み戻さない書き込み。他は全部 `Inline`。`nostr_generate_key` は nostr
 ///   feature 時のみ push されるので期待値も同じ feature 条件で組む / PR-1B）。
 /// - **Allowed 集合 == {report_progress, nostr_generate_key}**（sub-engine から到達可能な
@@ -283,7 +282,6 @@ fn server_tool_class_invariants_are_fixed() {
     let mut expected_dispatch: std::collections::BTreeSet<String> = [
         "rebuild_memory_index",
         "update_memory_index_config",
-        "update_heartbeat_instructions",
         "create_skill",
     ]
     .iter()
@@ -341,8 +339,6 @@ fn config_tools_are_inline_and_key_generation_is_dispatched() {
         "list_allowed_commands",
         "add_allowed_command",
         "remove_allowed_command",
-        // #157 S3 で Discord から移設（読み出し = inline）。
-        "read_heartbeat_instructions",
     ] {
         assert_eq!(
             class_of(name).dispatch,
@@ -358,16 +354,11 @@ fn config_tools_are_inline_and_key_generation_is_dispatched() {
         "configure_nostr は background 化してはならない（設定の共有状態書き込み）"
     );
     // 長時間 / 同ターンで読み戻さない書き込みは dispatch 対象に残す。
-    for name in [
-        "update_memory_index_config",
-        "update_heartbeat_instructions",
-    ] {
-        assert_eq!(
-            class_of(name).dispatch,
-            DispatchMode::Dispatchable,
-            "{name} は dispatch 対象に残す（同ターンで読み戻さない書き込み）"
-        );
-    }
+    assert_eq!(
+        class_of("update_memory_index_config").dispatch,
+        DispatchMode::Dispatchable,
+        "update_memory_index_config は dispatch 対象に残す（同ターンで読み戻さない書き込み）"
+    );
 #[cfg(any())]
     assert_eq!(
         class_of("nostr_generate_key").dispatch,
@@ -590,4 +581,47 @@ fn merge_definitions_dedups_report_progress_from_inner() {
         count, 1,
         "merge 後も report_progress は1件（own 優先で dedup）"
     );
+}
+
+/// #612 RED-6: 旧ハートビートのツールはカタログに無く、手動発火は `run_my_schedule`（owner / co_agent
+/// だけに見える）に置き換わる。
+#[test]
+fn unified_trigger_catalog_has_no_heartbeat_tools_and_run_my_schedule_is_owner_only() {
+    let names: Vec<_> = SystemGatewayActions::own_definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    for removed in [
+        "get_my_heartbeat",
+        "set_my_heartbeat",
+        "run_my_heartbeat",
+        "update_heartbeat_instructions",
+        "read_heartbeat_instructions",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == removed),
+            "{removed} must be removed"
+        );
+    }
+    for kept in [
+        "get_my_schedules",
+        "set_my_schedule",
+        "update_my_schedule",
+        "delete_my_schedule",
+        "run_my_schedule",
+    ] {
+        assert!(names.iter().any(|name| name == kept), "{kept} missing");
+    }
+    let policy = opencrab_actions::tool_policy("run_my_schedule");
+    assert!(policy.owner_only, "run_my_schedule is owner / co_agent only");
+    for removed in [
+        "get_my_heartbeat",
+        "set_my_heartbeat",
+        "run_my_heartbeat",
+        "update_heartbeat_instructions",
+        "read_heartbeat_instructions",
+    ] {
+        assert!(!opencrab_actions::OWNER_ONLY_ACTIONS.contains(&removed));
+        assert!(!opencrab_actions::TRUSTED_ONLY_ACTIONS.contains(&removed));
+    }
 }

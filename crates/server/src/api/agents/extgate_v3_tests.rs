@@ -21,7 +21,6 @@ async fn get_agent_absent_is_200_null_existing_has_subject_id() {
                 persona_name: "p".into(),
                 personality: None,
                 instructions: String::new(),
-                heartbeat_instructions: String::new(),
                 model: None,
                 reasoning_effort: None,
                 web_search: None,

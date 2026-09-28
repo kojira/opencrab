@@ -1,4 +1,4 @@
-// Historical v56 source tables are absent from a newly initialized S10 core.
+// Historical v57 source tables are absent from a newly initialized S10 core.
 // Migration fixtures explicitly model the stopped pre-cleanup source instead.
 fn create_legacy_core_source_tables(conn: &rusqlite::Connection) {
     conn.execute_batch(

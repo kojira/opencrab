@@ -43,9 +43,7 @@ fn state_with_consolidation(
         subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
         default_subtask_webhook: None,
-        heartbeat_limits: Default::default(),
         scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-        heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(Default::default()),
         timed_fire_router: std::sync::Arc::new(opencrab_actions::TimedFireRouter::new()),
         progress_debounce: std::sync::Arc::new(
             opencrab_server::subtask_registries::ProgressDebounce::new(),
@@ -104,7 +102,6 @@ async fn test_skill_consolidation_curates_and_audits() {
                 persona_name: "Persona".into(),
                 personality: Some("好奇心旺盛".into()),
                 instructions: String::new(),
-                heartbeat_instructions: String::new(),
                 model: None,
                 reasoning_effort: None,
                 web_search: None,

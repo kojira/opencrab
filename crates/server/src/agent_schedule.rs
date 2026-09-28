@@ -1,47 +1,48 @@
-//! エージェントが**自分自身の**定時実行（#455）を登録・照会するツール。
+//! エージェントが**自分自身の**時間トリガー（#455 / #612）を登録・照会するツール。
+//!
+//! 間隔実行（`@every 30m`）も定時実行（cron）も同じ `agent_schedules` の 1 行で、同じセッションに
+//! 複数登録でき、行ごとに `message`（発火時に自分へ渡されるプロンプト）を持つ（#612）。
 //!
 //! - `set_my_schedule`: いま話しているセッションに対して cron / `@every` のスケジュールを登録する。
 //! - `get_my_schedules`: いま話しているセッションのスケジュールを、次回発火時刻付きで列挙する。
 //! - `update_my_schedule`: `get_my_schedules` が返した id のスケジュールを部分更新する
 //!   （`enabled=false` で「止める」・cron/message/timezone の変更で「間隔を変える」）。
 //! - `delete_my_schedule`: `get_my_schedules` が返した id のスケジュールを消す（履歴も残さない）。
+//! - `run_my_schedule`: `get_my_schedules` が返した id のスケジュールを今すぐ手動発火する
+//!   （**オーナー / co_agent 限定**・定時発火と同じ経路・`last_fired_at` は更新しない）。
 //!
 //! # id の所属チェック（#477）
 //!
-//! `update_my_schedule` / `delete_my_schedule` は id を取る。**id を推測して他エージェント・他
-//! セッションのスケジュールを触れてはいけない**ので、対象行は `ctx.agent_id`＋現在のセッションの
-//! 両方に一致する場合だけ操作できる（`api::schedules` 側の `load_owned_schedule` が所属チェック
-//! を握る）。一致しない／存在しない id は**存在を明かさず**同じ文言で拒否する。
+//! `update_my_schedule` / `delete_my_schedule` / `run_my_schedule` は id を取る。**id を推測して
+//! 他エージェント・他セッションのスケジュールを触れてはいけない**ので、対象行は `ctx.agent_id`＋
+//! 現在のセッションの両方に一致する場合だけ操作できる（`api::schedules` 側の `load_owned_schedule`
+//! が所属チェックを握る）。一致しない／存在しない id は**存在を明かさず**同じ文言で拒否する。
 //!
 //! # なぜエージェント自身に開くか（設計 §7.4 の制約撤回・オーナー裁定 2026-08-09）
 //!
-//! 当初の設計は「新しい自己設定ツールは追加しない」としていたが、これは issue #455 に無い制約で、
-//! **sample-source の巡回指示ループを閉じられない**（巡回指示が webhook で届いても本人がスケジュールを
-//! 作れず、毎回オーナーが dashboard から登録することになる）。ハートビート（「いつ動くか」）は既に
-//! 本人が `set_my_heartbeat` で設定できる（#456）ので、schedule だけ人の承認を要求する理由が実測に
-//! 無い。**増えるのは「何ができるか」ではなく「いつ動くかを自分で決められるか」だけ**（作用面は
-//! HB と同一・オーナー裁定 A 案）。
+//! **sample-source の巡回指示ループを閉じる**ため（巡回指示が webhook で届いても本人がスケジュールを
+//! 作れないと、毎回オーナーが dashboard から登録することになる）。**増えるのは「何ができるか」では
+//! なく「いつ動くかを自分で決められるか」だけ**。
 //!
-//! # セッション単位（`set_my_heartbeat` と同じ流儀・#456）
+//! # セッション単位（#456）
 //!
 //! **スコープは無い。** 対象は常に `ctx.session_id`（いま話しているセッション）。発火経路を持つのは
-//! 登録済み transport のセッション（`nostr-` / `discord-` / `web-`・#628）だけなので、それ以外
-//! （`heartbeat-` / `agent-msg-` 等）で呼ばれたら **fail-closed で拒否し remedy（どこで実行すれば
-//! よいか）を返す**。「設定できたのに永遠に発火しない行」を作らせない。
+//! 登録済み transport のセッションだけ（#628）なので、それ以外で呼ばれたら **fail-closed で拒否し
+//! remedy（どこで実行すればよいか）を返す**。「設定できたのに永遠に発火しない行」を作らせない。
 //!
 //! # 権限
 //!
-//! `set_my_heartbeat` と同じく **owner 限定にはしない**（自分の定時実行を自分で決めるのが目的）が、
+//! get/set/update/delete は **owner 限定にはしない**（自分の定時実行を自分で決めるのが目的）が、
 //! 素の `Agent`（未信頼の外部ユーザー由来ターン）からは見えないよう `TRUSTED_ONLY_ACTIONS` に入れ、
-//! ハンドラ内でも同じ検査をする（多層防御）。
+//! ハンドラ内でも同じ検査をする（多層防御）。`run_my_schedule` は `OWNER_ONLY_ACTIONS`。
 
 use serde_json::json;
 
 use opencrab_gateway::{GatewayActionResult, GatewayCallContext, GatewayCaller};
 
 use crate::api::schedules::{
-    create_schedule_core, delete_schedule_core, list_session_schedules_core, update_schedule_core,
-    ScheduleOpError, SchedulePatch,
+    create_schedule_core, delete_schedule_core, list_session_schedules_core, load_owned_schedule,
+    update_schedule_core, ScheduleOpError, SchedulePatch,
 };
 use crate::AppState;
 
@@ -54,6 +55,20 @@ fn ensure_trusted(ctx: &GatewayCallContext) -> Option<GatewayActionResult> {
         return None;
     }
     Some(err("このアクションは信頼済みの呼び出し元のみ実行できます"))
+}
+
+/// 呼び出し元権限の検査（多層防御）。bridge の `OWNER_ONLY_ACTIONS` と同じ範囲
+/// （オーナー / co_agent のみ）。`run_my_schedule` 用。
+fn ensure_owner_or_coagent(ctx: &GatewayCallContext) -> Option<GatewayActionResult> {
+    if matches!(
+        ctx.caller,
+        GatewayCaller::Owner | GatewayCaller::CoAgent { .. }
+    ) {
+        return None;
+    }
+    Some(err(
+        "このアクションはオーナーまたは co_agent のみ実行できます",
+    ))
 }
 
 /// 他エージェントを指そうとする引数を拒否する（このツールは `ctx.agent_id` しか見ない）。
@@ -89,14 +104,14 @@ fn err(msg: impl Into<String>) -> GatewayActionResult {
     }
 }
 
-/// 現在のセッションが発火経路を持つかを確認する（`agent_heartbeat` と**同じ登録簿を引く**・#628）。
+/// 現在のセッションを発火先へ解決する（scheduler と**同じ登録簿を引く**・#628）。
 ///
 /// セッション文脈が無い / 発火経路の無い種別（登録済み descriptor がどれも名乗らない）→
 /// fail-closed で **remedy 付き**エラー。
-fn current_session(
+fn current_session_target(
     state: &AppState,
     ctx: &GatewayCallContext,
-) -> Result<String, GatewayActionResult> {
+) -> Result<(String, opencrab_actions::FireTarget), GatewayActionResult> {
     let session_id = match ctx.session_id.as_deref() {
         Some(s) if !s.is_empty() => s,
         _ => {
@@ -117,12 +132,20 @@ fn current_session(
             .resolve_persisted_target(&conn, session_id, &ctx.agent_id)
     };
     match target {
-        Some(_) => Ok(session_id.to_string()),
+        Some(target) => Ok((session_id.to_string(), target)),
         None => Err(err(format!(
             "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——{}——で実行してください。",
             state.timed_fire_router.fire_target_hint()
         ))),
     }
+}
+
+/// 現在のセッションが発火経路を持つかを確認し、session_id を返す（[`current_session_target`]）。
+fn current_session(
+    state: &AppState,
+    ctx: &GatewayCallContext,
+) -> Result<String, GatewayActionResult> {
+    current_session_target(state, ctx).map(|(session_id, _)| session_id)
 }
 
 /// 必須の整数 id 引数を取り出す（数値、または数値へ解釈できる文字列を許す）。
@@ -428,303 +451,94 @@ pub(crate) fn delete_my_schedule(
     }
 }
 
+/// 自分の定時実行スケジュールを **id 指定で**、次の発火時刻を待たずに手動発火する
+/// （#612 D2・オーナー / co_agent 限定）。
+///
+/// # 定時発火とまったく同じ経路
+///
+/// scheduler の定時発火と**同じ関数**（[`crate::heartbeat_fire::run_one_heartbeat`]）を呼ぶ。
+/// 対象は所属チェック（[`load_owned_schedule`]・`ctx.agent_id`＋現在のセッション）を通った行だけ。
+///
+/// # `last_fired_at` は更新しない
+///
+/// 手動発火は定時発火の位相をずらさないため `last_fired_at` を刻まない（刻むのはスケジューラの
+/// 発火ループだけ・I2）。
+///
+/// # 自己デッドロックを避ける（#599）
+///
+/// このツールは呼び出しターンの中で走り、そのターンは既に現在セッションの直列化ロックを保持して
+/// いる。発火は `spawn` して**即座に「投げた」を返し**、実際のターンは今のターンが終わってから走る。
+pub(crate) fn run_my_schedule(
+    state: &AppState,
+    args: &serde_json::Value,
+    ctx: &GatewayCallContext,
+) -> GatewayActionResult {
+    // owner_only（bridge の OWNER_ONLY_ACTIONS と同ポリシー）を handler でも確認する（多層防御）。
+    if let Some(denied) = ensure_owner_or_coagent(ctx) {
+        return denied;
+    }
+    if let Some(denied) = reject_foreign_target(args) {
+        return denied;
+    }
+    if let Some(denied) = reject_removed_scope_args(args) {
+        return denied;
+    }
+
+    let (session_id, target) = match current_session_target(state, ctx) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let id = match required_i64(args, "id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let row = match load_owned_schedule(state, &ctx.agent_id, &session_id, id) {
+        Ok(row) => row,
+        Err(ScheduleOpError::BadRequest(m)) | Err(ScheduleOpError::Internal(m)) => return err(m),
+    };
+
+    if !state.timed_fire_router.has_live_sink() {
+        return err("ゲートウェイが稼働していないため発火できません（受け口が未登録）。ゲートウェイの起動を確認してください。");
+    }
+
+    let fire_state = state.clone();
+    let fire_agent_id = ctx.agent_id.clone();
+    tokio::spawn(async move {
+        crate::heartbeat_fire::run_one_heartbeat(
+            &fire_state,
+            &fire_agent_id,
+            &target,
+            id,
+            &row.message,
+        )
+        .await;
+    });
+
+    tracing::info!(
+        agent_id = %ctx.agent_id,
+        session_id = %session_id,
+        schedule_id = id,
+        caller = %ctx.caller.label(),
+        "run_my_schedule: 手動でスケジュールを発火した（last_fired_at は更新しない）"
+    );
+
+    GatewayActionResult {
+        success: true,
+        data: Some(json!({
+            "fired": true,
+            "id": id,
+            "session_id": session_id,
+            "note": "スケジュールを発火しました。実際のターンは今のターンが終わってから同じセッションで走ります（last_fired_at は更新しません）。",
+        })),
+        error: None,
+    }
+}
+
 #[cfg(test)]
 #[path = "agent_schedule/review_tests.rs"]
 mod review_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn ctx(session_id: &str) -> GatewayCallContext {
-        let mut c = GatewayCallContext::new(GatewayCaller::TrustedUser, "agent-x");
-        c.session_id = Some(session_id.to_string());
-        c
-    }
-
-    /// 別エージェント（agent-y）の文脈。他人の id を渡す攻撃の再現に使う。
-    // #654: 使うのは nostr/web セッションを立てる test だけ。発火経路 descriptor は各 feature 時
-    // のみ登録される（#651）ので、その cfg 下でだけ使われる（bare/discord では未使用＝不要）。
-    #[cfg(any())]
-    fn ctx_for(agent_id: &str, session_id: &str) -> GatewayCallContext {
-        let mut c = GatewayCallContext::new(GatewayCaller::TrustedUser, agent_id);
-        c.session_id = Some(session_id.to_string());
-        c
-    }
-
-    /// set_my_schedule は **ctx.session_id** に対して作成する（スコープ引数なし）。
-    // #654: nostr セッションの発火経路（NostrFire descriptor）は nostr feature 時のみ登録される
-    // （#651）。off では作成が fail-closed になり検証対象の挙動が存在しないので同じ cfg で囲む。
-    #[cfg(any())]
-    #[tokio::test]
-    async fn set_creates_on_current_session_and_get_lists_it() {
-        let state = crate::test_app_state();
-        let c = ctx("nostr-agent-x");
-        let res = set_my_schedule(
-            &state,
-            &json!({"cron_expr": "@every 3h", "message": "巡回してまとめを書く"}),
-            &c,
-        );
-        assert!(res.success, "作成成功: {:?}", res.error);
-        let data = res.data.unwrap();
-        assert_eq!(data["session_id"], "nostr-agent-x");
-        assert!(data["id"].as_i64().unwrap() > 0);
-        assert_eq!(data["enabled"], true, "enabled 省略時 true");
-        // next_fire_at が照会時算出される（@every 3h・anchor=now → 未来）。
-        assert!(data["next_fire_at"].is_string(), "next_fire_at を返す");
-
-        // get_my_schedules は同一セッションのものを列挙し next_fire_at を含む。
-        let got = get_my_schedules(&state, &json!({}), &c);
-        assert!(got.success);
-        let gd = got.data.unwrap();
-        assert_eq!(gd["count"], 1);
-        assert!(gd["schedules"][0]["next_fire_at"].is_string());
-    }
-
-    /// 発火経路の無いセッション（`agent-msg-` 等・登録済み descriptor がどれも名乗らない）は
-    /// fail-closed + **remedy** で拒否する。
-    #[tokio::test]
-    async fn set_rejects_non_firing_session_with_remedy() {
-        let state = crate::test_app_state();
-        let res = set_my_schedule(
-            &state,
-            &json!({"cron_expr": "@every 3h", "message": "x"}),
-            &ctx("agent-msg-agent-x"),
-        );
-        assert!(!res.success);
-        let e = res.error.unwrap();
-        assert!(e.contains("発火経路"), "理由: {e}");
-        assert!(e.contains("実行してください"), "remedy: {e}");
-    }
-
-    /// cron 式が不正ならその場でエラー（remedy 付き）。
-    // #654: nostr セッションで cron 検証まで到達するには NostrFire（nostr feature）が要る（#651）。
-    // off では発火経路解決が先に fail-closed になり cron 検証へ届かないので同じ cfg で囲む。
-    #[cfg(any())]
-    #[tokio::test]
-    async fn set_rejects_invalid_cron_in_the_same_turn() {
-        let state = crate::test_app_state();
-        let res = set_my_schedule(
-            &state,
-            &json!({"cron_expr": "totally not cron", "message": "x"}),
-            &ctx("nostr-agent-x"),
-        );
-        assert!(!res.success);
-        let e = res.error.unwrap();
-        assert!(
-            e.contains("cron") || e.contains("@every") || e.contains("不正"),
-            "cron 不正 remedy: {e}"
-        );
-    }
-
-    /// スコープ引数（session_id 等）は明示拒否（#456 の語彙統一）。
-    #[tokio::test]
-    async fn set_rejects_scope_style_args() {
-        let state = crate::test_app_state();
-        let res = set_my_schedule(
-            &state,
-            &json!({"session_id": "nostr-other", "cron_expr": "@every 3h", "message": "x"}),
-            &ctx("nostr-agent-x"),
-        );
-        assert!(!res.success);
-        assert!(res.error.unwrap().contains("session_id"));
-    }
-
-    /// 必須引数（cron_expr / message）欠落は remedy 付きエラー。
-    // #654: nostr セッションで必須引数検証まで到達するには NostrFire（nostr feature）が要る（#651）。
-    #[cfg(any())]
-    #[tokio::test]
-    async fn set_requires_cron_and_message() {
-        let state = crate::test_app_state();
-        let res = set_my_schedule(&state, &json!({"message": "x"}), &ctx("nostr-agent-x"));
-        assert!(!res.success);
-        assert!(res.error.unwrap().contains("cron_expr"));
-    }
-
-    // ---- #477: update / delete ----
-
-    /// 自分のスケジュールを作って id を取り出すヘルパ。
-    // #654: nostr セッションで作成する test 専用のヘルパ。NostrFire descriptor は nostr feature
-    // 時のみ登録される（#651）ので同じ cfg で囲む。
-    #[cfg(any())]
-    fn create_one(state: &AppState, c: &GatewayCallContext) -> i64 {
-        let res = set_my_schedule(
-            state,
-            &json!({"cron_expr": "@every 3h", "message": "巡回してまとめを書く"}),
-            c,
-        );
-        assert!(res.success, "作成成功: {:?}", res.error);
-        res.data.unwrap()["id"].as_i64().unwrap()
-    }
-
-    /// update に enabled=false を渡すと「止まる」が**行は残る**（履歴が追える）。
-    // #654: nostr セッションで作成→更新する。NostrFire（nostr feature）が要る（#651）。
-    #[cfg(any())]
-    #[tokio::test]
-    async fn update_disable_stops_but_keeps_row() {
-        let state = crate::test_app_state();
-        let c = ctx("nostr-agent-x");
-        let id = create_one(&state, &c);
-
-        let res = update_my_schedule(&state, &json!({"id": id, "enabled": false}), &c);
-        assert!(res.success, "更新成功: {:?}", res.error);
-        assert_eq!(res.data.unwrap()["enabled"], false, "enabled=false で停止");
-
-        // 行は残る（delete と違い列挙に出続ける）。
-        let got = get_my_schedules(&state, &json!({}), &c);
-        let gd = got.data.unwrap();
-        assert_eq!(gd["count"], 1, "止めても行は残る（履歴が追える）");
-        assert_eq!(gd["schedules"][0]["enabled"], false);
-    }
-
-    /// update で cron を変えると「間隔を変える」が実現し、id は変わらない。
-    // #654: nostr セッションで作成→更新する。NostrFire（nostr feature）が要る（#651）。
-    #[cfg(any())]
-    #[tokio::test]
-    async fn update_changes_interval_same_id() {
-        let state = crate::test_app_state();
-        let c = ctx("nostr-agent-x");
-        let id = create_one(&state, &c);
-
-        let res = update_my_schedule(&state, &json!({"id": id, "cron_expr": "0 7 * * *"}), &c);
-        assert!(res.success, "更新成功: {:?}", res.error);
-        let data = res.data.unwrap();
-        assert_eq!(
-            data["id"].as_i64().unwrap(),
-            id,
-            "同じ id を更新（付け替えない）"
-        );
-        assert_eq!(data["cron_expr"], "0 7 * * *");
-    }
-
-    /// 変更フィールドが 1 つも無い update は暗黙の no-op を避けて拒否する。
-    // #654: nostr セッションで作成→更新する。NostrFire（nostr feature）が要る（#651）。
-    #[cfg(any())]
-    #[tokio::test]
-    async fn update_rejects_no_fields() {
-        let state = crate::test_app_state();
-        let c = ctx("nostr-agent-x");
-        let id = create_one(&state, &c);
-        let res = update_my_schedule(&state, &json!({"id": id}), &c);
-        assert!(!res.success);
-        assert!(res.error.unwrap().contains("変更する項目"));
-    }
-
-    /// update の cron 不正は同ターンでエラー（直して呼び直せる）。
-    // #654: nostr セッションで作成→更新する。NostrFire（nostr feature）が要る（#651）。
-    #[cfg(any())]
-    #[tokio::test]
-    async fn update_rejects_invalid_cron_in_the_same_turn() {
-        let state = crate::test_app_state();
-        let c = ctx("nostr-agent-x");
-        let id = create_one(&state, &c);
-        let res = update_my_schedule(
-            &state,
-            &json!({"id": id, "cron_expr": "totally not cron"}),
-            &c,
-        );
-        assert!(!res.success);
-        assert!(res.error.unwrap().contains("不正"), "cron 不正 remedy");
-    }
-
-    /// delete は行ごと消す（以後 list に出ない）。
-    // #654: nostr セッションで作成→削除する。NostrFire（nostr feature）が要る（#651）。
-    #[cfg(any())]
-    #[tokio::test]
-    async fn delete_removes_row() {
-        let state = crate::test_app_state();
-        let c = ctx("nostr-agent-x");
-        let id = create_one(&state, &c);
-
-        let res = delete_my_schedule(&state, &json!({"id": id}), &c);
-        assert!(res.success, "削除成功: {:?}", res.error);
-        assert_eq!(res.data.unwrap()["id"].as_i64().unwrap(), id);
-
-        let got = get_my_schedules(&state, &json!({}), &c);
-        assert_eq!(got.data.unwrap()["count"], 0, "削除後は列挙に出ない");
-    }
-
-    /// 存在しない id の delete は remedy 付きエラー（成功しない）。
-    // #654: nostr セッションで「見つからない」まで到達するには NostrFire（nostr feature）が要る
-    // （#651）。off では発火経路解決が先に fail-closed になり所属チェックへ届かないので同じ cfg で囲む。
-    #[cfg(any())]
-    #[tokio::test]
-    async fn delete_missing_id_fails() {
-        let state = crate::test_app_state();
-        let res = delete_my_schedule(&state, &json!({"id": 999999}), &ctx("nostr-agent-x"));
-        assert!(!res.success);
-        assert!(res.error.unwrap().contains("見つかりません"));
-    }
-
-    /// **所属チェック（#477 決定事項 1）**: 他エージェント（agent-y）が agent-x の id を推測して
-    /// 渡しても、update / delete は失敗し、agent-x の行は無傷で残る。
-    ///
-    /// このテストは所属チェックの変異検出用: `load_owned_schedule` の agent_id 一致条件を外すと
-    /// delete が通り、`victim_survives` が赤くなる。
-    // #654: 両者とも nostr セッション（NostrFire・nostr feature）で作成・攻撃する（#651）。
-    #[cfg(any())]
-    #[tokio::test]
-    async fn foreign_agent_cannot_touch_others_schedule() {
-        let state = crate::test_app_state();
-        let victim = ctx("nostr-agent-x"); // agent-x
-        let id = create_one(&state, &victim);
-
-        // agent-y が自分のセッション（発火経路あり）から victim の id を渡す。
-        let attacker = ctx_for("agent-y", "nostr-agent-y");
-
-        let del = delete_my_schedule(&state, &json!({"id": id}), &attacker);
-        assert!(!del.success, "他エージェントの id は削除できない");
-        assert!(
-            del.error.unwrap().contains("見つかりません"),
-            "存在を明かさない文言"
-        );
-
-        let upd = update_my_schedule(&state, &json!({"id": id, "enabled": false}), &attacker);
-        assert!(!upd.success, "他エージェントの id は更新できない");
-
-        // victim の行は無傷（削除も更新もされていない）。
-        let got = get_my_schedules(&state, &json!({}), &victim);
-        let gd = got.data.unwrap();
-        assert_eq!(gd["count"], 1, "victim の行は残っている");
-        assert_eq!(
-            gd["schedules"][0]["enabled"], true,
-            "victim の行は更新されていない"
-        );
-    }
-
-    /// **セッション所属チェック**: 同じ agent でも別セッション（この agent の Discord チャンネル）
-    /// からは、Nostr セッションの id を触れない。`load_owned_schedule` の session_id 一致条件を
-    /// 外すとこのテストが赤くなる。
-    // #654: nostr セッションで作成し、別セッションからの操作を弾く。作成・照会に NostrFire
-    // （nostr feature）が要る（#651）。攻撃側の別セッション拒否は理由を問わないので nostr 単独で足りる。
-    #[cfg(any())]
-    #[tokio::test]
-    async fn other_session_of_same_agent_cannot_touch() {
-        let state = crate::test_app_state();
-        let nostr = ctx("nostr-agent-x");
-        let id = create_one(&state, &nostr);
-
-        // 同じ agent-x だが別セッション（Discord）。発火経路はあるが所属が違う。
-        let discord = ctx("discord-agent-x-111-222");
-
-        let del = delete_my_schedule(&state, &json!({"id": id}), &discord);
-        assert!(!del.success, "別セッションからは削除できない");
-
-        // Nostr 側の行は残る。
-        let got = get_my_schedules(&state, &json!({}), &nostr);
-        assert_eq!(got.data.unwrap()["count"], 1);
-    }
-
-    /// id を文字列で渡しても受け付ける（LLM が数値を文字列化する実測に対応）。
-    // #654: nostr セッションで作成→更新する。NostrFire（nostr feature）が要る（#651）。
-    #[cfg(any())]
-    #[tokio::test]
-    async fn update_accepts_stringified_id() {
-        let state = crate::test_app_state();
-        let c = ctx("nostr-agent-x");
-        let id = create_one(&state, &c);
-        let res = update_my_schedule(&state, &json!({"id": id.to_string(), "enabled": false}), &c);
-        assert!(res.success, "文字列 id を受ける: {:?}", res.error);
-    }
-}
+mod tests;

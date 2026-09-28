@@ -34,7 +34,6 @@ fn state_with_alias(session_id: &str) -> AppState {
             persona_name: "persona".into(),
             personality: None,
             instructions: String::new(),
-            heartbeat_instructions: String::new(),
             model: None,
             reasoning_effort: None,
             web_search: None,
@@ -390,5 +389,123 @@ fn idempotent_reregister_preserves_phase() {
         b.last_fired_at.as_deref(),
         Some("2026-08-09T07:00:00Z"),
         "有効な同一内容の再登録は位相を保存する（次回発火が動かない＝冪等）"
+    );
+}
+
+// ---- #612 I1〜I3: 設定変更は anchor_at だけを動かし、last_fired_at を保持する ----
+
+fn set_last_fired(state: &AppState, id: i64, at: &str) {
+    let conn = state.db.lock().unwrap();
+    opencrab_db::queries::set_agent_schedule_last_fired(&conn, id, at).unwrap();
+}
+
+fn next_fire_after_now(dto: &ScheduleDto) -> bool {
+    let next = dto.next_fire_at.as_deref().expect("next_fire_at");
+    DateTime::parse_from_rfc3339(next).unwrap() > Utc::now()
+}
+
+#[tokio::test]
+async fn patch_cron_change_and_reenable_keep_last_fired_and_fire_after_now() {
+    let session_id = "opaque-schedule-session";
+    let state = state_with_alias(session_id);
+    let created = create_schedule(
+        State(state.clone()),
+        Path(AGENT.to_string()),
+        Json(CreateRequest {
+            session_id: session_id.into(),
+            cron_expr: "@every 3h".into(),
+            timezone: "Asia/Tokyo".into(),
+            message: "patrol".into(),
+            enabled: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let last_fired = (Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+    set_last_fired(&state, created.id, &last_fired);
+
+    let patch = |cron: Option<&str>, enabled: Option<bool>| PatchRequest {
+        session_id: None,
+        cron_expr: cron.map(str::to_string),
+        timezone: None,
+        message: None,
+        enabled,
+    };
+
+    let changed = update_schedule(
+        State(state.clone()),
+        Path(created.id),
+        Json(patch(Some("0 7 * * *"), None)),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(changed.last_fired_at.as_deref(), Some(last_fired.as_str()));
+    assert!(next_fire_after_now(&changed), "cron 変更直後に即発火しない");
+
+    let disabled = update_schedule(
+        State(state.clone()),
+        Path(created.id),
+        Json(patch(None, Some(false))),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(disabled.last_fired_at.as_deref(), Some(last_fired.as_str()));
+
+    let reenabled = update_schedule(
+        State(state.clone()),
+        Path(created.id),
+        Json(patch(Some("@every 3h"), Some(true))),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        reenabled.last_fired_at.as_deref(),
+        Some(last_fired.as_str())
+    );
+    assert!(
+        next_fire_after_now(&reenabled),
+        "再有効化直後に即発火しない"
+    );
+}
+
+#[test]
+fn idempotent_reenable_keeps_last_fired_and_fires_after_now() {
+    let session_id = "opaque-schedule-session";
+    let state = state_with_alias(session_id);
+    let created = create_schedule_core(
+        &state,
+        AGENT,
+        session_id,
+        "@every 3h",
+        "Asia/Tokyo",
+        "patrol",
+        false,
+    )
+    .unwrap();
+    let last_fired = (Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+    set_last_fired(&state, created.id, &last_fired);
+
+    let reenabled = create_schedule_core(
+        &state,
+        AGENT,
+        session_id,
+        "@every 3h",
+        "Asia/Tokyo",
+        "patrol",
+        true,
+    )
+    .unwrap();
+    assert_eq!(reenabled.id, created.id);
+    assert_eq!(
+        reenabled.last_fired_at.as_deref(),
+        Some(last_fired.as_str())
+    );
+    assert!(
+        next_fire_after_now(&reenabled),
+        "再有効化直後に即発火しない"
     );
 }

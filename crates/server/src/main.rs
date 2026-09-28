@@ -13,9 +13,8 @@ mod scheduler;
 #[path = "../tests/baseline_support/bin_test_support.rs"]
 mod bin_test_support;
 
-// #599: ハートビートの発火本体（`run_one_heartbeat`）と表示ラベル
-// `HEARTBEAT_NOSTR_CHANNEL_LABEL` は lib（`opencrab_server::heartbeat_fire`）へ移した。
-// scheduler（時刻発火）と `run_my_heartbeat`（手動発火）が同じ 1 つの関数を共有するため。
+// #599: 時間トリガーの発火本体（`run_one_heartbeat`）は lib（`opencrab_server::heartbeat_fire`）にある。
+// scheduler（時刻発火）と `run_my_schedule`（手動発火）が同じ 1 つの関数を共有するため。
 
 /// config名またはUUIDのagent_idを、DBのUUIDに解決する。
 /// "crab"のような名前が渡された場合、find_agentsで検索してUUIDを返す。
@@ -60,8 +59,6 @@ async fn main() -> anyhow::Result<()> {
         gate_admin_listener,
         gate_admin_cleanup,
         gate_admin_router,
-        heartbeat_config_tx,
-        heartbeat_config_rx,
         mut state,
         ..
     } = bootstrap::initialize()?;
@@ -104,13 +101,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let _watcher_handle = background::spawn_background_tasks(
-        &state,
-        &cfg,
-        &gate_socket,
-        heartbeat_config_tx,
-        heartbeat_config_rx,
-    );
+    let _watcher_handle = background::spawn_background_tasks(&state, &cfg, &gate_socket);
 
     // Per-agent MCP 接続マネージャ。enabled なサーバへ起動時に接続する。
     //
@@ -193,7 +184,7 @@ async fn wait_for_os_shutdown() {
 
 // #588 TimedFire / #599: ハートビートの発火本体は `opencrab_server::heartbeat_fire::run_one_heartbeat`
 // （時刻が来たら発火先ゲートウェイのループへ `TimedFire` を 1 本流すだけの free 関数）に集約した。lib へ
-// 置いてあるので scheduler（時刻発火）と `run_my_heartbeat`（手動発火）が同じ 1 つの関数を共有する。
+// 置いてあるので scheduler（時刻発火）と `run_my_schedule`（手動発火）が同じ 1 つの関数を共有する。
 // 専用のターン実装・専用配送（旧 `heartbeat_delivery.rs`）・scheduler 側の継続ターン機構は撤去し、以降の
 // ターンはexternal gatewayの通常delivery経路が回す。
 // 指示文の整形テストは `heartbeat_fire` の `#[cfg(test)]` にある。

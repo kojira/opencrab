@@ -20,7 +20,6 @@ fn inbound_speech_does_not_create_peer_review_progress_after_legacy_identity_cle
                 persona_name: "agent".into(),
                 personality: None,
                 instructions: String::new(),
-                heartbeat_instructions: String::new(),
                 model: None,
                 reasoning_effort: None,
                 web_search: None,

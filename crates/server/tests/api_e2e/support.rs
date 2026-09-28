@@ -55,9 +55,7 @@ fn create_test_state(compaction_ratio: f64) -> (AppState, opencrab_db::Db) {
         subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
         default_subtask_webhook: None,
-        heartbeat_limits: Default::default(),
         scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-        heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(Default::default()),
         timed_fire_router: std::sync::Arc::new(opencrab_actions::TimedFireRouter::new()),
         progress_debounce: std::sync::Arc::new(
             opencrab_server::subtask_registries::ProgressDebounce::new(),

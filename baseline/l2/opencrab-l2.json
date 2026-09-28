@@ -28,8 +28,8 @@
       "4xx": 32,
       "5xx": 4
     },
-    "tool_effects_observed": 44,
-    "tool_success_uncollected_count": 7
+    "tool_effects_observed": 43,
+    "tool_success_uncollected_count": 5
   },
   "http": {
     "probes": [
@@ -406,7 +406,6 @@
         "response": {
           "body": {
             "agent_id": "baseline-agent",
-            "heartbeat_instructions": "",
             "image_url": null,
             "instructions": "baseline instructions",
             "job_title": "Compatibility Probe",
@@ -478,7 +477,6 @@
           "after": {
             "body": {
               "agent_id": "baseline-agent",
-              "heartbeat_instructions": "",
               "image_url": null,
               "instructions": "baseline instructions",
               "job_title": "Compatibility Probe",
@@ -515,7 +513,6 @@
           "before": {
             "body": {
               "agent_id": "baseline-agent",
-              "heartbeat_instructions": "",
               "image_url": null,
               "instructions": "baseline instructions",
               "job_title": "Compatibility Probe",
@@ -627,7 +624,6 @@
           "after": {
             "body": {
               "agent_id": "baseline-agent",
-              "heartbeat_instructions": "",
               "image_url": null,
               "instructions": "",
               "job_title": null,
@@ -664,7 +660,6 @@
           "before": {
             "body": {
               "agent_id": "baseline-agent",
-              "heartbeat_instructions": "",
               "image_url": null,
               "instructions": "baseline instructions",
               "job_title": "Compatibility Probe",
@@ -4925,7 +4920,6 @@
           "after": {
             "body": {
               "agent_id": "baseline-agent",
-              "heartbeat_instructions": "",
               "image_url": null,
               "instructions": "baseline instructions",
               "job_title": "Compatibility Probe",
@@ -4962,7 +4956,6 @@
           "before": {
             "body": {
               "agent_id": "baseline-agent",
-              "heartbeat_instructions": "",
               "image_url": null,
               "instructions": "baseline instructions",
               "job_title": "Compatibility Probe",
@@ -8759,7 +8752,6 @@
         "add_allowed_command",
         "remove_allowed_command",
         "create_skill",
-        "update_heartbeat_instructions",
         "set_default_subtask_webhook",
         "set_default_webhook",
         "spawn_subtask",
@@ -8963,13 +8955,6 @@
           "arguments": null,
           "db_query": "memory_index_state"
         },
-        "update_heartbeat_instructions": {
-          "arguments": {
-            "scope": "agent"
-          },
-          "expect_success": true,
-          "tool": "read_heartbeat_instructions"
-        },
         "update_impression": {
           "arguments": null,
           "db_query": "impressions"
@@ -9038,7 +9023,6 @@
         "manage_allowed_commands",
         "mcp__public_local__echo",
         "mcp__trusted_local__echo",
-        "read_heartbeat_instructions",
         "read_my_history",
         "read_skill",
         "recall_model_experiences",
@@ -9162,9 +9146,6 @@
           "next_from_id": 1,
           "note": "baseline",
           "window_size": 10
-        },
-        "read_heartbeat_instructions": {
-          "scope": "agent"
         },
         "read_my_history": {
           "session_id": "baseline-session"
@@ -9291,11 +9272,6 @@
           "tag": "Baseline Tag",
           "topic_id": "t1"
         },
-        "update_heartbeat_instructions": {
-          "instructions": "baseline heartbeat updated",
-          "reason": "compatibility capture",
-          "scope": "agent"
-        },
         "update_impression": {
           "agreement": "neutral",
           "target_id": "baseline-peer",
@@ -9353,10 +9329,8 @@
       },
       "success_uncollected_l3": {
         "delete_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
-        "get_my_heartbeat": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "get_my_schedules": "requires an inbound gateway session fire descriptor owned by an external gateway process",
-        "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
-        "set_my_heartbeat": "requires an inbound gateway session fire descriptor owned by an external gateway process",
+        "run_my_schedule": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
         "set_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "update_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process"
       },
@@ -9722,18 +9696,6 @@
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "scope"
-        ],
-        "result": {
-          "data": null,
-          "error": "scope=effectiveのときはsession_idが必要です",
-          "success": false
-        },
-        "tool": "read_heartbeat_instructions"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
           "name"
         ],
         "result": {
@@ -9866,6 +9828,18 @@
           "success": false
         },
         "tool": "retrieve_memory_nodes"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "id"
+        ],
+        "result": {
+          "data": null,
+          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——ゲートに接続した会話——で実行してください。",
+          "success": false
+        },
+        "tool": "run_my_schedule"
       },
       {
         "arguments": {},
@@ -10023,19 +9997,6 @@
           "success": false
         },
         "tool": "untag_topic"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "scope",
-          "instructions"
-        ],
-        "result": {
-          "data": null,
-          "error": "instructionsパラメータが必要です",
-          "success": false
-        },
-        "tool": "update_heartbeat_instructions"
       },
       {
         "arguments": {},
@@ -10302,20 +10263,6 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'get_my_heartbeat' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "get_my_heartbeat"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
           "error": "rejected: action 'get_my_schedules' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
@@ -10470,20 +10417,6 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'read_heartbeat_instructions' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "read_heartbeat_instructions"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
           "error": "rejected: action 'read_my_history' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
@@ -10582,10 +10515,10 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'run_my_heartbeat' requires owner",
+          "error": "rejected: action 'run_my_schedule' requires owner",
           "success": false
         },
-        "tool": "run_my_heartbeat"
+        "tool": "run_my_schedule"
       },
       {
         "caller": "agent",
@@ -10614,20 +10547,6 @@
           "success": false
         },
         "tool": "set_default_webhook"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'set_my_heartbeat' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "set_my_heartbeat"
       },
       {
         "caller": "agent",
@@ -10684,20 +10603,6 @@
           "success": false
         },
         "tool": "untag_topic"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'update_heartbeat_instructions' requires owner",
-          "success": false
-        },
-        "tool": "update_heartbeat_instructions"
       },
       {
         "caller": "agent",
@@ -11497,7 +11402,6 @@
           "before": {
             "body": {
               "agent_id": "baseline-agent",
-              "heartbeat_instructions": "baseline heartbeat",
               "image_url": null,
               "instructions": "baseline instructions",
               "job_title": "Compatibility Probe",
@@ -11537,7 +11441,6 @@
           "observed": {
             "body": {
               "agent_id": "baseline-agent",
-              "heartbeat_instructions": "baseline heartbeat",
               "image_url": null,
               "instructions": "baseline instructions",
               "job_title": "Compatibility Probe",
@@ -12364,21 +12267,6 @@
           "success": true
         },
         "tool": "plan_next_memory_window"
-      },
-      {
-        "arguments": {
-          "scope": "agent"
-        },
-        "postcondition": null,
-        "result": {
-          "data": {
-            "instructions": "baseline heartbeat",
-            "scope": "agent"
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "read_heartbeat_instructions"
       },
       {
         "arguments": {
@@ -14331,51 +14219,6 @@
       },
       {
         "arguments": {
-          "instructions": "baseline heartbeat updated",
-          "reason": "compatibility capture",
-          "scope": "agent"
-        },
-        "postcondition": {
-          "arguments": {
-            "scope": "agent"
-          },
-          "before": {
-            "data": {
-              "instructions": "baseline heartbeat",
-              "scope": "agent"
-            },
-            "error": null,
-            "success": true
-          },
-          "db_query": null,
-          "expect_success": true,
-          "method": null,
-          "observed": {
-            "data": {
-              "instructions": "baseline heartbeat updated",
-              "scope": "agent"
-            },
-            "error": null,
-            "success": true
-          },
-          "tool": "read_heartbeat_instructions",
-          "uri": null
-        },
-        "result": {
-          "data": {
-            "length": 26,
-            "preview": "baseline heartbeat updated",
-            "scope": "agent",
-            "session_id": null,
-            "success": true
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "update_heartbeat_instructions"
-      },
-      {
-        "arguments": {
           "agreement": "neutral",
           "target_id": "baseline-peer",
           "target_name": "Baseline Peer"
@@ -14430,7 +14273,6 @@
           "before": {
             "body": {
               "agent_id": "baseline-agent",
-              "heartbeat_instructions": "baseline heartbeat",
               "image_url": null,
               "instructions": "baseline instructions",
               "job_title": "Compatibility Probe",
@@ -14470,7 +14312,6 @@
           "observed": {
             "body": {
               "agent_id": "baseline-agent",
-              "heartbeat_instructions": "baseline heartbeat",
               "image_url": null,
               "instructions": "baseline updated instructions",
               "job_title": "Compatibility Probe",
@@ -15151,12 +14992,6 @@
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "get_my_heartbeat"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
         "tool": "get_my_schedules"
       },
       {
@@ -15223,18 +15058,6 @@
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "run_my_heartbeat"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "set_my_heartbeat"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
         "tool": "survey_my_history"
       },
       {
@@ -15265,25 +15088,13 @@
         "facet": "success",
         "reason": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "status": "uncollected",
-        "tool": "get_my_heartbeat"
-      },
-      {
-        "facet": "success",
-        "reason": "requires an inbound gateway session fire descriptor owned by an external gateway process",
-        "status": "uncollected",
         "tool": "get_my_schedules"
       },
       {
         "facet": "success",
         "reason": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
         "status": "uncollected",
-        "tool": "run_my_heartbeat"
-      },
-      {
-        "facet": "success",
-        "reason": "requires an inbound gateway session fire descriptor owned by an external gateway process",
-        "status": "uncollected",
-        "tool": "set_my_heartbeat"
+        "tool": "run_my_schedule"
       },
       {
         "facet": "success",
@@ -15330,7 +15141,6 @@
           "generate_inner_voice",
           "get_default_subtask_webhook",
           "get_default_webhook",
-          "get_my_heartbeat",
           "get_my_schedules",
           "get_system_info",
           "get_task",
@@ -15345,7 +15155,6 @@
           "merge_tags",
           "open_task",
           "plan_next_memory_window",
-          "read_heartbeat_instructions",
           "read_my_history",
           "read_skill",
           "rebuild_memory_index",
@@ -15361,14 +15170,13 @@
           "retract_memory_core",
           "retract_memory_unit",
           "retrieve_memory_nodes",
-          "run_my_heartbeat",
+          "run_my_schedule",
           "save_model_insight",
           "search_memory_index",
           "search_my_history",
           "select_llm",
           "set_default_subtask_webhook",
           "set_default_webhook",
-          "set_my_heartbeat",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -15376,7 +15184,6 @@
           "survey_my_history",
           "tag_topic",
           "untag_topic",
-          "update_heartbeat_instructions",
           "update_impression",
           "update_instructions",
           "update_memory_core",
@@ -15419,7 +15226,6 @@
           "generate_inner_voice",
           "get_default_subtask_webhook",
           "get_default_webhook",
-          "get_my_heartbeat",
           "get_my_schedules",
           "get_system_info",
           "get_task",
@@ -15434,7 +15240,6 @@
           "merge_tags",
           "open_task",
           "plan_next_memory_window",
-          "read_heartbeat_instructions",
           "read_my_history",
           "read_skill",
           "rebuild_memory_index",
@@ -15450,14 +15255,13 @@
           "retract_memory_core",
           "retract_memory_unit",
           "retrieve_memory_nodes",
-          "run_my_heartbeat",
+          "run_my_schedule",
           "save_model_insight",
           "search_memory_index",
           "search_my_history",
           "select_llm",
           "set_default_subtask_webhook",
           "set_default_webhook",
-          "set_my_heartbeat",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -15465,7 +15269,6 @@
           "survey_my_history",
           "tag_topic",
           "untag_topic",
-          "update_heartbeat_instructions",
           "update_impression",
           "update_instructions",
           "update_memory_core",
@@ -15503,7 +15306,6 @@
           "generate_inner_voice",
           "get_default_subtask_webhook",
           "get_default_webhook",
-          "get_my_heartbeat",
           "get_my_schedules",
           "get_system_info",
           "get_task",
@@ -15517,7 +15319,6 @@
           "merge_tags",
           "open_task",
           "plan_next_memory_window",
-          "read_heartbeat_instructions",
           "read_my_history",
           "read_skill",
           "rebuild_memory_index",
@@ -15538,7 +15339,6 @@
           "select_llm",
           "set_default_subtask_webhook",
           "set_default_webhook",
-          "set_my_heartbeat",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -15738,7 +15538,6 @@
           "generate_inner_voice",
           "get_default_subtask_webhook",
           "get_default_webhook",
-          "get_my_heartbeat",
           "get_my_schedules",
           "get_system_info",
           "get_task",
@@ -15753,7 +15552,6 @@
           "merge_tags",
           "open_task",
           "plan_next_memory_window",
-          "read_heartbeat_instructions",
           "read_my_history",
           "read_skill",
           "rebuild_memory_index",
@@ -15769,14 +15567,13 @@
           "retract_memory_core",
           "retract_memory_unit",
           "retrieve_memory_nodes",
-          "run_my_heartbeat",
+          "run_my_schedule",
           "save_model_insight",
           "search_memory_index",
           "search_my_history",
           "select_llm",
           "set_default_subtask_webhook",
           "set_default_webhook",
-          "set_my_heartbeat",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -15784,7 +15581,6 @@
           "survey_my_history",
           "tag_topic",
           "untag_topic",
-          "update_heartbeat_instructions",
           "update_impression",
           "update_instructions",
           "update_memory_core",

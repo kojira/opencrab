@@ -86,7 +86,7 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
 
     /// `agents` テーブルにこの `agent_id` の行が存在するか（#632）。
     ///
-    /// エージェント別テーブル（`agent_allowed_commands` / `session_heartbeat_config` /
+    /// エージェント別テーブル（`agent_allowed_commands` / `agent_schedules` /
     /// `trusted_users` など）には外部キー制約が無いため、存在しない `agent_id` を渡しても
     /// セッション・ログ・per-agent 設定が「既定に落ちたまま」動いてしまう。タイプミス 1 つで
     /// 「動くが設定が効かない」状態になり、それに気づけない（#632 の症状）。
