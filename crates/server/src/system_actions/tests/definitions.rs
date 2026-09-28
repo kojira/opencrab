@@ -354,13 +354,11 @@ fn config_tools_are_inline_and_key_generation_is_dispatched() {
         "configure_nostr は background 化してはならない（設定の共有状態書き込み）"
     );
     // 長時間 / 同ターンで読み戻さない書き込みは dispatch 対象に残す。
-    for name in ["update_memory_index_config"] {
-        assert_eq!(
-            class_of(name).dispatch,
-            DispatchMode::Dispatchable,
-            "{name} は dispatch 対象に残す（同ターンで読み戻さない書き込み）"
-        );
-    }
+    assert_eq!(
+        class_of("update_memory_index_config").dispatch,
+        DispatchMode::Dispatchable,
+        "update_memory_index_config は dispatch 対象に残す（同ターンで読み戻さない書き込み）"
+    );
 #[cfg(any())]
     assert_eq!(
         class_of("nostr_generate_key").dispatch,

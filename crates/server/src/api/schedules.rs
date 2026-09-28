@@ -188,9 +188,7 @@ pub(crate) fn create_schedule_core(
         //     next_fire が動いて「同じことを 2 回言うと変わる」ことになり冪等でなくなる。
         //     （ただし anchor が欠けていれば打つ。）
         let enabling = enabled && !row.enabled;
-        if enabling {
-            row.anchor_at = Some(now.clone());
-        } else if enabled && row.anchor_at.is_none() {
+        if enabling || (enabled && row.anchor_at.is_none()) {
             row.anchor_at = Some(now.clone());
         }
         row.enabled = enabled;

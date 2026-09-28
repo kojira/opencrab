@@ -103,8 +103,8 @@ mod tests {
     ///
     /// 許可サイト:
     /// - `core/src/injection.rs`（この単一実装。doc/テストにも綴りが出る）
-    /// - `db/queries/heartbeat.rs`（`\n`/`\t` を残す別目的の `is_control`。誤検出を避け
-    ///   るため明示的に allowlist する）
+    /// - `db/schema/migrations/v57.rs`（v56 の heartbeat 指示サニタイザの凍結コピー。`\n`/`\t`
+    ///   を残す別目的の `is_control`。誤検出を避けるため明示的に allowlist する）
     ///
     /// （DI フェーズ1: `nostr-gateway/src/map.rs` の sanitize_anchor_field は §9A.2 で削除され、
     /// is_control 自前実装が無くなったため allowlist から外した。）
@@ -127,11 +127,13 @@ mod tests {
         let needle = "is_control";
         let allowed: [std::path::PathBuf; 6] = [
             crates_dir.join("core").join("src").join("injection.rs"),
+            // Frozen v56 heartbeat-instructions sanitizer used only by the v57 migration (#612).
             crates_dir
                 .join("db")
                 .join("src")
-                .join("queries")
-                .join("heartbeat.rs"),
+                .join("schema")
+                .join("migrations")
+                .join("v57.rs"),
             // Wire metadata validation, not prompt-field sanitization.
             crates_dir.join("extgate").join("src").join("protocol.rs"),
             // Filesystem-safe Discord filename normalization, not prompt sanitization.
