@@ -8,6 +8,17 @@ use crate::ids::{config_digest_from_b64, now_nanos, session_id_for_binding};
 use crate::protocol::{err_frame, write_json, Provision};
 use crate::registry::ExtgateState;
 
+/// Stored fields used to reconcile a declarative provision with an existing instance.
+struct ExistingInstanceRow {
+    kind_id: String,
+    subject_id: i64,
+    revision: i64,
+    config_b64: String,
+    enabled: i64,
+    binding_authority: String,
+    deleted_at: Option<i64>,
+}
+
 /// Applies the complete declarative inventory in the one pre-hello transaction.
 pub async fn handle_provision(
     state: &Arc<ExtgateState>,
@@ -48,12 +59,22 @@ pub(crate) fn persist(
         return Err(GateError::new(ErrorCode::SubjectUnknown));
     };
     let digest = config_digest_from_b64(&request.config_b64)?;
-    let existing: Option<(String, i64, i64, String, i64, String, Option<i64>)> = tx
+    let existing: Option<ExistingInstanceRow> = tx
         .query_row(
             "SELECT kind_id, subject_id, revision, config_b64, enabled, binding_authority, deleted_at
              FROM gate_instances WHERE instance_id=?1",
             [&request.instance_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+            |row| {
+                Ok(ExistingInstanceRow {
+                    kind_id: row.get(0)?,
+                    subject_id: row.get(1)?,
+                    revision: row.get(2)?,
+                    config_b64: row.get(3)?,
+                    enabled: row.get(4)?,
+                    binding_authority: row.get(5)?,
+                    deleted_at: row.get(6)?,
+                })
+            },
         )
         .optional()
         .map_err(|_| GateError::store())?;
@@ -79,11 +100,14 @@ pub(crate) fn persist(
             )
             .map_err(|_| GateError::new(ErrorCode::InstanceConflict))?;
         }
-        Some((kind, subject, revision, config_b64, enabled, authority, deleted_at)) => {
-            if deleted_at.is_some() || kind != request.kind_id || subject != request.subject_id {
+        Some(existing) => {
+            if existing.deleted_at.is_some()
+                || existing.kind_id != request.kind_id
+                || existing.subject_id != request.subject_id
+            {
                 return Err(GateError::new(ErrorCode::InstanceConflict));
             }
-            if authority == "runtime" {
+            if existing.binding_authority == "runtime" {
                 if !request.adopt_existing {
                     return Err(GateError::new(ErrorCode::InstanceConflict));
                 }
@@ -92,8 +116,13 @@ pub(crate) fn persist(
                     [&request.instance_id],
                 ).map_err(|_| GateError::store())?;
             }
-            if config_b64 != request.config_b64 || enabled != i64::from(request.enabled) {
-                let next = revision.checked_add(1).ok_or_else(GateError::store)?;
+            if existing.config_b64 != request.config_b64
+                || existing.enabled != i64::from(request.enabled)
+            {
+                let next = existing
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(GateError::store)?;
                 tx.execute(
                     "UPDATE gate_instances SET revision=?2,enabled=?3,config_b64=?4,config_digest=?5,updated_at=?6,operation_declaration_digest=NULL WHERE instance_id=?1",
                     params![request.instance_id, next, i64::from(request.enabled), request.config_b64, digest, now],
