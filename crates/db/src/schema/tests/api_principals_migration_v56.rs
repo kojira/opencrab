@@ -3,7 +3,7 @@ fn v56_creates_api_principals_on_fresh_and_upgraded_databases() {
     let fresh = crate::init_memory().expect("fresh schema must initialize");
     assert_eq!(
         schema_version(&fresh).expect("fresh user_version"),
-        56,
+        57,
         "S8 requires the ordinary v56 migration before offline projection"
     );
     assert!(
@@ -16,7 +16,7 @@ fn v56_creates_api_principals_on_fresh_and_upgraded_databases() {
         .execute_batch("DROP TABLE IF EXISTS api_principals; PRAGMA user_version=55;")
         .expect("prepare v55 fixture");
     initialize(&upgraded).expect("upgrade v55 to v56");
-    assert_eq!(schema_version(&upgraded).unwrap(), 56);
+    assert_eq!(schema_version(&upgraded).unwrap(), 57);
     assert!(table_exists(&upgraded, "api_principals").unwrap());
 
     let columns: Vec<(String, String, i64, i64)> = upgraded

@@ -3,7 +3,6 @@
 include!("conformance/support.rs");
 include!("conformance/liveness.rs");
 include!("conformance/wire_protocol.rs");
-include!("conformance/admin_registry.rs");
 include!("conformance/said_ingress.rs");
 include!("conformance/delivery.rs");
 include!("conformance/turn_outcomes.rs");

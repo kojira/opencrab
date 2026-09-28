@@ -1,14 +1,10 @@
+use base64::Engine as _;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
-use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
-use http_body_util::BodyExt;
 use opencrab_actions::subtask::{settle_completed, SettleContext};
 use opencrab_actions::{
     AgentRuntime, CallerIdentity, InboundMessageRecord, InteractionRecord, ModelAdminError,
@@ -16,27 +12,20 @@ use opencrab_actions::{
     SubtaskLifecycle, SubtaskRegistries, TranscriptSource,
 };
 use opencrab_core::EngineResult;
-use opencrab_db::queries::{AgentRow, SessionRow};
+use opencrab_db::queries::AgentRow;
 use opencrab_extgate::completion::ExtgateCompletionSink;
 use opencrab_extgate::{
-    admin_router, invoke_and_wait, now_nanos, recover_stale_calls, recover_stale_deliveries,
-    serve_uds, session_id_for_binding, validate_listen_socket, DeliveryMode,
-    ExtgateOpsGatewayActions,
-    ExtgateState, UNAUTHORIZED_BODY,
+    invoke_and_wait, now_nanos, recover_stale_calls, recover_stale_deliveries, serve_uds,
+    session_id_for_binding, DeliveryMode, ExtgateOpsGatewayActions, ExtgateState,
 };
 use opencrab_gate_client::client::{InstanceClient, SaidOutcome};
 use opencrab_gateway::{GatewayActions, GatewayCallContext, GatewayCaller};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{oneshot, Notify};
-use tower::ServiceExt;
 use uuid::Uuid;
 
-const TOKEN: &str = "database-backed-fixture";
-const FIXTURE_AUTHORIZATION: &str = "Bearer database-backed-fixture";
-static NEXT_ADMIN_PRINCIPAL: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone)]
 struct TestRuntime {
@@ -386,99 +375,6 @@ impl Harness {
     async fn connect(&self) -> UnixStream {
         UnixStream::connect(&self.sock).await.expect("connect")
     }
-
-    async fn admin(&self, req: Request<Body>) -> (StatusCode, Vec<u8>) {
-        let req = self.with_database_backed_admin(req).await;
-        let app = admin_router(Arc::clone(&self.state));
-        let res = app.oneshot(req).await.unwrap();
-        let status = res.status();
-        let body = res.into_body().collect().await.unwrap().to_bytes().to_vec();
-        (status, body)
-    }
-
-    async fn with_database_backed_admin(&self, req: Request<Body>) -> Request<Body> {
-        if req.headers().get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
-            != Some(FIXTURE_AUTHORIZATION)
-        {
-            return req;
-        }
-        let (mut parts, body) = req.into_parts();
-        let body = body.collect().await.unwrap().to_bytes();
-        let body_json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        let path = parts.uri.path();
-        let operation = match (parts.method.as_str(), path.contains("/gate-bindings/"), path.ends_with("/revisions")) {
-            ("GET", false, false) => "instance.read",
-            ("PUT", false, false) => "instance.put",
-            ("DELETE", false, false) => "instance.delete",
-            ("POST", false, true) => "instance.revise",
-            ("PUT", true, false) => "binding.put",
-            ("DELETE", true, false) => "binding.delete",
-            _ => return Request::from_parts(parts, Body::from(body)),
-        };
-        let route_id = path.rsplit('/').nth(usize::from(path.ends_with("/revisions"))).unwrap();
-        let instance_id = if path.contains("/gate-instances/") {
-            route_id.to_owned()
-        } else if let Some(instance_id) = body_json.get("instance_id").and_then(Value::as_str) {
-            instance_id.to_owned()
-        } else {
-            let conn = self.state.db.lock().unwrap();
-            conn.query_row(
-                "SELECT instance_id FROM gate_bindings WHERE binding_id=?1",
-                [route_id],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap_or_else(|_| Uuid::nil().to_string())
-        };
-
-        let sequence = NEXT_ADMIN_PRINCIPAL.fetch_add(1, Ordering::SeqCst) as u64;
-        let mut token = [0_u8; 32];
-        token[..8].copy_from_slice(&sequence.to_be_bytes());
-        token[8..].fill(0x5a);
-        let salt = [0x3c_u8; 32];
-        let mut hasher = Sha256::new();
-        hasher.update(b"opencrab/gate-admin/bearer/v1\0");
-        hasher.update(salt);
-        hasher.update(token);
-        let hash = hasher.finalize().to_vec();
-        let principal_id = format!("conformance-{sequence}");
-        let expires_at = 4_000_000_000_i64 * 1_000_000_000;
-        {
-            let conn = self.state.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO gate_admin_principals
-                 (principal_id, credential_salt, credential_hash, scope_mode, created_at,
-                  expires_at, revoked_at, sealed_at, predecessor_principal_id, overlap_deadline)
-                 VALUES (?1, ?2, ?3, 'exact', 1, ?4, NULL, NULL, NULL, NULL)",
-                rusqlite::params![principal_id, salt.as_slice(), hash, expires_at],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO gate_admin_principal_operations VALUES (?1, ?2)",
-                rusqlite::params![principal_id, operation],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO gate_admin_principal_subjects VALUES (?1, ?2)",
-                rusqlite::params![principal_id, self.subject_id],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO gate_admin_principal_instances VALUES (?1, ?2)",
-                rusqlite::params![principal_id, instance_id],
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE gate_admin_principals SET sealed_at=2 WHERE principal_id=?1",
-                [principal_id],
-            )
-            .unwrap();
-        }
-        parts.headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {}", URL_SAFE_NO_PAD.encode(token)).parse().unwrap(),
-        );
-        Request::from_parts(parts, Body::from(body))
-    }
 }
 
 fn uuid() -> String {
@@ -493,9 +389,6 @@ fn config_digest() -> String {
     opencrab_extgate::ids::config_digest_from_b64(config_b64()).unwrap()
 }
 
-fn auth() -> String {
-    format!("Bearer {TOKEN}")
-}
 
 async fn write_frame(s: &mut UnixStream, v: &Value) {
     let mut buf = serde_json::to_vec(v).unwrap();
@@ -550,11 +443,14 @@ async fn read_frame_opt(s: &mut UnixStream) -> Option<Value> {
         .flatten()
 }
 
-async fn put_instance(h: &Harness, instance_id: &str, enabled: bool) -> Value {
-    put_instance_kind(h, instance_id, enabled, "discord").await
-}
-
-async fn put_instance_kind(h: &Harness, instance_id: &str, enabled: bool, kind_id: &str) -> Value {
+async fn provision(
+    h: &Harness,
+    instance_id: &str,
+    kind_id: &str,
+    enabled: bool,
+    config_b64: &str,
+    bindings: Vec<(String, String)>,
+) -> Value {
     let grant = {
         let mut conn = h.state.db.lock().unwrap();
         let exists: i64 = conn
@@ -564,47 +460,44 @@ async fn put_instance_kind(h: &Harness, instance_id: &str, enabled: bool, kind_i
                 |row| row.get(0),
             )
             .unwrap();
-        if exists == 0 {
-            Some(
-                opencrab_db::queries::issue_subject_association_grant(
-                    &mut conn,
-                    "agent-1",
-                    h.subject_id,
-                    i64::MAX,
-                    now_nanos(),
-                )
-                .unwrap(),
+        (exists == 0).then(|| {
+            opencrab_db::queries::issue_subject_association_grant(
+                &mut conn,
+                "agent-1",
+                h.subject_id,
+                i64::MAX,
+                now_nanos(),
             )
-        } else {
-            None
-        }
+            .unwrap()
+        })
     };
+    let mut stream = h.connect().await;
     let mut request = json!({
+        "id": uuid(),
+        "m": "provision",
+        "instance_id": instance_id,
         "kind_id": kind_id,
         "subject_id": h.subject_id,
+        "adopt_existing": false,
         "enabled": enabled,
-        "config_b64": config_b64(),
+        "config_b64": config_b64,
+        "bindings": bindings.into_iter().map(|(binding_id, address)| json!({"binding_id": binding_id, "address": address})).collect::<Vec<_>>(),
     });
     if let Some(grant) = grant {
         request["subject_grant"] = json!(grant);
     }
-    let (st, body) = h
-        .admin(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/api/gate-instances/{instance_id}"))
-                .header(header::AUTHORIZATION, auth())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(request.to_string()))
-                .unwrap(),
-        )
-        .await;
-    assert!(
-        st == StatusCode::CREATED || st == StatusCode::OK,
-        "{st} {}",
-        String::from_utf8_lossy(&body)
-    );
-    serde_json::from_slice(&body).unwrap()
+    write_frame(&mut stream, &request).await;
+    let response = read_frame(&mut stream).await;
+    assert_eq!(response["m"], "provisioned", "{response}");
+    response
+}
+
+async fn put_instance(h: &Harness, instance_id: &str, enabled: bool) -> Value {
+    put_instance_kind(h, instance_id, enabled, "discord").await
+}
+
+async fn put_instance_kind(h: &Harness, instance_id: &str, enabled: bool, kind_id: &str) -> Value {
+    provision(h, instance_id, kind_id, enabled, config_b64(), Vec::new()).await
 }
 
 async fn put_binding(
@@ -612,38 +505,30 @@ async fn put_binding(
     binding_id: &str,
     instance_id: &str,
     address: &str,
-) -> StatusCode {
-    let (session_id, title) = {
+) -> Value {
+    let (kind_id, enabled, config_b64, mut bindings) = {
         let conn = h.state.db.lock().unwrap();
-        match opencrab_db::queries::get_session(&conn, address).unwrap() {
-            Some(session) => (address.to_string(), session.theme),
-            None => (session_id_for_binding(binding_id), address.to_string()),
-        }
+        let instance = conn
+            .query_row(
+                "SELECT kind_id, enabled, config_b64 FROM gate_instances WHERE instance_id=?1",
+                [instance_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
+            )
+            .unwrap();
+        let mut statement = conn
+            .prepare("SELECT binding_id, address FROM gate_bindings WHERE instance_id=?1 AND closed_at IS NULL ORDER BY binding_id")
+            .unwrap();
+        let bindings = statement
+            .query_map([instance_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        (instance.0, instance.1 == 1, instance.2, bindings)
     };
-    let (st, body) = h
-        .admin(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/api/gate-bindings/{binding_id}"))
-                .header(header::AUTHORIZATION, auth())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "instance_id": instance_id,
-                        "address": address,
-                        "session": {"session_id": session_id, "title": title}
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await;
-    assert!(
-        st == StatusCode::CREATED || st == StatusCode::OK,
-        "{st} {}",
-        String::from_utf8_lossy(&body)
-    );
-    st
+    if !bindings.iter().any(|(id, _)| id == binding_id) {
+        bindings.push((binding_id.to_string(), address.to_string()));
+    }
+    provision(h, instance_id, &kind_id, enabled, &config_b64, bindings).await
 }
 
 async fn hello_ok(s: &mut UnixStream, instance_id: &str, revision: u64) {
@@ -700,31 +585,6 @@ async fn ready_pair(h: &Harness) -> (UnixStream, String, String) {
     (s, instance_id, binding_id)
 }
 
-fn err_code(body: &[u8]) -> String {
-    let v: Value = serde_json::from_slice(body).unwrap();
-    v["error"]["code"].as_str().unwrap().to_string()
-}
-
-fn insert_named_session(h: &Harness, id: &str) {
-    let conn = h.state.db.lock().unwrap();
-    opencrab_db::queries::insert_session(
-        &conn,
-        &SessionRow {
-            id: id.into(),
-            mode: "solo".into(),
-            theme: id.into(),
-            phase: "convergent".into(),
-            turn_number: 0,
-            status: "active".into(),
-            participant_ids_json: r#"["agent-1"]"#.into(),
-            facilitator_id: None,
-            done_count: 0,
-            max_turns: None,
-            metadata_json: None,
-        },
-    )
-    .unwrap();
-}
 
 async fn wait_client_bound(client: &InstanceClient, address: &str, binding_id: &str) {
     for _ in 0..80 {

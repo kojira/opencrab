@@ -4,6 +4,7 @@
 use rusqlite::Connection;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
@@ -14,7 +15,6 @@ const AUTHOR: &str = "e2e-owner";
 const LOGICAL: &str = "web-e2eagent-c1";
 const INSTANCE: &str = "11111111-1111-4111-8111-111111111111";
 const BINDING: &str = "22222222-2222-4222-8222-222222222222";
-const TOKEN: &str = "e2e-operator-token";
 const CLIENT_MSG: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const REPLY: &str = "e2e-reply-from-mock";
 const CONFIG_B64: &str = "eyJhdXRob3JfaWQiOiJlMmUtb3duZXIifQ==";
@@ -270,6 +270,56 @@ fn wait_http(port: u16, path: &str, timeout: Duration) -> bool {
     false
 }
 
+/// Static Web E2E inventory uses the one-shot V3 pre-hello provision frame.
+fn provision_fixture_instance(db: &Path, socket: &Path, subject_id: i64) {
+    let grant = {
+        let mut conn = Connection::open(db).expect("open fixture database");
+        conn.busy_timeout(Duration::from_secs(5))
+            .expect("set fixture database timeout");
+        opencrab_db::queries::issue_subject_association_grant(
+            &mut conn,
+            AGENT,
+            subject_id,
+            i64::MAX,
+            0,
+        )
+        .expect("issue fixture subject grant")
+    };
+    let request_id = "core-process-e2e-provision";
+    let request = serde_json::json!({
+        "m": "provision",
+        "id": request_id,
+        "instance_id": INSTANCE,
+        "kind_id": "web",
+        "subject_id": subject_id,
+        "subject_grant": grant,
+        "adopt_existing": false,
+        "enabled": true,
+        "config_b64": CONFIG_B64,
+        "bindings": [{"binding_id": BINDING, "address": LOGICAL}],
+    });
+    let mut stream = UnixStream::connect(socket).expect("connect provision UDS");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set provision read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("set provision write timeout");
+    let mut frame = serde_json::to_vec(&request).expect("encode provision frame");
+    frame.push(b'\n');
+    stream.write_all(&frame).expect("write provision frame");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read provision response");
+    let response: serde_json::Value =
+        serde_json::from_str(response.trim()).expect("provision json");
+    assert_eq!(response["m"], "provisioned", "{response}");
+    assert_eq!(response["id"], request_id, "{response}");
+    assert_eq!(response["instance_id"], INSTANCE, "{response}");
+    assert_eq!(response["revision"], 1, "{response}");
+}
+
 fn spawn_sse(port: u16, session: &str) -> std::sync::mpsc::Receiver<String> {
     let (tx, rx) = std::sync::mpsc::channel();
     let session = session.to_string();
@@ -353,7 +403,6 @@ fn spawn_sse(port: u16, session: &str) -> std::sync::mpsc::Receiver<String> {
 }
 
 #[test]
-#[ignore = "gate_admin dependency is being removed; keep out of default CI (#1033)"]
 fn send_said_turn_say_sse_over_real_processes() {
     let mock = spawn_mock_llm();
     let root = tempfile::tempdir().unwrap();
@@ -400,7 +449,6 @@ fn send_said_turn_say_sse_over_real_processes() {
     let core = Proc(
         Command::new(server_bin())
             .current_dir(root.path())
-            .env("OPENCRAB_GATE_OPERATOR_TOKEN", TOKEN)
             .env(
                 "RUST_LOG",
                 "opencrab=debug,opencrab_server=debug,opencrab_extgate=debug,opencrab_core=debug",
@@ -452,31 +500,7 @@ fn send_said_turn_say_sse_over_real_processes() {
     let subject = agent_v["subject_id"].as_i64().expect("subject_id");
     assert!(subject > 0, "{agent_json}");
 
-    let inst_body = format!(
-        r#"{{"kind_id":"web","subject_id":{subject},"enabled":true,"config_b64":"{CONFIG_B64}"}}"#
-    );
-    let (st, body) = http(
-        core_port,
-        "PUT",
-        &format!("/api/gate-instances/{INSTANCE}"),
-        Some(TOKEN),
-        Some(&inst_body),
-        Duration::from_secs(5),
-    )
-    .expect("instance put");
-    assert!(st == 200 || st == 201, "instance PUT {st} {body}");
-
-    let bind_body = format!(r#"{{"instance_id":"{INSTANCE}","address":"{LOGICAL}"}}"#);
-    let (st, body) = http(
-        core_port,
-        "PUT",
-        &format!("/api/gate-bindings/{BINDING}"),
-        Some(TOKEN),
-        Some(&bind_body),
-        Duration::from_secs(5),
-    )
-    .expect("binding put");
-    assert!(st == 200 || st == 201, "binding PUT {st} {body}");
+    provision_fixture_instance(&db, &sock, subject);
 
     let placement = root.path().join("placement.json");
     std::fs::write(

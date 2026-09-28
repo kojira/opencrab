@@ -57,9 +57,6 @@ async fn main() -> anyhow::Result<()> {
         cfg,
         extgate,
         gate_socket,
-        gate_admin_listener,
-        gate_admin_cleanup,
-        gate_admin_router,
         heartbeat_config_tx,
         heartbeat_config_rx,
         mut state,
@@ -93,16 +90,6 @@ async fn main() -> anyhow::Result<()> {
         use opencrab_actions::AgentRuntime as _;
         state.cleanup_stale_interactions();
     }
-
-    // The protected router and private socket were prepared synchronously by bootstrap.
-    // Only after that security gate succeeds may any runtime/public listener be started.
-    tokio::spawn(async move {
-        let _cleanup = gate_admin_cleanup;
-        if let Err(error) = axum::serve(gate_admin_listener, gate_admin_router).await {
-            tracing::error!(%error, "gate-admin listener halted");
-            std::process::exit(1);
-        }
-    });
 
     let _watcher_handle = background::spawn_background_tasks(
         &state,

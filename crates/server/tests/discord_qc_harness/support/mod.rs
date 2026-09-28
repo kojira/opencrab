@@ -2,11 +2,6 @@ use std::path::PathBuf;
 pub(crate) use std::sync::{Arc, Mutex, Once, OnceLock};
 pub(crate) use std::time::Duration;
 
-pub(crate) use axum::body::Body;
-pub(crate) use axum::http::{header, Request, StatusCode};
-pub(crate) use http_body_util::BodyExt;
-pub(crate) use tower::ServiceExt;
-
 pub(crate) use opencrab_llm::message::*;
 pub(crate) use opencrab_llm::router::LlmRouter;
 pub(crate) use opencrab_llm::traits::LlmProvider;
@@ -15,7 +10,7 @@ pub(crate) use opencrab_server::AppState;
 pub(crate) use opencrab_discord_gateway::config::InstancePlacement;
 pub(crate) use opencrab_discord_gateway::harness::HarnessOverrides;
 pub(crate) use opencrab_discord_gateway::run::spawn_instance;
-pub(crate) use opencrab_extgate::{admin_router, serve_uds, ExtgateState};
+pub(crate) use opencrab_extgate::{serve_uds, ExtgateState};
 pub(crate) use opencrab_gate_client::client::InstanceClient;
 
 pub(crate) use tracing_subscriber::layer::{Context, SubscriberExt};

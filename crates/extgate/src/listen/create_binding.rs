@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rusqlite::TransactionBehavior;
+use rusqlite::{OptionalExtension, TransactionBehavior};
 
 use crate::error::{ErrorCode, GateError};
 use crate::protocol::{err_frame, ok_frame, write_json, CreateBinding};
@@ -39,6 +39,17 @@ fn persist(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| GateError::store())?;
+    let authority: Option<String> = tx.query_row(
+        "SELECT binding_authority FROM gate_instances WHERE instance_id=?1 AND deleted_at IS NULL",
+        [instance_id],
+        |row| row.get(0),
+    ).optional().map_err(|_| GateError::store())?;
+    match authority.as_deref() {
+        None => return Err(GateError::new(ErrorCode::InstanceUnknown)),
+        Some("declarative") => return Err(GateError::new(ErrorCode::BindingConflict)),
+        Some("runtime") => {}
+        Some(_) => return Err(GateError::store()),
+    }
     match opencrab_db::queries::create_gate_binding_in_tx(
         &tx,
         &request.binding_id,

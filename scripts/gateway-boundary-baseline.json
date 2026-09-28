@@ -10,7 +10,7 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/discord-gateway/src/daemon.rs",
-      "line": 725,
+      "line": 709,
       "snippet": "let store = DiscordStore::open(&config.database_path)?;",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",
@@ -30,7 +30,7 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 755,
+      "line": 730,
       "snippet": "let store = NostrStore::open(&config.database_path)?;",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",
@@ -500,7 +500,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 516,
+      "line": 637,
       "snippet": "Some(\"trusted_user\") => Ok(SaidCaller::TrustedUser),",
       "classification": "production-violation",
       "violation": "V11",

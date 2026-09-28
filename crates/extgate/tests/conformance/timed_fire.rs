@@ -46,12 +46,11 @@ async fn wait_binding_acknowledged(h: &Harness, instance_id: &str, binding_id: &
 #[tokio::test]
 async fn s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_continuation() {
     let h = Harness::start().await;
-    let session_id = "opaque-automatic-continuation";
     let instance_id = uuid();
     let binding_id = uuid();
-    insert_named_session(&h, session_id);
+    let session_id = session_id_for_binding(&binding_id);
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, session_id).await;
+    put_binding(&h, &binding_id, &instance_id, &session_id).await;
 
     let mut stream = h.connect().await;
     hello_ok(&mut stream, &instance_id, 1).await;
@@ -76,7 +75,7 @@ async fn s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_co
     let canonical = {
         let conn = h.state.db.lock().unwrap();
         TimedFireRouter::new()
-            .resolve_persisted_target(&conn, session_id, "agent-1")
+            .resolve_persisted_target(&conn, &session_id, "agent-1")
             .expect("canonical generic route")
     };
     assert_eq!(canonical.binding_id, binding_id);
@@ -108,12 +107,11 @@ async fn s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_co
 #[tokio::test]
 async fn s3_timed_continuation_routes_generic_binding_session_once_after_reconnect_ack() {
     let h = Harness::start().await;
-    let alias = "opaque-timed-fire-session";
     let instance_id = uuid();
     let binding_id = uuid();
-    insert_named_session(&h, alias);
+    let alias = session_id_for_binding(&binding_id);
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, alias).await;
+    put_binding(&h, &binding_id, &instance_id, &alias).await;
     let sink = ExtgateTimedFireSink::new(Arc::clone(&h.state), h.runtime.clone());
 
     let mut first = h.connect().await;
@@ -122,14 +120,14 @@ async fn s3_timed_continuation_routes_generic_binding_session_once_after_reconne
     assert_eq!(bind["m"], "bind");
     assert_eq!(bind["binding_id"], binding_id);
 
-    sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "agent-1"));
+    sink.fire_timed_turn(timed_fire_request(&binding_id, &alias, "agent-1"));
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
     assert!(read_frame_opt(&mut first).await.is_none());
 
     drop(first);
     wait_registry_absent(&h, &instance_id).await;
-    sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "agent-1"));
+    sink.fire_timed_turn(timed_fire_request(&binding_id, &alias, "agent-1"));
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
 
@@ -138,7 +136,7 @@ async fn s3_timed_continuation_routes_generic_binding_session_once_after_reconne
     assert_eq!(ack_bind(&mut reconnected).await, binding_id);
     wait_binding_acknowledged(&h, &instance_id, &binding_id).await;
 
-    sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "other-agent"));
+    sink.fire_timed_turn(timed_fire_request(&binding_id, &alias, "other-agent"));
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
     assert!(read_frame_opt(&mut reconnected).await.is_none());
@@ -152,7 +150,7 @@ async fn s3_timed_continuation_routes_generic_binding_session_once_after_reconne
             rusqlite::params![now_nanos(), binding_id],
         )
         .unwrap();
-    sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "agent-1"));
+    sink.fire_timed_turn(timed_fire_request(&binding_id, &alias, "agent-1"));
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
     assert!(read_frame_opt(&mut reconnected).await.is_none());
@@ -166,7 +164,7 @@ async fn s3_timed_continuation_routes_generic_binding_session_once_after_reconne
             [&binding_id],
         )
         .unwrap();
-    sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "agent-1"));
+    sink.fire_timed_turn(timed_fire_request(&binding_id, &alias, "agent-1"));
     let say = read_until(&mut reconnected, |frame| frame["m"] == "say").await;
     assert_eq!(say["binding_id"], binding_id);
     assert_eq!(say["payload"]["text"], "hello from agent");

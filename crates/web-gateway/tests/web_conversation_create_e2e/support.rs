@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 const AGENT: &str = "e2eagent";
 const AUTHOR: &str = "e2e-owner";
 const INSTANCE: &str = "11111111-1111-4111-8111-111111111111";
-const TOKEN: &str = "e2e-operator-token";
 const CLIENT_MSG: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const REPLY: &str = "e2e-reply-from-mock";
 const CONFIG_B64: &str = "eyJhdXRob3JfaWQiOiJlMmUtb3duZXIifQ==";
@@ -241,6 +240,28 @@ fn wait_http(port: u16, path: &str, timeout: Duration) -> bool {
     false
 }
 
+/// Web creates bindings after hello, so this fixture retains the reviewed runtime authority.
+/// It is test-only database setup performed before the Web gateway process is launched.
+fn seed_runtime_fixture_instance(db: &Path, subject_id: i64) {
+    use sha2::{Digest as _, Sha256};
+
+    let conn = Connection::open(db).expect("open fixture database");
+    conn.busy_timeout(Duration::from_secs(5))
+        .expect("set fixture database timeout");
+    let digest = format!("{:x}", Sha256::digest(br#"{"author_id":"e2e-owner"}"#));
+    let now = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .expect("fixture timestamp");
+    conn.execute(
+        "INSERT INTO gate_instances
+         (instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest,
+          created_at, updated_at, binding_authority)
+         VALUES (?1, 'web', ?2, 1, 1, ?3, ?4, ?5, ?5, 'runtime')",
+        rusqlite::params![INSTANCE, subject_id, CONFIG_B64, digest, now],
+    )
+    .expect("seed runtime Web instance");
+}
+
 fn spawn_sse(port: u16, session: &str) -> std::sync::mpsc::Receiver<String> {
     let (tx, rx) = std::sync::mpsc::channel();
     let session = session.to_string();
@@ -331,7 +352,6 @@ fn spawn_core(root: &Path) -> Proc {
     Proc(
         Command::new(server_bin())
             .current_dir(root)
-            .env("OPENCRAB_GATE_OPERATOR_TOKEN", TOKEN)
             // A disabled Discord row is persisted below to exercise caller identity. V3-only
             // startup still validates that configured rows have an executable deployment
             // prerequisite, but it must never launch this fixture while the row is disabled.
@@ -410,19 +430,7 @@ fn seed_core(root: &Path, db: &Path, sock: &Path, core_port: u16, llm_port: u16)
     .expect("get agent");
     let agent_v: serde_json::Value = serde_json::from_str(agent_json.trim()).expect("agent json");
     let subject = agent_v["subject_id"].as_i64().expect("subject_id");
-    let inst_body = format!(
-        r#"{{"kind_id":"web","subject_id":{subject},"enabled":true,"config_b64":"{CONFIG_B64}"}}"#
-    );
-    let (st, body) = http(
-        core_port,
-        "PUT",
-        &format!("/api/gate-instances/{INSTANCE}"),
-        Some(TOKEN),
-        Some(&inst_body),
-        Duration::from_secs(5),
-    )
-    .expect("instance put");
-    assert!(st == 200 || st == 201, "instance PUT {st} {body}");
+    seed_runtime_fixture_instance(db, subject);
     core
 }
 

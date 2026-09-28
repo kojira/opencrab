@@ -5,43 +5,7 @@ fn tool_driven_digest() -> String {
 }
 
 async fn put_instance_config(h: &Harness, instance_id: &str, config_b64: &str) -> Value {
-    let grant = {
-        let mut conn = h.state.db.lock().unwrap();
-        opencrab_db::queries::issue_subject_association_grant(
-            &mut conn,
-            "agent-1",
-            h.subject_id,
-            i64::MAX,
-            now_nanos(),
-        )
-        .unwrap()
-    };
-    let (st, body) = h
-        .admin(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/api/gate-instances/{instance_id}"))
-                .header(header::AUTHORIZATION, auth())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "kind_id": "discord",
-                        "subject_id": h.subject_id,
-                        "enabled": true,
-                        "config_b64": config_b64,
-                        "subject_grant": grant,
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await;
-    assert!(
-        st == StatusCode::CREATED || st == StatusCode::OK,
-        "{st} {}",
-        String::from_utf8_lossy(&body)
-    );
-    serde_json::from_slice(&body).unwrap()
+    provision(h, instance_id, "discord", true, config_b64, Vec::new()).await
 }
 
 async fn hello_ok_digest(s: &mut UnixStream, instance_id: &str, revision: u64, digest: &str) {

@@ -12,7 +12,7 @@ use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt};
 #[test]
-fn published_schema_56_source_fingerprints_are_stable() {
+fn published_schema_57_source_fingerprints_are_stable() {
     let cases = [
         (
             "trusted_users",
@@ -26,7 +26,7 @@ fn published_schema_56_source_fingerprints_are_stable() {
                 t("display_name", "Crab"),
                 t("platform", "rest"),
             ],
-            "2c6850f418281b0b4ede33a1a3ab379cef850e7a85dfd7d2679ee9209a5526a7",
+            "8addb00d52490e57c4ae221cc3383599f563af00527e786ebe72107ba8b9a6f6",
         ),
         (
             "channel_config",
@@ -43,7 +43,7 @@ fn published_schema_56_source_fingerprints_are_stable() {
                 t("heartbeat_instructions", "Ping"),
                 t("updated_at", "2026-01-01T00:00:00Z"),
             ],
-            "e9099467f8ece3abb668571cab576378cf02d894f2eaf911005c85c5c50f6348",
+            "38c5adc34e58b2fb8a26b851dc6034d8fb284ac8b4b81b1b4e6963b3fe013366",
         ),
         (
             "session_watches",
@@ -55,7 +55,7 @@ fn published_schema_56_source_fingerprints_are_stable() {
                 t("filter_json", "{\"authors\":[\"abc\"]}"),
                 t("created_at", "2026-01-01T00:00:00Z"),
             ],
-            "8150c628708b328fe4c4dfdf816caa806738fda29ea2fac1304532c62ae8911d",
+            "1d1b6f63fd285176be583a8e0f9bf6eff9341ec58e4feeb767522053f9091300",
         ),
         (
             "agent_discord_config",
@@ -67,7 +67,7 @@ fn published_schema_56_source_fingerprints_are_stable() {
                 t("updated_at", "2026-01-01T00:00:00Z"),
                 t("bot_user_id", "99"),
             ],
-            "0db7c5133b00d98943329f5fa1cb9fff1bc6f262f37a111875246f831da5514e",
+            "4c07ecde5c01d1ccd062c72f0a1a22ae487466a1f0eb7804a9863e991a799a84",
         ),
         (
             "agent_nostr_config",
@@ -81,7 +81,7 @@ fn published_schema_56_source_fingerprints_are_stable() {
                 t("owner_pubkey", "owner-pub"),
                 t("self_pubkey", "self-pub"),
             ],
-            "f37159af0363c135d48435ed493b34f05ecea5ae3869294712ec82a6214cc788",
+            "80ba03a96109ec47692292bd1ccb52bcb5b4ccd595d887381e15823765a6221a",
         ),
     ];
     for (table, columns, expected) in cases {
@@ -91,13 +91,13 @@ fn published_schema_56_source_fingerprints_are_stable() {
 
 #[test]
 fn source_profile_refuses_neighbor_versions_and_missing_required_column() {
-    for version in [55, 57] {
+    for version in [56, 58] {
         let conn = opencrab_db::init_memory().unwrap();
         conn.pragma_update(None, "user_version", version).unwrap();
         assert!(source::validate(&conn)
             .unwrap_err()
             .to_string()
-            .contains("exactly 56"));
+            .contains("exactly 57"));
     }
     let conn = opencrab_db::init_memory().unwrap();
     create_legacy_core_source_tables(&conn);
@@ -167,7 +167,7 @@ fn projected_discord_fixture(freeze: bool, fired: bool, cleanup: bool, changed: 
         version: 1,
         operation_id: "00000000-0000-4000-8000-000000000008".into(),
         created_at: "2026-01-01T00:00:00Z".into(),
-        core_user_version: 56,
+        core_user_version: 57,
         source_core_sha256: source::file_sha256(&core_path).unwrap(),
         destinations: vec![Destination {
             kind_id: "discord".into(),
@@ -533,7 +533,7 @@ fn s8_refuses_retained_discord_config_with_only_nostr_instance_before_backup() {
         version: 1,
         operation_id: "00000000-0000-4000-8000-000000000008".into(),
         created_at: "2026-01-01T00:00:00Z".into(),
-        core_user_version: 56,
+        core_user_version: 57,
         source_core_sha256: source::file_sha256(&core_path).unwrap(),
         destinations: vec![Destination {
             kind_id: "nostr".into(),
@@ -634,7 +634,7 @@ fn assert_missing_credential_fixture(kind: &str, enabled: bool) {
         version: 1,
         operation_id: "00000000-0000-4000-8000-000000000008".into(),
         created_at: "2026-01-01T00:00:00Z".into(),
-        core_user_version: 56,
+        core_user_version: 57,
         source_core_sha256: source::file_sha256(&core_path).unwrap(),
         destinations: vec![Destination {
             kind_id: kind.into(),
