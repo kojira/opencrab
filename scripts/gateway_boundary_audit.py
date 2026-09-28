@@ -68,9 +68,9 @@ FRESH_BOOTSTRAP_LEGACY_DROP_IDENTITIES = frozenset({
     ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 123, 'DROP TABLE IF EXISTS agent_nostr_config;",'),
 })
 VALID_GATEWAY_DB_OPEN_IDENTITIES = {
-    ("gateway-db-open", "crates/discord-gateway/src/daemon.rs", 725, "let store = DiscordStore::open(&config.database_path)?;"),
+    ("gateway-db-open", "crates/discord-gateway/src/daemon.rs", 709, "let store = DiscordStore::open(&config.database_path)?;"),
     ("gateway-db-open", "crates/discord-gateway/src/store.rs", 110, "let conn = Connection::open(path)?;"),
-    ("gateway-db-open", "crates/nostr-gateway/src/daemon.rs", 755, "let store = NostrStore::open(&config.database_path)?;"),
+    ("gateway-db-open", "crates/nostr-gateway/src/daemon.rs", 730, "let store = NostrStore::open(&config.database_path)?;"),
     ("gateway-db-open", "crates/nostr-gateway/src/store.rs", 117, "let conn = Connection::open(path)?;"),
     ("gateway-db-open", "crates/web-gateway/src/owner.rs", 39, "let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));"),
     ("gateway-db-open", "crates/web-gateway/src/store.rs", 71, "let conn = Connection::open(path)?;"),
