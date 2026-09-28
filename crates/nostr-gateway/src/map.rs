@@ -243,6 +243,7 @@ fn bundle_response_context(count: u32) -> String {
         "[Nostr] タイムラインの束ね（{count} 件）です。窓内を1ターンの文脈に載せています。\
          普通に投稿するだけなら本文をそのまま書いてください。\
          指定の投稿に返信・リアクション・リポストしたい時だけ reply(e番号, 本文)／reaction(e番号)／repost(e番号) を使ってください。\
+         返事を書いてこのターンを終えるなら、本文のあとで改行し、最後の行に NO_REPLY だけを書いてください（本文と同じ行に書かない）。\
          反応不要なら NO_REPLY とだけ答えてください。"
     )
 }
@@ -253,6 +254,7 @@ fn response_context(event: &WatchEvent, author_id: &str) -> String {
         "[Nostr] {short}… さんの投稿（kind:{}／{}）への応答です。\n\
          普通に返事するだけなら本文をそのまま書いてください。\n\
          指定の投稿に返信・リアクション・リポストしたい時だけ reply(e番号, 本文)／reaction(e番号)／repost(e番号) を使ってください。\n\
+         返事を書いてこのターンを終えるなら、本文のあとで改行し、最後の行に NO_REPLY だけを書いてください（本文と同じ行に書かない）。\n\
          反応が不要なら NO_REPLY とだけ答えてください。",
         event.kind,
         inbound_kind_label(event),

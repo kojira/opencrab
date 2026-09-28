@@ -67,7 +67,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reaction",
-            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らない（撃ちっぱなし・再開はされない）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reactions, put N reaction calls in THIS response.",
+            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response. If you need N reactions, put N reaction calls in THIS response.",
             json!({"type": "object", "required": ["event"], "properties": {
                 "event": ref_prop("対象イベントの短縮参照（例 e7）"),
                 "emoji": str_prop("リアクション絵文字（省略時は既定）")
@@ -76,7 +76,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reply",
-            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らない（撃ちっぱなし・再開はされない）。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N replies, put N reply calls in THIS response.",
+            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response. If you need N replies, put N reply calls in THIS response.",
             json!({"type": "object", "required": ["event", "text"], "properties": {
                 "event": ref_prop("返信先イベントの短縮参照（例 e7）"),
                 "text": str_prop("返信本文")
@@ -85,7 +85,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "repost",
-            "イベントをリポストする。event に会話の e番号。結果は返らない（撃ちっぱなし・再開はされない）。複数のリポストは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reposts, put N repost calls in THIS response.",
+            "イベントをリポストする。event に会話の e番号。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。複数のリポストは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response. If you need N reposts, put N repost calls in THIS response.",
             json!({"type": "object", "required": ["event"], "properties": {"event": ref_prop("対象イベントの短縮参照（例 e7）")}}),
             conv("not_exposed", "conversation_bound"),
         ),
@@ -369,8 +369,8 @@ mod tests {
                 .unwrap();
             // #923: #914（9a6af850）の英文併記形へ戻す（#922 過少化の取り消し）。
             assert!(
-                description.contains("結果は返らない（撃ちっぱなし・再開はされない）。"),
-                "#923: {name} 説明文に #914 の fire-and-forget 事実文が無い: {description}"
+                description.contains("結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。"),
+                "{name} 説明文に「ターンは終わらない・NO_REPLYで終える」事実文が無い: {description}"
             );
         }
         // #923: reply は #914 英文「put N reply calls in THIS response」を含む。
@@ -406,30 +406,30 @@ mod tests {
         for name in ["reaction", "reply", "repost"] {
             let d = desc(name);
             assert!(
-                d.contains("This call returns nothing and you will NOT be invoked again after it"),
-                "{name}: #914 の英文が無い（#922 過少化のまま）:\n{d}"
+                d.contains("It does not end the turn by itself"),
+                "{name}: 英文のターン終了事実文が無い:\n{d}"
             );
             assert!(
-                d.contains("結果は返らない（撃ちっぱなし・再開はされない）"),
-                "{name}: #914 の JP 事実文が無い:\n{d}"
+                d.contains("この呼び出しだけではターンは終わらない"),
+                "{name}: JP のターン終了事実文が無い:\n{d}"
             );
         }
 
-        // 全文一致（#914・9a6af850 逐語）。
+        // 全文一致（engine の実挙動: 発話ツールだけではターンは終わらず、NO_REPLY で終える）。
         assert_eq!(
             desc("reaction"),
-            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らない（撃ちっぱなし・再開はされない）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reactions, put N reaction calls in THIS response.",
-            "reaction 説明文が #914 全文と一致しない"
+            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response. If you need N reactions, put N reaction calls in THIS response.",
+            "reaction 説明文が全文と一致しない"
         );
         assert_eq!(
             desc("reply"),
-            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らない（撃ちっぱなし・再開はされない）。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N replies, put N reply calls in THIS response.",
-            "reply 説明文が #914 全文と一致しない"
+            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response. If you need N replies, put N reply calls in THIS response.",
+            "reply 説明文が全文と一致しない"
         );
         assert_eq!(
             desc("repost"),
-            "イベントをリポストする。event に会話の e番号。結果は返らない（撃ちっぱなし・再開はされない）。複数のリポストは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reposts, put N repost calls in THIS response.",
-            "repost 説明文が #914 全文と一致しない"
+            "イベントをリポストする。event に会話の e番号。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。複数のリポストは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response. If you need N reposts, put N repost calls in THIS response.",
+            "repost 説明文が全文と一致しない"
         );
     }
 }
