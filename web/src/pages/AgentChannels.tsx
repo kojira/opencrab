@@ -8,6 +8,18 @@ import { conversationTitle } from '../lib/conversationTitle';
 import ConfirmDialog from '../components/ui/ConfirmDialog';
 import { useTranslation } from "react-i18next";
 
+/** GET /api/sessions は 1 ページ最大 100 件なので、`before` カーソルで最後まで読む（古い Discord/Nostr の会話も選べるように）。 */
+async function loadAllSessions(): Promise<SessionDto[]> {
+  const all: SessionDto[] = [];
+  let before: string | undefined;
+  for (;;) {
+    const page = await getSessions({ before });
+    all.push(...page);
+    if (page.length < 100) return all;
+    before = page[page.length - 1].id;
+  }
+}
+
 export default function AgentChannels() {
   const { agentId } = useAgentContext();
   const { t } = useTranslation();
@@ -231,9 +243,9 @@ export function TimeTriggersSection({ agentId }: { agentId: string }) {
     setLoading(true);
     setError(null);
     try {
-      const [scheduleRes, page] = await Promise.all([listSchedules(agentId), getSessions()]);
+      const [scheduleRes, all] = await Promise.all([listSchedules(agentId), loadAllSessions()]);
       setSchedules(scheduleRes.schedules);
-      setSessions(page.filter((s) => s.agent_ids.includes(agentId)));
+      setSessions(all.filter((s) => s.agent_ids.includes(agentId)));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

@@ -44,6 +44,7 @@
 - **追加**: 対象セッション、種別、式、`timezone`、`message`、有効を入力して `POST /api/agents/{id}/schedules` を呼ぶ。
   - 種別が「間隔」なら、秒数の入力から `@every <N>s` を組み立てる。
   - 対象セッションは `GET /api/sessions` のうち `agent_ids` にそのエージェントを含むものから選ぶ（新しい API は足さない）。
+    - 追記（QC で判明）: `GET /api/sessions` は 1 ページ最大 100 件で、更新の古い Discord / Nostr のセッションが 1 ページ目に入らず選べなかった。既存の `before` カーソルで最後のページまで読んでから絞る（API 追加なし）。
   - 発火経路の無いセッションはサーバが 400 で拒否するので、画面にはエラーとして出す。
 - **編集**: `PATCH /api/schedules/{sid}`（cron_expr / timezone / message / enabled）。
 - **有効/無効**: 同じ PATCH で `enabled` だけを送る。

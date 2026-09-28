@@ -63,6 +63,25 @@ beforeEach(() => {
 });
 
 describe('TimeTriggersSection', () => {
+  it('reads every sessions page so older sessions of this agent can be chosen', async () => {
+    const full = Array.from({ length: 100 }, (_, i) => session(`n${i}`, `New ${i}`, ['a2']));
+    mockedGetSessions.mockReset();
+    mockedGetSessions
+      .mockResolvedValueOnce(full)
+      .mockResolvedValueOnce([session('old', 'Old channel', ['a1'])]);
+    mockedList.mockResolvedValue({ agent_id: 'a1', schedules: [], count: 0 });
+
+    render(<TimeTriggersSection agentId="a1" />);
+    await screen.findByText('channels.triggers.empty');
+
+    expect(mockedGetSessions).toHaveBeenNthCalledWith(2, { before: 'n99' });
+    fireEvent.click(screen.getByRole('button', { name: /channels.triggers.add/ }));
+    const options = within(screen.getByLabelText('channels.triggers.session'))
+      .getAllByRole('option')
+      .map((o) => o.textContent);
+    expect(options).toEqual(['channels.triggers.selectSession', 'Old channel']);
+  });
+
   it('adds an interval trigger as @every Ns and offers only sessions of this agent', async () => {
     mockedList.mockResolvedValueOnce({ agent_id: 'a1', schedules: [], count: 0 });
     mockedList.mockResolvedValueOnce({ agent_id: 'a1', schedules: [schedule()], count: 1 });
