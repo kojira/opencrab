@@ -71,13 +71,13 @@ class GatewayBoundaryMutationTests(unittest.TestCase):
             )
             self.assertEqual(AUDIT._metadata_for(moved)[0], "production-violation")
 
-    def test_s10_reviewed_boundary_burn_down_has_exactly_127_findings(self):
+    def test_s10_reviewed_boundary_burn_down_has_exactly_123_findings(self):
         root = pathlib.Path(__file__).parents[2]
         baseline = json.loads((root / "scripts/gateway-boundary-baseline.json").read_text())
         findings = AUDIT.audit_texts(AUDIT.repository_texts(root))
-        self.assertEqual(len(findings), 127)
-        self.assertEqual(len(baseline["entries"]), 127)
-        self.assertEqual(baseline["review"]["finding_count"], 127)
+        self.assertEqual(len(findings), 123)
+        self.assertEqual(len(baseline["entries"]), 123)
+        self.assertEqual(baseline["review"]["finding_count"], 123)
         self.assertFalse(
             [finding for finding in findings if finding.rule == "public-gate-admin-reachable"]
         )
@@ -95,9 +95,8 @@ class GatewayBoundaryMutationTests(unittest.TestCase):
         root = pathlib.Path(__file__).parents[2]
         paths = [
             "crates/server/src/heartbeat_fire.rs",
-            "crates/server/src/heartbeat_instructions.rs",
             "crates/server/src/scheduler.rs",
-            "crates/db/src/queries/session_heartbeat.rs",
+            "crates/db/src/queries/agent_schedules.rs",
         ]
         files = {path: (root / path).read_text() for path in paths}
         debt = [

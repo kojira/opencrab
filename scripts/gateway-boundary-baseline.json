@@ -3,7 +3,7 @@
   "purpose": "Issue #1006 S0 line-specific reviewed burn-down; entries are debts or explicit gateway-store provenance, never wildcard exceptions",
   "review": {
     "status": "line-by-line-reviewed",
-    "finding_count": 127,
+    "finding_count": 123,
     "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance"
   },
   "entries": [
@@ -380,7 +380,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 111,
+      "line": 110,
       "snippet": "-- Owner / CoAgent / TrustedUser の見え方には影響しない（従来どおり全部見える）。issue #352。",
       "classification": "production-violation",
       "violation": "V06",
@@ -390,7 +390,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 298,
+      "line": 278,
       "snippet": "CREATE TABLE IF NOT EXISTS channel_config (",
       "classification": "production-violation",
       "violation": "V06",
@@ -400,7 +400,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 312,
+      "line": 292,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_channel_guild ON channel_config(guild_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -410,7 +410,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 431,
+      "line": 411,
       "snippet": "CREATE TABLE IF NOT EXISTS trusted_users (",
       "classification": "production-violation",
       "violation": "V06",
@@ -420,7 +420,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 443,
+      "line": 423,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -430,7 +430,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 697,
+      "line": 647,
       "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
       "classification": "production-violation",
       "violation": "V06",
@@ -440,7 +440,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 706,
+      "line": 656,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -549,16 +549,6 @@
     },
     {
       "rule": "shared-concrete-schema",
-      "path": "crates/server/src/agent_heartbeat.rs",
-      "line": 51,
-      "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
       "path": "crates/server/src/agent_management.rs",
       "line": 68,
       "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
@@ -570,7 +560,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/server/src/agent_schedule.rs",
-      "line": 52,
+      "line": 53,
       "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
       "classification": "production-violation",
       "violation": "V11",
@@ -606,16 +596,6 @@
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
       "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 112,
-      "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S5/S10",
-      "expires_when": "rename legacy generic caller-role vocabulary after gateway policy ownership moves"
     },
     {
       "rule": "shared-concrete-schema",
@@ -980,17 +960,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 250,
-      "snippet": "channel_id TEXT,",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/schema/sql/full.rs",
-      "line": 299,
+      "line": 279,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -1000,7 +970,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 301,
+      "line": 281,
       "snippet": "guild_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -1010,7 +980,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 310,
+      "line": 290,
       "snippet": "PRIMARY KEY (channel_id, agent_id)",
       "classification": "production-violation",
       "violation": "V06",
@@ -1020,7 +990,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 566,
+      "line": 546,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -1129,16 +1099,6 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/agent_heartbeat.rs",
-      "line": 104,
-      "snippet": "for key in [\"scope\", \"channel_id\", \"guild_id\"] {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/agent_runtime_impl.rs",
       "line": 431,
       "snippet": "channel_id = %c.channel_id,",
@@ -1150,7 +1110,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/agent_schedule.rs",
-      "line": 73,
+      "line": 88,
       "snippet": "for key in [\"scope\", \"channel_id\", \"guild_id\", \"session_id\"] {",
       "classification": "production-violation",
       "violation": "V11",
