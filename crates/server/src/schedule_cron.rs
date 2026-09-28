@@ -110,7 +110,8 @@ pub fn validate_schedule(cron_expr: &str, timezone: &str) -> Result<(), Schedule
 
 /// 次回発火時刻を UTC で算出する（真実は再計算・キャッシュ列なし・設計 §7.2）。
 ///
-/// - `base = last_fired_at.or(anchor_at)`。
+/// - `base = later_of(last_fired_at, anchor_at)`（I1・#612）。設定変更は `anchor_at = now` だけを
+///   動かすので、変更後の次回は now より後になり、`last_fired` 以前のスロットへも遡らない。
 /// - `@every dur`: `base + dur`。`base` が無ければ `None`（＝起点なし＝即発火可）。
 /// - 標準 cron: `base`（無ければ `None`＝即発火可）以降の**最初のスロット**を `timezone` で
 ///   評価して返す。croner は渡した `DateTime` の tz で評価するので、`base` を `timezone` へ
@@ -124,7 +125,8 @@ pub fn schedule_next_fire_at(
     anchor_at: Option<DateTime<Utc>>,
     last_fired_at: Option<DateTime<Utc>>,
 ) -> Result<Option<DateTime<Utc>>, ScheduleParseError> {
-    let base = last_fired_at.or(anchor_at);
+    // `Option` の順序は `None < Some` なので、`max` が「遅い方（片方だけならそれ）」になる。
+    let base = last_fired_at.max(anchor_at);
 
     if let Some(dur) = parse_every(cron_expr)? {
         // `@every`: 起点 + 周期。起点が無ければ即発火可（None）。
