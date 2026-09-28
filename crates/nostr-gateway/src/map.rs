@@ -241,8 +241,8 @@ fn e_tag_is_self(event: &WatchEvent, self_pubkey: &str) -> bool {
 fn bundle_response_context(count: u32) -> String {
     format!(
         "[Nostr] タイムラインの束ね（{count} 件）です。窓内を1ターンの文脈に載せています。\
-         心が動いた投稿には本文をそのまま書いて独立投稿で触れてよいです。\
-         特定投稿に反応するなら reply(e番号, 本文)／reaction(e番号)／repost(e番号) を使ってください。\
+         普通に投稿するだけなら本文をそのまま書いてください。\
+         指定の投稿に返信・リアクション・リポストしたい時だけ reply(e番号, 本文)／reaction(e番号)／repost(e番号) を使ってください。\
          反応不要なら NO_REPLY とだけ答えてください。"
     )
 }
@@ -251,9 +251,8 @@ fn response_context(event: &WatchEvent, author_id: &str) -> String {
     let short: String = author_id.chars().take(12).collect();
     format!(
         "[Nostr] {short}… さんの投稿（kind:{}／{}）への応答です。\n\
-         普通の投稿は本文をそのまま書いてください。\n\
-         この投稿へ返信するなら reply(e番号, 本文)、リアクションは reaction(e番号)、\
-         リポストは repost(e番号) を使ってください。\n\
+         普通に返事するだけなら本文をそのまま書いてください。\n\
+         指定の投稿に返信・リアクション・リポストしたい時だけ reply(e番号, 本文)／reaction(e番号)／repost(e番号) を使ってください。\n\
          反応が不要なら NO_REPLY とだけ答えてください。",
         event.kind,
         inbound_kind_label(event),

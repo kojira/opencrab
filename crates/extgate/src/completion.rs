@@ -12,7 +12,6 @@ use opencrab_actions::{
 };
 
 use crate::delivery::apply_delivery_effect;
-use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
 use crate::listen::{emit_activity, emit_ended_activity};
 use crate::registry::ExtgateState;
 
@@ -91,7 +90,6 @@ pub struct ExtgateCompletionSink<R: AgentRuntime> {
     pub session_id: String,
     pub only_speaker: bool,
     pub speaker_id: String,
-    pub delivery_mode: DeliveryMode,
     pub system_context: String,
 }
 
@@ -106,7 +104,6 @@ impl<R: AgentRuntime> Clone for ExtgateCompletionSink<R> {
             session_id: self.session_id.clone(),
             only_speaker: self.only_speaker,
             speaker_id: self.speaker_id.clone(),
-            delivery_mode: self.delivery_mode,
             system_context: self.system_context.clone(),
         }
     }
@@ -265,7 +262,6 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                         let session_id = sink.session_id.clone();
                         let reply_target = reply_target.clone();
                         let latest = Arc::clone(&last_continuation_say);
-                        let delivery_mode = sink.delivery_mode;
                         Arc::new(move |speech: String| {
                             let state = Arc::clone(&state);
                             let instance_id = instance_id.clone();
@@ -275,26 +271,24 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                             let reply_target = reply_target.clone();
                             let latest = Arc::clone(&latest);
                             Box::pin(async move {
-                                if delivery_mode == DeliveryMode::Say {
-                                    let delivery_id = crate::delivery::deliver_intermediate_say(
-                                        &state,
-                                        &instance_id,
-                                        &binding_id,
-                                        &agent_id,
-                                        &session_id,
-                                        &speech,
-                                        reply_target.as_deref(),
+                                let delivery_id = crate::delivery::deliver_intermediate_say(
+                                    &state,
+                                    &instance_id,
+                                    &binding_id,
+                                    &agent_id,
+                                    &session_id,
+                                    &speech,
+                                    reply_target.as_deref(),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "extgate resume intermediate say failed: {}",
+                                        e.code.as_str()
                                     )
-                                    .await
-                                    .map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "extgate resume intermediate say failed: {}",
-                                            e.code.as_str()
-                                        )
-                                    })?;
-                                    *latest.lock().expect("continuation say id lock") =
-                                        Some(delivery_id);
-                                }
+                                })?;
+                                *latest.lock().expect("continuation say id lock") =
+                                    Some(delivery_id);
                                 Ok(())
                             })
                         })
@@ -341,7 +335,6 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                 ),
                 None => opencrab_actions::DeliveryEffect::Empty,
             };
-            let effect = adjust_inbound_effect(sink.delivery_mode, effect);
             let final_say_id = apply_delivery_effect(
                 &sink.state,
                 &sink.instance_id,

@@ -66,7 +66,7 @@ async fn hello_ok_digest(s: &mut UnixStream, instance_id: &str, revision: u64, d
 }
 
 #[tokio::test]
-async fn tool_driven_inbound_is_no_reply_without_say() {
+async fn operation_driven_inbound_plain_text_is_delivered_without_operation_call() {
     let h = Harness::start().await;
     let instance_id = uuid();
     let binding_id = uuid();
@@ -111,23 +111,21 @@ async fn tool_driven_inbound_is_no_reply_without_say() {
     }
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 1);
     tokio::time::sleep(Duration::from_millis(80)).await;
+    let mut saw_say = false;
     while let Some(frame) = read_frame_opt(&mut s).await {
-        assert_ne!(frame["m"], "say", "{frame}");
+        if frame["m"] == "say" {
+            saw_say = true;
+            assert_eq!(frame["payload"]["text"], "hello from agent");
+            break;
+        }
     }
+    assert!(
+        saw_say,
+        "operation-capable Nostr-style bindings must still deliver plain text without an operation call"
+    );
     let conn = h.state.db.lock().unwrap();
     let deliveries: i64 = conn
         .query_row("SELECT COUNT(*) FROM deliveries", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(deliveries, 0);
-    let no_reply: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM memory_sessions WHERE content = 'NO_REPLY'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        no_reply, 0,
-        "沈黙ターンで NO_REPLY 行を永続してはならない（#899）"
-    );
+    assert_eq!(deliveries, 1);
 }

@@ -35,26 +35,15 @@ fn default_reconcile_millis() -> u64 {
 }
 
 // Core retains only generic final-delivery compatibility. Runtime Nostr config and
-// gateway admission authority stay gateway-owned.
-const DEFAULT_CORE_CONFIG_B64: &str = "eyJkZWxpdmVyeV9tb2RlIjoic2F5In0=";
+// gateway admission authority stay gateway-owned. Nostr has a single contract:
+// plain text is delivered normally and operations are available only when the
+// model wants to target a specific post.
+const DEFAULT_CORE_CONFIG_B64: &str = "eyJkZWxpdmVyeV9tb2RlIjoidG9vbF9kcml2ZW4ifQ==";
 
 fn core_config_b64_for_runtime_config(config_b64: &str) -> Result<String> {
-    use base64::Engine as _;
-    let value: serde_json::Value = serde_json::from_slice(&config::decode_config_b64(config_b64)?)
+    let _value: serde_json::Value = serde_json::from_slice(&config::decode_config_b64(config_b64)?)
         .context("runtime config is not valid JSON")?;
-    let delivery_mode = value
-        .get("delivery_mode")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("say");
-    anyhow::ensure!(
-        matches!(delivery_mode, "say" | "tool_driven"),
-        "delivery_mode must be say or tool_driven"
-    );
-    if delivery_mode == "say" {
-        return Ok(DEFAULT_CORE_CONFIG_B64.to_string());
-    }
-    let core_config = serde_json::json!({ "delivery_mode": delivery_mode });
-    Ok(base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&core_config)?))
+    Ok(DEFAULT_CORE_CONFIG_B64.to_string())
 }
 
 fn retry_deadline(row: &InstanceRow) -> i64 {

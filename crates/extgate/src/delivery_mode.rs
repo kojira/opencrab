@@ -1,5 +1,5 @@
-//! instance configのoptional `delivery_mode`。欠落時は`say`配送を使う。
-//! `kind_id` では分岐しない。
+//! 旧 instance config の optional `delivery_mode` 互換層。
+//! 現行契約では `delivery_mode` で本文配送を切り替えない。
 
 use opencrab_actions::DeliveryEffect;
 use serde_json::Value;
@@ -36,17 +36,14 @@ pub fn delivery_mode_from_config_bytes(bytes: &[u8]) -> Result<DeliveryMode, Del
     }
 }
 
-/// inbound 最終本文の say 抑止。`tool_driven` は Text だけ NoReply へ置換する。
-pub fn adjust_inbound_effect(mode: DeliveryMode, effect: DeliveryEffect) -> DeliveryEffect {
-    match (mode, effect) {
-        (DeliveryMode::ToolDriven, DeliveryEffect::Text { .. }) => DeliveryEffect::NoReply,
-        (_, other) => other,
-    }
+/// inbound 最終本文は delivery-mode 互換値に関係なく配送対象にする。
+pub fn adjust_inbound_effect(_mode: DeliveryMode, effect: DeliveryEffect) -> DeliveryEffect {
+    effect
 }
 
-/// 自発配送を V3 say dispatcher へ渡すか。`tool_driven` は渡さない。
-pub fn dispatches_v3_say(mode: DeliveryMode) -> bool {
-    matches!(mode, DeliveryMode::Say)
+/// 自発配送は delivery-mode 互換値に関係なく V3 say dispatcher へ渡す。
+pub fn dispatches_v3_say(_mode: DeliveryMode) -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -94,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_driven_replaces_text_only() {
+    fn legacy_modes_do_not_suppress_text() {
         let text = DeliveryEffect::Text {
             body: "hi".into(),
             stopped_by_limit: false,
@@ -103,7 +100,7 @@ mod tests {
         };
         assert_eq!(
             adjust_inbound_effect(DeliveryMode::ToolDriven, text.clone()),
-            DeliveryEffect::NoReply
+            text
         );
         assert_eq!(adjust_inbound_effect(DeliveryMode::Say, text.clone()), text);
         assert_eq!(
@@ -124,8 +121,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_driven_does_not_dispatch_v3_say() {
-        assert!(!dispatches_v3_say(DeliveryMode::ToolDriven));
+    fn legacy_modes_dispatch_v3_say() {
+        assert!(dispatches_v3_say(DeliveryMode::ToolDriven));
         assert!(dispatches_v3_say(DeliveryMode::Say));
     }
 }
