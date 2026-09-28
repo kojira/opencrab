@@ -92,9 +92,8 @@ pub fn spawn_instance(
     })?;
     // DI 能力宣言（§9.2）と invoke handler を hello に載せて接続する。invoke は nostaro CLI 実行へ
     // 写す（reply/reaction/repost/follow/unfollow/kind0/upload/resolve）。秘密鍵は env 注入のみ。
-    // delivery_mode=say では投稿は gateway の automatic final delivery が所有し、LLM に投稿 tool を
-    // 見せない。明示 tool 運用が必要な config だけ operation-driven にする。
-    let (operations, runtime_capabilities) = runtime_contract_for_config(&cfg);
+    // Nostr は単一契約: 本文だけなら通常配送し、指定投稿への操作が必要な時だけ tool を使う。
+    let (operations, runtime_capabilities) = runtime_contract();
     let invoke_handler: Arc<dyn opencrab_gate_client::InvokeHandler> =
         Arc::new(crate::ops::NostrInvokeHandler::new(
             nostaro_bin.clone(),
@@ -130,24 +129,13 @@ pub fn spawn_instance(
     Ok(client)
 }
 
-fn runtime_contract_for_config(
-    cfg: &InstanceConfig,
-) -> (Option<serde_json::Value>, RuntimeCapabilities) {
-    if cfg.delivery_mode.as_deref() == Some("tool_driven") {
-        (
-            Some(crate::ops::operation_declarations()),
-            RuntimeCapabilities {
-                final_delivery: FinalDelivery::OperationDriven,
-            },
-        )
-    } else {
-        (
-            None,
-            RuntimeCapabilities {
-                final_delivery: FinalDelivery::Automatic,
-            },
-        )
-    }
+fn runtime_contract() -> (Option<serde_json::Value>, RuntimeCapabilities) {
+    (
+        Some(crate::ops::operation_declarations()),
+        RuntimeCapabilities {
+            final_delivery: FinalDelivery::OperationDriven,
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

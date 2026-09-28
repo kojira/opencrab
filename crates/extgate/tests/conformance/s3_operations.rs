@@ -26,48 +26,22 @@ async fn s3_hello_with_capabilities(
 }
 
 #[tokio::test]
-async fn s3_hello_final_delivery_rejects_both_legacy_config_mismatch_directions() {
+async fn s3_hello_final_delivery_is_not_config_authority() {
     let h = Harness::start().await;
 
-    let automatic_instance = uuid();
-    put_instance(&h, &automatic_instance, true).await;
-    let mut automatic_stream = h.connect().await;
+    let instance_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    let mut stream = h.connect().await;
     let operation_driven = s3_hello_with_capabilities(
-        &mut automatic_stream,
-        &automatic_instance,
+        &mut stream,
+        &instance_id,
         &config_digest(),
         &ops_reply(),
         "operation_driven",
     )
     .await;
-    assert_eq!(operation_driven["m"], "err");
-    assert_eq!(operation_driven["code"], "operation_declaration_invalid");
-
-    let driven_instance = uuid();
-    put_instance(&h, &driven_instance, true).await;
-    let driven_config = br#"{"delivery_mode":"tool_driven"}"#;
-    let driven_b64 = base64::engine::general_purpose::STANDARD.encode(driven_config);
-    let driven_digest = opencrab_extgate::ids::config_digest_from_b64(&driven_b64).unwrap();
-    h.state
-        .db
-        .lock()
-        .unwrap()
-        .execute(
-            "UPDATE gate_instances SET config_b64 = ?1, config_digest = ?2 WHERE instance_id = ?3",
-            rusqlite::params![driven_b64, driven_digest, driven_instance],
-        )
-        .unwrap();
-    let mut driven_stream = h.connect().await;
-    let automatic = s3_hello_with_capabilities(
-        &mut driven_stream,
-        &driven_instance,
-        &driven_digest,
-        &ops_reply(),
-        "automatic",
-    )
-    .await;
-    assert_eq!(automatic["m"], "err");
-    assert_eq!(automatic["code"], "operation_declaration_invalid");
+    assert_eq!(operation_driven["m"], "ok");
+    assert_eq!(operation_driven["id"], "s3-hello");
 }
 
 #[tokio::test]

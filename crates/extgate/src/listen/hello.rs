@@ -49,17 +49,6 @@ pub(crate) async fn handle_hello(
                 Ok(inspected) if inspected.config_digest != hello.config_digest => {
                     Err(ErrorCode::ConfigDigestMismatch)
                 }
-                // S3 transition: hello is the runtime authority, but old config readers remain
-                // until their owning stages. Refuse either mismatch direction so two authorities
-                // can never disagree during the transition.
-                Ok(inspected)
-                    if !final_delivery_matches_config(
-                        &hello.final_delivery,
-                        &inspected.config_b64,
-                    ) =>
-                {
-                    Err(ErrorCode::OperationDeclarationInvalid)
-                }
                 // 宣言検証を hello 検査と同じ lock 下で完了させる（§4.1）。永続 digest との
                 // 照合は撤去済み（#894）。
                 Ok(_) => match validate_hello_declarations(
@@ -204,29 +193,6 @@ struct InstanceSnap {
     enabled: bool,
     revision: u64,
     config_digest: String,
-    config_b64: String,
-}
-
-fn final_delivery_matches_config(final_delivery: &str, config_b64: &str) -> bool {
-    let Some(final_delivery) = FinalDelivery::parse(final_delivery) else {
-        return false;
-    };
-    let Ok(config) = crate::ids::decode_config_b64(config_b64) else {
-        return false;
-    };
-    let Ok(mode) = crate::delivery_mode::delivery_mode_from_config_bytes(&config) else {
-        return false;
-    };
-    matches!(
-        (final_delivery, mode),
-        (
-            FinalDelivery::Automatic,
-            crate::delivery_mode::DeliveryMode::Say
-        ) | (
-            FinalDelivery::OperationDriven,
-            crate::delivery_mode::DeliveryMode::ToolDriven
-        )
-    )
 }
 
 fn inspect_instance(db: &opencrab_db::Db, instance_id: &str) -> Result<InstanceSnap, ErrorCode> {
@@ -249,11 +215,10 @@ fn inspect_instance(db: &opencrab_db::Db, instance_id: &str) -> Result<InstanceS
         Err(rusqlite::Error::QueryReturnedNoRows) => Err(ErrorCode::InstanceUnknown),
         Err(_) => Err(ErrorCode::StoreError),
         Ok((_, _, _, _, Some(_))) => Err(ErrorCode::InstanceUnknown),
-        Ok((enabled, revision, digest, config_b64, None)) => Ok(InstanceSnap {
+        Ok((enabled, revision, digest, _config_b64, None)) => Ok(InstanceSnap {
             enabled: enabled == 1,
             revision: u64::try_from(revision).map_err(|_| ErrorCode::StoreError)?,
             config_digest: digest,
-            config_b64,
         }),
     }
 }
