@@ -12,8 +12,8 @@ use super::*;
 //
 // cron / `@every` をセッション時刻源へ載せる。既定は無効（fail-closed / #240）。
 //
-// **語彙・持ち方は heartbeat（`session_heartbeat_config`）に揃える**（v38・#455）:
-//   - `last_fired_at`（heartbeat と同名。旧 `last_run_at` を v38 で RENAME）
+// 時刻トリガーの唯一の保存先（#612。旧ハートビートは v57 でここへ畳んだ）:
+//   - `last_fired_at`（旧 `last_run_at` を v38 で RENAME）
 //   - **次回発火時刻は列に持たず照会時算出**（`next_fire_at` キャッシュ列を作らない）。
 //     cron 計算は wake 時のみ・件数も僅少でホットパスに無く、列はキャッシュ無効化漏れ
 //     （cron 式/tz/enabled 変更時）による stale リスクだけを増やす。真実は再計算に置く。
@@ -37,7 +37,7 @@ pub struct AgentScheduleRow {
     /// しない床」。明示の有効化・cron/tz 変更で `now` を打つ（設計 §4.4）。
     pub anchor_at: Option<String>,
     /// 最終発火時刻（rfc3339）。`None` = 未発火。next 計算の base は
-    /// `last_fired_at.or(anchor_at)`（heartbeat と同型）。
+    /// `later_of(last_fired_at, anchor_at)`（I1・#612）。
     pub last_fired_at: Option<String>,
 }
 
@@ -59,13 +59,15 @@ const SELECT_COLS: &str =
     "id, agent_id, session_id, cron_expr, timezone, message, enabled, anchor_at, last_fired_at";
 
 /// スケジュールを挿入し、採番された id を返す（`created_at`/`updated_at` は現在時刻）。
+///
+/// `last_fired_at` は常に NULL で入れる（I2・#612。書くのは [`set_agent_schedule_last_fired`] だけ）。
 pub fn insert_agent_schedule(conn: &Connection, row: &AgentScheduleRow) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO agent_schedules
             (agent_id, session_id, cron_expr, timezone, message, enabled,
-             anchor_at, last_fired_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+             anchor_at, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
         params![
             row.agent_id,
             row.session_id,
@@ -74,7 +76,6 @@ pub fn insert_agent_schedule(conn: &Connection, row: &AgentScheduleRow) -> Resul
             row.message,
             row.enabled,
             row.anchor_at,
-            row.last_fired_at,
             now,
         ],
     )?;
@@ -103,8 +104,7 @@ pub fn list_agent_schedules(conn: &Connection, agent_id: &str) -> Result<Vec<Age
 /// **enabled = 1** のスケジュールを全件列挙する（中央スケジューラ用 / PR4）。
 ///
 /// 発火可否の最終判定（cron/`@every` の next 算出・多重実行防止）はスケジューラ側が握る。
-/// ここでは enabled 行を素直に返すだけ（`list_enabled_session_heartbeat_configs` と同じ二段構え）。
-/// **G ゲートは掛けない**（schedule は heartbeat のマスタスイッチ G の対象外・自身の enabled で制御）。
+/// ここでは enabled 行を素直に返すだけ。自身の `enabled` で制御する。
 pub fn list_enabled_agent_schedules(conn: &Connection) -> Result<Vec<AgentScheduleRow>> {
     let sql = format!("SELECT {SELECT_COLS} FROM agent_schedules WHERE enabled = 1 ORDER BY id");
     let mut stmt = conn.prepare(&sql)?;
@@ -114,8 +114,8 @@ pub fn list_enabled_agent_schedules(conn: &Connection) -> Result<Vec<AgentSchedu
 
 /// 可変フィールドを更新する。`id` 必須。
 ///
-/// `last_fired_at` も含めて上書きする（明示の cron/tz/間隔変更で API 層が `NULL` へ
-/// リセットして「新しい式で now 以降の最初のスロットから」始めるため・設計 §4.4）。
+/// `last_fired_at` は書かない（I2・#612）。`row.last_fired_at` は無視され、発火時刻を
+/// 進めるのは [`set_agent_schedule_last_fired`]（スケジューラの発火成功時）だけ。
 pub fn update_agent_schedule(conn: &Connection, row: &AgentScheduleRow) -> Result<()> {
     let Some(id) = row.id else {
         anyhow::bail!("update_agent_schedule: id is required");
@@ -123,7 +123,7 @@ pub fn update_agent_schedule(conn: &Connection, row: &AgentScheduleRow) -> Resul
     conn.execute(
         "UPDATE agent_schedules SET
             session_id = ?2, cron_expr = ?3, timezone = ?4, message = ?5,
-            enabled = ?6, anchor_at = ?7, last_fired_at = ?8, updated_at = ?9
+            enabled = ?6, anchor_at = ?7, updated_at = ?8
          WHERE id = ?1",
         params![
             id,
@@ -133,7 +133,6 @@ pub fn update_agent_schedule(conn: &Connection, row: &AgentScheduleRow) -> Resul
             row.message,
             row.enabled,
             row.anchor_at,
-            row.last_fired_at,
             Utc::now().to_rfc3339(),
         ],
     )?;

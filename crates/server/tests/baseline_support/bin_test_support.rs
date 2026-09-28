@@ -104,7 +104,6 @@ pub(crate) fn app_state_with_agent(provider: Arc<dyn LlmProvider>, agent_id: &st
                 persona_name: "p".to_string(),
                 personality: None,
                 instructions: String::new(),
-                heartbeat_instructions: String::new(),
                 model: None,
                 reasoning_effort: None,
                 web_search: None,

@@ -44,7 +44,6 @@ fn seeded_state() -> Result<AppState, String> {
             persona_name: "Baseline".to_string(),
             personality: Some("deterministic".to_string()),
             instructions: "baseline instructions".to_string(),
-            heartbeat_instructions: String::new(),
             model: None,
             reasoning_effort: None,
             web_search: None,

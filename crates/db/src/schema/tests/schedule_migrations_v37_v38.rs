@@ -3,8 +3,7 @@ fn v37_creates_generic_schedule_tables_idempotently() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(SCHEMA_SQL).unwrap();
     conn.execute_batch(
-        "DROP TABLE session_heartbeat_config;
-         DROP TABLE agent_schedules;
+        "DROP TABLE agent_schedules;
          PRAGMA user_version = 36;",
     )
     .unwrap();

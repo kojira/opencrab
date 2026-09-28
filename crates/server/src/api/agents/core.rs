@@ -77,7 +77,6 @@ pub async fn create_agent(
         persona_name: req.persona_name,
         personality: None,
         instructions: String::new(),
-        heartbeat_instructions: String::new(),
         model: None,
         reasoning_effort: None,
         web_search: None,

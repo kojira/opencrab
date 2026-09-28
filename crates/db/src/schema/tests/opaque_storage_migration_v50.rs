@@ -196,7 +196,15 @@ fn v50_preserves_heartbeat_audit_values_with_opaque_caller_id() {
     .unwrap();
 
     seed_minimal_s2_prerequisites(&conn);
-    run_migrations(&conn, MIGRATION_GROUPS.iter().flat_map(|group| group.iter())).unwrap();
+    // v57 (#612) drops the audit table; stop before it to observe the v50 rebuild.
+    run_migrations(
+        &conn,
+        MIGRATION_GROUPS
+            .iter()
+            .flat_map(|group| group.iter())
+            .filter(|migration| migration.version < 57),
+    )
+    .unwrap();
 
     assert!(column_exists(&conn, "heartbeat_instructions_audit", "caller_user_id").unwrap());
     let row: (String, String, String) = conn

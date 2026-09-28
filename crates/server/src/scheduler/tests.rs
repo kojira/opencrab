@@ -105,7 +105,6 @@ fn seed_generic_alias_binding(
             persona_name: "persona".into(),
             personality: None,
             instructions: String::new(),
-            heartbeat_instructions: String::new(),
             model: None,
             reasoning_effort: None,
             web_search: None,

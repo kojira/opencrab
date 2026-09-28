@@ -20,7 +20,6 @@ fn state_with_agent(model: Option<&str>) -> AppState {
                 persona_name: "X".to_string(),
                 personality: None,
                 instructions: String::new(),
-                heartbeat_instructions: String::new(),
                 model: model.map(|s| s.to_string()),
                 reasoning_effort: None,
                 web_search: None,

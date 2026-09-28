@@ -79,7 +79,6 @@ async fn binding_put_reuse_membership_mismatch_conflicts() {
                 persona_name: "p".into(),
                 personality: None,
                 instructions: String::new(),
-                heartbeat_instructions: String::new(),
                 model: None,
                 reasoning_effort: None,
                 web_search: None,

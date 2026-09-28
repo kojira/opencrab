@@ -20,7 +20,6 @@ fn state_with_alias(session_id: &str) -> AppState {
             persona_name: "persona".into(),
             personality: None,
             instructions: String::new(),
-            heartbeat_instructions: String::new(),
             model: None,
             reasoning_effort: None,
             web_search: None,

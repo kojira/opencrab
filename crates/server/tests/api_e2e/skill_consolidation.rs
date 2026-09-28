@@ -104,7 +104,6 @@ async fn test_skill_consolidation_curates_and_audits() {
                 persona_name: "Persona".into(),
                 personality: Some("好奇心旺盛".into()),
                 instructions: String::new(),
-                heartbeat_instructions: String::new(),
                 model: None,
                 reasoning_effort: None,
                 web_search: None,

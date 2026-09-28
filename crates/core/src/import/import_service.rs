@@ -60,7 +60,6 @@ pub fn execute_import(
             persona_name: String::new(),
             personality: None,
             instructions: String::new(),
-            heartbeat_instructions: String::new(),
             model: None,
             reasoning_effort: None,
             web_search: None,

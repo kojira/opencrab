@@ -551,7 +551,6 @@ mod tests {
                     persona_name: "p".to_string(),
                     personality: None,
                     instructions: String::new(),
-                    heartbeat_instructions: String::new(),
                     model: None,
                     reasoning_effort: None,
                     web_search: None,

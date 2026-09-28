@@ -11,7 +11,6 @@ CREATE TABLE IF NOT EXISTS agents (
     persona_name TEXT NOT NULL,
     personality TEXT,
     instructions TEXT NOT NULL DEFAULT '',
-    heartbeat_instructions TEXT NOT NULL DEFAULT '',
     model TEXT,
     reasoning_effort TEXT,
     web_search INTEGER,
@@ -239,25 +238,6 @@ CREATE TABLE IF NOT EXISTS heartbeat_log (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_heartbeat_agent ON heartbeat_log(agent_id);
-
--- ============================================
--- ハートビート指示の監査ログ
--- ============================================
-CREATE TABLE IF NOT EXISTS heartbeat_instructions_audit (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id TEXT NOT NULL,
-    scope TEXT NOT NULL,
-    channel_id TEXT,
-    session_id TEXT,
-    caller_identity TEXT NOT NULL,
-    caller_user_id TEXT,
-    old_value TEXT,
-    new_value TEXT,
-    reason TEXT,
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_heartbeat_instr_audit_agent
-    ON heartbeat_instructions_audit(agent_id, created_at DESC);
 
 -- ============================================
 -- セッション状態
@@ -607,36 +587,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_inbox_dedup
     ON agent_inbox(source, dedup_key);
 CREATE INDEX IF NOT EXISTS idx_agent_inbox_unprocessed
     ON agent_inbox(agent_id, processed_at);
-
--- ============================================
--- SESSION HEARTBEAT CONFIG: セッション単位ハートビート（統合スケジューラ / #439 × #456）
--- ============================================
--- agent/channel 二本立てを畳んだ後継。発火先は session_id 接頭辞から導くので列に持たない。
--- 既定は無効（fail-closed / #240）。この PR では発火経路はまだ切り替えない（PR2）。
--- ※ SESSION_HEARTBEAT_CONFIG_SQL 定数と文面を一致させること。
-CREATE TABLE IF NOT EXISTS session_heartbeat_config (
-    agent_id      TEXT NOT NULL,
-    session_id    TEXT NOT NULL,
-    enabled       INTEGER NOT NULL DEFAULT 0,
-    interval_secs INTEGER,
-    anchor_at     TEXT,
-    last_fired_at TEXT,
-    updated_at    TEXT NOT NULL,
-    PRIMARY KEY (agent_id, session_id)
-);
-
--- Generic per-session heartbeat instructions (Issue #1006 S4).
--- NULL override_text inherits current agents.heartbeat_instructions, then the generic default.
-CREATE TABLE IF NOT EXISTS session_heartbeat_instructions (
-    agent_id      TEXT NOT NULL,
-    session_id    TEXT NOT NULL,
-    override_text TEXT,
-    updated_at    TEXT NOT NULL,
-    PRIMARY KEY (agent_id, session_id),
-    FOREIGN KEY (agent_id, session_id)
-        REFERENCES session_heartbeat_config(agent_id, session_id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-);
 
 -- ============================================
 -- AGENT SCHEDULES: per-agent 定時実行（#455）

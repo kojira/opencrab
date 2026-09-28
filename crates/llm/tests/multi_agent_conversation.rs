@@ -295,7 +295,6 @@ async fn test_three_agent_with_db_and_session() {
                 persona_name: persona.to_string(),
                 personality: None,
                 instructions: String::new(),
-                heartbeat_instructions: String::new(),
                 model: None,
                 reasoning_effort: None,
                 web_search: None,

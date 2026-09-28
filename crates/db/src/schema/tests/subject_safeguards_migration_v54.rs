@@ -288,7 +288,6 @@ fn s2_hard_delete_tombstones_subject_and_allocator_never_reuses_it() {
             persona_name: "p".into(),
             personality: None,
             instructions: String::new(),
-            heartbeat_instructions: String::new(),
             model: None,
             reasoning_effort: None,
             web_search: None,
