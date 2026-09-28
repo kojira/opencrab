@@ -30,7 +30,7 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 755,
+      "line": 744,
       "snippet": "let store = NostrStore::open(&config.database_path)?;",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",
@@ -1030,7 +1030,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 120,
+      "line": 118,
       "snippet": "channel_id: row.address.as_str(),",
       "classification": "production-violation",
       "violation": "V11",
@@ -1040,7 +1040,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 122,
+      "line": 120,
       "snippet": "guild_id: instance_id,",
       "classification": "production-violation",
       "violation": "V11",
@@ -1050,7 +1050,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 152,
+      "line": 150,
       "snippet": "let whitelist = |channel_id: &str, agent_id: &str| {",
       "classification": "production-violation",
       "violation": "V11",
@@ -1060,7 +1060,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 162,
+      "line": 160,
       "snippet": "channel_whitelisted(&tx, agent_id, instance_id, channel_id)",
       "classification": "production-violation",
       "violation": "V11",
@@ -1080,7 +1080,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/turn.rs",
-      "line": 142,
+      "line": 140,
       "snippet": "channel_id: Some(&address),",
       "classification": "production-violation",
       "violation": "V11",
