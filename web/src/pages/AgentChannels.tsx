@@ -85,8 +85,6 @@ export default function AgentChannels() {
                 <th className="p-3 text-center text-label-lg">{t("channels.tableReadable")}</th>
                 <th className="p-3 text-center text-label-lg">{t("channels.tableWritable")}</th>
                 <th className="p-3 text-center text-label-lg">{t("channels.tableWhitelisted")}</th>
-                <th className="p-3 text-center text-label-lg">{t("channels.tableHeartbeat")}</th>
-                <th className="p-3 text-center text-label-lg">{t("channels.tableInterval")}</th>
                 <th className="p-3 text-center text-label-lg">{t("channels.tableActions")}</th>
               </tr>
             </thead>
@@ -116,22 +114,6 @@ export default function AgentChannels() {
                       type="checkbox"
                       checked={config.whitelisted}
                       onChange={e => handleFieldChange(idx, 'whitelisted', e.target.checked)}
-                    />
-                  </td>
-                  <td className="p-3 text-center">
-                    <input
-                      type="checkbox"
-                      checked={config.heartbeat_enabled}
-                      onChange={e => handleFieldChange(idx, 'heartbeat_enabled', e.target.checked)}
-                    />
-                  </td>
-                  <td className="p-3 text-center">
-                    <input
-                      type="number"
-                      className="input-outlined w-24 text-center"
-                      value={config.heartbeat_interval_secs ?? ''}
-                      onChange={e => handleFieldChange(idx, 'heartbeat_interval_secs', e.target.value ? Number(e.target.value) : null)}
-                      placeholder={t("channels.globalPlaceholder")}
                     />
                   </td>
                   <td className="p-3 text-center space-x-2">

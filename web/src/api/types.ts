@@ -176,8 +176,6 @@ export interface ChannelConfigDto {
   readable: boolean;
   writable: boolean;
   whitelisted: boolean;
-  heartbeat_enabled: boolean;
-  heartbeat_interval_secs: number | null;
 }
 
 export interface ChannelConfigListResponse {
