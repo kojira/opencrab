@@ -232,49 +232,25 @@ struct CachedModels {
 
 type ModelCache = Arc<tokio::sync::Mutex<HashMap<String, CachedModels>>>;
 
-// `/model` is global, so its invocation channel need not be a configured conversation binding.
-// A fallback is only a transport for Owner administration of this process's one configured agent.
-fn model_command_transport_candidates(
-    agent_id: &str,
-    requested_address: &str,
-    caller: &SaidCaller,
+// `/model` is registered globally, but a gateway answers it only in the channels it is configured
+// for. Several gateways may share one Discord application (e.g. production and an isolated QC
+// cohort); answering elsewhere would race another gateway's interaction and act on the wrong core.
+fn model_command_address<'a>(
+    requested_address: &'a str,
     configured_addresses: &[String],
-) -> Vec<String> {
-    let mut candidates = vec![requested_address.to_string()];
-    if !matches!(caller, SaidCaller::Owner) {
-        return candidates;
-    }
-
-    let mut fallbacks = configured_addresses
+) -> Option<&'a str> {
+    configured_addresses
         .iter()
-        .filter(|address| address.as_str() != requested_address)
-        .filter(|address| parse_address(agent_id, address).is_some())
-        .cloned()
-        .collect::<Vec<_>>();
-    fallbacks.sort();
-    fallbacks.dedup();
-    candidates.extend(fallbacks);
-    candidates
+        .any(|address| address == requested_address)
+        .then_some(requested_address)
 }
 
 async fn resolve_model_command_transport(
     client: &InstanceClient,
-    agent_id: &str,
-    requested_address: &str,
-    caller: &SaidCaller,
-    configured_addresses: &[String],
+    address: &str,
 ) -> Option<(String, String)> {
-    for address in model_command_transport_candidates(
-        agent_id,
-        requested_address,
-        caller,
-        configured_addresses,
-    ) {
-        if let Some(binding_id) = client.binding_for_address(&address).await {
-            return Some((address, binding_id));
-        }
-    }
-    None
+    let binding_id = client.binding_for_address(address).await?;
+    Some((address.to_string(), binding_id))
 }
 
 async fn handle_model_interaction(
@@ -296,15 +272,12 @@ async fn handle_model_interaction(
     let interaction_id = serenity::all::InteractionId::new(interaction_id);
     let guild = event.guild_id.as_deref().unwrap_or("");
     let requested_address = address_for(agent_id, guild, &event.channel_id);
+    // Not our channel: stay silent so the gateway that owns it answers the interaction.
+    let Some(address) = model_command_address(&requested_address, configured_addresses) else {
+        return;
+    };
     let caller = caller_for(access, &event.user_id);
-    let transport = resolve_model_command_transport(
-        client,
-        agent_id,
-        &requested_address,
-        &caller,
-        configured_addresses,
-    )
-    .await;
+    let transport = resolve_model_command_transport(client, address).await;
 
     if event.autocomplete {
         let models = match transport.as_ref() {
