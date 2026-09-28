@@ -141,3 +141,94 @@ fn update_my_schedule_keeps_last_fired_and_fires_after_now() {
     assert_eq!(data["last_fired_at"], last_fired.as_str());
     assert!(after_now(&data), "再有効化直後に即発火しない");
 }
+
+struct CollectingTimedFireSink {
+    requests: std::sync::Arc<std::sync::Mutex<Vec<opencrab_actions::TimedFireRequest>>>,
+    delivered: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl opencrab_actions::TimedFireSink for CollectingTimedFireSink {
+    fn fire_timed_turn(&self, request: opencrab_actions::TimedFireRequest) {
+        self.requests.lock().unwrap().push(request);
+        self.delivered.notify_one();
+    }
+}
+
+/// #612 D2: `run_my_schedule` は所属チェックを通った行を TimedFire で発火し、プロンプトは行の
+/// message を含む。`last_fired_at` は更新しない。
+#[tokio::test]
+async fn run_my_schedule_fires_owned_row_message_without_touching_last_fired() {
+    let session_id = "opaque-schedule-session";
+    let state = state_with_alias(session_id);
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let delivered = std::sync::Arc::new(tokio::sync::Notify::new());
+    state
+        .timed_fire_router
+        .register_sink(std::sync::Arc::new(CollectingTimedFireSink {
+            requests: requests.clone(),
+            delivered: delivered.clone(),
+        }));
+    let created = set_my_schedule(
+        &state,
+        &json!({"cron_expr": "@every 3h", "message": "manual patrol message"}),
+        &context(session_id),
+    );
+    assert!(created.success, "create: {:?}", created.error);
+    let id = created.data.unwrap()["id"].as_i64().unwrap();
+
+    let owner = GatewayCallContext::new(GatewayCaller::Owner, "agent-x")
+        .with_session_id(session_id.to_string());
+    let run = run_my_schedule(&state, &json!({"id": id}), &owner);
+    assert!(run.success, "run: {:?}", run.error);
+    tokio::time::timeout(std::time::Duration::from_secs(3), delivered.notified())
+        .await
+        .expect("manual fire must reach the timed-fire sink");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].session_id, session_id);
+    assert!(requests[0].prompt.contains("manual patrol message"));
+    drop(requests);
+    let row = opencrab_db::queries::get_agent_schedule(&state.db.lock().unwrap(), id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        row.last_fired_at.is_none(),
+        "手動発火は last_fired_at を刻まない"
+    );
+}
+
+/// #612 D2: `run_my_schedule` は owner / co_agent だけ。他人・他セッションの id は存在を明かさず拒否。
+#[test]
+fn run_my_schedule_is_owner_only_and_rejects_foreign_id() {
+    let session_id = "opaque-schedule-session";
+    let state = state_with_alias(session_id);
+    let created = set_my_schedule(
+        &state,
+        &json!({"cron_expr": "@every 3h", "message": "patrol"}),
+        &context(session_id),
+    );
+    let id = created.data.unwrap()["id"].as_i64().unwrap();
+
+    for caller in [GatewayCaller::TrustedUser, GatewayCaller::Agent] {
+        let ctx =
+            GatewayCallContext::new(caller, "agent-x").with_session_id(session_id.to_string());
+        let denied = run_my_schedule(&state, &json!({"id": id}), &ctx);
+        assert!(!denied.success);
+        assert!(denied.error.unwrap().contains("オーナーまたは co_agent"));
+    }
+
+    let owner = GatewayCallContext::new(GatewayCaller::Owner, "agent-x")
+        .with_session_id(session_id.to_string());
+    let missing = run_my_schedule(&state, &json!({"id": id + 1000}), &owner);
+    assert!(!missing.success);
+    assert!(missing.error.unwrap().contains("見つかりません"));
+
+    assert!(ensure_owner_or_coagent(&GatewayCallContext::new(
+        GatewayCaller::CoAgent {
+            agent_id: "peer".to_string()
+        },
+        "agent-x"
+    ))
+    .is_none());
+}

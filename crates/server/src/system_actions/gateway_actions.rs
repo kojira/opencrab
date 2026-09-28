@@ -73,20 +73,6 @@ impl GatewayActions for SystemGatewayActions {
             // （委譲パターンにすると二重定義を招く）。core の `create_my_skill` とは別ツール
             // として**両方**残す（統廃合は #157 の範囲外）。
             "create_skill" => crate::agent_management::create_skill(&self.state, args, ctx),
-            // ハートビート指示ツール（#157 S3）。Discord 側の実装は撤去済みなので
-            // inner へは委譲しない（委譲パターンにすると二重定義を招く）。
-            "update_heartbeat_instructions" => {
-                crate::heartbeat_instructions::update_heartbeat_instructions(&self.state, args, ctx)
-            }
-            "read_heartbeat_instructions" => {
-                crate::heartbeat_instructions::read_heartbeat_instructions(&self.state, args, ctx)
-            }
-            // エージェント自身のハートビート設定（#247 段階 2）。対象は常に
-            // `ctx.agent_id` で、引数から他エージェントを指す経路は無い。
-            "get_my_heartbeat" => crate::agent_heartbeat::get_my_heartbeat(&self.state, args, ctx),
-            "set_my_heartbeat" => crate::agent_heartbeat::set_my_heartbeat(&self.state, args, ctx),
-            // #599: 時間を待たずに手動発火（オーナー / co_agent 限定・OWNER_ONLY_ACTIONS）。
-            "run_my_heartbeat" => crate::agent_heartbeat::run_my_heartbeat(&self.state, args, ctx),
             // エージェント自身の定時実行スケジュール（#455）。対象は常に ctx.session_id。
             "get_my_schedules" => crate::agent_schedule::get_my_schedules(&self.state, args, ctx),
             "set_my_schedule" => crate::agent_schedule::set_my_schedule(&self.state, args, ctx),
@@ -97,6 +83,8 @@ impl GatewayActions for SystemGatewayActions {
             "delete_my_schedule" => {
                 crate::agent_schedule::delete_my_schedule(&self.state, args, ctx)
             }
+            // #612 D2: 時間を待たずに手動発火（オーナー / co_agent 限定・OWNER_ONLY_ACTIONS）。
+            "run_my_schedule" => crate::agent_schedule::run_my_schedule(&self.state, args, ctx),
             // 通知先（webhook）の管理ツール（#157 S5）。Discord 側の実装は撤去済みなので
             // inner へは委譲しない（委譲パターンにすると二重定義を招く）。設定ファイル
             // 由来のフォールバックは `AppState::default_subtask_webhook` から読むので、

@@ -236,15 +236,8 @@ fn tool_category(name: &str) -> &'static str {
         | "configure_mcp_server"
         | "select_llm"
         | "update_instructions" => "configuration",
-        "set_my_heartbeat"
-        | "get_my_heartbeat"
-        | "update_heartbeat_instructions"
-        | "run_my_heartbeat"
-        | "read_heartbeat_instructions"
-        | "set_my_schedule"
-        | "get_my_schedules"
-        | "update_my_schedule"
-        | "delete_my_schedule" => "schedule & heartbeat",
+        "set_my_schedule" | "get_my_schedules" | "update_my_schedule" | "delete_my_schedule"
+        | "run_my_schedule" => "schedule",
         "add_allowed_command" | "list_allowed_commands" | "remove_allowed_command" => {
             "allowed commands"
         }

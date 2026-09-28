@@ -101,8 +101,8 @@ impl SystemGatewayActions {
     /// 本ツール源が直接提供するツール定義（A2UI 描画面がある構成の全量）。
     ///
     /// 各定義は分類属性（`class.dispatch` / `class.sub_engine` / `class.sharing`）を
-    /// 名乗る（`ToolClass` に `Default` が無いため構築サイトで必須）。テストや
-    /// `agent_heartbeat` の分類検査がこの全量から属性を引くので `pub(crate)`。
+    /// 名乗る（`ToolClass` に `Default` が無いため構築サイトで必須）。テストの
+    /// 分類検査がこの全量から属性を引くので `pub(crate)`。
     pub(crate) fn own_definitions() -> Vec<GatewayActionDef> {
         let mut defs = Self::always_own_definitions();
         defs.push(opencrab_actions::send_ui_definition());

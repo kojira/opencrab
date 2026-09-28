@@ -1,47 +1,48 @@
-//! エージェントが**自分自身の**定時実行（#455）を登録・照会するツール。
+//! エージェントが**自分自身の**時間トリガー（#455 / #612）を登録・照会するツール。
+//!
+//! 間隔実行（`@every 30m`）も定時実行（cron）も同じ `agent_schedules` の 1 行で、同じセッションに
+//! 複数登録でき、行ごとに `message`（発火時に自分へ渡されるプロンプト）を持つ（#612）。
 //!
 //! - `set_my_schedule`: いま話しているセッションに対して cron / `@every` のスケジュールを登録する。
 //! - `get_my_schedules`: いま話しているセッションのスケジュールを、次回発火時刻付きで列挙する。
 //! - `update_my_schedule`: `get_my_schedules` が返した id のスケジュールを部分更新する
 //!   （`enabled=false` で「止める」・cron/message/timezone の変更で「間隔を変える」）。
 //! - `delete_my_schedule`: `get_my_schedules` が返した id のスケジュールを消す（履歴も残さない）。
+//! - `run_my_schedule`: `get_my_schedules` が返した id のスケジュールを今すぐ手動発火する
+//!   （**オーナー / co_agent 限定**・定時発火と同じ経路・`last_fired_at` は更新しない）。
 //!
 //! # id の所属チェック（#477）
 //!
-//! `update_my_schedule` / `delete_my_schedule` は id を取る。**id を推測して他エージェント・他
-//! セッションのスケジュールを触れてはいけない**ので、対象行は `ctx.agent_id`＋現在のセッションの
-//! 両方に一致する場合だけ操作できる（`api::schedules` 側の `load_owned_schedule` が所属チェック
-//! を握る）。一致しない／存在しない id は**存在を明かさず**同じ文言で拒否する。
+//! `update_my_schedule` / `delete_my_schedule` / `run_my_schedule` は id を取る。**id を推測して
+//! 他エージェント・他セッションのスケジュールを触れてはいけない**ので、対象行は `ctx.agent_id`＋
+//! 現在のセッションの両方に一致する場合だけ操作できる（`api::schedules` 側の `load_owned_schedule`
+//! が所属チェックを握る）。一致しない／存在しない id は**存在を明かさず**同じ文言で拒否する。
 //!
 //! # なぜエージェント自身に開くか（設計 §7.4 の制約撤回・オーナー裁定 2026-08-09）
 //!
-//! 当初の設計は「新しい自己設定ツールは追加しない」としていたが、これは issue #455 に無い制約で、
-//! **sample-source の巡回指示ループを閉じられない**（巡回指示が webhook で届いても本人がスケジュールを
-//! 作れず、毎回オーナーが dashboard から登録することになる）。ハートビート（「いつ動くか」）は既に
-//! 本人が `set_my_heartbeat` で設定できる（#456）ので、schedule だけ人の承認を要求する理由が実測に
-//! 無い。**増えるのは「何ができるか」ではなく「いつ動くかを自分で決められるか」だけ**（作用面は
-//! HB と同一・オーナー裁定 A 案）。
+//! **sample-source の巡回指示ループを閉じる**ため（巡回指示が webhook で届いても本人がスケジュールを
+//! 作れないと、毎回オーナーが dashboard から登録することになる）。**増えるのは「何ができるか」では
+//! なく「いつ動くかを自分で決められるか」だけ**。
 //!
-//! # セッション単位（`set_my_heartbeat` と同じ流儀・#456）
+//! # セッション単位（#456）
 //!
 //! **スコープは無い。** 対象は常に `ctx.session_id`（いま話しているセッション）。発火経路を持つのは
-//! 登録済み transport のセッション（`nostr-` / `discord-` / `web-`・#628）だけなので、それ以外
-//! （`heartbeat-` / `agent-msg-` 等）で呼ばれたら **fail-closed で拒否し remedy（どこで実行すれば
-//! よいか）を返す**。「設定できたのに永遠に発火しない行」を作らせない。
+//! 登録済み transport のセッションだけ（#628）なので、それ以外で呼ばれたら **fail-closed で拒否し
+//! remedy（どこで実行すればよいか）を返す**。「設定できたのに永遠に発火しない行」を作らせない。
 //!
 //! # 権限
 //!
-//! `set_my_heartbeat` と同じく **owner 限定にはしない**（自分の定時実行を自分で決めるのが目的）が、
+//! get/set/update/delete は **owner 限定にはしない**（自分の定時実行を自分で決めるのが目的）が、
 //! 素の `Agent`（未信頼の外部ユーザー由来ターン）からは見えないよう `TRUSTED_ONLY_ACTIONS` に入れ、
-//! ハンドラ内でも同じ検査をする（多層防御）。
+//! ハンドラ内でも同じ検査をする（多層防御）。`run_my_schedule` は `OWNER_ONLY_ACTIONS`。
 
 use serde_json::json;
 
 use opencrab_gateway::{GatewayActionResult, GatewayCallContext, GatewayCaller};
 
 use crate::api::schedules::{
-    create_schedule_core, delete_schedule_core, list_session_schedules_core, update_schedule_core,
-    ScheduleOpError, SchedulePatch,
+    create_schedule_core, delete_schedule_core, list_session_schedules_core, load_owned_schedule,
+    update_schedule_core, ScheduleOpError, SchedulePatch,
 };
 use crate::AppState;
 
@@ -54,6 +55,20 @@ fn ensure_trusted(ctx: &GatewayCallContext) -> Option<GatewayActionResult> {
         return None;
     }
     Some(err("このアクションは信頼済みの呼び出し元のみ実行できます"))
+}
+
+/// 呼び出し元権限の検査（多層防御）。bridge の `OWNER_ONLY_ACTIONS` と同じ範囲
+/// （オーナー / co_agent のみ）。`run_my_schedule` 用。
+fn ensure_owner_or_coagent(ctx: &GatewayCallContext) -> Option<GatewayActionResult> {
+    if matches!(
+        ctx.caller,
+        GatewayCaller::Owner | GatewayCaller::CoAgent { .. }
+    ) {
+        return None;
+    }
+    Some(err(
+        "このアクションはオーナーまたは co_agent のみ実行できます",
+    ))
 }
 
 /// 他エージェントを指そうとする引数を拒否する（このツールは `ctx.agent_id` しか見ない）。
@@ -89,14 +104,14 @@ fn err(msg: impl Into<String>) -> GatewayActionResult {
     }
 }
 
-/// 現在のセッションが発火経路を持つかを確認する（`agent_heartbeat` と**同じ登録簿を引く**・#628）。
+/// 現在のセッションを発火先へ解決する（scheduler と**同じ登録簿を引く**・#628）。
 ///
 /// セッション文脈が無い / 発火経路の無い種別（登録済み descriptor がどれも名乗らない）→
 /// fail-closed で **remedy 付き**エラー。
-fn current_session(
+fn current_session_target(
     state: &AppState,
     ctx: &GatewayCallContext,
-) -> Result<String, GatewayActionResult> {
+) -> Result<(String, opencrab_actions::FireTarget), GatewayActionResult> {
     let session_id = match ctx.session_id.as_deref() {
         Some(s) if !s.is_empty() => s,
         _ => {
@@ -117,12 +132,20 @@ fn current_session(
             .resolve_persisted_target(&conn, session_id, &ctx.agent_id)
     };
     match target {
-        Some(_) => Ok(session_id.to_string()),
+        Some(target) => Ok((session_id.to_string(), target)),
         None => Err(err(format!(
             "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——{}——で実行してください。",
             state.timed_fire_router.fire_target_hint()
         ))),
     }
+}
+
+/// 現在のセッションが発火経路を持つかを確認し、session_id を返す（[`current_session_target`]）。
+fn current_session(
+    state: &AppState,
+    ctx: &GatewayCallContext,
+) -> Result<String, GatewayActionResult> {
+    current_session_target(state, ctx).map(|(session_id, _)| session_id)
 }
 
 /// 必須の整数 id 引数を取り出す（数値、または数値へ解釈できる文字列を許す）。
@@ -425,6 +448,91 @@ pub(crate) fn delete_my_schedule(
             }
         }
         Err(ScheduleOpError::BadRequest(m)) | Err(ScheduleOpError::Internal(m)) => err(m),
+    }
+}
+
+/// 自分の定時実行スケジュールを **id 指定で**、次の発火時刻を待たずに手動発火する
+/// （#612 D2・オーナー / co_agent 限定）。
+///
+/// # 定時発火とまったく同じ経路
+///
+/// scheduler の定時発火と**同じ関数**（[`crate::heartbeat_fire::run_one_heartbeat`]）を呼ぶ。
+/// 対象は所属チェック（[`load_owned_schedule`]・`ctx.agent_id`＋現在のセッション）を通った行だけ。
+///
+/// # `last_fired_at` は更新しない
+///
+/// 手動発火は定時発火の位相をずらさないため `last_fired_at` を刻まない（刻むのはスケジューラの
+/// 発火ループだけ・I2）。
+///
+/// # 自己デッドロックを避ける（#599）
+///
+/// このツールは呼び出しターンの中で走り、そのターンは既に現在セッションの直列化ロックを保持して
+/// いる。発火は `spawn` して**即座に「投げた」を返し**、実際のターンは今のターンが終わってから走る。
+pub(crate) fn run_my_schedule(
+    state: &AppState,
+    args: &serde_json::Value,
+    ctx: &GatewayCallContext,
+) -> GatewayActionResult {
+    // owner_only（bridge の OWNER_ONLY_ACTIONS と同ポリシー）を handler でも確認する（多層防御）。
+    if let Some(denied) = ensure_owner_or_coagent(ctx) {
+        return denied;
+    }
+    if let Some(denied) = reject_foreign_target(args) {
+        return denied;
+    }
+    if let Some(denied) = reject_removed_scope_args(args) {
+        return denied;
+    }
+
+    let (session_id, target) = match current_session_target(state, ctx) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let id = match required_i64(args, "id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let row = match load_owned_schedule(state, &ctx.agent_id, &session_id, id) {
+        Ok(row) => row,
+        Err(ScheduleOpError::BadRequest(m)) | Err(ScheduleOpError::Internal(m)) => return err(m),
+    };
+
+    if !state.timed_fire_router.has_live_sink() {
+        return err("ゲートウェイが稼働していないため発火できません（受け口が未登録）。ゲートウェイの起動を確認してください。");
+    }
+
+    let fire_state = state.clone();
+    let fire_agent_id = ctx.agent_id.clone();
+    tokio::spawn(async move {
+        crate::heartbeat_fire::run_one_heartbeat(
+            &fire_state,
+            &fire_agent_id,
+            &target,
+            id,
+            &row.message,
+        )
+        .await;
+    });
+
+    tracing::info!(
+        agent_id = %ctx.agent_id,
+        session_id = %session_id,
+        schedule_id = id,
+        caller = %ctx.caller.label(),
+        "run_my_schedule: 手動でスケジュールを発火した（last_fired_at は更新しない）"
+    );
+
+    GatewayActionResult {
+        success: true,
+        data: Some(json!({
+            "fired": true,
+            "id": id,
+            "session_id": session_id,
+            "note": "スケジュールを発火しました。実際のターンは今のターンが終わってから同じセッションで走ります（last_fired_at は更新しません）。",
+        })),
+        error: None,
     }
 }
 

@@ -111,7 +111,6 @@ pub(super) const MAX_DEPTH: u32 = 2;
 /// owner のみが可視・実行できるアクション（#45）。
 pub const OWNER_ONLY_ACTIONS: &[&str] = &[
     "update_instructions",
-    "update_heartbeat_instructions",
     // LLM プロバイダ設定の即時変更（ルーターのホットスワップ）。外部ユーザー由来の
     // ターン（caller=Agent）からは一覧にも出さず実行もしない。owner のみ。
     "configure_llm_provider",
@@ -146,10 +145,10 @@ pub const OWNER_ONLY_ACTIONS: &[&str] = &[
     "ws_mkdir",
     "add_allowed_command",
     "remove_allowed_command",
-    // 時間を待たずにハートビートを手動発火（#599）。テスト用だが「今すぐ自律ターンを起こす」
-    // 操作なので、オーナー / co_agent 以外（外部ユーザー由来の caller=Agent）には出さない。
-    // 発火の実行内容は時間発火と同一（別経路を作らない）。
-    "run_my_heartbeat",
+    // 時間を待たずにスケジュールを手動発火（#599 / #612）。テスト用だが「今すぐ自律ターンを
+    // 起こす」操作なので、オーナー / co_agent 以外（外部ユーザー由来の caller=Agent）には出さない。
+    // 発火の実行内容は定時発火と同一（別経路を作らない）。
+    "run_my_schedule",
 ];
 
 /// owner / co_agent / trusted_user のみ（素の Agent は不可）のアクション（#45）。
@@ -170,18 +169,8 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "learn_from_experience",
     "learn_from_peer",
     "reflect_and_learn",
-    "read_heartbeat_instructions",
-    // 自分のハートビート（自律実行）の有効化と間隔（#247）。**owner 限定にはしない** —
-    // 自分の設定を自分で触れることがこの機能の目的で、エージェントが自分の意思で
-    // 触るターン（heartbeat tick / ダッシュボード / オーナーとの会話）は全て
-    // caller=Owner なので妨げられない。一方 caller=Agent は「未信頼の外部ユーザーと
-    // 会話しているターン」を意味するので、そこへ開けると会話で自律実行を起動させられる
-    // （費用と挙動に効く / #240 の「意図せず自律実行が始まる」の再来）。
-    "get_my_heartbeat",
-    "set_my_heartbeat",
-    // 定時実行（#455）。`set_my_heartbeat` と同じ理由: **owner 限定にはしない**（自分の
-    // 定時実行を自分で決めるのが目的で、本人が触るターン〔heartbeat tick / ダッシュボード /
-    // オーナー会話〕は caller=Owner）。一方 caller=Agent（未信頼の外部ユーザー会話ターン）へ
+    // 時間トリガー（#455 / #612）。**owner 限定にはしない**（自分の定時実行を自分で決めるのが
+    // 目的で、本人が触るターン〔時間トリガー / ダッシュボード / オーナー会話〕は caller=Owner）。一方 caller=Agent（未信頼の外部ユーザー会話ターン）へ
     // 開けると、会話で「毎朝○時に外部出力する」を仕込ませられる（#240 の再来）ので塞ぐ。
     // 更新・削除（#477）も同じ棚: **owner 限定にはしない**（自分の巡回をやめる/間隔を変えるのが
     // 目的で、本人が触るターンは caller=Owner）。一方 caller=Agent（未信頼の外部ユーザー会話）

@@ -231,38 +231,38 @@ fn local_tools_gated_by_caller_only_regardless_of_depth() {
 
 /// 設定変更系（#116）は owner 限定であること（ポリシー表の権威）。
 #[test]
-fn test_list_tools_owner_sees_update_heartbeat_instructions() {
+fn test_list_tools_owner_sees_run_my_schedule() {
     let (_dir, ctx) = test_context_with_caller(CallerIdentity::Owner);
     let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
-        .with_gateway_actions(Arc::new(MockGatewayHeartbeat));
-    // #923: heartbeat/owner-only の可視性は narrowing 前の policy 層で検証する。
+        .with_gateway_actions(Arc::new(MockGatewaySchedule));
+    // #923: schedule/owner-only の可視性は narrowing 前の policy 層で検証する。
     let names: Vec<String> = policy_visible_names(&executor);
-    assert!(names.iter().any(|n| n == "update_heartbeat_instructions"));
-    assert!(names.iter().any(|n| n == "read_heartbeat_instructions"));
+    assert!(names.iter().any(|n| n == "run_my_schedule"));
+    assert!(names.iter().any(|n| n == "get_my_schedules"));
 }
 
 #[test]
-fn test_list_tools_agent_cannot_see_heartbeat_actions() {
+fn test_list_tools_agent_cannot_see_schedule_actions() {
     let (_dir, ctx) = test_context_with_caller(CallerIdentity::Agent);
     let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
-        .with_gateway_actions(Arc::new(MockGatewayHeartbeat));
-    // #923: heartbeat/owner-only の可視性は narrowing 前の policy 層で検証する。
+        .with_gateway_actions(Arc::new(MockGatewaySchedule));
+    // #923: schedule/owner-only の可視性は narrowing 前の policy 層で検証する。
     let names: Vec<String> = policy_visible_names(&executor);
     // Agent (non-owner, non-trusted) sees neither.
-    assert!(!names.iter().any(|n| n == "update_heartbeat_instructions"));
-    assert!(!names.iter().any(|n| n == "read_heartbeat_instructions"));
+    assert!(!names.iter().any(|n| n == "run_my_schedule"));
+    assert!(!names.iter().any(|n| n == "get_my_schedules"));
 }
 
 #[test]
-fn test_list_tools_trusted_user_heartbeat_read_only() {
+fn test_list_tools_trusted_user_sees_schedules_but_not_manual_fire() {
     let (_dir, ctx) = test_context_with_caller(CallerIdentity::TrustedUser);
     let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
-        .with_gateway_actions(Arc::new(MockGatewayHeartbeat));
-    // #923: heartbeat/owner-only の可視性は narrowing 前の policy 層で検証する。
+        .with_gateway_actions(Arc::new(MockGatewaySchedule));
+    // #923: schedule/owner-only の可視性は narrowing 前の policy 層で検証する。
     let names: Vec<String> = policy_visible_names(&executor);
-    // TrustedUser can read but not write (write is owner-only).
-    assert!(names.iter().any(|n| n == "read_heartbeat_instructions"));
-    assert!(!names.iter().any(|n| n == "update_heartbeat_instructions"));
+    // TrustedUser can read but not manually fire (run_my_schedule is owner-only).
+    assert!(names.iter().any(|n| n == "get_my_schedules"));
+    assert!(!names.iter().any(|n| n == "run_my_schedule"));
 }
 
 #[test]
@@ -540,8 +540,7 @@ fn test_policy_owner_only_dispatcher_names_are_live() {
         names.iter().any(|n| n == "update_instructions"),
         "update_instructions must exist in dispatcher"
     );
-    // `create_skill`（#157 S6）と `update_heartbeat_instructions` /
-    // `read_heartbeat_instructions`（#157 S3）は server 側の合成 gateway が実装する
+    // `create_skill`（#157 S6）と `run_my_schedule`（#612）は server 側の合成 gateway が実装する
     // （実在性は server crate のテストで検証）。execute_skill は防御的エントリ
     // （実装なし）であることをここで明文化する。
     assert!(!names.iter().any(|n| n == "execute_skill"));

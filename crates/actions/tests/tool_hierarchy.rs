@@ -7,7 +7,7 @@
 //!
 //! 期待挙動（env ゲート無し・既定）:
 //! - depth 0 の会話ターンでは投影関数を**常時集合（≤15）＋describe_tools**に絞る。
-//! - 常時集合の外のツール（例 set_my_heartbeat / 記憶管理・内省など）は投影に出ない（余分 0）。
+//! - 常時集合の外のツール（例 set_my_schedule / 記憶管理・内省など）は投影に出ない（余分 0）。
 //! - `describe_tools([...])` を呼ぶと、**同一ターンの次の LLM 呼び出し**の functions に
 //!   その名前が加わる（呼ばないターンでは加わらない）。
 //!
@@ -132,7 +132,7 @@ fn tool_call_response(calls: Vec<ToolCall>) -> ChatResponse {
 
 /// 会話ターンで露出する gateway op を供給するモック。
 /// - `reply` / `reaction` / `resolve`: 常時集合の会話 op（Discord/Nostr レーン）。
-/// - `set_my_heartbeat`: 常時集合の**外**（設定カテゴリ）。describe_tools の活性化検証に使う。
+/// - `set_my_schedule`: 常時集合の**外**（設定カテゴリ）。describe_tools の活性化検証に使う。
 struct ConversationGateway;
 
 #[async_trait]
@@ -154,8 +154,8 @@ impl GatewayActions for ConversationGateway {
             conv("resolve", DispatchMode::Inline),
             // 常時集合の外（設定カテゴリ・index 経由でのみ describe_tools 対象）。
             GatewayActionDef {
-                name: "set_my_heartbeat".to_string(),
-                description: "set heartbeat interval".to_string(),
+                name: "set_my_schedule".to_string(),
+                description: "set schedule".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {"minutes": {"type": "integer"}}
@@ -281,12 +281,12 @@ async fn discord_nonowner_turn_projects_only_always_set_plus_describe_tools() {
 #[tokio::test]
 async fn describe_tools_activates_named_tool_for_next_llm_call() {
     let (_dir, executor) = executor_with_conv_gateway(CallerIdentity::Owner);
-    // 1 回目: describe_tools(["set_my_heartbeat"]) を呼ぶ。2 回目: text で終端。
+    // 1 回目: describe_tools(["set_my_schedule"]) を呼ぶ。2 回目: text で終端。
     let (llm, captures) = CapturingMockLlm::new(vec![
         tool_call_response(vec![tc(
             "call-1",
             "describe_tools",
-            serde_json::json!({"names": ["set_my_heartbeat"]}),
+            serde_json::json!({"names": ["set_my_schedule"]}),
         )]),
         text_response("done"),
     ]);
@@ -304,7 +304,7 @@ async fn describe_tools_activates_named_tool_for_next_llm_call() {
     let caps = captures.lock().unwrap();
     assert_eq!(caps.len(), 2, "describe_tools→終端で 2 回の LLM 呼び出し");
 
-    // 1 回目: 常時集合のみ（set_my_heartbeat は未活性・count ≤15・describe_tools 在り）。
+    // 1 回目: 常時集合のみ（set_my_schedule は未活性・count ≤15・describe_tools 在り）。
     let first = &caps[0];
     assert!(
         first.names.len() <= 15,
@@ -318,12 +318,12 @@ async fn describe_tools_activates_named_tool_for_next_llm_call() {
         first.names
     );
     assert!(
-        !first.names.iter().any(|n| n == "set_my_heartbeat"),
-        "呼ぶ前から set_my_heartbeat が投影されている（活性化前提が崩れる）: {:?}",
+        !first.names.iter().any(|n| n == "set_my_schedule"),
+        "呼ぶ前から set_my_schedule が投影されている（活性化前提が崩れる）: {:?}",
         first.names
     );
 
-    // 2 回目: describe_tools で活性化した set_my_heartbeat が加わる（count は依然 ≤15）。
+    // 2 回目: describe_tools で活性化した set_my_schedule が加わる（count は依然 ≤15）。
     let second = &caps[1];
     assert!(
         second.names.len() <= 15,
@@ -332,8 +332,8 @@ async fn describe_tools_activates_named_tool_for_next_llm_call() {
         second.names
     );
     assert!(
-        second.names.iter().any(|n| n == "set_my_heartbeat"),
-        "describe_tools 後も set_my_heartbeat が投影に加わらない: {:?}",
+        second.names.iter().any(|n| n == "set_my_schedule"),
+        "describe_tools 後も set_my_schedule が投影に加わらない: {:?}",
         second.names
     );
 }
@@ -355,8 +355,8 @@ async fn without_describe_tools_the_named_tool_stays_hidden() {
     let caps = captures.lock().unwrap();
     assert_eq!(caps.len(), 1);
     assert!(
-        !caps[0].names.iter().any(|n| n == "set_my_heartbeat"),
-        "describe_tools 未呼び出しなのに set_my_heartbeat が投影された: {:?}",
+        !caps[0].names.iter().any(|n| n == "set_my_schedule"),
+        "describe_tools 未呼び出しなのに set_my_schedule が投影された: {:?}",
         caps[0].names
     );
     assert!(
@@ -404,7 +404,7 @@ async fn rest_lane_turn_projects_at_most_15_functions() {
 }
 
 /// 常時集合 14 個すべて（会話 op 3＋execute_shell＋subtask 3）を供給する gateway。
-/// ＋常時集合外の set_my_heartbeat（narrowing で落ちる/index 行き）。owner 等値 pin で
+/// ＋常時集合外の set_my_schedule（narrowing で落ちる/index 行き）。owner 等値 pin で
 /// 「常時集合の 14 個が 1 つも欠けない」ことを検証するのに使う。
 struct FullAlwaysGateway;
 
@@ -459,7 +459,7 @@ impl GatewayActions for FullAlwaysGateway {
             ),
             // 常時集合の外（設定カテゴリ）。narrowing で投影から落ちる。
             mk(
-                "set_my_heartbeat",
+                "set_my_schedule",
                 DispatchMode::Inline,
                 ToolSharing::AgentBound,
             ),
@@ -514,7 +514,7 @@ async fn owner_turn_projects_exactly_the_always_set_plus_describe_tools() {
     let caps = captures.lock().unwrap();
     assert_eq!(caps.len(), 1);
     // 常時集合 14（会話 op 3＋execute_shell＋subtask 3＋memory 3＋ledger 3＋read_skill）＋
-    // describe_tools。set_my_heartbeat は常時集合外なので投影されない（narrowing 漏れ検出）。
+    // describe_tools。set_my_schedule は常時集合外なので投影されない（narrowing 漏れ検出）。
     assert_projected_set_eq(
         &caps[0].names,
         &[
