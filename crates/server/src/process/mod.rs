@@ -39,11 +39,11 @@ pub(crate) use wiring::{
     build_turn_executor, effective_allowed_commands, resolve_run_tools_config, TurnExecutorWiring,
 };
 
-use budget::{format_single_log, spawn_background_turn_end_snapshot};
+use budget::spawn_background_turn_end_snapshot;
 use callbacks::{
     merge_image_urls, set_llm_log_callback, set_run_notifier_callbacks, set_turn_log_callbacks,
 };
-use live_inbound::{SessionLiveInbound, SubtaskSteerInbound};
+use live_inbound::SubtaskSteerInbound;
 use loop_restart::prepare_loop_restart;
 use skills::{record_used_skills, spawn_background_index_build};
 
@@ -56,9 +56,6 @@ mod curated_long_term_injection_tests;
 #[cfg(test)]
 #[path = "tests/error_body_with_prompt_size.rs"]
 mod error_body_with_prompt_size_tests;
-#[cfg(test)]
-#[path = "tests/live_inbound_source.rs"]
-mod live_inbound_source_tests;
 #[cfg(test)]
 #[path = "tests/no_forced_reply.rs"]
 mod no_forced_reply_tests;
@@ -356,32 +353,14 @@ pub async fn run_agent_response(
     // 退避先は inline のログ callback / dispatch 経路と**同じ root**を使う。
     engine.set_tool_result_offload(session_id.to_string(), Some(tool_result_workspace.clone()));
 
-    // #289: 走行中のターンにも新着ユーザー発言を届ける。
+    // 走行中のターンへは新着（発言・完了）を差し込まない。来たものは次のターンで扱う
+    // （差し込みは時系列の逆転や二重処理の原因になった）。
     //
-    // `conversation` は呼び出し側がこの関数に入る**前**に組んでおり、以後ターン内では
-    // 組み直さない。ツール往復が長引くとその間の発言が次ターンまで見えず、「やめて」の
-    // ような緊急の指示ほど効かなかった（#289 のエビデンス）。ここで注入口を挿し、
-    // ツール往復のたびに差分だけを入力へ足す。
-    //
-    // watermark をここ（会話構築の**後**）で取ることで、履歴に載っている発言を二重に
-    // 見せない。届けるだけで応答は強制しない（#288 の強制は撤回済み）。
-    //
-    // depth 0 限定。サブタスク（depth>0）は背景処理であって対話の当事者ではなく、
-    // 親ターンが同じ発言を注入する以上、こちらにも足すと同じ発言が二重に流れる。
-    if depth == 0 {
-        // #323 / B2: Nostr は 1 セッションに全相手が同居するため、走行中注入を返信中の
-        // 相手（inbound=`OnlySpeaker` / resume=`Silent`）に絞る。他ゲートウェイは既定
-        // （`AllOthers`）のままで挙動は変わらない。
-        engine.set_live_inbound(std::sync::Arc::new(
-            SessionLiveInbound::new(state.db.clone(), session_id, agent_id)
-                .with_scope(req.live_inbound_scope.clone()),
-        ));
-    } else {
-        // #647: サブタスク（depth>0）は走行中ユーザー発話の当事者ではないが、親/オーナーからの
-        // steer（追加指示）は反復の合間に読む。ユーザー発話版と同じ `LiveInboundSource` 機構を
-        // steer 専用ソースで通す。sub-session（`subtask-{id}` = ここでの `session_id`）に積まれた
-        // `log_type='steer'` の行だけを差分注入する。auto-dispatch はこの経路（`run_agent_response`）
-        // を通らないので steer 注入口も持たない＝`steer_subtask` 側が `NotSteerable` を返す。
+    // #647: サブタスク（depth>0）だけは、親/オーナーからの steer（追加指示）を反復の合間に読む。
+    // sub-session（`subtask-{id}` = ここでの `session_id`）に積まれた `log_type='steer'` の行だけを
+    // 差分注入する。auto-dispatch はこの経路（`run_agent_response`）を通らないので steer 注入口も
+    // 持たない＝`steer_subtask` 側が `NotSteerable` を返す。
+    if depth > 0 {
         engine.set_live_inbound(std::sync::Arc::new(SubtaskSteerInbound::new(
             state.db.clone(),
             session_id,

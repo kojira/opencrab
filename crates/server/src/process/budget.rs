@@ -113,5 +113,3 @@ pub fn ensure_request_functions_budget(
         ..args
     })
 }
-// `format_single_log` は `format_live_inbound`（本番経路）が使うので常時取り込む。
-pub(crate) use opencrab_core::conversation::format_single_log;
