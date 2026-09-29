@@ -57,8 +57,10 @@ fn persist_turn_end_snapshot(
         .map_err(|e| anyhow::anyhow!("db lock poisoned: {e}"))?;
     let assembled =
         opencrab_core::context_budget::assemble_from_snapshot(&conn, session_id, agent_id)?;
+    let bridge = opencrab_core::context_budget::load_bridge_lines(&conn, agent_id, session_id)?;
     let mut gov =
-        opencrab_core::context_budget::TurnGovernor::new(conversation_high, conversation_low);
+        opencrab_core::context_budget::TurnGovernor::new(conversation_high, conversation_low)
+            .with_bridge(bridge);
     gov.finish_turn(
         &conn,
         session_id,

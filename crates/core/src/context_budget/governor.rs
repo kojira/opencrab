@@ -53,6 +53,8 @@ pub struct TurnGovernor {
     pub conversation_high: usize,
     pub conversation_low: usize,
     events: Vec<GovernorEvent>,
+    /// 逐語で残せなかった区間をつなぐトピック要約（#1049）。空なら案内 1 行だけ。
+    bridge: Vec<super::bridge::BridgeLine>,
 }
 
 impl TurnGovernor {
@@ -61,7 +63,14 @@ impl TurnGovernor {
             conversation_high,
             conversation_low,
             events: Vec::new(),
+            bridge: Vec::new(),
         }
+    }
+
+    /// 開始時・終了時の圧縮で使うトピック要約を載せる。
+    pub fn with_bridge(mut self, bridge: Vec<super::bridge::BridgeLine>) -> Self {
+        self.bridge = bridge;
+        self
     }
 
     pub fn events(&self) -> &[GovernorEvent] {
@@ -167,7 +176,12 @@ impl TurnGovernor {
     }
 
     fn fire(&mut self, phase: CompactPhase, items: &[CompactItem]) -> CompactOutcome {
-        let outcome = compact_to_low_water(items, self.conversation_high, self.conversation_low);
+        let outcome = super::compact::compact_with_bridge(
+            items,
+            self.conversation_high,
+            self.conversation_low,
+            &self.bridge,
+        );
         self.push(GovernorEvent::CompactFired {
             phase,
             before: outcome.before_tokens,
@@ -350,7 +364,8 @@ pub fn items_from_logs(
             }
             let key = format!("log:{}", log.id.unwrap_or(i as i64));
             let tokens = ledger.record(&key, &text);
-            let must_keep = newest_user.contains(&i) || unresolved;
+            // #1049: 話者で抜き出さない。必ず残すのは未決着のツール組だけ。
+            let must_keep = unresolved;
             let lane = if must_keep || in_recent {
                 CompactLane::RecentVerbatim
             } else if log.log_type == "tool_call" || log.log_type == "tool_result" {

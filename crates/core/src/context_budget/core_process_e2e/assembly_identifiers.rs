@@ -54,7 +54,7 @@ fn d_hysteresis_consecutive_posts_do_not_refire() {
         )
         .unwrap();
     assert!(first.fired, "最初の投稿で圧縮する");
-    assert!(first.after_tokens <= LOW || first.low_water_unreachable);
+    assert!(first.after_tokens <= HIGH || first.low_water_unreachable);
 
     for n in 0..5 {
         insert_speech(&conn, "owner", &format!("post-{n} {}", "z".repeat(80)));

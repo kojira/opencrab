@@ -216,7 +216,7 @@ mod past_summary_budget_tests {
         const BUDGET: usize = 4_000;
         let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
         assert!(
-            out.contains("[old_history_summary]"),
+            out.contains("[Earlier"),
             "二水位圧縮の印が無い: {out}"
         );
         assert!(out.contains("log line 399"), "直近ログが落ちている: {out}");

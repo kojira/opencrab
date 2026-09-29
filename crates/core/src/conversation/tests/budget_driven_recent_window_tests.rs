@@ -111,7 +111,7 @@ mod budget_driven_recent_window_tests {
         let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
 
         assert!(
-            out.contains("[old_history_summary]"),
+            out.contains("[Earlier"),
             "二水位圧縮の印が無い: {out}"
         );
         assert!(
@@ -209,13 +209,9 @@ mod budget_driven_recent_window_tests {
         );
     }
 
-    /// #284 の維持（`merge_recent_user_speeches` 削除後）。大量のツール往復で古いユーザー発言が
-    /// 末尾から押し出されても、**一番新しいユーザー発言**は小予算でも必ず載る。
-    ///
-    /// 全ログを fit へ渡すので、混ぜ戻し（旧 merge）が無くても直近ユーザー発言は入力に含まれ、
-    /// `fit_logs_to_budget` の必須枠（`RECENT_MIN_USER_SPEECHES` / 飛び地 A′）が拾う。
+    /// #1049: 圧縮しても直近の履歴は話者を問わず連続で残り、古い発言だけを抜き出さない。
     #[test]
-    fn newest_user_speech_survives_tool_flood_after_merge_removal() {
+    fn newest_contiguous_history_survives_tool_flood() {
         let conn = opencrab_db::init_memory().unwrap();
         // 一番古い位置に置くユーザー発言（これが「今の指示」で、末尾からは押し出される）。
         insert_raw(&conn, "speech", Some("owner"), "この指示は消えてはいけない");
@@ -232,9 +228,12 @@ mod budget_driven_recent_window_tests {
         seed_topic_covering_all(&conn, 100);
 
         let out = build_conversation_string(&conn, SESSION, AGENT, 400).unwrap();
+        for i in 20..40 {
+            assert!(out.contains(&format!("結果 {i}:")), "直近 {i} が落ちた: {out}");
+        }
         assert!(
-            out.contains("この指示は消えてはいけない"),
-            "一番新しいユーザー発言が押し出された（#284 が壊れた）: {out}"
+            !out.contains("この指示は消えてはいけない"),
+            "直近 20 件より古い発言を抜き出して残してはいけない: {out}"
         );
     }
 
@@ -255,7 +254,7 @@ mod budget_driven_recent_window_tests {
             "廃止した topic 要約が出ている: {out}"
         );
         assert!(
-            out.contains("[old_history_summary]"),
+            out.contains("[Earlier"),
             "コンパクションが起きていない（マーカー無し）: {out}"
         );
         assert!(
