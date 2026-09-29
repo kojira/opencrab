@@ -129,16 +129,9 @@ impl<R: AgentRuntime> SubtaskCompletionSink for ExtgateCompletionSink<R> {
         false
     }
 
+    /// 完了は常に次のターンで届ける。親ターンが走行中なら、そのターンの終了を
+    /// セッション直列ロックで待ってから始まる。走行中ターンへの差し込みはしない。
     fn deliver_continuation(&self, ev: SubtaskSettled) {
-        let locks = self.runtime.session_locks();
-        if locks.holds_lock_entry(&self.session_id) {
-            tracing::debug!(
-                session_id = %self.session_id,
-                subtask_id = %ev.subtask_id,
-                "subtask completion left for the active parent turn"
-            );
-            return;
-        }
         let sink = self.clone();
         tokio::spawn(async move {
             resume_v3_turn(sink, ev).await;

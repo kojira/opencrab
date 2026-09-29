@@ -21,7 +21,12 @@ pub(super) fn append(
             "injecting newly arrived user speech into the running turn"
         );
     }
-    if !append_bounded_history_block(messages, ledger, &text) {
+    // 履歴の後ろにツール往復が並んでいれば、新着はその後ろ（末尾）へ置く。履歴の中へ
+    // 差し込むと、ツール呼び出しより前に見えて時系列が逆転する。
+    let tool_exchange_follows = messages
+        .iter()
+        .any(|m| m.role == Role::Tool || m.tool_calls.is_some());
+    if tool_exchange_follows || !append_bounded_history_block(messages, ledger, &text) {
         messages.push(Message {
             role: Role::User,
             content: Some(MessageContent::Text(text.clone())),

@@ -409,9 +409,9 @@ async fn s3_subtask_continuation_routes_by_exact_generic_session_without_prefix(
     );
 }
 
-/// 親ターンが実行中なら、保存済みcompletionは親のiterationへ委ね、別resumeを待機させない。
+/// 親ターンが実行中でも、完了は差し込まず、親の終了後に次のターンとして届ける。
 #[tokio::test]
-async fn settlement_during_active_parent_does_not_start_another_resume() {
+async fn settlement_during_active_parent_resumes_after_parent_turn() {
     let h = Harness::start().await;
     let (_s, instance_id, binding_id) = ready_pair(&h).await;
     let session_id = format!("extgate-{binding_id}");
@@ -456,13 +456,19 @@ async fn settlement_during_active_parent_does_not_start_another_resume() {
         "active-parent-result",
     );
 
-    release_tx.send(()).unwrap();
-    active.await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
         h.runtime.turns.load(Ordering::SeqCst),
         0,
-        "実行中の親の後ろへ別resume turnを待機させない"
+        "親ターンの実行中は次のターンを始めない"
+    );
+    release_tx.send(()).unwrap();
+    active.await.unwrap();
+    wait_turns(&h, 1).await;
+    assert_eq!(
+        h.runtime.turns.load(Ordering::SeqCst),
+        1,
+        "親ターン終了後に完了のターンが 1 回走る"
     );
     let logs = {
         let conn = h.state.db.lock().unwrap();
