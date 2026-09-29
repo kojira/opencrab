@@ -5881,6 +5881,8 @@
             "compaction_ratio": 0.5,
             "models": [
               {
+                "cache_write_price_per_1m": null,
+                "cached_input_price_per_1m": null,
                 "context_window": 400000,
                 "input_price_per_1m": 0.0,
                 "max_output_tokens": 32000,
@@ -5889,6 +5891,8 @@
                 "provider": "chatgpt"
               },
               {
+                "cache_write_price_per_1m": null,
+                "cached_input_price_per_1m": null,
                 "context_window": 400000,
                 "input_price_per_1m": 0.0,
                 "max_output_tokens": 32000,
@@ -5897,6 +5901,8 @@
                 "provider": "chatgpt"
               },
               {
+                "cache_write_price_per_1m": null,
+                "cached_input_price_per_1m": null,
                 "context_window": 1050000,
                 "input_price_per_1m": 0.0,
                 "max_output_tokens": 32000,
@@ -5940,6 +5946,8 @@
             "compaction_ratio": 0.5,
             "models": [
               {
+                "cache_write_price_per_1m": null,
+                "cached_input_price_per_1m": null,
                 "context_window": 400000,
                 "input_price_per_1m": 0.0,
                 "max_output_tokens": 32000,
@@ -5948,6 +5956,8 @@
                 "provider": "chatgpt"
               },
               {
+                "cache_write_price_per_1m": null,
+                "cached_input_price_per_1m": null,
                 "context_window": 400000,
                 "input_price_per_1m": 0.0,
                 "max_output_tokens": 32000,
@@ -5956,6 +5966,8 @@
                 "provider": "chatgpt"
               },
               {
+                "cache_write_price_per_1m": null,
+                "cached_input_price_per_1m": null,
                 "context_window": 1050000,
                 "input_price_per_1m": 0.0,
                 "max_output_tokens": 32000,
@@ -5994,6 +6006,8 @@
               "compaction_ratio": 0.5,
               "models": [
                 {
+                  "cache_write_price_per_1m": null,
+                  "cached_input_price_per_1m": null,
                   "context_window": 4096,
                   "input_price_per_1m": 0.0,
                   "max_output_tokens": null,
@@ -6002,6 +6016,8 @@
                   "provider": "baseline"
                 },
                 {
+                  "cache_write_price_per_1m": null,
+                  "cached_input_price_per_1m": null,
                   "context_window": 400000,
                   "input_price_per_1m": 0.0,
                   "max_output_tokens": 32000,
@@ -6010,6 +6026,8 @@
                   "provider": "chatgpt"
                 },
                 {
+                  "cache_write_price_per_1m": null,
+                  "cached_input_price_per_1m": null,
                   "context_window": 400000,
                   "input_price_per_1m": 0.0,
                   "max_output_tokens": 32000,
@@ -6018,6 +6036,8 @@
                   "provider": "chatgpt"
                 },
                 {
+                  "cache_write_price_per_1m": null,
+                  "cached_input_price_per_1m": null,
                   "context_window": 1050000,
                   "input_price_per_1m": 0.0,
                   "max_output_tokens": 32000,
@@ -6052,6 +6072,8 @@
               "compaction_ratio": 0.5,
               "models": [
                 {
+                  "cache_write_price_per_1m": null,
+                  "cached_input_price_per_1m": null,
                   "context_window": 400000,
                   "input_price_per_1m": 0.0,
                   "max_output_tokens": 32000,
@@ -6060,6 +6082,8 @@
                   "provider": "chatgpt"
                 },
                 {
+                  "cache_write_price_per_1m": null,
+                  "cached_input_price_per_1m": null,
                   "context_window": 400000,
                   "input_price_per_1m": 0.0,
                   "max_output_tokens": 32000,
@@ -6068,6 +6092,8 @@
                   "provider": "chatgpt"
                 },
                 {
+                  "cache_write_price_per_1m": null,
+                  "cached_input_price_per_1m": null,
                   "context_window": 1050000,
                   "input_price_per_1m": 0.0,
                   "max_output_tokens": 32000,
