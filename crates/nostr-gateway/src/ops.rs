@@ -1,6 +1,6 @@
 //! Nostr gateway の DI 能力宣言と invoke handler（DESIGN-DI-EXTENSION §9.2 / §9A）。
 //!
-//! hello に載せる能力宣言（reply/reaction/repost/follow/unfollow/kind0/upload/resolve）と、core からの
+//! hello に載せる能力宣言（reply/reaction/repost/say/follow/unfollow/kind0/upload/resolve）と、core からの
 //! invoke を nostaro CLI 実行へ写す handler。短縮参照(uN/eN/cN)は core が解決済みで payload に入る:
 //! `event` は発端 origin（`nostr:event:v1:...`）、`user`/`ref` は pubkey か origin。gateway は origin から
 //! event_id を導いて nostaro を叩く（層分離・§9.3）。秘密鍵は env(`NOSTARO_SECRET_KEY`) のみ。
@@ -27,7 +27,7 @@ pub fn operation_declarations() -> Value {
     // conversation_bound、agent 全体の設定系は agent_bound（DI-02 の既存規則に対応）。
     let conv = |sub: &str, sharing: &str| json!({"sub_engine": sub, "sharing": sharing});
     let decl = |name: &str, desc: &str, input: Value, class: Value| {
-        let utterance = matches!(name, "reaction" | "reply" | "repost");
+        let utterance = matches!(name, "reaction" | "reply" | "repost" | "say");
         let read_only = name == "resolve";
         json!({
             "name": name,
@@ -46,7 +46,7 @@ pub fn operation_declarations() -> Value {
     // 短縮参照フィールド（uN/eN/cN）。core はこの標示 field だけを実 ID へ解決する（レビュー要望）。
     let ref_prop =
         |desc: &str| json!({"type": "string", "description": desc, "format": "short-ref"});
-    // 配列は name の UTF-8 昇順（follow < kind0 < reaction < reply < repost < resolve < unfollow < upload）。
+    // 配列は name の UTF-8 昇順（follow < kind0 < reaction < reply < repost < resolve < say < unfollow < upload）。
     json!([
         decl(
             "follow",
@@ -93,6 +93,12 @@ pub fn operation_declarations() -> Value {
             "resolve",
             "u番号/e番号の完全な生JSONを取得する（会話で省略された全文の参照）。",
             json!({"type": "object", "required": ["ref"], "properties": {"ref": ref_prop("u番号またはe番号の短縮参照（例 u2 / e7）")}}),
+            conv("not_exposed", "conversation_bound"),
+        ),
+        decl(
+            "say",
+            "返信ではない新しい投稿をする。text に投稿本文。ツールを使わずに本文を書いても同じく新規投稿として配信される。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。This posts a new standalone note (not a reply). Writing plain text without any tool is also posted the same way. This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response.",
+            json!({"type": "object", "required": ["text"], "properties": {"text": str_prop("投稿本文")}}),
             conv("not_exposed", "conversation_bound"),
         ),
         decl(
@@ -229,7 +235,7 @@ impl InvokeHandler for NostrInvokeHandler {
                 );
             }
             let body = match operation {
-                "reply" => str_field(payload, "text").unwrap_or_default(),
+                "reply" | "say" => str_field(payload, "text").unwrap_or_default(),
                 "reaction" => str_field(payload, "emoji").unwrap_or("+"),
                 _ => "",
             };
@@ -276,6 +282,12 @@ impl InvokeHandler for NostrInvokeHandler {
                     return InvokeOutcome::Rejected;
                 };
                 vec!["repost".into(), dash(), id]
+            }
+            "say" => {
+                let Some(text) = str_field(payload, "text").filter(|t| !t.trim().is_empty()) else {
+                    return InvokeOutcome::Rejected;
+                };
+                vec!["post".into(), dash(), text.to_string()]
             }
             "follow" | "unfollow" => {
                 let Some(user) = str_field(payload, "user") else {
@@ -345,23 +357,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn declarations_are_sorted_and_eight() {
+    fn declarations_are_sorted_and_nine() {
         let decls = operation_declarations();
         let arr = decls.as_array().unwrap();
-        assert_eq!(arr.len(), 8);
+        assert_eq!(arr.len(), 9);
         let names: Vec<&str> = arr.iter().map(|d| d["name"].as_str().unwrap()).collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted, "name UTF-8 昇順（§3.1）");
         assert_eq!(
             names,
-            vec!["follow", "kind0", "reaction", "reply", "repost", "resolve", "unfollow", "upload"]
+            vec![
+                "follow", "kind0", "reaction", "reply", "repost", "resolve", "say", "unfollow",
+                "upload"
+            ]
         );
         // 全 callback なし。
         for d in arr {
             assert!(d["callback_schema"].is_null(), "第一段は callback なし");
         }
-        for name in ["reaction", "reply", "repost"] {
+        for name in ["reaction", "reply", "repost", "say"] {
             let description = arr
                 .iter()
                 .find(|d| d["name"] == name)
@@ -383,6 +398,48 @@ mod tests {
             reply_desc.contains("put N reply calls in THIS response"),
             "#923: reply 説明文に #914 の N 件並置英文が無い: {reply_desc}"
         );
+    }
+
+    /// say は返信先を持たない新規投稿として `nostaro post -- <text>` を実行する。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn say_invokes_nostaro_post_without_reply_target() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let args_path = dir.path().join("args");
+        let bin = dir.path().join("fake-nostaro");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho ok\n",
+                args_path.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let handler = NostrInvokeHandler::new(bin, dir.path().join("cfg.toml"), None, false);
+
+        let out = handler
+            .handle("c1", "b1", "say", &json!({"text": "-新しいニュース"}))
+            .await;
+        assert!(matches!(out, InvokeOutcome::Ok(_)));
+        let args = std::fs::read_to_string(&args_path).unwrap();
+        let args: Vec<&str> = args.lines().collect();
+        assert_eq!(
+            args,
+            vec![
+                "--config",
+                dir.path().join("cfg.toml").to_str().unwrap(),
+                "post",
+                "--",
+                "-新しいニュース"
+            ]
+        );
+
+        let empty = handler
+            .handle("c2", "b1", "say", &json!({"text": "  "}))
+            .await;
+        assert!(matches!(empty, InvokeOutcome::Rejected));
     }
 
     /// #923: 発話 op（reaction / reply / repost）の description を #914（9a6af850）の英文併記形へ
