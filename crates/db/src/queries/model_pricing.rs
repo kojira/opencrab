@@ -36,10 +36,10 @@ pub struct BilledTokens {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
-    /// True when `input_tokens` already contains `cache_read_tokens` (OpenAI Responses:
-    /// `input_tokens_details.cached_tokens`). False when reads are reported separately
-    /// (Anthropic-style `cache_read_input_tokens`).
-    pub cache_read_included_in_input: bool,
+    /// True when `input_tokens` already contains the cache reads and writes (OpenAI Responses:
+    /// `input_tokens_details.cached_tokens`; hermit). False when they are reported separately
+    /// from the uncached input (Anthropic-style `cache_read_input_tokens`).
+    pub cache_included_in_input: bool,
 }
 
 impl ModelPricingRow {
@@ -53,8 +53,8 @@ impl ModelPricingRow {
         let write_rate = self
             .cache_write_price_per_1m
             .unwrap_or(self.input_price_per_1m);
-        let base_input = if t.cache_read_included_in_input {
-            t.input_tokens - t.cache_read_tokens
+        let base_input = if t.cache_included_in_input {
+            t.input_tokens - t.cache_read_tokens - t.cache_write_tokens
         } else {
             t.input_tokens
         };

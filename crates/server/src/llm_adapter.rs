@@ -91,7 +91,7 @@ impl LlmClient for LlmRouterAdapter {
                 output_tokens: usage.completion_tokens as i64,
                 cache_read_tokens: usage.cache_read_input_tokens as i64,
                 cache_write_tokens: usage.cache_creation_input_tokens as i64,
-                cache_read_included_in_input: cache_read_included_in_input(&provider),
+                cache_included_in_input: cache_included_in_input(&provider),
             };
             // 単価は `model_pricing`（DB）だけが出所。未登録なら 0 を記録し warn で見えるようにする。
             let pricing = ctx.db.lock().ok().and_then(|conn| {
@@ -145,11 +145,12 @@ impl LlmClient for LlmRouterAdapter {
     }
 }
 
-/// Whether the provider's `prompt_tokens` already contains the cached-read tokens.
+/// Whether the provider's `prompt_tokens` already contains the cache read/write tokens.
 ///
 /// OpenAI Responses-style providers (`chatgpt`, `codex`) report `input_tokens` including
-/// `input_tokens_details.cached_tokens`. Anthropic-style usage (hermit, anthropic, cursor)
-/// reports cache reads and writes separately from the uncached input.
-pub fn cache_read_included_in_input(provider: &str) -> bool {
-    matches!(provider, "chatgpt" | "codex")
+/// `input_tokens_details.cached_tokens`, and hermit reports uncached + read + write as its prompt
+/// count. Anthropic-style usage (anthropic, cursor) reports cache reads and writes separately from
+/// the uncached input.
+pub fn cache_included_in_input(provider: &str) -> bool {
+    matches!(provider, "chatgpt" | "codex" | "hermit")
 }
