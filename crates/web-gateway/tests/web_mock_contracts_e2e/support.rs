@@ -406,6 +406,8 @@ fn setup(mock_port: u16, tag: &str, auto_dispatch: bool, tools_block: &str) -> H
                 output_price_per_1m: 0.0,
                 context_window: Some(200_000),
                 max_output_tokens: Some(1024),
+                cached_input_price_per_1m: None,
+                cache_write_price_per_1m: None,
             },
         )
         .expect("seed model_pricing for startup budget check");

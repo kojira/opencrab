@@ -170,6 +170,8 @@ mod reload_validation_tests {
                     output_price_per_1m: 0.0,
                     context_window: window,
                     max_output_tokens: Some(4_096),
+                    cached_input_price_per_1m: None,
+                    cache_write_price_per_1m: None,
                 },
             )
             .unwrap();

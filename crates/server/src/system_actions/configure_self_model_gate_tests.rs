@@ -45,6 +45,8 @@ fn register(state: &AppState, provider: &str, model: &str, window: i32) {
             // 「完全登録」を表すには max_output_tokens も入れる（context_window だけでは gate を
             // 通らない）。gate の条件分岐そのものは context_budget の単体テストで担保する。
             max_output_tokens: Some(8192),
+            cached_input_price_per_1m: None,
+            cache_write_price_per_1m: None,
         },
     )
     .unwrap();

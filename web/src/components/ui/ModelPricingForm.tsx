@@ -16,6 +16,8 @@ export interface ModelPricingFormInitial {
   context_window?: number | null;
   /** #676: 出力トークン上限（任意）。max_tokens を送るプロバイダのモデルにだけ必要。 */
   max_output_tokens?: number | null;
+  cached_input_price_per_1m?: number | null;
+  cache_write_price_per_1m?: number | null;
 }
 
 /**
@@ -53,6 +55,12 @@ export default function ModelPricingForm({
   const [maxOutputTokens, setMaxOutputTokens] = useState(
     initial?.max_output_tokens != null ? String(initial.max_output_tokens) : '',
   );
+  const [cachedInputPrice, setCachedInputPrice] = useState(
+    initial?.cached_input_price_per_1m != null ? String(initial.cached_input_price_per_1m) : '',
+  );
+  const [cacheWritePrice, setCacheWritePrice] = useState(
+    initial?.cache_write_price_per_1m != null ? String(initial.cache_write_price_per_1m) : '',
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -87,6 +95,18 @@ export default function ModelPricingForm({
       }
       mot = v;
     }
+    // キャッシュ単価は任意。空欄なら null（通常の入力単価で計算）。
+    const optionalPrice = (raw: string): number | null | 'invalid' => {
+      if (raw.trim() === '') return null;
+      const v = Number(raw);
+      return Number.isFinite(v) && v >= 0 ? v : 'invalid';
+    };
+    const cachedIn = optionalPrice(cachedInputPrice);
+    const cacheWrite = optionalPrice(cacheWritePrice);
+    if (cachedIn === 'invalid' || cacheWrite === 'invalid') {
+      setError('キャッシュ単価は空欄か、0 以上の数値で入力してください');
+      return;
+    }
     setSaving(true);
     try {
       await putModelPricing({
@@ -96,6 +116,8 @@ export default function ModelPricingForm({
         output_price_per_1m: out,
         context_window: cw,
         max_output_tokens: mot,
+        cached_input_price_per_1m: cachedIn,
+        cache_write_price_per_1m: cacheWrite,
       });
       onSaved({
         provider: p,
@@ -104,6 +126,8 @@ export default function ModelPricingForm({
         output_price_per_1m: out,
         context_window: cw,
         max_output_tokens: mot,
+        cached_input_price_per_1m: cachedIn,
+        cache_write_price_per_1m: cacheWrite,
       });
     } catch (e) {
       setError(String(e));
@@ -201,7 +225,34 @@ export default function ModelPricingForm({
           />
         </div>
       </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-on-surface-variant">
+            キャッシュ読み込み単価（per 1M トークン・任意）
+          </label>
+          <input
+            value={cachedInputPrice}
+            onChange={(e) => setCachedInputPrice(e.target.value)}
+            inputMode="decimal"
+            placeholder="例: 0.2（空欄なら入力単価）"
+            className={inputCls}
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-on-surface-variant">
+            キャッシュ書き込み単価（per 1M トークン・任意）
+          </label>
+          <input
+            value={cacheWritePrice}
+            onChange={(e) => setCacheWritePrice(e.target.value)}
+            inputMode="decimal"
+            placeholder="例: 2.5（空欄なら入力単価）"
+            className={inputCls}
+          />
+        </div>
+      </div>
       <p className="text-xs text-on-surface-variant">
+        使用料の表示は「API で払った場合の金額」を、この表の単価で計算します。
         入力量の帯で単価が変わるモデルがあります（一定量を超えると単価が上がる等）。
         この表は<strong>単一レートしか持てない</strong>ので、どちらの単価を入れるかは
         運用者の判断です。

@@ -207,6 +207,9 @@ CREATE TABLE IF NOT EXISTS model_pricing (
     -- 番号付きマイグレーション v42 で既存 DB にも追加する。
     max_output_tokens INTEGER,
     updated_at TEXT NOT NULL,
+    -- v58: prompt-cache unit prices (NULL = base input price applies).
+    cached_input_price_per_1m REAL,
+    cache_write_price_per_1m REAL,
     PRIMARY KEY (provider, model)
 );
 

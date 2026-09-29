@@ -98,7 +98,7 @@ impl Approval {
 
     pub fn validate(&self) -> Result<()> {
         ensure!(self.version == 1, "approval version must be 1");
-        ensure!(self.core_user_version == 57, "core_user_version must be 57");
+        ensure!(self.core_user_version == 58, "core_user_version must be 58");
         let operation = Uuid::parse_str(&self.operation_id).context("operation_id")?;
         ensure!(
             operation.get_version_num() == 4,
@@ -169,7 +169,7 @@ mod tests {
             version: 1,
             operation_id: "00000000-0000-4000-8000-000000000008".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
-            core_user_version: 57,
+            core_user_version: 58,
             source_core_sha256: "a".repeat(64),
             destinations: vec![
                 Destination {

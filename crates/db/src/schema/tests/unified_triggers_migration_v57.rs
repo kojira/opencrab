@@ -146,7 +146,7 @@ fn v57_moves_enabled_session_heartbeats_into_agent_schedules_and_drops_old_stora
         .unwrap();
 
     initialize(&conn).unwrap();
-    assert_eq!(schema_version(&conn).unwrap(), 57);
+    assert_eq!(schema_version(&conn).unwrap(), 58);
 
     let rows = v57_schedule_rows(&conn);
     assert_eq!(
@@ -235,9 +235,16 @@ fn v57_rejects_enabled_heartbeat_without_interval_or_below_floor() {
 #[test]
 fn v57_fresh_schema_has_no_heartbeat_storage() {
     let fresh = crate::init_memory().unwrap();
-    assert_eq!(schema_version(&fresh).unwrap(), 57);
+    assert_eq!(schema_version(&fresh).unwrap(), 58);
     for table in V57_OLD_HEARTBEAT_TABLES {
         assert!(!table_exists(&fresh, table).unwrap(), "{table} must be absent");
     }
     assert!(!column_exists(&fresh, "agents", "heartbeat_instructions").unwrap());
+}
+
+#[test]
+fn v58_adds_cache_prices_to_model_pricing() {
+    let fresh = crate::init_memory().unwrap();
+    assert!(column_exists(&fresh, "model_pricing", "cached_input_price_per_1m").unwrap());
+    assert!(column_exists(&fresh, "model_pricing", "cache_write_price_per_1m").unwrap());
 }

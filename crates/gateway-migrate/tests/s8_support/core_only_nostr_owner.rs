@@ -74,7 +74,7 @@ fn core_only_nostr_owner_fixture(historical_watch_session: bool, mismatched_sess
     let rows = source::validate(&source::open_read_only(&core_path).unwrap()).unwrap();
     let approval = Approval {
         version:1, operation_id:"00000000-0000-4000-8000-000000000019".into(),
-        created_at:"2026-01-01T00:00:00Z".into(), core_user_version:57,
+        created_at:"2026-01-01T00:00:00Z".into(), core_user_version: 58,
         source_core_sha256:source::file_sha256(&core_path).unwrap(),
         destinations:vec![Destination {kind_id:"nostr".into(),path_id:"nostr-primary".into(),schema:"s5-nostr-v1".into()}],
         identity_dispositions:rows.iter().filter(|r| r.table=="trusted_users").map(|r| IdentityDisposition {

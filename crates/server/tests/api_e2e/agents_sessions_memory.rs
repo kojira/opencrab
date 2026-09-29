@@ -50,6 +50,8 @@ async fn test_model_pricing_list_exposes_compaction_ratio() {
                 output_price_per_1m: 0.0,
                 context_window: Some(400_000),
                 max_output_tokens: None,
+                cached_input_price_per_1m: None,
+                cache_write_price_per_1m: None,
             },
         )
         .unwrap();

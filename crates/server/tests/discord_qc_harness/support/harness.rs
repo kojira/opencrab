@@ -11,6 +11,8 @@ fn register_mock_pricing(db: &opencrab_db::Db) {
             output_price_per_1m: 0.0,
             context_window: Some(200_000),
             max_output_tokens: Some(4_096),
+            cached_input_price_per_1m: None,
+            cache_write_price_per_1m: None,
         },
     )
     .expect("test model_pricing");

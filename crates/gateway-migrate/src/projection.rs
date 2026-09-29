@@ -48,8 +48,8 @@ pub fn verify_already_applied(
     destination_manifest_sha256: &str,
 ) -> Result<Option<ProjectionOutcome>> {
     ensure!(
-        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? == 57,
-        "core schema must be 57"
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? == 58,
+        "core schema must be 58"
     );
     if !table_exists(conn, "separation_migrations")? {
         return Ok(None);
@@ -93,8 +93,8 @@ pub fn verify_immutable_marker_for_freeze(
     destination_manifest_sha256: &str,
 ) -> Result<()> {
     ensure!(
-        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? == 57,
-        "core schema must be 57"
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? == 58,
+        "core schema must be 58"
     );
     let existing =
         read_marker(conn, &approval.operation_id)?.context("projection marker missing")?;
