@@ -4,6 +4,7 @@
 //! 既定へ落とさず fail-loud する。水位は `min(floor(W * 比), A)`。chatgpt 305K 特例と
 //! 100K 隠れフォールバックは置かない。
 
+mod bridge;
 mod compact;
 #[cfg(test)]
 mod core_process_e2e;
@@ -14,9 +15,10 @@ mod ledger;
 mod observe;
 mod request;
 
+pub use bridge::{load_bridge_lines, BridgeLine, BRIDGE_HEADER};
 pub use compact::{
-    argument_reference, compact_to_low_water, group_items, should_compact, CompactItem,
-    CompactLane, CompactOutcome, CompactPhase, ExchangeGroup,
+    argument_reference, compact_to_low_water, compact_with_bridge, group_items, should_compact,
+    CompactItem, CompactLane, CompactOutcome, CompactPhase, ExchangeGroup,
 };
 pub use envelope::{
     apply_line_items, compute_water_levels, decide_memory_index, ensure_functions_within_cap,

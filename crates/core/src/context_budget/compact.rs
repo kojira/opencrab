@@ -139,19 +139,31 @@ pub fn group_items(items: &[CompactItem]) -> Vec<ExchangeGroup> {
 /// 完了結果や自分の発話が消えて何に応えるのか分からなくなる。
 pub const MIN_RECENT_ITEMS: usize = 20;
 
+/// 高水位超過なら刈る。橋渡しの要約なし版（途中圧縮など log id を持たない経路）。
+pub fn compact_to_low_water(
+    items: &[CompactItem],
+    conversation_high: usize,
+    conversation_low: usize,
+) -> CompactOutcome {
+    compact_with_bridge(items, conversation_high, conversation_low, &[])
+}
+
 /// 高水位超過なら刈る。超過していなければ入力をそのまま返す。
 ///
 /// 最新から連続して積む（#1049）:
 /// 1. 直近 [`MIN_RECENT_ITEMS`] 件は予算にかかわらず逐語で残す。
 /// 2. それより前は低水位まで逐語で積む。入らない完了済みツール組は参照化して続ける。
-/// 3. 低水位を越える境目の 1 組は高水位（許容マージン）までならそのまま残す。
-/// 4. 入らなくなった地点より前は要約 1 行にする（未決着のツール組だけは API 対のため残す）。
+/// 3. 低水位を越えても、トピック要約がまだ覆っていない区間は高水位（許容マージン）まで逐語で残す
+///    （要約との間に隙間を作らない）。
+/// 4. 逐語で残せなかった区間は、トピック要約（`bridge`）を新しい順に高水位まで入れてつなぐ。
+///    それより古い部分は [Memory Index]（宣言ユニット・月次要約）が担う。
 ///
-/// [`ExchangeGroup`] はまとめて残すか落とす。
-pub fn compact_to_low_water(
+/// 未決着のツール組は API 対のため必ず残す。[`ExchangeGroup`] はまとめて残すか落とす。
+pub fn compact_with_bridge(
     items: &[CompactItem],
     conversation_high: usize,
     conversation_low: usize,
+    bridge: &[super::bridge::BridgeLine],
 ) -> CompactOutcome {
     let mut ledger = TokenLedger::new();
     for item in items {
@@ -177,23 +189,29 @@ pub fn compact_to_low_water(
     let mut used = 0usize;
     let mut kept_items = 0usize;
     let mut kept: Vec<CompactItem> = Vec::new();
-    let mut dropped = 0usize;
+    let mut oldest_verbatim: Option<i64> = None;
     let mut cut = false;
+    let mut gap = false;
     for g in order {
         if cut {
             if g.unresolved {
                 used += g.tokens();
                 kept.extend(g.items.iter().cloned());
-            } else {
-                dropped += 1;
             }
             continue;
         }
         let tokens = g.tokens();
+        let newest = g.newest_log_id().unwrap_or(0);
         if kept_items < MIN_RECENT_ITEMS || g.unresolved || used + tokens <= conversation_low {
             used += tokens;
             kept_items += g.items.len();
             kept.extend(g.items.iter().cloned());
+            oldest_verbatim = g
+                .items
+                .iter()
+                .filter_map(|i| i.log_id)
+                .min()
+                .or(oldest_verbatim);
             continue;
         }
         if g.items.iter().any(|i| i.lane == CompactLane::Echoable) {
@@ -202,22 +220,54 @@ pub fn compact_to_low_water(
                 used += echo.tokens;
                 kept_items += 1;
                 kept.push(echo);
+                oldest_verbatim = g
+                    .items
+                    .iter()
+                    .filter_map(|i| i.log_id)
+                    .min()
+                    .or(oldest_verbatim);
                 continue;
             }
         }
-        // 境目の 1 組は許容マージン（高水位）まで残す。
+        // 許容マージン: 要約が覆っていない区間、または境目の 1 組は高水位まで逐語で残す。
         if used + tokens <= conversation_high {
             used += tokens;
             kept.extend(g.items.iter().cloned());
-        } else {
-            dropped += 1;
+            oldest_verbatim = g
+                .items
+                .iter()
+                .filter_map(|i| i.log_id)
+                .min()
+                .or(oldest_verbatim);
+            if !bridge.is_empty() && !super::bridge::is_covered(bridge, newest) {
+                continue;
+            }
+        } else if !bridge.is_empty() && !super::bridge::is_covered(bridge, newest) {
+            gap = true;
         }
         cut = true;
     }
-    if dropped > 0 {
-        let summary = old_history_summary(dropped);
-        used += summary.tokens;
-        kept.push(summary);
+    if cut {
+        // 古い側から: [Memory Index] への案内（隙間があるときだけ）→ トピック要約 → 逐語。
+        if gap || bridge.is_empty() {
+            let note = older_history_note();
+            used += note.tokens;
+            kept.push(note);
+        }
+        let boundary = oldest_verbatim.unwrap_or(i64::MAX);
+        let room = conversation_high.saturating_sub(used);
+        if let Some((text, tokens)) = super::bridge::render_bridge(bridge, boundary, room) {
+            used += tokens;
+            kept.push(CompactItem {
+                key: "bridge".into(),
+                tokens,
+                text,
+                lane: CompactLane::OldHistory,
+                log_id: None,
+                must_keep: false,
+                group_id: None,
+            });
+        }
     }
 
     kept.sort_by_key(|a| a.log_id);
@@ -260,13 +310,12 @@ fn argument_digest(text: &str) -> String {
     hash.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
-fn old_history_summary(dropped: usize) -> CompactItem {
-    let text = format!(
-        "[old_history_summary] {dropped} older units omitted; search_memory_index / read_my_history can retrieve them"
-    );
+/// トピック要約が用意できない（途中圧縮・索引未作成）ときだけ、古い履歴の在りかを示す。
+fn older_history_note() -> CompactItem {
+    let text = "[Earlier conversation is in your memory: see [Memory Index], search_memory_index / retrieve_memory_nodes]".to_string();
     let tokens = crate::tokens::estimate_tokens(&text);
     CompactItem {
-        key: "old_history_summary".into(),
+        key: "older_history_note".into(),
         tokens,
         text,
         lane: CompactLane::OldHistory,
@@ -340,7 +389,48 @@ mod tests {
         assert!(cut.after_tokens <= high, "after={}", cut.after_tokens);
         assert!(cut.text.contains("[extra:1]") && cut.text.contains("[h44:1000]"));
         assert!(!cut.text.contains("[h0:1000]"), "古い側から省略する");
-        assert!(cut.text.contains("[old_history_summary]"));
+        assert!(cut.text.contains("[Earlier conversation"));
+    }
+
+    /// 逐語で残せない区間はトピック要約でつなぐ。要約が覆っていない区間は
+    /// マージンまで逐語で残し、要約と逐語の間に隙間を作らない（#1049）。
+    #[test]
+    fn topic_bridge_fills_older_history_without_gap() {
+        let items: Vec<CompactItem> = (0..60)
+            .map(|i| item_at(&format!("m{i}"), 100, CompactLane::RecentVerbatim, i))
+            .collect();
+        let line = |a: i64, b: i64| super::super::bridge::BridgeLine {
+            start_log_id: a,
+            end_log_id: b,
+            text: format!("- [t{a}-{b}] summary"),
+            tokens: 5,
+        };
+        // 要約は log 0..=34 まで（35 以降は索引が追いついていない）。
+        let bridge = vec![line(0, 9), line(10, 19), line(20, 29), line(30, 34)];
+        let out = compact_with_bridge(&items, 5_000, 2_000, &bridge);
+        assert!(out.fired);
+        // 直近 20 + 低水位 = m40..m59 が逐語。未要約の m35..m39 もマージンで逐語に残る。
+        for i in 35..60 {
+            assert!(
+                out.text.contains(&format!("[m{i}:100]")),
+                "m{i} missing: {}",
+                out.text
+            );
+        }
+        assert!(
+            out.text.contains("[t30-34]") && out.text.contains("[t0-9]"),
+            "{}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("[Earlier conversation is in your memory"),
+            "隙間なし: {}",
+            out.text
+        );
+        let summary_at = out.text.find("[t30-34]").unwrap();
+        let verbatim_at = out.text.find("[m35:100]").unwrap();
+        assert!(summary_at < verbatim_at, "古い要約 → 新しい逐語の順");
+        assert!(out.after_tokens <= 5_000);
     }
 
     /// 直近 20 件は種別・話者によらず連続で逐語に残す（#1049）。
@@ -361,7 +451,7 @@ mod tests {
         }
         assert!(!out.text.contains("[n9:100]"), "{}", out.text);
         assert!(
-            out.text.starts_with("[old_history_summary]"),
+            out.text.starts_with("[Earlier conversation"),
             "{}",
             out.text
         );

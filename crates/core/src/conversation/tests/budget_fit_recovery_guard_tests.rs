@@ -72,7 +72,7 @@ mod budget_fit_recovery_guard_tests {
             "廃止した topic 要約が出ている: {out}"
         );
         assert!(
-            out.contains("[old_history_summary]"),
+            out.contains("[Earlier"),
             "切り詰めの注記が無い＝コンパクションが起きていない: {out}"
         );
         let toks = estimate_tokens(&out);
@@ -103,7 +103,7 @@ mod budget_fit_recovery_guard_tests {
         for budget in [2_000usize, 4_000, 6_000, 8_000, 10_000, 20_000] {
             let out = build_conversation_string(&conn, SESSION, AGENT, budget).unwrap();
             assert!(
-                out.contains("[old_history_summary]"),
+                out.contains("[Earlier"),
                 "budget={budget} でコンパクションが起きていない: {out}"
             );
             let toks = estimate_tokens(&out);

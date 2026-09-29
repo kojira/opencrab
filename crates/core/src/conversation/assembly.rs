@@ -216,7 +216,8 @@ fn build_conversation_inner(
     if assembled.text == NO_MESSAGES_MARKER {
         return Ok(assembled.text);
     }
-    let mut gov = TurnGovernor::new(conversation_high, conversation_low);
+    let bridge = crate::context_budget::load_bridge_lines(conn, agent_id, session_id)?;
+    let mut gov = TurnGovernor::new(conversation_high, conversation_low).with_bridge(bridge);
     let Some(outcome) = gov.compact_start_if_over(assembled.tokens, &assembled.items) else {
         return Ok(assembled.text);
     };

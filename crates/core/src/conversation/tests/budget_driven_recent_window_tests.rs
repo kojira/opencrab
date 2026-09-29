@@ -111,7 +111,7 @@ mod budget_driven_recent_window_tests {
         let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
 
         assert!(
-            out.contains("[old_history_summary]"),
+            out.contains("[Earlier"),
             "二水位圧縮の印が無い: {out}"
         );
         assert!(
@@ -254,7 +254,7 @@ mod budget_driven_recent_window_tests {
             "廃止した topic 要約が出ている: {out}"
         );
         assert!(
-            out.contains("[old_history_summary]"),
+            out.contains("[Earlier"),
             "コンパクションが起きていない（マーカー無し）: {out}"
         );
         assert!(

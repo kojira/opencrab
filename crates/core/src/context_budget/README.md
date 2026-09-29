@@ -39,7 +39,7 @@ conversation_low  = input_low.saturating_sub(fixed)
 - ターン開始: `assemble_from_snapshot`（スナップショット + 水位印より後の差分）と `inspect_turn_start`。開始時 `fit_logs_to_budget` は走らせない。高水位超過のときだけ `compact_start_if_over`（途中超過と同じ `compact_to_low_water`）。
 - ターン途中: SkillEngine の各 append で `TokenLedger` 合計だけを更新し、高水位超過のときだけ合成 user 文字列を低水位まで刈る。ツール結果は事前予約しない。append 時に `min(ツール別上限, 残り会話枠)` へ切り詰め、超えたら既存の spool-with-stub を載せる。ツール結果が理由で turn は死なない。`context_budget_exhausted` は未登録モデル等の設定・データ誤りと、物理窓 `実入力 + output_reserve > W` だけ。
 - 二水位: `tokens > conversation_high` で発火し、低水位まで落とす。ちょうど high は非発火。
-- 最新から連続して積む（#1049）: 直近 20 件は無条件に逐語 → 低水位まで逐語（入らない完了済みツール組は参照化）→ 境目の 1 組は高水位（許容マージン）まで → それより前は省略 1 行。話者で抜き出さない。未決着ツール組だけは必ず残す。`ExchangeGroup`（assistant said + 対応 tool call/result）は原子的。
+- 最新から連続して積む（#1049）: 直近 20 件は無条件に逐語 → 低水位まで逐語（入らない完了済みツール組は参照化）→ トピック要約がまだ覆っていない区間と境目の 1 組は高水位（許容マージン）まで逐語 → それより前は現セッションのトピック要約（`bridge.rs`、short_id 付き）を新しい順に高水位まで入れて隙間なくつなぐ。宣言ユニット・月次要約が覆う地点で止め、それより古い部分は [Memory Index] が担う（新しいほど細かく、古いほど粗い）。要約が用意できない経路（途中圧縮・索引未作成）だけ [Memory Index] への案内 1 行。話者で抜き出さない。未決着ツール組だけは必ず残す。`ExchangeGroup`（assistant said + 対応 tool call/result）は原子的。
 - スナップショット: 非発火時も `assembled.text`（snap+差分の全文）を書く。`items` は正本の全ログから取る。persist 後も継続ターンで刈れる。
 
 完了済み `tool_call.arguments` の read 経路は `{ref,digest,bytes}` の有効 JSON。未決着 call は全文。DB の `metadata.tool_calls_json` は変えない。

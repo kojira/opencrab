@@ -27,7 +27,7 @@ fn split_user_blocks(text: &str) -> Vec<String> {
             && !line.starts_with("[tool_call]")
             && !line.starts_with("[tool_result]")
             && !line.starts_with("[id=")
-            && !line.starts_with("[old_history_summary]")
+            && !line.starts_with("[Earlier")
             && !line.starts_with("[echo]");
         if new_block && !cur.is_empty() {
             out.push(std::mem::take(&mut cur));
