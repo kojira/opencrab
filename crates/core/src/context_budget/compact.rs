@@ -285,8 +285,9 @@ fn take_lane<'a>(
             }
         } else if g.must_keep() {
             // 直近ユーザー発話は残量が 0 でも落とさない。tool 予約が user 車線を
-            // 食い潰したとき、質問本文まで消えるのを防ぐ。
-            *remaining_budget = 0;
+            // 食い潰したとき、質問本文まで消えるのを防ぐ。残量は使った分だけ減らし、
+            // 余裕があれば後続の車線（自分の発話・完了結果・要約）も残す（#1049）。
+            *remaining_budget = remaining_budget.saturating_sub(g.tokens());
             *used += g.tokens();
             kept.extend(g.items.iter().cloned());
         } else if g.tokens() <= *remaining_budget {
@@ -499,6 +500,29 @@ mod tests {
             .contains("log:"));
         assert!(v.get("digest").is_some());
         assert!(v.get("bytes").is_some());
+    }
+
+    /// must_keep を残したあとも、低水位の残量で後続の履歴（完了結果など）を残す（#1049）。
+    #[test]
+    fn must_keep_does_not_zero_remaining_budget() {
+        let items = vec![
+            item_at("completion", 30, CompactLane::RecentVerbatim, 2),
+            CompactItem {
+                key: "origin".into(),
+                tokens: 20,
+                text: "[owner]: ニュースある？".into(),
+                lane: CompactLane::RecentVerbatim,
+                log_id: Some(1),
+                must_keep: true,
+                group_id: Some(1),
+            },
+            item_at("old", 200, CompactLane::OldHistory, 0),
+        ];
+        let out = compact_to_low_water(&items, 100, 60);
+        assert!(out.fired);
+        assert!(out.text.contains("ニュースある？"), "{}", out.text);
+        assert!(out.text.contains("completion"), "{}", out.text);
+        assert!(!out.low_water_unreachable);
     }
 
     /// user 車線の残量が 0 でも must_keep（直近ユーザー発話）は残る。
