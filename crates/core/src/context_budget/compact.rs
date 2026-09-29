@@ -133,10 +133,21 @@ pub fn group_items(items: &[CompactItem]) -> Vec<ExchangeGroup> {
     groups
 }
 
-/// 高水位超過なら低水位まで刈る。超過していなければ入力をそのまま返す。
+/// 圧縮しても必ず逐語で残す直近の会話単位数（#1049）。
 ///
-/// 刈る順は車線優先: 直近逐語 → エコー参照化 → 古い要約。
-/// 新しい echo が古い逐語を押し出さない。[`ExchangeGroup`] はまとめて残すか落とす。
+/// 話者や種別で抜き出さず、最新から連続した履歴を残す。抜き出しは文脈を欠き、
+/// 完了結果や自分の発話が消えて何に応えるのか分からなくなる。
+pub const MIN_RECENT_ITEMS: usize = 20;
+
+/// 高水位超過なら刈る。超過していなければ入力をそのまま返す。
+///
+/// 最新から連続して積む（#1049）:
+/// 1. 直近 [`MIN_RECENT_ITEMS`] 件は予算にかかわらず逐語で残す。
+/// 2. それより前は低水位まで逐語で積む。入らない完了済みツール組は参照化して続ける。
+/// 3. 低水位を越える境目の 1 組は高水位（許容マージン）までならそのまま残す。
+/// 4. 入らなくなった地点より前は要約 1 行にする（未決着のツール組だけは API 対のため残す）。
+///
+/// [`ExchangeGroup`] はまとめて残すか落とす。
 pub fn compact_to_low_water(
     items: &[CompactItem],
     conversation_high: usize,
@@ -159,72 +170,58 @@ pub fn compact_to_low_water(
         };
     }
 
-    let mut used = 0usize;
-    let mut remaining_budget = conversation_low;
-    let mut low_water_unreachable = false;
-
     let groups = group_items(items);
+    let mut order: Vec<&ExchangeGroup> = groups.iter().collect();
+    order.sort_by_key(|g| std::cmp::Reverse(g.newest_log_id()));
+
+    let mut used = 0usize;
+    let mut kept_items = 0usize;
     let mut kept: Vec<CompactItem> = Vec::new();
-    let mut dropped: Vec<&ExchangeGroup> = Vec::new();
-    let mut claimed = std::collections::HashSet::<u64>::new();
-
-    // 1. 直近逐語。must_keep（未決着 group / 直近ユーザー）を先に、残りを新しい順。
-    take_lane(
-        &groups,
-        CompactLane::RecentVerbatim,
-        true,
-        &mut remaining_budget,
-        &mut used,
-        &mut kept,
-        &mut claimed,
-        &mut dropped,
-        false,
-    );
-    take_lane(
-        &groups,
-        CompactLane::RecentVerbatim,
-        false,
-        &mut remaining_budget,
-        &mut used,
-        &mut kept,
-        &mut claimed,
-        &mut dropped,
-        false,
-    );
-
-    // 2. エコー参照化。完了済み group を {ref,digest,bytes} にして新しい順。
-    take_lane(
-        &groups,
-        CompactLane::Echoable,
-        false,
-        &mut remaining_budget,
-        &mut used,
-        &mut kept,
-        &mut claimed,
-        &mut dropped,
-        true,
-    );
-
-    // 3. 古い履歴は要約だけ。残量があれば 1 件。
-    for g in &groups {
-        if claimed.contains(&g.id) {
+    let mut dropped = 0usize;
+    let mut cut = false;
+    for g in order {
+        if cut {
+            if g.unresolved {
+                used += g.tokens();
+                kept.extend(g.items.iter().cloned());
+            } else {
+                dropped += 1;
+            }
             continue;
         }
-        dropped.push(g);
-        claimed.insert(g.id);
-    }
-    if !dropped.is_empty() && remaining_budget > 0 {
-        let summary = old_history_summary(dropped.len(), remaining_budget);
-        if summary.tokens <= remaining_budget {
-            used += summary.tokens;
-            kept.insert(0, summary);
+        let tokens = g.tokens();
+        if kept_items < MIN_RECENT_ITEMS || g.unresolved || used + tokens <= conversation_low {
+            used += tokens;
+            kept_items += g.items.len();
+            kept.extend(g.items.iter().cloned());
+            continue;
         }
+        if g.items.iter().any(|i| i.lane == CompactLane::Echoable) {
+            let echo = echo_group(g);
+            if used + echo.tokens <= conversation_low {
+                used += echo.tokens;
+                kept_items += 1;
+                kept.push(echo);
+                continue;
+            }
+        }
+        // 境目の 1 組は許容マージン（高水位）まで残す。
+        if used + tokens <= conversation_high {
+            used += tokens;
+            kept.extend(g.items.iter().cloned());
+        } else {
+            dropped += 1;
+        }
+        cut = true;
+    }
+    if dropped > 0 {
+        let summary = old_history_summary(dropped);
+        used += summary.tokens;
+        kept.push(summary);
     }
 
     kept.sort_by_key(|a| a.log_id);
-    if used > conversation_low {
-        low_water_unreachable = true;
-    }
+    let low_water_unreachable = used > conversation_high;
 
     CompactOutcome {
         fired: true,
@@ -234,69 +231,6 @@ pub fn compact_to_low_water(
         through_log_id: items.iter().rev().find_map(|i| i.log_id),
         low_water_unreachable,
         exhausted: false,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn take_lane<'a>(
-    groups: &'a [ExchangeGroup],
-    lane: CompactLane,
-    must_keep_only: bool,
-    remaining_budget: &mut usize,
-    used: &mut usize,
-    kept: &mut Vec<CompactItem>,
-    claimed: &mut std::collections::HashSet<u64>,
-    dropped: &mut Vec<&'a ExchangeGroup>,
-    as_echo: bool,
-) {
-    let mut candidates: Vec<&ExchangeGroup> = groups
-        .iter()
-        .filter(|g| {
-            !claimed.contains(&g.id)
-                && g.lane() == lane
-                && if must_keep_only {
-                    g.must_keep()
-                } else {
-                    !g.must_keep()
-                }
-        })
-        .collect();
-    candidates.sort_by_key(|b| std::cmp::Reverse(b.newest_log_id()));
-    for g in candidates {
-        claimed.insert(g.id);
-        if g.unresolved && as_echo {
-            if g.tokens() <= *remaining_budget {
-                *remaining_budget -= g.tokens();
-                *used += g.tokens();
-                kept.extend(g.items.iter().cloned());
-            } else {
-                dropped.push(g);
-            }
-            continue;
-        }
-        if as_echo {
-            let echo = echo_group(g);
-            if echo.tokens <= *remaining_budget {
-                *remaining_budget -= echo.tokens;
-                *used += echo.tokens;
-                kept.push(echo);
-            } else {
-                dropped.push(g);
-            }
-        } else if g.must_keep() {
-            // 直近ユーザー発話は残量が 0 でも落とさない。tool 予約が user 車線を
-            // 食い潰したとき、質問本文まで消えるのを防ぐ。残量は使った分だけ減らし、
-            // 余裕があれば後続の車線（自分の発話・完了結果・要約）も残す（#1049）。
-            *remaining_budget = remaining_budget.saturating_sub(g.tokens());
-            *used += g.tokens();
-            kept.extend(g.items.iter().cloned());
-        } else if g.tokens() <= *remaining_budget {
-            *remaining_budget -= g.tokens();
-            *used += g.tokens();
-            kept.extend(g.items.iter().cloned());
-        } else {
-            dropped.push(g);
-        }
     }
 }
 
@@ -326,13 +260,11 @@ fn argument_digest(text: &str) -> String {
     hash.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
-fn old_history_summary(dropped: usize, budget: usize) -> CompactItem {
-    let text =
-        format!("[old_history_summary] {dropped} older units omitted after higher-priority lanes");
-    let mut tokens = crate::tokens::estimate_tokens(&text);
-    if tokens > budget {
-        tokens = budget;
-    }
+fn old_history_summary(dropped: usize) -> CompactItem {
+    let text = format!(
+        "[old_history_summary] {dropped} older units omitted; search_memory_index / read_my_history can retrieve them"
+    );
+    let tokens = crate::tokens::estimate_tokens(&text);
     CompactItem {
         key: "old_history_summary".into(),
         tokens,
@@ -387,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn high_exactly_does_not_fire_and_over_cuts_to_low() {
+    fn high_exactly_does_not_fire_and_over_cuts_within_margin() {
         let high = 45_000;
         let low = 20_000;
         let at_high: Vec<CompactItem> = (0..45)
@@ -395,56 +327,44 @@ mod tests {
             .collect();
         let stay = compact_to_low_water(&at_high, high, low);
         assert!(!stay.fired, "45,000 ちょうどは非発火");
-        assert_eq!(stay.before_tokens, 45_000);
         assert_eq!(stay.after_tokens, 45_000);
 
         let mut over = at_high;
         over.push(item_at("extra", 1, CompactLane::OldHistory, 45));
         let cut = compact_to_low_water(&over, high, low);
         assert!(cut.fired, "45,001 は発火");
-        assert_eq!(cut.before_tokens, 45_001);
         assert!(
-            cut.after_tokens <= 20_000,
-            "after={} が低水位を超えた",
-            cut.after_tokens
+            cut.after_tokens > low,
+            "低水位を越える境目はマージン内で残す"
         );
-        assert!(
-            cut.reduction() >= 25_001,
-            "reduction={} が足りない",
-            cut.reduction()
-        );
+        assert!(cut.after_tokens <= high, "after={}", cut.after_tokens);
+        assert!(cut.text.contains("[extra:1]") && cut.text.contains("[h44:1000]"));
+        assert!(!cut.text.contains("[h0:1000]"), "古い側から省略する");
+        assert!(cut.text.contains("[old_history_summary]"));
     }
 
+    /// 直近 20 件は種別・話者によらず連続で逐語に残す（#1049）。
     #[test]
-    fn lane_priority_keeps_verbatim_over_newer_echo() {
-        let items = vec![
-            item_at("old_said", 80, CompactLane::RecentVerbatim, 1),
-            item_at("new_echo", 80, CompactLane::Echoable, 99),
-        ];
-        let out = compact_to_low_water(&items, 100, 90);
+    fn newest_twenty_are_kept_contiguously_regardless_of_budget() {
+        let mut items: Vec<CompactItem> = (0..30)
+            .map(|i| item_at(&format!("n{i}"), 100, CompactLane::OldHistory, i))
+            .collect();
+        items[29].lane = CompactLane::Echoable;
+        let out = compact_to_low_water(&items, 500, 200);
         assert!(out.fired);
-        assert!(
-            out.text.contains("[old_said:80]"),
-            "直近逐語が先: {}",
-            out.text
-        );
-        let echo_json: serde_json::Value = serde_json::from_str(
-            out.text
-                .lines()
-                .find(|l| l.starts_with('{') && l.contains("\"ref\""))
-                .unwrap_or("{}"),
-        )
-        .unwrap_or(serde_json::json!({}));
-        if out.text.contains("[new_echo:80]") {
-            panic!(
-                "新しい echo 全文が古い逐語を押し出してはいけない: {}",
+        for i in 10..30 {
+            assert!(
+                out.text.contains(&format!("[n{i}:100]")),
+                "n{i}: {}",
                 out.text
             );
         }
-        if echo_json.get("ref").is_some() {
-            assert!(echo_json.get("digest").is_some());
-            assert!(echo_json.get("bytes").is_some());
-        }
+        assert!(!out.text.contains("[n9:100]"), "{}", out.text);
+        assert!(
+            out.text.starts_with("[old_history_summary]"),
+            "{}",
+            out.text
+        );
     }
 
     #[test]
@@ -484,7 +404,8 @@ mod tests {
 
     #[test]
     fn echo_is_valid_ref_digest_bytes_json() {
-        let items = vec![item_at("tool", 5_000, CompactLane::Echoable, 12)];
+        let mut items = vec![item_at("tool", 5_000, CompactLane::Echoable, 0)];
+        items.extend((1..=20).map(|i| item_at(&format!("r{i}"), 1, CompactLane::OldHistory, i)));
         let out = compact_to_low_water(&items, 100, 80);
         assert!(out.fired);
         let json_line = out
@@ -502,27 +423,26 @@ mod tests {
         assert!(v.get("bytes").is_some());
     }
 
-    /// must_keep を残したあとも、低水位の残量で後続の履歴（完了結果など）を残す（#1049）。
+    /// サブタスク完了など、ユーザー発言より新しい履歴が消えない（#1049）。
     #[test]
-    fn must_keep_does_not_zero_remaining_budget() {
-        let items = vec![
-            item_at("completion", 30, CompactLane::RecentVerbatim, 2),
-            CompactItem {
-                key: "origin".into(),
-                tokens: 20,
-                text: "[owner]: ニュースある？".into(),
-                lane: CompactLane::RecentVerbatim,
-                log_id: Some(1),
-                must_keep: true,
-                group_id: Some(1),
-            },
-            item_at("old", 200, CompactLane::OldHistory, 0),
-        ];
+    fn completion_newer_than_user_speech_is_kept() {
+        let mut items: Vec<CompactItem> = (0..30)
+            .map(|i| item_at("old", 5_000, CompactLane::OldHistory, i))
+            .collect();
+        items.push(item_at("owner_speech", 20, CompactLane::RecentVerbatim, 30));
+        items.push(item_at("my_ack", 20, CompactLane::RecentVerbatim, 31));
+        items.push(item_at(
+            "subtask_completed",
+            30,
+            CompactLane::RecentVerbatim,
+            32,
+        ));
         let out = compact_to_low_water(&items, 100, 60);
         assert!(out.fired);
-        assert!(out.text.contains("ニュースある？"), "{}", out.text);
-        assert!(out.text.contains("completion"), "{}", out.text);
-        assert!(!out.low_water_unreachable);
+        for k in ["owner_speech", "my_ack", "subtask_completed"] {
+            assert!(out.text.contains(k), "{k}: {}", out.text);
+        }
+        assert_eq!(out.text.matches("[old:5000]").count(), 17, "{}", out.text);
     }
 
     /// user 車線の残量が 0 でも must_keep（直近ユーザー発話）は残る。

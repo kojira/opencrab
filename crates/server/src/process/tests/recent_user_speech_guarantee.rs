@@ -79,13 +79,13 @@ fn user_speech_survives_a_flood_of_tool_results() {
     );
 }
 
-/// ユーザー発言が要約境界より前に落ちていても混ぜ戻される。
+/// 要約境界より前でも、直近 20 件の連続区間にあるユーザー発言は残る（#1049）。
 #[test]
 fn user_speech_is_reinjected_from_before_the_summary_boundary() {
     let conn = opencrab_db::init_memory().unwrap();
     insert_user_speech(&conn, "つらい");
     let user_log = last_log_id(&conn);
-    for _ in 0..20 {
+    for _ in 0..15 {
         insert_agent_row(&conn, "tool_result", &"x".repeat(400));
     }
     // 現セッションの topic 要約が user_log を含む範囲をカバーしている状態を作る。
@@ -173,8 +173,8 @@ fn full_conversation_is_unchanged_when_it_fits() {
 fn gateway_shaped_rows_are_recognized_as_user_speech() {
     let conn = opencrab_db::init_memory().unwrap();
     insert_user_speech(&conn, "この発言が消えたら対話が成立しない");
-    // 予算を食い潰す巨大なツール往復（末尾の連続区間を占有する）。
-    for _ in 0..30 {
+    // 予算を食い潰す巨大なツール往復（直近 20 件の連続区間には収まる数、#1049）。
+    for _ in 0..15 {
         insert_agent_row(&conn, "tool_result", &"z".repeat(600));
     }
     // 受信行が本番と同じ形（agent_id 列＝受信側エージェント / speaker_id 列＝送信者、

@@ -304,7 +304,8 @@ pub(super) fn user_line_items(messages: &[Message]) -> Vec<crate::context_budget
                     CompactLane::OldHistory
                 },
                 log_id: Some(i as i64),
-                must_keep: keep_speech,
+                // #1049: 話者で抜き出さない（直近は compact 側で連続保持）。
+                must_keep: false,
                 group_id: Some(group_id),
             }
         })

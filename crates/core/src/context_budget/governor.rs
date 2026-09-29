@@ -350,7 +350,8 @@ pub fn items_from_logs(
             }
             let key = format!("log:{}", log.id.unwrap_or(i as i64));
             let tokens = ledger.record(&key, &text);
-            let must_keep = newest_user.contains(&i) || unresolved;
+            // #1049: 話者で抜き出さない。必ず残すのは未決着のツール組だけ。
+            let must_keep = unresolved;
             let lane = if must_keep || in_recent {
                 CompactLane::RecentVerbatim
             } else if log.log_type == "tool_call" || log.log_type == "tool_result" {

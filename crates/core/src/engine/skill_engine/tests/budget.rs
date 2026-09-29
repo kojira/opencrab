@@ -220,7 +220,7 @@
     }
 
     #[test]
-    fn user_line_items_marks_newest_speech_must_keep_not_trailing_tools() {
+    fn user_line_items_do_not_single_out_user_speech() {
         let text = "[owner] [2026-08-30 17:57:20]:\n東京！\n\
                     [agent] [2026-08-30 17:57:54]:\n[tool_call]:\n[id=c1]: execute_shell({})\n\
                     [system: subtask_completed] [2026-08-30 17:58:08]:\n{\"exit_reason\":\"completed\"}\n";
@@ -240,7 +240,7 @@
             .iter()
             .find(|i| i.text.contains("東京！"))
             .expect("origin block");
-        assert!(origin.must_keep, "発端 speech が must_keep: {items:#?}");
+        assert!(!origin.must_keep, "#1049: 話者で抜き出さない: {items:#?}");
         assert!(items
             .iter()
             .any(|i| i.text.contains("[tool_call]") && !i.must_keep));
@@ -279,8 +279,8 @@
             .find(|i| i.text.contains("東京！"))
             .expect("origin in long conversation");
         assert!(
-            origin.must_keep,
-            "長い会話でも発端は must_keep: keep={} lane={:?} idx-ish={}",
+            !origin.must_keep,
+            "#1049: 長い会話でも話者で抜き出さない: keep={} lane={:?} idx-ish={}",
             origin.must_keep,
             origin.lane,
             origin.log_id.unwrap_or(-1)
