@@ -200,7 +200,7 @@ fn legacy_nostr_gateway_fixture_with_updates(
         version: 1,
         operation_id: "00000000-0000-4000-8000-000000000009".into(),
         created_at: "2026-01-01T00:00:00Z".into(),
-        core_user_version: 57,
+        core_user_version: 58,
         source_core_sha256: source::file_sha256(&core_path).unwrap(),
         destinations: vec![Destination {
             kind_id: "nostr".into(),

@@ -19,6 +19,10 @@ export interface ModelPricing {
    * 送らないプロバイダ（chatgpt/codex/cursor/acp）では null のままで良い（任意）。
    */
   max_output_tokens: number | null;
+  /** v58: キャッシュ読み込み単価（1M トークンあたり）。null は通常入力単価。 */
+  cached_input_price_per_1m?: number | null;
+  /** v58: キャッシュ書き込み単価（1M トークンあたり）。null は通常入力単価。 */
+  cache_write_price_per_1m?: number | null;
 }
 
 export interface ModelPricingListResponse {
@@ -42,6 +46,8 @@ export interface PutModelPricingBody {
   output_price_per_1m: number;
   context_window: number;
   max_output_tokens?: number | null;
+  cached_input_price_per_1m?: number | null;
+  cache_write_price_per_1m?: number | null;
 }
 
 export function listModelPricing(): Promise<ModelPricingListResponse> {

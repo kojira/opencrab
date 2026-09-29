@@ -7,8 +7,6 @@ use std::sync::Arc;
 
 use tracing::Instrument;
 
-use opencrab_llm::pricing::PricingRegistry;
-
 use crate::llm_adapter::{LlmRouterAdapter, MetricsContext};
 use crate::AppState;
 
@@ -298,7 +296,6 @@ pub async fn run_agent_response(
         db: state.db.clone(),
         agent_id: agent_id.to_string(),
         session_id: Some(session_id.to_string()),
-        pricing: PricingRegistry::default(),
         last_metrics_id: last_metrics_id.clone(),
         current_purpose: current_purpose.clone(),
     };

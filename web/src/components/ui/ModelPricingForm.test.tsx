@@ -41,6 +41,8 @@ describe('ModelPricingForm', () => {
       output_price_per_1m: 12,
       context_window: 1050000,
       max_output_tokens: null,
+      cached_input_price_per_1m: null,
+      cache_write_price_per_1m: null,
     });
     await waitFor(() => {
       expect(onSaved).toHaveBeenCalledWith(

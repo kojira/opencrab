@@ -198,7 +198,7 @@ pub fn run_import(args: ImportArgs<'_>) -> Result<ImportReport> {
             existing.backups.len() == paths.len() + 1
                 && existing.backups.iter().any(|item| item.kind_id == "core"
                     && item.path_id == "core"
-                    && item.schema == "core-v57")
+                    && item.schema == "core-v58")
                 && paths
                     .iter()
                     .all(|(destination, _)| existing
@@ -475,7 +475,7 @@ mod s8_review_red_tests {
     fn import_report_rejects_unknown_destination_fields() {
         let value = json!({
             "version":1,
-            "approval":{"version":1,"operation_id":"00000000-0000-4000-8000-000000000008","created_at":"2026-01-01T00:00:00Z","core_user_version":57,"source_core_sha256":"a".repeat(64),"destinations":[],"identity_dispositions":[],"channel_edges":[],"watch_edges":[],"credential_sources":[]},
+            "approval":{"version":1,"operation_id":"00000000-0000-4000-8000-000000000008","created_at":"2026-01-01T00:00:00Z","core_user_version":58,"source_core_sha256":"a".repeat(64),"destinations":[],"identity_dispositions":[],"channel_edges":[],"watch_edges":[],"credential_sources":[]},
             "approval_sha256":"b".repeat(64),"backup_set_sha256":"c".repeat(64),"backups":[],"source_rows":[],
             "destinations":[{"kind_id":"discord","path_id":"main","schema":"s5-discord-v1","before_logical_sha256":"d".repeat(64),"after_logical_sha256":"e".repeat(64),"counts":{"instances":0,"endpoints":0,"identity_projections":0,"policies":0,"credentials":0},"inserted_keys":[],"accepted_existing_keys":[],"credentials":[],"plaintext":"forbidden"}],
             "destination_manifest_sha256":"f".repeat(64)

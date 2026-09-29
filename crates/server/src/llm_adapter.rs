@@ -5,14 +5,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use opencrab_core::{ChatRequest, ChatResponse, LlmClient, LlmExchange};
-use opencrab_llm::pricing::PricingRegistry;
 
 /// Configuration for metrics recording.
 pub struct MetricsContext {
     pub db: opencrab_db::Db,
     pub agent_id: String,
     pub session_id: Option<String>,
-    pub pricing: PricingRegistry,
     /// Shared state: updated after each LLM call so actions can reference it.
     pub last_metrics_id: Arc<Mutex<Option<String>>>,
     /// Shared current purpose: actions (e.g. select_llm) can update this
@@ -87,10 +85,27 @@ impl LlmClient for LlmRouterAdapter {
             let output_tokens = exchange.response.usage.completion_tokens as i32;
             let total_tokens = exchange.response.usage.total_tokens as i32;
 
-            let estimated_cost = ctx
-                .pricing
-                .calculate_cost(&provider, &model, input_tokens as u32, output_tokens as u32)
-                .unwrap_or(0.0);
+            let usage = &exchange.response.usage;
+            let tokens = opencrab_db::queries::BilledTokens {
+                input_tokens: usage.prompt_tokens as i64,
+                output_tokens: usage.completion_tokens as i64,
+                cache_read_tokens: usage.cache_read_input_tokens as i64,
+                cache_write_tokens: usage.cache_creation_input_tokens as i64,
+                cache_read_included_in_input: cache_read_included_in_input(&provider),
+            };
+            // 単価は `model_pricing`（DB）だけが出所。未登録なら 0 を記録し warn で見えるようにする。
+            let pricing = ctx.db.lock().ok().and_then(|conn| {
+                opencrab_db::queries::get_model_pricing(&conn, &provider, &model)
+                    .ok()
+                    .flatten()
+            });
+            let estimated_cost = match pricing {
+                Some(p) => p.cost_usd(tokens),
+                None => {
+                    tracing::warn!(%provider, %model, "no model_pricing row; usage cost recorded as 0");
+                    0.0
+                }
+            };
 
             let row = opencrab_db::queries::LlmMetricsRow {
                 id: metrics_id.clone(),
@@ -128,4 +143,13 @@ impl LlmClient for LlmRouterAdapter {
 
         Ok(exchange)
     }
+}
+
+/// Whether the provider's `prompt_tokens` already contains the cached-read tokens.
+///
+/// OpenAI Responses-style providers (`chatgpt`, `codex`) report `input_tokens` including
+/// `input_tokens_details.cached_tokens`. Anthropic-style usage (hermit, anthropic, cursor)
+/// reports cache reads and writes separately from the uncached input.
+pub fn cache_read_included_in_input(provider: &str) -> bool {
+    matches!(provider, "chatgpt" | "codex")
 }

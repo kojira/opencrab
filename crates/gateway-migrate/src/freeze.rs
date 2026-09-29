@@ -141,7 +141,7 @@ pub fn verify(args: VerifyArgs<'_>) -> Result<()> {
         let record = &snapshot.record;
         let key = (record.kind_id.clone(), record.path_id.clone());
         let expected_schema = if key == ("core".into(), "core".into()) {
-            "core-v57"
+            "core-v58"
         } else {
             approval
                 .destinations
@@ -176,7 +176,7 @@ pub fn verify(args: VerifyArgs<'_>) -> Result<()> {
         );
         if key == &("core".into(), "core".into()) {
             ensure!(
-                conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? == 57,
+                conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? == 58,
                 "freeze core schema mismatch"
             );
         } else {

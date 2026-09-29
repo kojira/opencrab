@@ -3,8 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::pricing::PricingRegistry;
-
 /// A single usage record from an LLM call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRecord {
@@ -30,7 +28,6 @@ pub struct AggregatedStats {
     pub total_completion_tokens: u64,
     pub total_tokens: u64,
     pub total_latency_ms: u64,
-    pub estimated_cost_usd: f64,
 }
 
 impl AggregatedStats {
@@ -55,14 +52,12 @@ impl AggregatedStats {
 #[derive(Debug, Clone)]
 pub struct MetricsCollector {
     records: Arc<Mutex<Vec<UsageRecord>>>,
-    pricing: Arc<PricingRegistry>,
 }
 
 impl MetricsCollector {
-    pub fn new(pricing: PricingRegistry) -> Self {
+    pub fn new() -> Self {
         Self {
             records: Arc::new(Mutex::new(Vec::new())),
-            pricing: Arc::new(pricing),
         }
     }
 
@@ -122,7 +117,7 @@ impl MetricsCollector {
 
         for rec in records.iter() {
             let stats = map.entry(rec.provider.clone()).or_default();
-            Self::accumulate(stats, rec, &self.pricing);
+            Self::accumulate(stats, rec);
         }
 
         map
@@ -136,7 +131,7 @@ impl MetricsCollector {
         for rec in records.iter() {
             let key = format!("{}:{}", rec.provider, rec.model);
             let stats = map.entry(key).or_default();
-            Self::accumulate(stats, rec, &self.pricing);
+            Self::accumulate(stats, rec);
         }
 
         map
@@ -148,7 +143,7 @@ impl MetricsCollector {
         let mut stats = AggregatedStats::default();
 
         for rec in records.iter() {
-            Self::accumulate(&mut stats, rec, &self.pricing);
+            Self::accumulate(&mut stats, rec);
         }
 
         stats
@@ -160,7 +155,7 @@ impl MetricsCollector {
         records.clear();
     }
 
-    fn accumulate(stats: &mut AggregatedStats, rec: &UsageRecord, pricing: &PricingRegistry) {
+    fn accumulate(stats: &mut AggregatedStats, rec: &UsageRecord) {
         stats.total_requests += 1;
         if rec.success {
             stats.successful_requests += 1;
@@ -171,21 +166,12 @@ impl MetricsCollector {
         stats.total_completion_tokens += rec.completion_tokens as u64;
         stats.total_tokens += rec.total_tokens as u64;
         stats.total_latency_ms += rec.latency_ms;
-
-        if let Some(cost) = pricing.calculate_cost(
-            &rec.provider,
-            &rec.model,
-            rec.prompt_tokens,
-            rec.completion_tokens,
-        ) {
-            stats.estimated_cost_usd += cost;
-        }
     }
 }
 
 impl Default for MetricsCollector {
     fn default() -> Self {
-        Self::new(PricingRegistry::default())
+        Self::new()
     }
 }
 

@@ -1,7 +1,6 @@
 pub mod error;
 pub mod message;
 pub mod metrics;
-pub mod pricing;
 pub mod providers;
 pub mod router;
 pub mod traits;
@@ -14,7 +13,6 @@ pub use message::{
     Role, StreamChoice, ToolCall, Usage,
 };
 pub use metrics::MetricsCollector;
-pub use pricing::{ModelPricing, PricingRegistry};
 pub use router::LlmRouter;
 pub use traits::{LlmProvider, ModelInfo};
 

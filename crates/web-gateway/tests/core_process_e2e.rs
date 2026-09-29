@@ -384,6 +384,8 @@ fn send_said_turn_say_sse_over_real_processes() {
                 // context_budget_exhausted で turn が止まるため、実運用寄りの大きさにする。
                 context_window: Some(200_000),
                 max_output_tokens: Some(1024),
+                cached_input_price_per_1m: None,
+                cache_write_price_per_1m: None,
             },
         )
         .expect("seed model_pricing for startup budget check");

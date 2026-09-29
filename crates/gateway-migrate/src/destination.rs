@@ -671,7 +671,7 @@ mod s8_review_red_tests {
     use crate::manifest::{Approval, IdentityDisposition};
 
     fn approval(destination: Destination) -> Approval {
-        Approval { version:1, operation_id:"00000000-0000-4000-8000-000000000008".into(), created_at:"2026-01-01T00:00:00Z".into(), core_user_version:57, source_core_sha256:"a".repeat(64), destinations:vec![destination], identity_dispositions:vec![], channel_edges:vec![], watch_edges:vec![], credential_sources:vec![] }
+        Approval { version:1, operation_id:"00000000-0000-4000-8000-000000000008".into(), created_at:"2026-01-01T00:00:00Z".into(), core_user_version: 58, source_core_sha256:"a".repeat(64), destinations:vec![destination], identity_dispositions:vec![], channel_edges:vec![], watch_edges:vec![], credential_sources:vec![] }
     }
 
     #[test]

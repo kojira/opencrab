@@ -68,6 +68,12 @@ pub struct PutModelPricingBody {
     /// （#676・案Y）。指定するなら 0 以下は受け付けない。
     #[serde(default)]
     pub max_output_tokens: Option<i32>,
+    /// v58: cached input read price per 1M tokens. Omitted = base input price applies.
+    #[serde(default)]
+    pub cached_input_price_per_1m: Option<f64>,
+    /// v58: cache write price per 1M tokens. Omitted = base input price applies.
+    #[serde(default)]
+    pub cache_write_price_per_1m: Option<f64>,
 }
 
 pub async fn put_model_pricing(
@@ -101,6 +107,8 @@ pub async fn put_model_pricing(
         output_price_per_1m: body.output_price_per_1m,
         context_window: Some(body.context_window),
         max_output_tokens: body.max_output_tokens,
+        cached_input_price_per_1m: body.cached_input_price_per_1m,
+        cache_write_price_per_1m: body.cache_write_price_per_1m,
     };
 
     let conn = state

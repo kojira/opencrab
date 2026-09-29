@@ -295,6 +295,8 @@ mod model_context_window_gate_tests {
                 output_price_per_1m: 0.0,
                 context_window: window,
                 max_output_tokens: max_output,
+                cached_input_price_per_1m: None,
+                cache_write_price_per_1m: None,
             },
         )
         .unwrap();
