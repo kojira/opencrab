@@ -97,8 +97,11 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "say",
-            "返信ではない新しい投稿をする。text に投稿本文。ツールを使わずに本文を書いても同じく新規投稿として配信される。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。This posts a new standalone note (not a reply). Writing plain text without any tool is also posted the same way. This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response.",
-            json!({"type": "object", "required": ["text"], "properties": {"text": str_prop("投稿本文")}}),
+            "返信ではない新しい投稿をする。text に投稿本文。user に会話の u番号を渡すと、その人へのメンション付きで投稿する（省略可・1人）。ツールを使わずに本文を書いても同じく新規投稿として配信される。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。This posts a new standalone note (not a reply). Pass a u-number as user to mention that person (optional, one user). Writing plain text without any tool is also posted the same way. This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response.",
+            json!({"type": "object", "required": ["text"], "properties": {
+                "text": str_prop("投稿本文"),
+                "user": ref_prop("メンションする相手の短縮参照（例 u2・省略可）")
+            }}),
             conv("not_exposed", "conversation_bound"),
         ),
         decl(
@@ -287,7 +290,18 @@ impl InvokeHandler for NostrInvokeHandler {
                 let Some(text) = str_field(payload, "text").filter(|t| !t.trim().is_empty()) else {
                     return InvokeOutcome::Rejected;
                 };
-                vec!["post".into(), dash(), text.to_string()]
+                let mut a = vec!["post".to_string()];
+                if let Some(user) = str_field(payload, "user") {
+                    // core が u番号を pubkey へ解決済み。未解決（u番号のまま等）は投稿しない。
+                    if !is_hex64(user) {
+                        return InvokeOutcome::Rejected;
+                    }
+                    a.push("--mention".into());
+                    a.push(user.to_ascii_lowercase());
+                }
+                a.push(dash());
+                a.push(text.to_string());
+                a
             }
             "follow" | "unfollow" => {
                 let Some(user) = str_field(payload, "user") else {
@@ -435,6 +449,20 @@ mod tests {
                 "-新しいニュース"
             ]
         );
+
+        let pk = "ab".repeat(32);
+        let out = handler
+            .handle("c3", "b1", "say", &json!({"text": "やあ", "user": pk}))
+            .await;
+        assert!(matches!(out, InvokeOutcome::Ok(_)));
+        let args = std::fs::read_to_string(&args_path).unwrap();
+        let args: Vec<&str> = args.lines().skip(2).collect();
+        assert_eq!(args, vec!["post", "--mention", pk.as_str(), "--", "やあ"]);
+
+        let unresolved = handler
+            .handle("c4", "b1", "say", &json!({"text": "やあ", "user": "u2"}))
+            .await;
+        assert!(matches!(unresolved, InvokeOutcome::Rejected));
 
         let empty = handler
             .handle("c2", "b1", "say", &json!({"text": "  "}))
