@@ -140,6 +140,18 @@ impl ContextBudgetEnvelope {
     pub fn accounted_total(&self) -> usize {
         self.items.total_with_reserve()
     }
+
+    /// ターン内台帳（system + user 全文 + ターン内の追加）と比べる二水位（D-1063）。
+    ///
+    /// 台帳は functions 以外の入力を全部数えるので、input 水位から functions だけを引く。
+    /// `conversation_high/low`（fixed を引いた会話車線の水位）を台帳合計と比べると、
+    /// system・runtime context・Memory Index を二重に引いてしまう。
+    pub fn turn_ledger_waters(&self) -> (usize, usize) {
+        (
+            self.water.input_high.saturating_sub(self.items.functions),
+            self.water.input_low.saturating_sub(self.items.functions),
+        )
+    }
 }
 
 fn floor_ratio(window: usize, ratio: f64) -> usize {
@@ -315,6 +327,26 @@ mod tests {
             absolute_cap_a: a,
             ..ContextBudgetPolicy::default()
         }
+    }
+
+    /// D-1063: 台帳水位は会話車線の水位に system・runtime context・Memory Index を
+    /// 足し戻した値（fixed を一度だけ引く）。
+    #[test]
+    fn turn_ledger_waters_count_fixed_items_once() {
+        let water = compute_water_levels(200_000, 4_096, &ContextBudgetPolicy::default()).unwrap();
+        let measured = MeasuredLineItems {
+            system: 16_000,
+            runtime_context: 100,
+            functions: 8_000,
+            memory_index: 2_000,
+            memory_index_entry_count: 3,
+            conversation: 0,
+        };
+        let env = apply_line_items(water, measured, &ContextBudgetPolicy::default()).unwrap();
+        let (high, low) = env.turn_ledger_waters();
+        assert_eq!(high, env.conversation_high + 16_000 + 100 + 2_000);
+        assert_eq!(low, env.conversation_low + 16_000 + 100 + 2_000);
+        assert_eq!(high, 80_000 - 8_000);
     }
 
     #[test]

@@ -183,8 +183,9 @@ impl SkillEngine {
         self.assistant_history_name = (!name.trim().is_empty()).then_some(name);
     }
 
-    /// ターン内 append 境界の二水位。設定すると TokenLedger 合計だけで超過判定し、
-    /// 超えたときだけ合成 user 文字列を低水位まで刈る。
+    /// ターン内 append 境界の二水位。設定すると TokenLedger 合計（system + user 全文 +
+    /// ターン内の追加）だけで超過判定し、超えたときだけ合成 user 文字列を低水位まで刈る。
+    /// 水位は台帳と同じ範囲で測った値を渡す（`ContextBudgetEnvelope::turn_ledger_waters`）。
     pub fn set_conversation_waters(&mut self, high: usize, low: usize) {
         self.conversation_high = Some(high);
         self.conversation_low = Some(low);

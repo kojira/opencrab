@@ -532,7 +532,10 @@ pub async fn run_agent_response(
                 &tools,
             ) {
                 Ok(env) => {
-                    engine.set_conversation_waters(env.conversation_high, env.conversation_low);
+                    // D-1063: ターン内台帳は system・user 全文を数えるので、台帳用の水位を渡す。
+                    // ターン終了の正時（会話車線だけを数える）は conversation_high/low のまま。
+                    let (ledger_high, ledger_low) = env.turn_ledger_waters();
+                    engine.set_conversation_waters(ledger_high, ledger_low);
                     last_waters = Some((env.conversation_high, env.conversation_low));
                 }
                 Err(e) => {
