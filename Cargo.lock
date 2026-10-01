@@ -1535,6 +1535,7 @@ dependencies = [
  "opencrab-core",
  "opencrab-db",
  "opencrab-gateway",
+ "opencrab-llm",
  "opencrab-llm-types",
  "rusqlite",
  "serde",

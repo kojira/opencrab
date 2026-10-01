@@ -782,7 +782,7 @@ impl From<ActionsActionResult> for CoreActionResult {
             success: ar.success,
             data: ar.data.unwrap_or(serde_json::Value::Null),
             error: ar.error,
-            ..Default::default()
+            images: ar.images,
         }
     }
 }

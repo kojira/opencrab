@@ -9,6 +9,9 @@ pub struct ActionResult {
     pub data: Option<serde_json::Value>,
     pub error: Option<String>,
     pub side_effects: Vec<SideEffect>,
+    /// 次の LLM 呼び出しで見せる画像（data URL）。`view_image` が使う（D-1060）。
+    #[serde(skip)]
+    pub images: Vec<String>,
 }
 
 impl ActionResult {
@@ -18,6 +21,7 @@ impl ActionResult {
             data: Some(data),
             error: None,
             side_effects: vec![],
+            images: vec![],
         }
     }
 
@@ -27,6 +31,7 @@ impl ActionResult {
             data: None,
             error: Some(msg.to_string()),
             side_effects: vec![],
+            images: vec![],
         }
     }
 

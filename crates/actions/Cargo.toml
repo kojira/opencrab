@@ -19,6 +19,7 @@ futures = { workspace = true }
 opencrab-core = { workspace = true }
 opencrab-gateway = { workspace = true }
 opencrab-db = { workspace = true }
+opencrab-llm = { workspace = true }
 indexmap = "2"
 
 [dev-dependencies]
