@@ -46,7 +46,7 @@ impl SkillEngine {
             (self.conversation_high, self.conversation_low),
         );
 
-        let mut iterations = 0;
+        let (mut iterations, mut shown) = (0, super::view_images::ViewImages::default());
         // 発端originは初回だけconsumeし、走行中の新着はrequestへappendした時点で加える。
         let initial_read_origin = self
             .initial_read_origin
@@ -150,7 +150,7 @@ impl SkillEngine {
 
             let request = ChatRequest {
                 model: model.clone(),
-                messages: messages.clone(),
+                messages: shown.seat(&mut messages, &mut turn_ledger),
                 functions: if tools.is_empty() {
                     None
                 } else {
@@ -170,7 +170,7 @@ impl SkillEngine {
                 reasoning_effort: self.reasoning_effort.clone(),
             };
 
-            let request_for_log = request.clone();
+            let request_for_log = shown.redact_for_log(&request);
             let requested_at =
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
@@ -608,7 +608,7 @@ impl SkillEngine {
                     messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
                     turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
                     apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
-
+                    shown.collect(&result.images);
                     // Notify on_tool_result callbacks.
                     for cb in &self.on_tool_result {
                         cb(

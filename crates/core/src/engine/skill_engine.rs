@@ -5,6 +5,7 @@ mod run;
 mod run_helpers;
 mod silent_origins;
 mod turn_budget;
+mod view_images;
 
 use anyhow::Result;
 use tracing;

@@ -271,3 +271,60 @@
         assert_eq!(result.response, "done");
     }
 
+
+    /// D-1060: ツール結果の画像は直後の LLM 呼び出しにだけ載り、その次には載らない。
+    /// 並列 tool_call では全 tool 結果の後ろに置き、結果 JSON に画像は入らない。
+    #[tokio::test]
+    async fn tool_result_images_are_shown_only_on_the_next_request() {
+        use std::sync::{Arc, Mutex};
+        let has_image = |messages: &[Message]| {
+            messages.iter().any(|m| {
+                matches!(&m.content, Some(MessageContent::Multi(parts))
+                    if parts.iter().any(|p| matches!(p, opencrab_llm_types::ContentPart::ImageUrl { .. })))
+            })
+        };
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let llm = CapturingLlm::new(
+            vec![
+                tool_call_response(vec![
+                    tc("tc-img", "view_image", serde_json::json!({"path": "a.png"})),
+                    tc("tc-other", "test_tool", serde_json::json!({})),
+                ]),
+                tool_call_response(vec![tc("tc-2", "test_tool", serde_json::json!({}))]),
+                final_text_response("done"),
+            ],
+            requests.clone(),
+        );
+        let executor = MockExecutor::new()
+            .add_result(
+                "view_image",
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!({"viewed": "a.png"}),
+                    images: vec!["data:image/png;base64,QUJD".to_string()],
+                    ..Default::default()
+                },
+            )
+            .add_result("test_tool", successful_action_result());
+        let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 5);
+        engine.run("system", "look", "test-model").await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(!has_image(&requests[0]));
+        assert!(has_image(&requests[1]), "next request must carry the image");
+        assert!(!has_image(&requests[2]), "image must not be resent");
+        let second = &requests[1];
+        let last = second.last().unwrap();
+        assert_eq!(last.role, Role::User);
+        let tool_positions: Vec<usize> = second
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == Role::Tool)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(tool_positions.len(), 2);
+        assert!(tool_positions.iter().all(|&i| i < second.len() - 1));
+        let tool_json = second[tool_positions[0]].text_content().unwrap();
+        assert!(!tool_json.contains("QUJD"), "result JSON must not carry images");
+    }
