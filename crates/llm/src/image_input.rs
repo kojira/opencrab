@@ -136,7 +136,7 @@ fn decode_data_url(url: &str) -> Result<Vec<u8>> {
 pub async fn fetch_image_data_url(url: &str) -> Result<NormalizedImage> {
     let url = url.trim();
     if url.starts_with("data:") {
-        return normalize_image_bytes(&decode_data_url(url)?);
+        return normalize_image_bytes_blocking(decode_data_url(url)?).await;
     }
     let parsed = reqwest::Url::parse(url).context("invalid image url")?;
     let host = parsed
@@ -164,11 +164,27 @@ pub async fn fetch_image_data_url(url: &str) -> Result<NormalizedImage> {
             anyhow::bail!("image too large ({len} bytes, max 20MB)");
         }
     }
-    let bytes = resp.bytes().await.context("failed to read image body")?;
-    if bytes.len() > MAX_SOURCE_BYTES {
-        anyhow::bail!("image too large ({} bytes, max 20MB)", bytes.len());
+    let bytes = read_body_capped(resp, MAX_SOURCE_BYTES).await?;
+    normalize_image_bytes_blocking(bytes).await
+}
+
+/// 本文を読みながら上限を効かせる（Content-Length 無しでも全量を溜めない）。
+async fn read_body_capped(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.context("failed to read image body")? {
+        if buf.len() + chunk.len() > max {
+            anyhow::bail!("image too large (over {max} bytes, max 20MB)");
+        }
+        buf.extend_from_slice(&chunk);
     }
-    normalize_image_bytes(&bytes)
+    Ok(buf)
+}
+
+/// デコード・縮小は CPU 処理なので async worker を塞がないよう blocking スレッドで行う。
+async fn normalize_image_bytes_blocking(bytes: Vec<u8>) -> Result<NormalizedImage> {
+    tokio::task::spawn_blocking(move || normalize_image_bytes(&bytes))
+        .await
+        .context("image normalize task failed")?
 }
 
 /// http(s) URL のホストを解決し、全解決 IP が公開アドレスであることを確認する（SSRF 対策）。
@@ -287,5 +303,35 @@ mod tests {
             .await
             .is_err());
         assert!(fetch_image_data_url("file:///etc/passwd").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn chunked_body_over_cap_is_rejected_while_streaming() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = [0u8; 1024];
+            let _ = sock.read(&mut req).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await;
+            let chunk = vec![b'x'; 1024];
+            for _ in 0..64 {
+                let head = format!("{:x}\r\n", chunk.len());
+                if sock.write_all(head.as_bytes()).await.is_err()
+                    || sock.write_all(&chunk).await.is_err()
+                    || sock.write_all(b"\r\n").await.is_err()
+                {
+                    return;
+                }
+            }
+            let _ = sock.write_all(b"0\r\n\r\n").await;
+        });
+        let resp = reqwest::get(format!("http://{addr}/")).await.unwrap();
+        assert!(resp.content_length().is_none());
+        let err = read_body_capped(resp, 4096).await.unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
     }
 }
