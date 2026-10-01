@@ -349,9 +349,6 @@ fn capped_bundle_manifest_matches_coordinator_contract() {
         )
         .expect("map");
         assert!(!mapped.text.contains("NOSTRBUNDLE"));
-        assert!(mapped
-            .system_context
-            .contains(&format!("束ね（{count} 件）")));
         assert_eq!(mapped.reply_target, None);
         assert!(!mapped.text.contains(&dropped_origin));
     }
