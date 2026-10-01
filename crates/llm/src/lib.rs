@@ -1,4 +1,5 @@
 pub mod error;
+pub mod image_input;
 pub mod message;
 pub mod metrics;
 pub mod providers;

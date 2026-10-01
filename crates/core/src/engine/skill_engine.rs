@@ -5,6 +5,7 @@ mod run;
 mod run_helpers;
 mod silent_origins;
 mod turn_budget;
+mod view_images;
 
 use anyhow::Result;
 use tracing;
@@ -375,6 +376,7 @@ impl SkillEngine {
                 "Action '{}' is not authorized. Add '{}' to the skill's actions frontmatter to enable this capability.",
                 action_name, action_name
             )),
+            ..Default::default()
         }
     }
 }

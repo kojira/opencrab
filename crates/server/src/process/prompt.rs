@@ -243,7 +243,8 @@ fn tool_category(name: &str) -> &'static str {
         | "save_model_insight"
         | "generate_inner_voice"
         | "update_impression" => "introspection",
-        "ws_read" | "ws_list" | "ws_write" | "ws_edit" | "ws_mkdir" | "ws_delete" => "workspace",
+        "ws_read" | "ws_list" | "ws_write" | "ws_edit" | "ws_mkdir" | "ws_delete"
+        | "view_image" => "workspace",
         "update_task_contract" | "get_task" | "declare_done" => "tasks",
         "configure_llm_provider"
         | "configure_self"

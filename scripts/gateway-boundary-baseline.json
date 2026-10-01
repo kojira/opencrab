@@ -120,7 +120,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/bridge/executor.rs",
-      "line": 432,
+      "line": 435,
       "snippet": "\"action '{name}' requires a trusted caller (owner/co_agent/trusted_user)\"",
       "classification": "production-violation",
       "violation": "V11",
@@ -130,7 +130,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 32,
+      "line": 33,
       "snippet": "pub mod session_watch_policy;",
       "classification": "production-violation",
       "violation": "V11",
@@ -140,7 +140,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 58,
+      "line": 59,
       "snippet": "pub use session_watch_policy::{",
       "classification": "production-violation",
       "violation": "V11",
@@ -150,7 +150,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 59,
+      "line": 60,
       "snippet": "caller_policy_key, parse_session_watch_policy, watch_author_standing, ClassPolicy,",
       "classification": "production-violation",
       "violation": "V11",
@@ -160,7 +160,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 60,
+      "line": 61,
       "snippet": "SessionPolicyError, SessionWatchPolicy, WatchAllowSets, WatchAuthorStanding,",
       "classification": "production-violation",
       "violation": "V11",

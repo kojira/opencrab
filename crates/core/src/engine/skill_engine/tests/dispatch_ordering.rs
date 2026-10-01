@@ -68,6 +68,7 @@
                     success: true,
                     data: serde_json::json!(null),
                     error: None,
+                    ..Default::default()
                 }
             }
             fn list_tools(&self) -> Vec<FunctionDefinition> {
@@ -142,6 +143,7 @@
                     success: true,
                     data: serde_json::json!(null),
                     error: None,
+                    ..Default::default()
                 }
             }
             fn list_tools(&self) -> Vec<FunctionDefinition> {
@@ -266,6 +268,7 @@
                     success: true,
                     data: serde_json::json!(null),
                     error: None,
+                    ..Default::default()
                 }
             }
             fn list_tools(&self) -> Vec<FunctionDefinition> {
@@ -398,6 +401,7 @@
                     success: true,
                     data: serde_json::json!({"done": true}),
                     error: None,
+                    ..Default::default()
                 }
             }
             fn list_tools(&self) -> Vec<FunctionDefinition> {
@@ -481,6 +485,7 @@
                     success: true,
                     data: serde_json::json!(null),
                     error: None,
+                    ..Default::default()
                 }
             }
             fn list_tools(&self) -> Vec<FunctionDefinition> {

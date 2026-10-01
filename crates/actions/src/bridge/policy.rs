@@ -44,6 +44,8 @@ pub const CORE_INLINE_ACTIONS: &[&str] = &[
     "get_system_info",
     "ws_read",
     "ws_list",
+    // 画像を見る（D-1060）。結果の画像は次の LLM 呼び出しで見るので同ターンが必須。
+    "view_image",
     "read_skill",
     "browse_memory_index",
     "search_memory_index",

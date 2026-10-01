@@ -39,7 +39,8 @@ pub(crate) use wiring::{
 
 use budget::spawn_background_turn_end_snapshot;
 use callbacks::{
-    merge_image_urls, set_llm_log_callback, set_run_notifier_callbacks, set_turn_log_callbacks,
+    merge_image_urls, normalize_image_urls, set_llm_log_callback, set_run_notifier_callbacks,
+    set_turn_log_callbacks,
 };
 use live_inbound::SubtaskSteerInbound;
 use loop_restart::prepare_loop_restart;
@@ -476,6 +477,14 @@ pub async fn run_agent_response(
     }
 
     let merged_image_urls = merge_image_urls(state, session_id, agent_id, &req.image_urls);
+    let (merged_image_urls, image_fetch_note) = normalize_image_urls(&merged_image_urls).await;
+    let conversation_with_note;
+    let conversation = if image_fetch_note.is_empty() {
+        conversation
+    } else {
+        conversation_with_note = format!("{conversation}{image_fetch_note}");
+        conversation_with_note.as_str()
+    };
 
     // ループ再起動 v1（#52）: depth 0 の run が反復上限（stopped_by_limit）で停止し、
     // セッションに active タスクが残っている場合、restart_count 上限まで（v1 では 1 回）

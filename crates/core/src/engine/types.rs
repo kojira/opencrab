@@ -14,7 +14,7 @@ pub use opencrab_llm_types::{
 // ---------------------------------------------------------------------------
 
 /// Result of executing an action.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActionResult {
     /// Whether the action succeeded.
     pub success: bool,
@@ -22,6 +22,10 @@ pub struct ActionResult {
     pub data: Value,
     /// Optional error message if the action failed.
     pub error: Option<String>,
+    /// 次の LLM 呼び出しで見せる画像（data URL）。`view_image` が使う（D-1060）。
+    /// 結果 JSON・永続ログには載せない。
+    #[serde(skip)]
+    pub images: Vec<String>,
 }
 
 /// Trait for executing actions (tool calls).

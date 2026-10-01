@@ -13,6 +13,7 @@ use crate::skill_management::*;
 use crate::soul::*;
 use crate::task_ledger::*;
 use crate::traits::*;
+use crate::view_image::ViewImageAction;
 use crate::workspace::*;
 
 /// アクションディスパッチャー
@@ -39,6 +40,7 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(WsListAction));
         dispatcher.register(Arc::new(WsDeleteAction));
         dispatcher.register(Arc::new(WsMkdirAction));
+        dispatcher.register(Arc::new(ViewImageAction));
 
         // 学習アクション登録
         dispatcher.register(Arc::new(LearnFromExperienceAction));

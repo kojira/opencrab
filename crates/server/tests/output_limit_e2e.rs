@@ -42,6 +42,7 @@ impl ActionExecutor for NoopExecutor {
             success: false,
             data: serde_json::json!(null),
             error: Some(format!("unexpected tool call: {name}")),
+            ..Default::default()
         }
     }
     fn list_tools(&self) -> Vec<FunctionDefinition> {

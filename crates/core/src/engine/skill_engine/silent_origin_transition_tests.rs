@@ -23,6 +23,7 @@ impl ActionExecutor for SuccessfulExecutor {
             success: true,
             data: serde_json::json!(null),
             error: None,
+            ..Default::default()
         }
     }
 

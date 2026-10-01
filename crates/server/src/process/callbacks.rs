@@ -432,3 +432,20 @@ pub(super) fn merge_image_urls(
         urls
     }
 }
+
+/// 受信画像 URL を取得・縮小して data URL にそろえる（D-1060）。取得できなかった
+/// URL は添付せず（URL のまま流さない）、理由を本文末尾へ足す注記として返す。
+pub(super) async fn normalize_image_urls(urls: &[String]) -> (Vec<String>, String) {
+    let mut data_urls = Vec::with_capacity(urls.len());
+    let mut note = String::new();
+    for url in urls {
+        match opencrab_llm::image_input::fetch_image_data_url(url).await {
+            Ok(img) => data_urls.push(img.data_url),
+            Err(e) => {
+                tracing::warn!(error = %e, url = %url, "受信画像を取得できなかったので添付しない");
+                note.push_str(&format!("\n[画像を取得できなかった: {url} ({e})]"));
+            }
+        }
+    }
+    (data_urls, note)
+}

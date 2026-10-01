@@ -24,6 +24,7 @@ pub mod timed_fire;
 pub mod tools;
 pub mod traits;
 pub mod transcript;
+pub mod view_image;
 pub mod webhook_target;
 pub mod workspace;
 

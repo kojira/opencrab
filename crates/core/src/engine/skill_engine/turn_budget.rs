@@ -381,11 +381,42 @@ pub(super) fn apply_turn_budget(
     if outcome.fired {
         let rebuilt = rebuild_user_text(&user_text, &outcome.text);
         if let Some(user) = messages.get_mut(1) {
-            user.content = Some(MessageContent::Text(rebuilt.clone()));
+            replace_user_text(user, &rebuilt);
         }
         ledger.record("user", &rebuilt);
     }
     Ok(())
+}
+
+/// 本文テキストだけを差し替える。Multi なら画像 part を保持し、テキスト part は
+/// 最初の位置に 1 つへまとめる（`message_plain_text` が全テキストを連結して
+/// 圧縮元にしているため）。
+fn replace_user_text(user: &mut Message, rebuilt: &str) {
+    match user.content.as_mut() {
+        Some(MessageContent::Multi(parts)) => {
+            let mut placed = false;
+            parts.retain_mut(|part| match part {
+                ContentPart::Text { text } => {
+                    if placed {
+                        return false;
+                    }
+                    *text = rebuilt.to_string();
+                    placed = true;
+                    true
+                }
+                _ => true,
+            });
+            if !placed {
+                parts.insert(
+                    0,
+                    ContentPart::Text {
+                        text: rebuilt.to_string(),
+                    },
+                );
+            }
+        }
+        _ => user.content = Some(MessageContent::Text(rebuilt.to_string())),
+    }
 }
 
 fn remaining_conversation(
@@ -449,6 +480,39 @@ mod tests {
             None
         );
         assert_eq!(user_cache_segments(&[Message::system("s")]), None);
+    }
+
+    #[test]
+    fn apply_turn_budget_keeps_image_parts_when_compacting() {
+        use opencrab_llm_types::{ContentPart, MessageContent};
+        let mut history = String::from("<conversation_history>\n");
+        for i in 0..200 {
+            history.push_str(&format!(
+                "[u{i}|a][2026-01-01 00:00:00]:\nline {i} with some padding text to take tokens\n"
+            ));
+        }
+        history.push_str("</conversation_history>");
+        let turn = super::super::run_helpers::initialize_turn(
+            "sys",
+            &history,
+            &["https://x/a.png".to_string()],
+            (Some(500), Some(200)),
+        );
+        let mut messages = turn.messages;
+        let mut ledger = turn.ledger;
+        let mut gov = turn.governor;
+        super::apply_turn_budget(&mut gov, &mut ledger, &mut messages, 0).unwrap();
+        let Some(MessageContent::Multi(parts)) = &messages[1].content else {
+            panic!(
+                "user content must stay multipart: {:?}",
+                messages[1].content
+            );
+        };
+        assert!(parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::ImageUrl { image_url } if image_url.url == "https://x/a.png")));
+        let text = super::message_plain_text(&messages[1]);
+        assert!(text.len() < history.len(), "history must be compacted");
     }
 
     #[test]

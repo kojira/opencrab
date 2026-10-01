@@ -367,6 +367,7 @@ impl BridgedExecutor {
                 success: false,
                 data: serde_json::Value::Null,
                 error: Some("describe_tools: names[] is required".to_string()),
+                ..Default::default()
             };
         }
         let effective = self.effective_tool_definitions();
@@ -398,6 +399,7 @@ impl BridgedExecutor {
                 "note": "Loaded tools are now callable for the rest of this turn."
             }),
             error: None,
+            ..Default::default()
         }
     }
 
@@ -422,6 +424,7 @@ impl BridgedExecutor {
             success: false,
             data: serde_json::Value::Null,
             error: Some(format!("{REJECTION_CODE_PREFIX}{msg}")),
+            ..Default::default()
         };
         let policy = tool_policy(name);
         if policy.owner_only && !self.caller_is_owner() {
@@ -463,6 +466,7 @@ impl BridgedExecutor {
                     success: r.success,
                     data: r.data.unwrap_or(serde_json::Value::Null),
                     error: r.error,
+                    ..Default::default()
                 };
             }
         }
@@ -487,6 +491,7 @@ impl BridgedExecutor {
                 success: gw_result.success,
                 data: gw_result.data.unwrap_or(serde_json::Value::Null),
                 error: gw_result.error,
+                ..Default::default()
             };
         }
 
@@ -495,6 +500,7 @@ impl BridgedExecutor {
             success: false,
             data: serde_json::Value::Null,
             error: Some(format!("Unknown action: {name}")),
+            ..Default::default()
         }
     }
 }
@@ -776,6 +782,7 @@ impl From<ActionsActionResult> for CoreActionResult {
             success: ar.success,
             data: ar.data.unwrap_or(serde_json::Value::Null),
             error: ar.error,
+            images: ar.images,
         }
     }
 }
