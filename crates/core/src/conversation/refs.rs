@@ -2,6 +2,10 @@
 /// 初出順で採番する。写像は決定的（同じログ列 → 同じ番号）なので追加の永続や migration は
 /// 不要で、番号は不変（append-only ログの初出順が安定なため）。core の enum/DB/error に個別
 /// platform 語彙を足さず、log の汎用 field（speaker_id / external_origin / tool_call id）で採る。
+/// 受信発言の `metadata_json` で、発言者がオーナーであることを示すキー（値 `true`）。
+/// 会話履歴の話者表示に `|owner` を付ける（D-1056）。
+pub const OWNER_SPEAKER_METADATA: &str = "owner";
+
 #[derive(Debug, Default, Clone)]
 pub struct ConversationRefs {
     agent_id: String,
@@ -128,19 +132,27 @@ impl ConversationRefs {
         &self,
         log: &opencrab_db::queries::SessionLogRow,
     ) -> String {
-        let name = log
+        let meta = log
             .metadata_json
             .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .and_then(|meta| {
-                meta.get("user_name")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            });
-        self.speaker_label_with_name(
-            log.speaker_id.as_deref().unwrap_or(&log.agent_id),
-            name.as_deref(),
-        )
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        let name = meta
+            .as_ref()
+            .and_then(|meta| meta.get("user_name"))
+            .and_then(serde_json::Value::as_str);
+        let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
+        let label = self.speaker_label_with_name(speaker, name);
+        // D-1056: 受信記録時に gateway が owner と判定した発言だけ `|owner` を付ける。
+        let is_owner = meta
+            .as_ref()
+            .and_then(|meta| meta.get(OWNER_SPEAKER_METADATA))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if is_owner && speaker != self.agent_id {
+            format!("{label}|owner")
+        } else {
+            label
+        }
     }
 
     pub(crate) fn event_of(&self, log: &opencrab_db::queries::SessionLogRow) -> Option<usize> {

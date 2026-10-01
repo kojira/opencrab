@@ -255,11 +255,10 @@ async fn spawned_subtask_does_not_escalate_agent_callers() {
 /// #333 の本丸: sub-engine の**実行 caller** が親ターンの caller を継承すること、
 /// および `spawn_subtask` 経由の迂回が閉じること。
 ///
-/// sub-run が LLM へ提示するツール一覧を観測する。`execute_shell` / `ws_read` は
-/// #330 で owner_only なので、提示されていれば sub-run の実行 caller は Owner、
-/// 提示されていなければ Agent。
-/// - **親 Owner → サブ Owner**: `execute_shell` / `ws_read` が見える（実装作業が死なない）。
-/// - **親 Agent（外部由来ターン相当）→ サブ Agent**: どちらも消える
+/// sub-run に owner_only（#330）の `ws_read` を実際に呼ばせ、その結果で実行 caller を観測する
+/// （D-1056 以降、ツール一覧は caller に依らず同じなので一覧では判別できない）。
+/// - **親 Owner → サブ Owner**: `ws_read` が owner ゲートを通る（実装作業が死なない）。
+/// - **親 Agent（外部由来ターン相当）→ サブ Agent**: owner ゲートで拒否される
 ///   （`spawn_subtask` を挟んでローカル操作へ昇格する迂回路の封鎖）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sub_engine_inherits_parent_caller_and_closes_spawn_bypass() {
@@ -276,17 +275,13 @@ async fn sub_engine_inherits_parent_caller_and_closes_spawn_bypass() {
         .await;
     assert!(res.success, "spawn(owner): {:?}", res.error);
     assert!(
-        wait_until(|| !seen.lock().unwrap().is_empty()).await,
-        "親 Owner の sub-run が LLM を呼ばない"
+        wait_until(|| seen.lock().unwrap().len() >= 2).await,
+        "親 Owner の sub-run が ws_read 結果まで進まない"
     );
-    let owner_tools = seen.lock().unwrap().last().unwrap().clone();
+    let owner_result = seen.lock().unwrap()[1][0].clone();
     assert!(
-        owner_tools.iter().any(|t| t == "execute_shell"),
-        "親 Owner のサブ run に execute_shell が出ない（継承されていない / #333）: {owner_tools:?}"
-    );
-    assert!(
-        owner_tools.iter().any(|t| t == "ws_read"),
-        "親 Owner のサブ run に ws_read が出ない（#333）: {owner_tools:?}"
+        owner_result.starts_with("tool_result:") && !owner_result.contains("requires owner"),
+        "親 Owner のサブ run で ws_read が owner ゲートに落ちた（継承されていない / #333）: {owner_result}"
     );
 
     // 観測を混ぜないよう、次の spawn の前に走行中サブを止めて登録簿を空にする。
@@ -306,17 +301,13 @@ async fn sub_engine_inherits_parent_caller_and_closes_spawn_bypass() {
         .await;
     assert!(res2.success, "spawn(agent): {:?}", res2.error);
     assert!(
-        wait_until(|| seen.lock().unwrap().len() > owner_calls).await,
-        "親 Agent の sub-run が LLM を呼ばない"
+        wait_until(|| seen.lock().unwrap().len() >= owner_calls + 2).await,
+        "親 Agent の sub-run が ws_read 結果まで進まない"
     );
-    let agent_tools = seen.lock().unwrap().last().unwrap().clone();
+    let agent_result = seen.lock().unwrap()[owner_calls + 1][0].clone();
     assert!(
-            !agent_tools.iter().any(|t| t == "execute_shell"),
-            "外部 Agent 親のサブ run に execute_shell が出た = spawn_subtask 迂回が開いている（#333）: {agent_tools:?}"
-        );
-    assert!(
-        !agent_tools.iter().any(|t| t == "ws_read"),
-        "外部 Agent 親のサブ run に ws_read が出た（#333）: {agent_tools:?}"
+        agent_result.contains("requires owner"),
+        "外部 Agent 親のサブ run で ws_read が owner ゲートを通った = spawn_subtask 迂回が開いている（#333）: {agent_result}"
     );
 
     for id in reg.iter().map(|e| e.key().clone()).collect::<Vec<_>>() {

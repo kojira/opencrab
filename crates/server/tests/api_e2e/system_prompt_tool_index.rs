@@ -146,11 +146,12 @@ async fn owner_turn_system_prompt_index_has_owner_only_setting() {
     );
 }
 
-/// 非 owner ターン: owner-only 設定 op（configure_llm_provider）は policy で effective に出ない
-/// ので index にも出ない（op 単位の owner ゲート・負のコントロール）。
+/// 非 owner ターン（D-1056）: 可視性は caller に依らない（プロンプトキャッシュの prefix を
+/// caller 間で揃えるため）。owner-only 設定 op も index に出るが、実行は executor の
+/// owner ゲートで拒否される（実行時拒否は bridge の policy テストが固定する）。
 #[tokio::test]
-async fn nonowner_turn_system_prompt_index_omits_owner_only_setting() {
-    let sp = captured_system_prompt(
+async fn nonowner_turn_system_prompt_index_lists_owner_only_setting_same_as_owner() {
+    let nonowner = captured_system_prompt(
         opencrab_actions::CallerIdentity::Agent,
         IdxProbeGateway {
             nostr_ops: false,
@@ -158,9 +159,18 @@ async fn nonowner_turn_system_prompt_index_omits_owner_only_setting() {
         },
     )
     .await;
-    assert_eq!(
-        sp.matches("configure_llm_provider").count(),
-        0,
-        "configure_llm_provider（owner-only）が非 owner の system prompt index に漏れた:\n{sp}"
+    let owner = captured_system_prompt(
+        opencrab_actions::CallerIdentity::Owner,
+        IdxProbeGateway {
+            nostr_ops: false,
+            config_op: true,
+        },
+    )
+    .await;
+    assert!(
+        nonowner.contains("configure_llm_provider"),
+        "非 owner の system prompt index に configure_llm_provider が無い:\n{nonowner}"
     );
+    let index = |sp: &str| sp[sp.find("## More tools").expect("index")..].to_string();
+    assert_eq!(index(&nonowner), index(&owner), "More tools index が caller で変わった");
 }

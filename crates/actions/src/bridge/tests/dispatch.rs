@@ -79,10 +79,10 @@ async fn local_tools_are_blocked_for_agent_caller() {
             !agent_exec.policy_allows(name),
             "caller=Agent が {name} を policy_allows で通してしまう（#330）"
         );
-        // 2. 可視性: モデルに見えない。
+        // 2. 可視性: caller では絞らない（D-1056: tools をキャッシュ prefix で固定するため）。
         assert!(
-            !agent_tools.iter().any(|t| t == name),
-            "caller=Agent の list_tools に {name} が出てはいけない（#330）"
+            agent_tools.iter().any(|t| t == name),
+            "caller=Agent の list_tools にも {name} は載る（D-1056）"
         );
         // 3. 実行時強制: 名前指定の実行が owner ゲートで拒否される（gateway へ到達しない）。
         let r = agent_exec.execute(name, &json!({})).await;
@@ -248,9 +248,11 @@ fn test_list_tools_agent_cannot_see_schedule_actions() {
         .with_gateway_actions(Arc::new(MockGatewaySchedule));
     // #923: schedule/owner-only の可視性は narrowing 前の policy 層で検証する。
     let names: Vec<String> = policy_visible_names(&executor);
-    // Agent (non-owner, non-trusted) sees neither.
-    assert!(!names.iter().any(|n| n == "run_my_schedule"));
-    assert!(!names.iter().any(|n| n == "get_my_schedules"));
+    // D-1056: 可視性は caller で絞らない（実行時に拒否する）。
+    assert!(names.iter().any(|n| n == "run_my_schedule"));
+    assert!(names.iter().any(|n| n == "get_my_schedules"));
+    assert!(!executor.policy_allows("run_my_schedule"));
+    assert!(!executor.policy_allows("get_my_schedules"));
 }
 
 #[test]
@@ -260,9 +262,11 @@ fn test_list_tools_trusted_user_sees_schedules_but_not_manual_fire() {
         .with_gateway_actions(Arc::new(MockGatewaySchedule));
     // #923: schedule/owner-only の可視性は narrowing 前の policy 層で検証する。
     let names: Vec<String> = policy_visible_names(&executor);
-    // TrustedUser can read but not manually fire (run_my_schedule is owner-only).
+    // D-1056: どちらも見える。TrustedUser は読めるが手動発火（owner-only）は実行時に拒否。
     assert!(names.iter().any(|n| n == "get_my_schedules"));
-    assert!(!names.iter().any(|n| n == "run_my_schedule"));
+    assert!(names.iter().any(|n| n == "run_my_schedule"));
+    assert!(executor.policy_allows("get_my_schedules"));
+    assert!(!executor.policy_allows("run_my_schedule"));
 }
 
 #[test]

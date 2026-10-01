@@ -110,6 +110,11 @@ pub struct ProviderConfig {
     pub reasoning_effort: String,
     #[serde(default)]
     pub include_reasoning_encrypted_content: bool,
+    /// `type = "openai"` の接続先へ Anthropic のプロンプトキャッシュ目印（`cache_control`）を
+    /// 載せる（D-1056）。hermit-shell のように Anthropic へ中継する接続先だけで true にする。
+    /// 本物の OpenAI は未知パラメータとして 400 を返すので既定 false。
+    #[serde(default)]
+    pub anthropic_cache_control: bool,
 }
 
 fn default_codex_timeout() -> u64 {

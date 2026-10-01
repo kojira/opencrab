@@ -99,11 +99,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                 )
                 .await;
                 let (system, name) = runtime.build_agent_context(&agent_id, &caller);
-                let system = if system_context.is_empty() {
-                    system
-                } else {
-                    format!("{system}\n\n{system_context}")
-                };
+                let system = crate::completion::with_system_context(system, &system_context);
                 let last_continuation_say = Arc::new(std::sync::Mutex::new(None::<String>));
                 let turn_res = {
                     let runtime = runtime.clone();

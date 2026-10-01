@@ -667,10 +667,7 @@ async fn send_mapped(
     let context = SaidContext {
         caller,
         start_turn: bundle.is_none_or(|place| place.index == place.count),
-        system_context: Some(match crate::map::owner_context(&access.owner) {
-            Some(owner) => format!("{}\n{owner}", mapped.system_context),
-            None => mapped.system_context.clone(),
-        }),
+        system_context: None,
         reply_target: mapped.reply_target.clone(),
         live_inbound_scope: LiveInboundScope::Speaker,
     };

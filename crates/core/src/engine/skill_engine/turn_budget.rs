@@ -22,13 +22,7 @@ fn split_user_blocks(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     for line in text.lines() {
-        let new_block = line.starts_with('[')
-            && line.contains("]:")
-            && !line.starts_with("[tool_call]")
-            && !line.starts_with("[tool_result]")
-            && !line.starts_with("[id=")
-            && !line.starts_with("[Earlier")
-            && !line.starts_with("[echo]");
+        let new_block = is_entry_header_line(line);
         if new_block && !cur.is_empty() {
             out.push(std::mem::take(&mut cur));
         }
@@ -41,6 +35,46 @@ fn split_user_blocks(text: &str) -> Vec<String> {
         out.push(cur);
     }
     out.into_iter().filter(|b| !b.trim().is_empty()).collect()
+}
+
+/// 会話履歴の 1 エントリの先頭行（`[話者][時刻]...:`）か。
+fn is_entry_header_line(line: &str) -> bool {
+    line.starts_with('[')
+        && line.contains("]:")
+        && !line.starts_with("[tool_call]")
+        && !line.starts_with("[tool_result]")
+        && !line.starts_with("[id=")
+        && !line.starts_with("[Earlier")
+        && !line.starts_with("[echo]")
+}
+
+/// D-1056: 先頭 user メッセージ（messages[1]・プレーン text）のキャッシュ区切り位置。
+///
+/// `[会話履歴の開始タグの位置, 各エントリ先頭行の位置..., 閉じタグの位置]`（バイト）。会話履歴
+/// ブロックがちょうど 1 つのときだけ返す。履歴の手前（台帳・Memory Index 等）と各エントリを
+/// 別 part にすると、履歴が伸びても既存エントリまでの prefix がキャッシュから読める。
+pub(super) fn user_cache_segments(messages: &[Message]) -> Option<Vec<usize>> {
+    let msg = messages.get(1).filter(|m| m.role == Role::User)?;
+    let Some(MessageContent::Text(text)) = &msg.content else {
+        return None;
+    };
+    let (start, end) = conversation_history_range(text)?;
+    let mut offsets = vec![start - CONVERSATION_HISTORY_START.len()];
+    let mut line_start = start;
+    while line_start < end {
+        let line_end = text[line_start..end]
+            .find('\n')
+            .map_or(end, |i| line_start + i);
+        let line = &text[line_start..line_end];
+        // ターン終了の注記は直前エントリの末尾へ後から足されるので、別 part にして既存エントリ
+        // の part を不変に保つ（足されたエントリの part が変わると、そこに置いた目印が外れる）。
+        if is_entry_header_line(line) || line.starts_with("[turn_terminated") {
+            offsets.push(line_start);
+        }
+        line_start = line_end + 1;
+    }
+    offsets.push(end);
+    Some(offsets)
 }
 
 fn is_toolish_user_block(block: &str) -> bool {
@@ -391,7 +425,31 @@ pub(super) fn seat_tool_result(
 
 #[cfg(test)]
 mod tests {
-    use super::conversation_history_range;
+    use super::{conversation_history_range, user_cache_segments};
+    use opencrab_llm_types::Message;
+
+    /// D-1056: 区切りは開始タグ・各エントリ先頭・閉じタグ。履歴以外の形では返さない。
+    #[test]
+    fn user_cache_segments_marks_prefix_entries_and_closing_tag() {
+        let text = "[Memory Index]\nmi\n\n<conversation_history>\n[u1|a][2026-01-01 00:00:00]:\nhi\n[x]: also a header\n[me][2026-01-01 00:00:01]:\nyo\nbody\n[turn_terminated: NO_REPLY]\n</conversation_history>";
+        let messages = vec![Message::system("s"), Message::user(text)];
+        let offsets = user_cache_segments(&messages).unwrap();
+        let at = |o: usize| &text[o..];
+        assert!(at(offsets[0]).starts_with("<conversation_history>"));
+        assert!(at(offsets[1]).starts_with("[u1|a]"));
+        assert!(at(offsets[2]).starts_with("[x]:"));
+        assert!(at(offsets[3]).starts_with("[me]"));
+        // ターン終了注記は後から足されるので別 part（直前エントリの part を不変に保つ）。
+        assert!(at(offsets[4]).starts_with("[turn_terminated: NO_REPLY]"));
+        assert!(at(offsets[5]).starts_with("</conversation_history>"));
+        assert_eq!(offsets.len(), 6);
+
+        assert_eq!(
+            user_cache_segments(&[Message::system("s"), Message::user("no history")]),
+            None
+        );
+        assert_eq!(user_cache_segments(&[Message::system("s")]), None);
+    }
 
     #[test]
     fn conversation_history_range_rejects_two_complete_blocks() {

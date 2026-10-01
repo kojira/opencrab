@@ -22,7 +22,7 @@ pub use assembly::{
 };
 pub use format::{format_single_log, format_single_log_with_echo, format_speech_entry};
 pub use past_summary::past_summary_omitted_notice;
-pub use refs::ConversationRefs;
+pub use refs::{ConversationRefs, OWNER_SPEAKER_METADATA};
 pub use retain::retain_conversation_logs;
 
 #[allow(unused_imports)]
@@ -74,3 +74,5 @@ include!("tests/result_reference_tests.rs");
 include!("tests/subtask_completed_folding_tests.rs");
 #[cfg(test)]
 include!("tests/render_refs_tests.rs");
+#[cfg(test)]
+include!("tests/owner_speaker_mark_tests.rs");

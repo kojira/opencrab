@@ -3,8 +3,9 @@ use opencrab_db::queries::{insert_session_log, SessionLogRow};
 use rusqlite::{params, Connection, Transaction};
 
 use crate::error::GateError;
-use crate::protocol::{Said, SaidAttachment};
+use crate::protocol::{Said, SaidAttachment, SaidCaller};
 use crate::registry::ExtgateState;
+use opencrab_core::conversation::OWNER_SPEAKER_METADATA;
 
 use super::binding::OriginRow;
 
@@ -99,6 +100,11 @@ pub(super) fn record_inbound(
     // Gatewayが供給した外部reply参照はopaque値として保存し、coreでは解釈しない。
     if let Some(reply_target) = &said.reply_target {
         meta["reply_target"] = serde_json::json!(reply_target);
+    }
+    // D-1056: オーナーの発言は会話履歴の話者表示（`uN|name|owner`）で示す。記録時点の caller で
+    // 固定し、過去行の表示が後から変わらないようにする（プロンプトキャッシュの prefix 安定）。
+    if matches!(said.caller, SaidCaller::Owner) {
+        meta[OWNER_SPEAKER_METADATA] = serde_json::json!(true);
     }
     insert_session_log(
         tx,

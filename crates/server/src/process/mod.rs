@@ -287,7 +287,16 @@ pub async fn run_agent_response(
     let system_prompt = if more_tools_index.is_empty() {
         system_prompt
     } else {
-        system_prompt_owned = format!("{system_prompt}{more_tools_index}");
+        // D-1056: More tools はツール定義と同じく caller に依らない固定部の末尾へ置く
+        // （caller 依存部・リクエスト毎部より前に置いてキャッシュ prefix に含める）。
+        system_prompt_owned =
+            match system_prompt.split_once(opencrab_llm_types::SYSTEM_SEGMENT_BREAK) {
+                Some((stable, rest)) => format!(
+                    "{stable}{more_tools_index}{}{rest}",
+                    opencrab_llm_types::SYSTEM_SEGMENT_BREAK
+                ),
+                None => format!("{system_prompt}{more_tools_index}"),
+            };
         system_prompt_owned.as_str()
     };
 

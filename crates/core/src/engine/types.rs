@@ -6,6 +6,7 @@ use serde_json::Value;
 // Canonical LLM message model shared with the provider/router layer.
 pub use opencrab_llm_types::{
     ChatRequest, ChatResponse, FunctionDefinition, LlmExchange, ProviderToolHistory, ToolCall,
+    SYSTEM_SEGMENT_BREAK,
 };
 
 // ---------------------------------------------------------------------------

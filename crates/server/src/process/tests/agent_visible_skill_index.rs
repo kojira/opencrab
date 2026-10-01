@@ -75,3 +75,47 @@ fn agent_caller_with_no_visible_skills_gets_no_skill_section() {
     assert!(owner_prompt.contains("Your skills (index only"));
     assert!(owner_prompt.contains("HiddenOnly"));
 }
+
+/// D-1056: skill index は caller で絞られるので、curated memory まで含む固定部の後ろ
+/// （system の 2 番目のセグメント）に置く。並びは使用回数ではなく名前順で、使うたびに
+/// 並びが変わってプロンプトキャッシュが外れないこと。
+#[test]
+fn skill_index_is_name_sorted_in_caller_segment_after_curated() {
+    let conn = opencrab_db::init_memory().unwrap();
+    insert_skill(&conn, "Zeta", true);
+    insert_skill(&conn, "Alpha", true);
+    insert_skill(&conn, "Mid", true);
+    // 使用回数順なら Mid が先頭に来る。
+    conn.execute("UPDATE skills SET usage_count = 99 WHERE name = 'Mid'", [])
+        .unwrap();
+    opencrab_db::queries::upsert_curated_memory(
+        &conn,
+        &opencrab_db::queries::CuratedMemoryRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent_id: "a1".to_string(),
+            category: "long_term/Topic".to_string(),
+            content: "- curated fact".to_string(),
+            created_at: String::new(),
+        },
+    )
+    .unwrap();
+
+    let (prompt, _) = build_agent_context(&conn, "a1", &CallerIdentity::Owner);
+    let segments: Vec<&str> = prompt
+        .split(opencrab_llm_types::SYSTEM_SEGMENT_BREAK)
+        .collect();
+    assert_eq!(
+        segments.len(),
+        2,
+        "stable と caller の 2 セグメント:\n{prompt}"
+    );
+    assert!(segments[0].contains("- curated fact"));
+    assert!(!segments[0].contains("Your skills (index only"));
+    let skills = segments[1];
+    assert!(skills.starts_with("Your skills (index only"));
+    let pos = |n: &str| skills.find(&format!("- {n}:")).unwrap();
+    assert!(
+        pos("Alpha") < pos("Mid") && pos("Mid") < pos("Zeta"),
+        "{skills}"
+    );
+}

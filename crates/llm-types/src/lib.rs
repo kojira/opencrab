@@ -223,6 +223,12 @@ pub enum FunctionCallBehavior {
     Named { name: String },
 }
 
+mod system_segments;
+pub use system_segments::{
+    join_system_segments, SYSTEM_CACHE_SEGMENTS_METADATA, SYSTEM_SEGMENT_BREAK,
+    USER_CACHE_SEGMENTS_METADATA,
+};
+
 /// Request for a chat completion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {

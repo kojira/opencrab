@@ -162,6 +162,32 @@ pub(super) fn normalize_response(response: &ChatResponse) -> NormalizedResponse 
     }
 }
 
+/// 各 LLM 呼び出しの ChatRequest.metadata（プロバイダ固有の拡張）。
+/// `system_cache_segments` は結合後 system のキャッシュ区切り（D-1056）。
+pub(super) fn request_metadata(
+    web_search: bool,
+    system_cache_segments: Option<&[usize]>,
+    messages: &[Message],
+) -> std::collections::HashMap<String, serde_json::Value> {
+    let mut m = std::collections::HashMap::new();
+    if web_search {
+        m.insert("web_search".to_string(), serde_json::json!(true));
+    }
+    if let Some(ends) = system_cache_segments {
+        m.insert(
+            opencrab_llm_types::SYSTEM_CACHE_SEGMENTS_METADATA.to_string(),
+            serde_json::json!(ends),
+        );
+    }
+    if let Some(offsets) = super::turn_budget::user_cache_segments(messages) {
+        m.insert(
+            opencrab_llm_types::USER_CACHE_SEGMENTS_METADATA.to_string(),
+            serde_json::json!(offsets),
+        );
+    }
+    m
+}
+
 pub(super) struct InitialTurn {
     pub(super) messages: Vec<Message>,
     pub(super) ledger: TokenLedger,
