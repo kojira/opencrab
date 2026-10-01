@@ -25,73 +25,10 @@ pub(super) fn base64_encode(data: &[u8]) -> String {
     out
 }
 
-/// http(s) URL のホストを解決し、全解決 IP が公開アドレスであることを確認する（SSRF 対策）。
-/// 接続に使う（検証済みの）SocketAddr を返す。1つでも非公開アドレスに解決したら拒否。
-pub(super) async fn validate_public_url(
-    parsed: &reqwest::Url,
-) -> anyhow::Result<std::net::SocketAddr> {
-    use anyhow::Context;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        other => anyhow::bail!("unsupported url scheme for image fetch: {other}"),
-    }
-    let host = parsed.host_str().context("image url has no host")?;
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
-        .await
-        .with_context(|| format!("failed to resolve host {host}"))?
-        .collect();
-    let first = *addrs
-        .first()
-        .context("host did not resolve to any address")?;
-    for addr in &addrs {
-        if !is_global_ip(addr.ip()) {
-            anyhow::bail!(
-                "refusing to fetch image from non-public address ({})",
-                addr.ip()
-            );
-        }
-    }
-    Ok(first)
-}
-
-/// IP が公開（グローバル）アドレスか。ループバック/プライベート/リンクローカル
-/// （169.254.169.254 のメタデータ含む）/CGNAT/ユニークローカル等は非公開として弾く。
-/// `std::net` の `is_global` は unstable のため、既知の非公開レンジを直接判定する。
-pub(super) fn is_global_ip(ip: std::net::IpAddr) -> bool {
-    use std::net::IpAddr;
-    match ip {
-        IpAddr::V4(v4) => {
-            let o = v4.octets();
-            !(v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local() // 169.254.0.0/16（メタデータ 169.254.169.254 含む）
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_multicast()
-                || v4.is_documentation()
-                || (o[0] == 100 && (o[1] & 0xc0) == 64)) // carrier-grade NAT range
-        }
-        IpAddr::V6(v6) => {
-            // IPv4-mapped（::ffff:a.b.c.d）で内部アドレスへ回避されないよう展開して判定。
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_global_ip(IpAddr::V4(v4));
-            }
-            let s = v6.segments();
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (s[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
-                || (s[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
-                // 埋め込み v4 で内部アドレスを指しうる遷移レンジは一律非公開扱い
-                // （::a.b.c.d 互換 / 6to4 / Teredo / NAT64。正当な画像ホストは通常来ない）。
-                || (s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0) // ::/96 IPv4-compatible
-                || s[0] == 0x2002 // 6to4 2002::/16
-                || (s[0] == 0x2001 && s[1] == 0x0000) // Teredo 2001:0000::/32
-                || (s[0] == 0x0064 && s[1] == 0xff9b)) // NAT64 64:ff9b::/96
-        }
-    }
-}
+// SSRF 判定は画像正規化と共有する（D-1060）。
+#[cfg(test)]
+pub(super) use crate::image_input::is_global_ip;
+pub(super) use crate::image_input::validate_public_url;
 
 /// URL の拡張子から画像 MIME を推測する（Content-Type が無い/不正なときのフォールバック）。
 pub(super) fn guess_image_mime(url: &str) -> String {

@@ -20,10 +20,10 @@ mod response;
 mod transport;
 
 #[cfg(test)]
+use self::image::{base64_encode, guess_image_mime, is_global_ip, validate_public_url};
+#[cfg(test)]
 use auth::{base64url_decode, token_expired};
 use auth::{build_client, expand_tilde, extract_account_id, DEFAULT_TIMEOUT_SECS, OAUTH_TOKEN_URL};
-#[cfg(test)]
-use image::{base64_encode, guess_image_mime, is_global_ip, validate_public_url};
 
 #[derive(Debug, Clone)]
 pub struct ChatGptProvider {

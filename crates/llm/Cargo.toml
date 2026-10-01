@@ -17,6 +17,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 tempfile = { workspace = true }
 opencrab-llm-types = { workspace = true }
+image = { workspace = true }
+base64 = "0.22"
 
 [dev-dependencies]
 tokio = { workspace = true }
