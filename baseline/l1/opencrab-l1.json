@@ -3347,6 +3347,36 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
+          "description": "画像を見る。url（https）かワークスペース内の path を1つ渡すと、次の応答でその画像が見える。大きい画像は長辺1568pxに縮小される。",
+          "input_schema": {
+            "properties": {
+              "path": {
+                "description": "画像ファイルのパス（ワークスペースルートからの相対パス。url とどちらか1つ）",
+                "type": "string"
+              },
+              "url": {
+                "description": "画像の https URL（path とどちらか1つ）",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": "view_image",
+          "origin": "dispatcher",
+          "visibility": {
+            "depth_capped": false,
+            "owner_only": false,
+            "trusted_only": false
+          }
+        },
+        {
+          "activation": "always",
+          "classification": {
+            "collection_status": "observed",
+            "dispatch": "inline",
+            "sharing": "agent_bound",
+            "sub_engine": "not_exposed"
+          },
           "description": "ワークスペース内のファイルまたはディレクトリを削除する",
           "input_schema": {
             "properties": {

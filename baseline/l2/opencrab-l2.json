@@ -29,7 +29,7 @@
       "5xx": 4
     },
     "tool_effects_observed": 43,
-    "tool_success_uncollected_count": 5
+    "tool_success_uncollected_count": 6
   },
   "http": {
     "probes": [
@@ -9358,7 +9358,8 @@
         "get_my_schedules": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "run_my_schedule": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
         "set_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
-        "update_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process"
+        "update_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
+        "view_image": "Success requires an image file fixture; the collector workspace holds only text fixtures. Path/URL handling and resizing are covered by opencrab-actions and opencrab-llm unit tests."
       },
       "why": "Visibility alone does not prove direct invocation is gated or that result/error translation survives a replacement."
     },
@@ -15102,6 +15103,12 @@
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
+        "tool": "view_image"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
         "tool": "ws_list"
       },
       {
@@ -15133,6 +15140,12 @@
         "reason": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "status": "uncollected",
         "tool": "update_my_schedule"
+      },
+      {
+        "facet": "success",
+        "reason": "Success requires an image file fixture; the collector workspace holds only text fixtures. Path/URL handling and resizing are covered by opencrab-actions and opencrab-llm unit tests.",
+        "status": "uncollected",
+        "tool": "view_image"
       }
     ],
     "unsuccessful_attempts": []
@@ -15216,6 +15229,7 @@
           "update_memory_index_config",
           "update_my_schedule",
           "update_task_contract",
+          "view_image",
           "ws_delete",
           "ws_edit",
           "ws_list",
@@ -15301,6 +15315,7 @@
           "update_memory_index_config",
           "update_my_schedule",
           "update_task_contract",
+          "view_image",
           "ws_delete",
           "ws_edit",
           "ws_list",
@@ -15386,6 +15401,7 @@
           "update_memory_index_config",
           "update_my_schedule",
           "update_task_contract",
+          "view_image",
           "ws_delete",
           "ws_edit",
           "ws_list",
@@ -15470,6 +15486,7 @@
           "update_memory_index_config",
           "update_my_schedule",
           "update_task_contract",
+          "view_image",
           "ws_delete",
           "ws_edit",
           "ws_list",
@@ -15529,6 +15546,7 @@
           "update_instructions",
           "update_memory_core",
           "update_task_contract",
+          "view_image",
           "ws_delete",
           "ws_edit",
           "ws_list",
@@ -15588,6 +15606,7 @@
           "update_instructions",
           "update_memory_core",
           "update_task_contract",
+          "view_image",
           "ws_delete",
           "ws_edit",
           "ws_list",
@@ -15672,6 +15691,7 @@
           "update_memory_index_config",
           "update_my_schedule",
           "update_task_contract",
+          "view_image",
           "ws_delete",
           "ws_edit",
           "ws_list",
@@ -15775,6 +15795,7 @@
           "update_memory_index_config",
           "update_my_schedule",
           "update_task_contract",
+          "view_image",
           "ws_delete",
           "ws_edit",
           "ws_list",

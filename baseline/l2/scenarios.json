@@ -757,6 +757,7 @@
     },
     "success_uncollected_l3": {
       "run_my_schedule": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
+      "view_image": "Success requires an image file fixture; the collector workspace holds only text fixtures. Path/URL handling and resizing are covered by opencrab-actions and opencrab-llm unit tests.",
       "delete_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
       "get_my_schedules": "requires an inbound gateway session fire descriptor owned by an external gateway process",
       "set_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
