@@ -248,7 +248,7 @@ The ActionDispatcher registers these actions, invokable by agents during convers
 | Category | Actions | Description |
 |----------|---------|-------------|
 | **Common** | `generate_inner_voice`, `update_impression`, `declare_done`, `get_system_info` | Core session control and self-narration |
-| **Workspace** | `ws_read`, `ws_write`, `ws_edit`, `ws_list`, `ws_delete`, `ws_mkdir` | Sandboxed per-agent file operations |
+| **Workspace** | `ws_read`, `ws_write`, `ws_edit`, `ws_list`, `ws_delete`, `ws_mkdir`, `view_image` | Sandboxed per-agent file operations; `view_image` shows an image (workspace path or https URL) on the next LLM call |
 | **Learning** | `learn_from_experience`, `learn_from_peer`, `reflect_and_learn` | Self-improvement through experience and reflection |
 | **Skills** | `create_my_skill`, `retire_my_skill`, `restore_my_skill`, `read_skill` | Self-created skill lifecycle |
 | **Search & Memory** | `search_my_history`, `summarize_and_save`, `browse_memory_index`, `retrieve_memory_nodes`, `search_memory_index` | Memory search, curation, and Agentic RAG |
