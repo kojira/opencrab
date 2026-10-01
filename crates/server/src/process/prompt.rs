@@ -129,7 +129,8 @@ pub fn build_agent_context(
          create_my_skill.\n\
          \n\
          When conversation history is present, it is delimited by `<conversation_history>` and \
-         `</conversation_history>`. Its speaker headers contain an identity and timestamp. After \
+         `</conversation_history>`. Its speaker headers contain an identity and timestamp; a \
+         header containing `|owner` marks a message from your owner. After \
          the closing tag, output only your own response content; never reproduce or continue \
          transcript-formatted speaker lines. Your response is posted verbatim; a name prefix \
          you add is not removed, so it would appear duplicated.\n\

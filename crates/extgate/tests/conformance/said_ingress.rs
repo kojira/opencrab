@@ -99,6 +99,41 @@ async fn author_label_is_persisted_and_reaches_live_turn() {
     );
 }
 
+/// D-1056: owner と申告された said だけ、記録 metadata に owner 印が残る（話者表示 `|owner` の源）。
+#[tokio::test]
+async fn owner_caller_is_marked_in_recorded_speech_and_agent_is_not() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    for (id, origin, caller) in [
+        ("own", "owner-origin", json!({"role": "owner"})),
+        ("agt", "agent-origin", json!({"role": "agent"})),
+    ] {
+        write_frame(
+            &mut s,
+            &json!({
+                "id": id, "m": "said", "binding_id": binding_id,
+                "origin": origin, "author_id": "user-42", "caller": caller,
+                "text": "hello", "attachments": []
+            }),
+        )
+        .await;
+        read_said_response(&mut s, id).await;
+    }
+    let conn = h.state.db.lock().unwrap();
+    let meta = |origin: &str| -> serde_json::Value {
+        let raw: String = conn
+            .query_row(
+                "SELECT metadata_json FROM memory_sessions WHERE json_extract(metadata_json, '$.external_origin') = ?1",
+                [origin],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&raw).unwrap()
+    };
+    assert_eq!(meta("owner-origin")["owner"], json!(true));
+    assert!(meta("agent-origin").get("owner").is_none());
+}
+
 #[tokio::test]
 async fn gateway_context_and_reply_target_reach_storage_and_turn() {
     let h = Harness::start().await;
