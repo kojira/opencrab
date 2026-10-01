@@ -4,22 +4,19 @@
 pub fn build_agent_context(
     conn: &rusqlite::Connection,
     agent_id: &str,
-    caller: &opencrab_actions::CallerIdentity,
+    _caller: &opencrab_actions::CallerIdentity,
 ) -> (String, String) {
     let agent = opencrab_db::queries::get_agent(conn, agent_id)
         .ok()
         .flatten();
     let mut skills = opencrab_db::queries::list_skills(conn, agent_id, true).unwrap_or_default();
-    // #352: caller=Agent のターン（素の Agent 権限で走る run。外部 Nostr の受信ターンが
-    // 典型例だが、判定軸は transport ではなく caller=Agent）には、オーナーが露出を許可
-    // （`agent_visible`）した skill だけを index に出す。既定 false なので、許可が無ければ
-    // 1 件も残らず、下の `skills.is_empty()` 分岐で skill セクションごと出さない
-    // （空の見出しは残さない）。Owner / CoAgent / TrustedUser は絞らない（従来どおり全部
-    // 見える）。read_skill 側の本文ゲート（skill_management.rs）と AND で二重化する。名前を
-    // 隠すだけでは read_skill を名前直打ちされるため index と本文の両方で絞る。
-    if matches!(caller, opencrab_actions::CallerIdentity::Agent) {
-        skills.retain(|s| s.agent_visible);
-    }
+    // D-1058: skill index は caller に依らず同じ内容にする（プロンプトキャッシュの prefix 安定）。
+    // 一覧に名前を出すのは、オーナーが露出を許可（`agent_visible`）した skill だけ（#352: 名前
+    // からも内部の事情が分かるため、許可の無い skill は誰のターンでも一覧に出さない）。許可の
+    // 無い skill は `owner-skills` の 1 行に畳み、オーナー等価のターンだけが read_skill で中身を
+    // 引ける（権限は read_skill 側で判定する）。
+    let has_owner_only_skills = skills.iter().any(|s| !s.agent_visible);
+    skills.retain(|s| s.agent_visible);
     // curated 記憶は取り込みが **1 見出し 1 行**（`long_term/<見出し>`）で入れるため、
     // 完全一致で引くと `long_term/*` が 1 件も載らなかった（#428）。前方一致で素の
     // `long_term` と `long_term/<見出し>` の両方を拾い、見出しごとに束ねて注入する。
@@ -78,21 +75,28 @@ pub fn build_agent_context(
         .map(|a| a.instructions.clone())
         .unwrap_or_default();
 
-    // D-1056: skill index は caller で絞られる（#352）ので、固定部ではなく caller 依存部
-    // （system の 2 番目のセグメント）へ置く。並びは名前順で決定的にする（使用回数順だと
-    // 使うたびに並びが変わり、プロンプトキャッシュが外れる）。
+    // D-1058: skill index は caller に依らないので固定部（curated の後ろ）に置く。並びは名前順で
+    // 決定的にする（使用回数順だと使うたびに並びが変わり、プロンプトキャッシュが外れる）。
+    // `owner-skills` 行は名前順の一覧の後ろに固定で 1 行だけ付ける（並びを決定的に保つ）。
     skills.sort_by(|a, b| a.name.cmp(&b.name));
-    let skills_text = if skills.is_empty() {
+    let mut list: Vec<String> = skills
+        .iter()
+        .map(|s| format!("- {}: {}", s.name, s.description))
+        .collect();
+    if has_owner_only_skills {
+        list.push(format!(
+            "- {}: Index of owner-only skills (owner turns only; call read_skill(\"{}\") to \
+             list their names and descriptions)",
+            opencrab_actions::OWNER_SKILLS_INDEX_NAME,
+            opencrab_actions::OWNER_SKILLS_INDEX_NAME
+        ));
+    }
+    let skills_text = if list.is_empty() {
         String::new()
     } else {
-        let list: Vec<String> = skills
-            .iter()
-            .map(|s| format!("- {}: {}", s.name, s.description))
-            .collect();
         // index（名前 + 説明）だけを載せ、本文は read_skill で必要時に掘り下げさせる（#119）。
         format!(
-            "{}Your skills (index only — call read_skill(name) to get a skill's full body):\n{}",
-            opencrab_llm_types::SYSTEM_SEGMENT_BREAK,
+            "\n\nYour skills (index only — call read_skill(name) to get a skill's full body):\n{}",
             list.join("\n")
         )
     };
@@ -196,7 +200,11 @@ pub fn build_agent_context(
          revises the criteria.\n\
          - Trivial single-message replies do not need a ledger entry.\n\
          \n\
-         {character_section}{instructions_section}{curated_section}{skills_text}",
+         {character_section}{instructions_section}{curated_section}{skills_text}{caller_break}",
+        // D-1058: caller 依存部は空。区切りだけ残して `[固定] BREAK [caller 依存] BREAK
+        // [リクエスト毎]` の並び（D-1056）を保つ（extgate の system_context が caller 部の位置へ
+        // 繰り上がってキャッシュ目印を付けられないように）。空セグメントは結合時に落ちる。
+        caller_break = opencrab_llm_types::SYSTEM_SEGMENT_BREAK,
     );
 
     (prompt, agent_name)

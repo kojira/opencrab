@@ -46,9 +46,10 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
 
     /// system prompt と表示名を組み立てる（`(system_prompt, agent_name)`）。
     ///
-    /// `caller` は本ターンの呼び出し元。caller=Agent のときだけ skill index を露出許可
-    /// （`agent_visible`）のものへ絞る（#352）。ここへ渡す caller は、同じターンの
-    /// [`RunRequest`] に載せる caller と一致させること（index と実行権限を揃える）。
+    /// `caller` は本ターンの呼び出し元。system prompt（skill index を含む）は caller に依らず
+    /// 同じ内容になる（D-1058: プロンプトキャッシュの prefix 安定）。権限は実行側（tool の
+    /// policy・read_skill）で判定する。ここへ渡す caller は、同じターンの [`RunRequest`] に
+    /// 載せる caller と一致させること。
     fn build_agent_context(
         &self,
         agent_id: &str,
