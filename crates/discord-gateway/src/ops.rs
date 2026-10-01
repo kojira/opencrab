@@ -73,7 +73,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reply",
-            "会話の e番号のメッセージに返信する。event に e番号、text に返信本文。返信の本文は text にだけ書く。同じ応答の地の文に書いた内容も、別の発言として同時に投稿される。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。Put the reply body only in text; any plain text in the same response is also posted at the same time as a separate message. This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response. If you need N replies, put N reply calls in THIS response.",
+            "reply を呼ぶ応答では、地の文に何も書かない（最後の行の NO_REPLY だけは書いてよい）。地の文は別の発言として投稿されるので、返信が二重になる。会話の e番号のメッセージに返信する。event に e番号、text に返信本文。返信の本文は text にだけ書く。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。In a response that calls reply, write no plain text except an optional final NO_REPLY line; plain text is posted as a separate message and would duplicate the reply. Put the reply body only in text. This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response. If you need N replies, put N reply calls in THIS response.",
             json!({"type": "object", "required": ["event", "text"], "properties": {
                 "event": ref_prop("返信先メッセージの短縮参照（例 e7）"),
                 "text": str_prop("返信本文")
@@ -504,7 +504,7 @@ mod tests {
         );
         assert_eq!(
             desc("reply"),
-            "会話の e番号のメッセージに返信する。event に e番号、text に返信本文。返信の本文は text にだけ書く。同じ応答の地の文に書いた内容も、別の発言として同時に投稿される。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。Put the reply body only in text; any plain text in the same response is also posted at the same time as a separate message. This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response. If you need N replies, put N reply calls in THIS response.",
+            "reply を呼ぶ応答では、地の文に何も書かない（最後の行の NO_REPLY だけは書いてよい）。地の文は別の発言として投稿されるので、返信が二重になる。会話の e番号のメッセージに返信する。event に e番号、text に返信本文。返信の本文は text にだけ書く。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。In a response that calls reply, write no plain text except an optional final NO_REPLY line; plain text is posted as a separate message and would duplicate the reply. Put the reply body only in text. This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response. If you need N replies, put N reply calls in THIS response.",
             "reply 説明文が全文と一致しない"
         );
     }
