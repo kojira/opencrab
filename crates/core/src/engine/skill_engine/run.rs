@@ -164,6 +164,7 @@ impl SkillEngine {
                 metadata: run_helpers::request_metadata(
                     self.web_search,
                     system_cache_segments.as_deref(),
+                    &messages,
                 ),
                 agent_id: None,
                 reasoning_effort: self.reasoning_effort.clone(),

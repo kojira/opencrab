@@ -1040,7 +1040,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/record.rs",
-      "line": 58,
+      "line": 59,
       "snippet": "\"channel_id\": row.address,",
       "classification": "production-violation",
       "violation": "V11",

@@ -167,6 +167,7 @@ pub(super) fn normalize_response(response: &ChatResponse) -> NormalizedResponse 
 pub(super) fn request_metadata(
     web_search: bool,
     system_cache_segments: Option<&[usize]>,
+    messages: &[Message],
 ) -> std::collections::HashMap<String, serde_json::Value> {
     let mut m = std::collections::HashMap::new();
     if web_search {
@@ -176,6 +177,12 @@ pub(super) fn request_metadata(
         m.insert(
             opencrab_llm_types::SYSTEM_CACHE_SEGMENTS_METADATA.to_string(),
             serde_json::json!(ends),
+        );
+    }
+    if let Some(offsets) = super::turn_budget::user_cache_segments(messages) {
+        m.insert(
+            opencrab_llm_types::USER_CACHE_SEGMENTS_METADATA.to_string(),
+            serde_json::json!(offsets),
         );
     }
     m

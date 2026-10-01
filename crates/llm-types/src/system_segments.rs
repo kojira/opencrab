@@ -10,6 +10,12 @@ pub const SYSTEM_SEGMENT_BREAK: char = '\u{1E}';
 /// （固定部の末尾・caller 依存部の末尾。空セグメントの分は載せない）。
 pub const SYSTEM_CACHE_SEGMENTS_METADATA: &str = "system_cache_segments";
 
+/// ChatRequest.metadata のキー（D-1056）。値は先頭 user メッセージ（messages[1]・プレーン text）
+/// のバイトオフセット配列 `[会話履歴の手前の末尾, 各履歴エントリの先頭..., 閉じタグの先頭]`。
+/// 会話履歴ブロックがちょうど 1 つのときだけ載る。キャッシュ目印を置くプロバイダが、この位置で
+/// user 本文を text part に割る（連結すると元の本文に戻る）。
+pub const USER_CACHE_SEGMENTS_METADATA: &str = "user_cache_segments";
+
 /// `SYSTEM_SEGMENT_BREAK` で区切った system を、空セグメントを落として `"\n\n"` で連結する。
 /// 戻り値の 2 つ目は、セグメント 0（固定部）と 1（caller 依存部）のうち非空のものの結合後
 /// バイト終端（= キャッシュの区切り位置）。区切りが 1 つも無ければ `None`。
