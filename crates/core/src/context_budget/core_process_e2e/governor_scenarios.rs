@@ -297,6 +297,7 @@ impl ActionExecutor for LoopingExecutor {
             success: true,
             data: serde_json::json!({"ok": true}),
             error: None,
+            ..Default::default()
         }
     }
     fn list_tools(&self) -> Vec<FunctionDefinition> {

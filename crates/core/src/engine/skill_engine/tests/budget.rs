@@ -368,6 +368,7 @@
                 success: true,
                 data: serde_json::json!({"content": "Tokyo: sunny"}),
                 error: None,
+                ..Default::default()
             },
         );
         let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);

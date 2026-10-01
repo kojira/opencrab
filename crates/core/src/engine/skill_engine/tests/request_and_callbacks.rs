@@ -211,6 +211,7 @@
                 success: true,
                 data: serde_json::json!("ok"),
                 error: None,
+                ..Default::default()
             },
         );
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -333,6 +334,7 @@
                 success: true,
                 data: serde_json::json!({"result": "ok"}),
                 error: None,
+                ..Default::default()
             },
         );
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -358,6 +360,7 @@
                 success: true,
                 data: serde_json::json!(null),
                 error: None,
+                ..Default::default()
             },
         );
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 1);
@@ -384,6 +387,7 @@
                 success: true,
                 data: serde_json::json!(null),
                 error: None,
+                ..Default::default()
             },
         );
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -413,6 +417,7 @@
                 success: true,
                 data: serde_json::json!({"answer": 42}),
                 error: None,
+                ..Default::default()
             },
         );
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -468,6 +473,7 @@
                 success: true,
                 data: serde_json::json!({"ok": true}),
                 error: None,
+                ..Default::default()
             },
         );
 
@@ -512,6 +518,7 @@
                 success: true,
                 data: serde_json::json!(null),
                 error: None,
+                ..Default::default()
             },
         );
 
@@ -575,6 +582,7 @@
                 success: true,
                 data: serde_json::json!({"result": "ok"}),
                 error: None,
+                ..Default::default()
             },
         );
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -648,6 +656,7 @@
                 success: true,
                 data: serde_json::json!({"result": "ok"}),
                 error: None,
+                ..Default::default()
             },
         );
         let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);

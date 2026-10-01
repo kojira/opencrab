@@ -142,6 +142,7 @@
                 success: false,
                 data: serde_json::json!(null),
                 error: Some(format!("Unknown action: {name}")),
+                ..Default::default()
             })
         }
         fn list_tools(&self) -> Vec<FunctionDefinition> {
@@ -197,6 +198,7 @@
             success: true,
             data: serde_json::json!(null),
             error: None,
+            ..Default::default()
         }
     }
 

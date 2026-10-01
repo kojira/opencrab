@@ -19,6 +19,7 @@
                     success: true,
                     data: serde_json::json!({"tool": name}),
                     error: None,
+                    ..Default::default()
                 }
             }
             fn list_tools(&self) -> Vec<FunctionDefinition> {
@@ -104,6 +105,7 @@
                 success: true,
                 data: serde_json::json!({"tool": name}),
                 error: None,
+                ..Default::default()
             }
         }
         fn list_tools(&self) -> Vec<FunctionDefinition> {
@@ -230,6 +232,7 @@
                     // 変化のあるテキスト（連続同一文字だと tiktoken で潰れて上限に届かない）。
                     data: serde_json::json!({ "tool": name, "blob": "a1b2c3d4 ".repeat(250) }),
                     error: None,
+                    ..Default::default()
                 }
             }
             fn list_tools(&self) -> Vec<FunctionDefinition> {
@@ -465,6 +468,7 @@
                     success: true,
                     data: serde_json::json!({"blob": "Z".repeat(50_000)}),
                     error: None,
+                    ..Default::default()
                 }
             }
             fn list_tools(&self) -> Vec<FunctionDefinition> {
@@ -523,6 +527,7 @@
                     success: true,
                     data: serde_json::json!({"npub": "npub1ok", "nsec": "nsec1synthetic"}),
                     error: None,
+                    ..Default::default()
                 }
             }
             fn list_tools(&self) -> Vec<FunctionDefinition> {

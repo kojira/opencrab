@@ -25,6 +25,7 @@
                     success: true,
                     data: serde_json::json!(null),
                     error: None,
+                    ..Default::default()
                 }
             }
             fn list_tools(&self) -> Vec<FunctionDefinition> {
@@ -127,6 +128,7 @@
                 success: true,
                 data: serde_json::json!({ "list": "npub1abcdefgh ".repeat(7_000) }),
                 error: None,
+                ..Default::default()
             },
         );
 
@@ -219,6 +221,7 @@
                 success: true,
                 data: serde_json::json!({ "blob": "z".repeat(100_000) }),
                 error: None,
+                ..Default::default()
             },
         );
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -253,6 +256,7 @@
                 success: true,
                 data: serde_json::json!({"ok": true}),
                 error: None,
+                ..Default::default()
             },
         );
         let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);

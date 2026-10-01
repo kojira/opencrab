@@ -375,6 +375,7 @@ impl SkillEngine {
                 "Action '{}' is not authorized. Add '{}' to the skill's actions frontmatter to enable this capability.",
                 action_name, action_name
             )),
+            ..Default::default()
         }
     }
 }
