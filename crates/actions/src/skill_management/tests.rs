@@ -83,14 +83,15 @@ async fn agent_created_skill_is_denied_to_owner_turn() {
         "owner turn must NOT read an agent-planted skill body"
     );
 
-    // #352: 同じ Agent 権限のターンでも、既定では本文を読めない（fail-closed）。
-    // #335 の逆向き許可（弱いターンが読む）は #352 の露出ゲートと **AND** で重なる。
+    // D-1058: 同じ Agent 権限のターンでも、露出許可が無ければ本文を読めない（owner が要る）。
+    // #335 の逆向き許可（弱いターンが読む）は露出ゲートと **AND** で重なる。
     let denied_agent = ReadSkillAction
         .execute(&json!({ "name": "Planted" }), &agent_ctx)
         .await;
-    assert!(
-        !denied_agent.success,
-        "agent turn must NOT read a non-visible skill body (#352 default)"
+    assert_eq!(
+        denied_agent.error.as_deref(),
+        Some("skill 'Planted' requires owner"),
+        "agent turn must NOT read a non-visible skill body"
     );
 
     // オーナーが露出を許可すると、Agent ターンから本文を読める（#335 の逆向き許可が
@@ -141,13 +142,20 @@ async fn owner_created_skill_runs_in_owner_turn() {
     assert_eq!(ok.data.unwrap()["guidance"], "owner guidance");
 }
 
-// #352: オーナー作成スキル（agent_visible 既定 false）は、caller=Agent のターンからは
-// read_skill しても本文を渡さない。エラーメッセージは「存在しない」場合と **完全に同一**で、
-// 内部の事情（パス・構成・露出可否）を一切漏らさない。
+// D-1058: 露出許可（agent_visible 既定 false）の無い skill の本文は、オーナー等価
+// （Owner / CoAgent）のターンだけが読める。Agent / TrustedUser にはツールの owner_only と
+// 同じく「owner が要る」と返し、本文・パス等は一切渡さない。
 #[tokio::test]
-async fn agent_caller_cannot_read_non_visible_skill_body() {
+async fn non_owner_caller_cannot_read_non_visible_skill_body() {
     let (_dir, owner_ctx) = test_context();
     let agent_ctx = ctx_with_caller(&owner_ctx, CallerIdentity::Agent);
+    let trusted_ctx = ctx_with_caller(&owner_ctx, CallerIdentity::TrustedUser);
+    let co_agent_ctx = ctx_with_caller(
+        &owner_ctx,
+        CallerIdentity::CoAgent {
+            agent_id: "peer".to_string(),
+        },
+    );
 
     CreateMySkillAction
         .execute(
@@ -161,49 +169,97 @@ async fn agent_caller_cannot_read_non_visible_skill_body() {
         )
         .await;
 
-    // 既定 false なので Agent ターンには本文を渡さない。
-    let denied = ReadSkillAction
-        .execute(&json!({ "name": "Internal" }), &agent_ctx)
-        .await;
-    assert!(
-        !denied.success,
-        "agent turn must NOT read a non-visible body"
-    );
-
-    // 情報漏洩の核心: エラーは **存在しない場合と同一形式**の汎用メッセージのみで、
-    // 露出可否・パス・構成といった内部の事情を一切漏らさない。存在するのに隠された
-    // "Internal" の応答が、実在しない同名の応答（`skill not found: Internal`）と
-    // 文字列として一致することを固定する。
-    assert_eq!(
-        denied.error.as_deref(),
-        Some("skill not found: Internal"),
-        "hidden skill must return the same generic not-found message as a nonexistent one"
-    );
-    // ガードの本文（露出可否）を漏らす語が混ざっていないこと。
-    let err = denied.error.unwrap_or_default();
-    for leak in [
-        "agent_visible",
-        "visible",
-        "許可",
-        "露出",
-        "path",
-        "/Volumes",
-    ] {
-        assert!(
-            !err.contains(leak),
-            "error message leaks internal detail {leak:?}: {err}"
+    for ctx in [&agent_ctx, &trusted_ctx] {
+        let denied = ReadSkillAction
+            .execute(&json!({ "name": "Internal" }), ctx)
+            .await;
+        assert!(denied.data.is_none(), "caller {:?} got a body", ctx.caller);
+        assert_eq!(
+            denied.error.as_deref(),
+            Some("skill 'Internal' requires owner"),
+            "caller {:?}",
+            ctx.caller
         );
     }
 
-    // Owner ターンからは従来どおり読める（絞りは caller=Agent のみ）。
-    let ok = ReadSkillAction
-        .execute(&json!({ "name": "Internal" }), &owner_ctx)
-        .await;
-    assert!(ok.success);
+    for ctx in [&owner_ctx, &co_agent_ctx] {
+        let ok = ReadSkillAction
+            .execute(&json!({ "name": "Internal" }), ctx)
+            .await;
+        assert!(ok.success, "caller {:?} must read it", ctx.caller);
+    }
 }
 
-// #352: オーナーが agent_visible を立てた skill は caller=Agent のターンからも本文を読める。
-// Owner / CoAgent / TrustedUser は露出フラグに関わらず従来どおり読める。
+// D-1058: `owner-skills` はオーナー向け skill（露出許可なし）の名前と説明の一覧。オーナー等価の
+// ターンだけが引け、露出許可のある skill は含めない。名前順。
+#[tokio::test]
+async fn owner_skills_index_lists_non_visible_skills_for_owner_only() {
+    let (_dir, owner_ctx) = test_context();
+    let agent_ctx = ctx_with_caller(&owner_ctx, CallerIdentity::Agent);
+    let trusted_ctx = ctx_with_caller(&owner_ctx, CallerIdentity::TrustedUser);
+    let co_agent_ctx = ctx_with_caller(
+        &owner_ctx,
+        CallerIdentity::CoAgent {
+            agent_id: "peer".to_string(),
+        },
+    );
+    for (name, desc) in [
+        ("Zeta", "z desc"),
+        ("Alpha", "a desc"),
+        ("Public", "p desc"),
+    ] {
+        CreateMySkillAction
+            .execute(
+                &json!({
+                    "name": name,
+                    "description": desc,
+                    "situation_pattern": "s",
+                    "guidance": "g"
+                }),
+                &owner_ctx,
+            )
+            .await;
+    }
+    {
+        let conn = owner_ctx.db.lock().unwrap();
+        let mut row =
+            opencrab_db::queries::find_skill_by_name_any(&conn, &owner_ctx.agent_id, "Public")
+                .unwrap()
+                .unwrap();
+        row.agent_visible = true;
+        opencrab_db::queries::update_skill(&conn, &row).unwrap();
+    }
+
+    for ctx in [&owner_ctx, &co_agent_ctx] {
+        let ok = ReadSkillAction
+            .execute(&json!({ "name": OWNER_SKILLS_INDEX_NAME }), ctx)
+            .await;
+        assert!(ok.success, "caller {:?}", ctx.caller);
+        assert_eq!(
+            ok.data.unwrap()["skills"],
+            json!([
+                { "name": "Alpha", "description": "a desc" },
+                { "name": "Zeta", "description": "z desc" }
+            ])
+        );
+    }
+
+    for ctx in [&agent_ctx, &trusted_ctx] {
+        let denied = ReadSkillAction
+            .execute(&json!({ "name": OWNER_SKILLS_INDEX_NAME }), ctx)
+            .await;
+        assert!(denied.data.is_none());
+        assert_eq!(
+            denied.error.as_deref(),
+            Some("skill 'owner-skills' requires owner"),
+            "caller {:?}",
+            ctx.caller
+        );
+    }
+}
+
+// #352 / D-1058: オーナーが agent_visible を立てた skill は、オーナー以外（Agent / TrustedUser）
+// のターンからも本文を読める。
 #[tokio::test]
 async fn all_callers_read_skill_after_owner_grants_visibility() {
     let (_dir, owner_ctx) = test_context();

@@ -3,7 +3,9 @@ use super::prompt::build_agent_context;
 fn prompt() -> String {
     let conn = opencrab_db::init_memory().unwrap();
     let (p, _name) = build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
-    p
+    // D-1058: 末尾の（空の caller 部の）キャッシュ区切りは本文ではないので、節の比較から外す。
+    p.trim_end_matches(opencrab_llm_types::SYSTEM_SEGMENT_BREAK)
+        .to_string()
 }
 
 /// 空白（改行・連続空白）を 1 個の半角スペースへ畳み、前後を trim する。

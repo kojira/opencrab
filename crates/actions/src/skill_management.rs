@@ -242,6 +242,17 @@ impl Action for RestoreMySkillAction {
     }
 }
 
+/// オーナー向けスキルの index を引く予約名（D-1058）。system の skill 一覧には露出許可
+/// （`agent_visible`）の無い skill の名前を出さず、この名前の 1 行だけを置く。オーナー等価の
+/// ターンが `read_skill` でこの名前を引くと、その skill 群の名前と説明の一覧が返る。
+pub const OWNER_SKILLS_INDEX_NAME: &str = "owner-skills";
+
+/// オーナー等価でない caller が、露出許可の無い skill（とその index）を引いたときの拒否文。
+/// ツールの owner_only と同じく「権限が要る」と返す（D-1058）。
+fn owner_required(name: &str) -> ActionResult {
+    ActionResult::error(&format!("skill '{name}' requires owner"))
+}
+
 /// スキルの本文（行動指針）を名前で取得するアクション（段階的開示 #119）。
 ///
 /// システムプロンプトにはスキルの index（名前 + 説明）だけを載せ、詳細な本文
@@ -280,19 +291,33 @@ impl Action for ReadSkillAction {
             Ok(c) => c,
             Err(_) => return ActionResult::error("db lock failed"),
         };
+        // D-1058: 予約名はオーナー向け skill の index。実在 skill の解決より先に扱う。
+        if name == OWNER_SKILLS_INDEX_NAME {
+            if !ctx.caller.is_owner_equivalent() {
+                return owner_required(name);
+            }
+            let mut skills = match opencrab_db::queries::list_skills(&conn, &ctx.agent_id, true) {
+                Ok(skills) => skills,
+                Err(e) => return ActionResult::error(&e.to_string()),
+            };
+            skills.retain(|s| !s.agent_visible);
+            skills.sort_by(|a, b| a.name.cmp(&b.name));
+            let list: Vec<serde_json::Value> = skills
+                .iter()
+                .map(|s| json!({ "name": s.name, "description": s.description }))
+                .collect();
+            return ActionResult::success(json!({ "name": name, "skills": list }));
+        }
         match opencrab_db::queries::find_skill_by_name_any(&conn, &ctx.agent_id, name) {
             Ok(Some(s)) => {
-                // #352: caller=Agent のターン（素の Agent 権限で走る run。外部 Nostr の受信
-                // ターンが典型例だが判定軸は transport ではなく caller=Agent）には、オーナーが
-                // 露出を許可（`agent_visible`）した skill 以外は本文を渡さない。index 側
-                // （process.rs）と AND で二重化する — index を隠すだけでは名前を直打ちで
-                // read_skill されるため本文でも塞ぐ。#335 の may_exercise_skill ゲート（向きが逆）
-                // は残したまま両方を満たすときだけ本文を返す（既存ゲートを弱めない）。
-                //
-                // エラーメッセージは **存在しない場合（Ok(None)）と同一**にする。パス・構成・
-                // 露出可否といった内部の事情を一切漏らさない（要望の核心 / #352）。
-                if matches!(ctx.caller, CallerIdentity::Agent) && !s.agent_visible {
-                    return ActionResult::error(&format!("skill not found: {name}"));
+                // D-1058（#352 の露出制限を権限ゲートへ置き換え）: オーナーが露出を許可
+                // （`agent_visible`）していない skill の本文は、オーナー等価（Owner / CoAgent）の
+                // ターンだけに渡す。それ以外はツールの owner_only と同じく「owner が要る」と
+                // 返す。system の一覧はこの skill の名前を出さないので、名前を知る手段は
+                // オーナー等価ターンの `owner-skills` だけ。#335 の may_exercise_skill ゲート
+                // （向きが逆）はこの後に残し、両方を満たすときだけ本文を返す。
+                if !s.agent_visible && !ctx.caller.is_owner_equivalent() {
+                    return owner_required(name);
                 }
                 // #335: confused deputy 対策。read_skill は本文（行動指針）を渡す＝スキルの
                 // 「実行」入口。作成 caller より強いターン（例: 外部 Nostr の caller=Agent が

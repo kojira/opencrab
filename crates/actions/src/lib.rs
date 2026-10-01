@@ -60,6 +60,7 @@ pub use session_watch_policy::{
     SessionPolicyError, SessionWatchPolicy, WatchAllowSets, WatchAuthorStanding,
     AGREED_IMMEDIATE_KINDS, POLICY_CLASS_KEYS, WATCH_KIND_LABELS,
 };
+pub use skill_management::OWNER_SKILLS_INDEX_NAME;
 pub use subtask::{
     cancel_subtask, default_non_dispatch_tools, dispatch_settled, steer_subtask, CancelOutcome,
     NoopCompletionSink, SettleKind, SharedExecutor, SpawnedSubtask, SteerOutcome,

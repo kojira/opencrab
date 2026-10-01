@@ -436,8 +436,8 @@ pub async fn send_agent_message(
     // RESTは具体gateway接続を所有しないため、transport固有tool surfaceを注入しない。
     let gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> = None;
 
-    // 7. Build agent context. 本ターンの caller（上で resolve 済み）で index を絞る。
-    // 同じ caller を下の RunRequest にも載せる（index と実行権限を一致させる / #352）。
+    // 7. Build agent context. system prompt は caller に依らない（D-1058）。権限は下の
+    // RunRequest に載せる同じ caller で実行側が判定する。
     let (system_prompt, agent_name) = {
         let conn = state.db.lock().unwrap();
         process::build_agent_context(&conn, &id, &caller)
