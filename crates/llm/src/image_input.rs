@@ -129,21 +129,51 @@ fn decode_data_url(url: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// リダイレクトを手で追う上限（blossom 等は 302 で実体へ転送する）。
+const MAX_REDIRECTS: usize = 3;
+
 /// 画像 URL（http/https または `data:`）を取得して正規化する。
 ///
 /// SSRF 対策: ホストを解決して全 IP が公開アドレスであることを確認し、その IP に
-/// 固定して接続する。リダイレクトは無効。元画像は 20MB まで。
+/// 固定して接続する。リダイレクトは自動では追わず、転送先ごとに同じ検査をして最大
+/// [`MAX_REDIRECTS`] 回まで追う。元画像は 20MB まで。
 pub async fn fetch_image_data_url(url: &str) -> Result<NormalizedImage> {
     let url = url.trim();
     if url.starts_with("data:") {
         return normalize_image_bytes_blocking(decode_data_url(url)?).await;
     }
-    let parsed = reqwest::Url::parse(url).context("invalid image url")?;
-    let host = parsed
-        .host_str()
-        .context("image url has no host")?
-        .to_string();
-    let pinned = validate_public_url(&parsed).await?;
+    let mut current = reqwest::Url::parse(url).context("invalid image url")?;
+    for _ in 0..=MAX_REDIRECTS {
+        let resp = get_pinned(&current).await?;
+        if resp.status().is_redirection() {
+            let location = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .context("image redirect without Location")?;
+            current = current
+                .join(location)
+                .context("invalid image redirect location")?;
+            continue;
+        }
+        if !resp.status().is_success() {
+            anyhow::bail!("image download HTTP {}", resp.status());
+        }
+        if let Some(len) = resp.content_length() {
+            if len > MAX_SOURCE_BYTES as u64 {
+                anyhow::bail!("image too large ({len} bytes, max 20MB)");
+            }
+        }
+        let bytes = read_body_capped(resp, MAX_SOURCE_BYTES).await?;
+        return normalize_image_bytes_blocking(bytes).await;
+    }
+    anyhow::bail!("too many image redirects (max {MAX_REDIRECTS})")
+}
+
+/// 公開アドレス検査済みの IP に固定して 1 回だけ GET する（リダイレクトは追わない）。
+async fn get_pinned(url: &reqwest::Url) -> Result<reqwest::Response> {
+    let host = url.host_str().context("image url has no host")?.to_string();
+    let pinned = validate_public_url(url).await?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .connect_timeout(Duration::from_secs(10))
@@ -151,21 +181,11 @@ pub async fn fetch_image_data_url(url: &str) -> Result<NormalizedImage> {
         .resolve(&host, pinned)
         .build()
         .context("failed to build image http client")?;
-    let resp = client
-        .get(url)
+    client
+        .get(url.clone())
         .send()
         .await
-        .context("image download request failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("image download HTTP {}", resp.status());
-    }
-    if let Some(len) = resp.content_length() {
-        if len > MAX_SOURCE_BYTES as u64 {
-            anyhow::bail!("image too large ({len} bytes, max 20MB)");
-        }
-    }
-    let bytes = read_body_capped(resp, MAX_SOURCE_BYTES).await?;
-    normalize_image_bytes_blocking(bytes).await
+        .context("image download request failed")
 }
 
 /// 本文を読みながら上限を効かせる（Content-Length 無しでも全量を溜めない）。

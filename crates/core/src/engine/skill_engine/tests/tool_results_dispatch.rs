@@ -272,10 +272,10 @@
     }
 
 
-    /// D-1060: ツール結果の画像は直後の LLM 呼び出しにだけ載り、その次には載らない。
+    /// D-1060: ツール結果の画像は直後の LLM 呼び出しから、そのターンの終わりまで同じ位置に載る。
     /// 並列 tool_call では全 tool 結果の後ろに置き、結果 JSON に画像は入らない。
     #[tokio::test]
-    async fn tool_result_images_are_shown_only_on_the_next_request() {
+    async fn tool_result_images_stay_for_the_rest_of_the_turn() {
         use std::sync::{Arc, Mutex};
         let has_image = |messages: &[Message]| {
             messages.iter().any(|m| {
@@ -313,7 +313,14 @@
         assert_eq!(requests.len(), 3);
         assert!(!has_image(&requests[0]));
         assert!(has_image(&requests[1]), "next request must carry the image");
-        assert!(!has_image(&requests[2]), "image must not be resent");
+        assert!(has_image(&requests[2]), "image must stay until the turn ends");
+        let image_pos = |messages: &[Message]| {
+            messages.iter().position(|m| {
+                matches!(&m.content, Some(MessageContent::Multi(parts))
+                    if parts.iter().any(|p| matches!(p, opencrab_llm_types::ContentPart::ImageUrl { .. })))
+            })
+        };
+        assert_eq!(image_pos(&requests[1]), image_pos(&requests[2]), "same position for cache");
         let second = &requests[1];
         let last = second.last().unwrap();
         assert_eq!(last.role, Role::User);

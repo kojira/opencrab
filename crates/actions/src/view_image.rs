@@ -33,7 +33,7 @@ impl Action for ViewImageAction {
     }
 
     fn description(&self) -> &str {
-        "画像を見る。url（https）かワークスペース内の path を1つ渡すと、次の応答でその画像が見える。\
+        "画像を見る。url（https）かワークスペース内の path を1つ渡すと、次の応答からこのターンの終わりまでその画像が見える。\
          大きい画像は長辺1568pxに縮小される。"
     }
 
