@@ -1,9 +1,8 @@
 /// #923 実行ゲート不変の回帰ガード（可視≠実行可否）: ツール階層で常時集合の外に置いた
-/// owner-only ツール（`configure_llm_provider`）を、非 owner が `describe_tools` で活性化
-/// しようとしても — (1) describe_tools は policy 済みの effective 定義からしか schema を
-/// 引かないので unknown を返し可視化されない、(2) 仮に名前を記憶で呼んでも dispatch_inner の
-/// policy が従来どおり owner ゲートで拒否する。describe_tools が policy バイパスにならない
-/// ことを最外層（list_tools 可視性＋execute 実行）で pin する。
+/// owner-only ツール（`configure_llm_provider`）は、D-1056 以降 caller に依らず可視なので
+/// 非 owner でも `describe_tools` で schema を読み込める。それでも実行は dispatch_inner の
+/// policy が従来どおり owner ゲートで拒否する。describe_tools が実行ゲートのバイパスに
+/// ならないことを最外層（describe_tools / list_tools 可視性＋execute 実行）で pin する。
 #[tokio::test]
 async fn describe_tools_does_not_bypass_owner_gate_for_nonowner() {
     struct GwConfig;
@@ -39,44 +38,29 @@ async fn describe_tools_does_not_bypass_owner_gate_for_nonowner() {
     let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), actx)
         .with_gateway_actions(Arc::new(GwConfig));
 
-    // (1) 非 owner が describe_tools で活性化を試みる → unknown（loaded に入らない）。
+    // (1) 非 owner でも describe_tools で読み込める（可視性は caller に依らない / D-1056）。
     let d = agent_exec
         .execute(
             "describe_tools",
             &json!({"names": ["configure_llm_provider"]}),
         )
         .await;
-    assert!(
-        d.success,
-        "describe_tools 自体は成功する（合成 query ツール）"
-    );
-    let unknown = d.data["unknown"]
+    assert!(d.success, "describe_tools 自体は成功する（合成 query ツール）");
+    let loaded = d.data["loaded"]
         .as_array()
-        .map(|a| a.iter().any(|v| v == "configure_llm_provider"))
+        .map(|a| a.iter().any(|v| v["name"] == "configure_llm_provider"))
         .unwrap_or(false);
-    assert!(
-        unknown,
-        "非 owner には configure_llm_provider が unknown（可視化されない）: {:?}",
-        d.data
-    );
-    let loaded_empty = d.data["loaded"]
-        .as_array()
-        .map(|a| a.is_empty())
-        .unwrap_or(false);
-    assert!(
-        loaded_empty,
-        "owner-only ツールが loaded に入ってはならない"
-    );
+    assert!(loaded, "非 owner にも schema は見える: {:?}", d.data);
 
-    // (2) 活性化後も list_tools（投影）に出ない（可視化バイパスなし）。
+    // (2) 活性化後は list_tools（投影）にも出る。
     let names: Vec<String> = agent_exec
         .list_tools()
         .into_iter()
         .map(|t| t.name)
         .collect();
     assert!(
-        !names.iter().any(|n| n == "configure_llm_provider"),
-        "describe_tools 後も owner-only ツールが投影に出てはならない: {names:?}"
+        names.iter().any(|n| n == "configure_llm_provider"),
+        "describe_tools 後は投影に出る: {names:?}"
     );
 
     // (3) 名前を記憶で直接呼んでも dispatch_inner の policy が owner ゲートで拒否する。
@@ -245,10 +229,10 @@ async fn skill_and_learning_actions_gated_from_agent_caller() {
             !agent_exec.policy_allows(name),
             "caller=Agent が {name} を policy_allows で通してしまう（#351）"
         );
-        // 2. 可視性: モデルに見えていないこと。
+        // 2. 可視性: caller では絞らない（D-1056）。見えても 3. で実行は拒否される。
         assert!(
-            !agent_listed.iter().any(|n| n == name),
-            "caller=Agent の list_tools に {name} が出てしまう（#351）"
+            agent_listed.iter().any(|n| n == name),
+            "caller=Agent の list_tools にも {name} は載る（D-1056 / #351）"
         );
         // 3. 実行時強制: 名前指定の実行が拒否されること（記憶で名前を呼んでも素通し
         //    しない）。
@@ -369,10 +353,10 @@ async fn passthrough_actions_gated_from_agent_caller() {
             !agent_exec.policy_allows(name),
             "caller=Agent が {name} を policy_allows で通してしまう（#356）"
         );
-        // 2. 可視性: モデルに見えていないこと（gateway を注入しても policy で除外される）。
+        // 2. 可視性: caller では絞らない（D-1056）。見えても 3. で実行は拒否される。
         assert!(
-            !agent_listed.iter().any(|n| n == name),
-            "caller=Agent の list_tools に {name} が出てしまう（#356）"
+            agent_listed.iter().any(|n| n == name),
+            "caller=Agent の list_tools にも {name} は載る（D-1056 / #356）"
         );
         // 3. 実行時強制: 名前指定の実行が policy で拒否されること（記憶で名前を呼んでも
         //    素通ししない）。Unknown action ではなく policy 拒否であることまで見る。
@@ -460,10 +444,10 @@ async fn tag_actions_gated_from_agent_caller() {
             !agent_exec.policy_allows(name),
             "caller=Agent が {name} を policy_allows で通してしまう（#359）"
         );
-        // 2. 可視性: モデルに見えていないこと。
+        // 2. 可視性: caller では絞らない（D-1056）。見えても 3. で実行は拒否される。
         assert!(
-            !agent_listed.iter().any(|n| n == name),
-            "caller=Agent の list_tools に {name} が出てしまう（#359）"
+            agent_listed.iter().any(|n| n == name),
+            "caller=Agent の list_tools にも {name} は載る（D-1056 / #359）"
         );
         // 3. 実行時強制: 名前指定の実行が policy で拒否されること（記憶で名前を呼んでも
         //    素通ししない）。実在アクションなので「引数不足エラー」ではなく policy 拒否で
@@ -545,10 +529,10 @@ async fn memory_unit_actions_gated_from_agent_caller() {
             !agent_exec.policy_allows(name),
             "caller=Agent が {name} を policy_allows で通してしまう（#379）"
         );
-        // 2. 可視性: モデルに見えていない。
+        // 2. 可視性: caller では絞らない（D-1056）。見えても 3. で実行は拒否される。
         assert!(
-            !agent_listed.iter().any(|n| n == name),
-            "caller=Agent の list_tools に {name} が出てしまう（#379）"
+            agent_listed.iter().any(|n| n == name),
+            "caller=Agent の list_tools にも {name} は載る（D-1056 / #379）"
         );
         // 3. 実行時強制: 名前指定の実行が policy 拒否になる（実在アクションなので
         //    「引数不足」ではなく policy 拒否であることまで見る）。

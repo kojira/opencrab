@@ -146,6 +146,20 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
     run_v3_said_less_turn(sink, ev.caller.clone(), ev.reply_target.clone()).await;
 }
 
+/// gateway の `system_context`（Nostr の応答文脈・オーナー鍵・heartbeat 指示）を system の
+/// 末尾セグメント（リクエスト毎に変わる部分）として付ける（D-1056）。前の固定部・caller 部の
+/// プロンプトキャッシュを壊さないよう、区切りの後ろへ置く。
+pub(crate) fn with_system_context(system: String, system_context: &str) -> String {
+    if system_context.is_empty() {
+        system
+    } else {
+        format!(
+            "{system}{}{system_context}",
+            opencrab_core::SYSTEM_SEGMENT_BREAK
+        )
+    }
+}
+
 /// 発端 said の無い自己ターン（resume 継続 / #925 heartbeat）を 1 本駆動する共有実装。
 ///
 /// `caller` は実行権限（resume は spawn 時の caller・heartbeat は `Owner`）。`reply_target` は
@@ -174,11 +188,7 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
             )
             .await;
             let (system, name) = sink.runtime.build_agent_context(&sink.agent_id, &caller);
-            let system = if sink.system_context.is_empty() {
-                system
-            } else {
-                format!("{system}\n\n{}", sink.system_context)
-            };
+            let system = with_system_context(system, &sink.system_context);
             let registry = sink.runtime.subtask_registry_for(&sink.session_id);
             let dispatch: Arc<dyn SubtaskCompletionSink> = Arc::new(sink.clone());
             let only_speaker = sink.only_speaker;
@@ -372,6 +382,18 @@ mod tests {
     use crate::ids::session_id_for_binding;
     use opencrab_actions::{CallerIdentity, NoopCompletionSink, SubtaskRegistries};
     use std::sync::Arc;
+
+    /// D-1056: gateway の system_context は区切りの後ろ（末尾セグメント）へ付き、
+    /// 固定部・caller 部（skill index）の本文を変えない。空なら何も付けない。
+    #[test]
+    fn system_context_is_appended_as_tail_segment() {
+        let b = opencrab_core::SYSTEM_SEGMENT_BREAK;
+        let system = format!("stable{b}skills");
+        let joined = with_system_context(system.clone(), "nostr reply context");
+        let segments: Vec<&str> = joined.split(b).collect();
+        assert_eq!(segments, vec!["stable", "skills", "nostr reply context"]);
+        assert_eq!(with_system_context(system.clone(), ""), system);
+    }
 
     #[test]
     fn subtask_settled_during_parent_turn_allows_final_completed_target() {

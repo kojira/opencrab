@@ -32,12 +32,15 @@ impl SkillEngine {
         // §2.7: functions はループ内で毎イテレーション list_tools を取り直して組む（活性集合を
         // 反映）。ここでの事前取得は結果を捨てる死んだ呼び出しだったので置かない。
 
+        // D-1056: 区切り付き system を 1 本に戻し、区切り位置はキャッシュ用 metadata へ。
+        let (system_context, system_cache_segments) =
+            opencrab_llm_types::join_system_segments(system_context);
         let InitialTurn {
             mut messages,
             ledger: mut turn_ledger,
             governor: mut turn_gov,
         } = initialize_turn(
-            system_context,
+            &system_context,
             user_message,
             image_urls,
             (self.conversation_high, self.conversation_low),
@@ -158,14 +161,10 @@ impl SkillEngine {
                 max_tokens: self.max_output_tokens,
                 stop: None,
                 stream: None,
-                metadata: {
-                    let mut m: std::collections::HashMap<String, serde_json::Value> =
-                        Default::default();
-                    if self.web_search {
-                        m.insert("web_search".to_string(), serde_json::json!(true));
-                    }
-                    m
-                },
+                metadata: run_helpers::request_metadata(
+                    self.web_search,
+                    system_cache_segments.as_deref(),
+                ),
                 agent_id: None,
                 reasoning_effort: self.reasoning_effort.clone(),
             };

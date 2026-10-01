@@ -9,6 +9,6 @@ pub use types::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
     EngineResult, ExplicitTermination, FoldedInbound, FunctionDefinition, LiveInboundSource,
     LlmCallLog, LlmClient, LlmExchange, LlmExchangeLog, ProviderToolHistory, ToolCall,
-    ToolDispatcher,
+    ToolDispatcher, SYSTEM_SEGMENT_BREAK,
 };
 pub use xml_parser::parse_xml_tool_calls;

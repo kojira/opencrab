@@ -190,7 +190,7 @@ impl BridgedExecutor {
             .get_definitions(&[])
             .into_iter()
             .filter(|definition| {
-                self.policy_allows(&definition.name) && self.run_allows(&definition.name)
+                self.visibility_allows(&definition.name) && self.run_allows(&definition.name)
             })
             .map(|definition| {
                 let class = self.tool_class_index.get(&definition.name).copied();
@@ -215,7 +215,7 @@ impl BridgedExecutor {
 
         if let Some(ref gateway) = self.gateway_actions {
             for definition in gateway.definitions() {
-                if !self.policy_allows(&definition.name) || !self.run_allows(&definition.name) {
+                if !self.visibility_allows(&definition.name) || !self.run_allows(&definition.name) {
                     continue;
                 }
                 let class = self.tool_class_index.get(&definition.name).copied();
@@ -233,7 +233,7 @@ impl BridgedExecutor {
 
         if let Some(ref mcp) = self.mcp_actions {
             for definition in mcp.definitions() {
-                if !self.policy_allows(&definition.name) || !self.run_allows(&definition.name) {
+                if !self.visibility_allows(&definition.name) || !self.run_allows(&definition.name) {
                     continue;
                 }
                 let class = self.tool_class_index.get(&definition.name).copied();
@@ -332,23 +332,22 @@ impl BridgedExecutor {
         )
     }
 
-    /// このコンテキスト（caller/depth）で name が可視・実行可能か（#45）。
-    /// list_tools と dispatch_inner が同一のポリシー判定を共有するための述語。
+    /// このコンテキスト（caller/depth）で name が実行可能か（#45）。`dispatch_inner` の
+    /// 拒否と同じ判定をテストから引くための述語。
+    #[cfg(test)]
     pub(super) fn policy_allows(&self, name: &str) -> bool {
         let policy = tool_policy(name);
-        if policy.owner_only && !self.caller_is_owner() {
-            return false;
-        }
-        if policy.trusted_only && !self.caller_is_trusted() {
-            return false;
-        }
-        if self.depth >= 1 && self.is_blocked_in_subengine(name) {
-            return false;
-        }
-        if self.depth >= MAX_DEPTH && policy.depth_capped {
-            return false;
-        }
-        true
+        (!policy.owner_only || self.caller_is_owner())
+            && (!policy.trusted_only || self.caller_is_trusted())
+            && self.visibility_allows(name)
+    }
+
+    /// LLM へ見せるか（D-1056）。caller（owner_only / trusted_only）では絞らない: tools は
+    /// プロンプトキャッシュの先頭に来るので、caller ごとに変わると後続のキャッシュが全て
+    /// 外れる。caller の権限は `dispatch_inner` が実行時に拒否する。depth 系は残す。
+    pub(super) fn visibility_allows(&self, name: &str) -> bool {
+        !(self.depth >= 1 && self.is_blocked_in_subengine(name))
+            && !(self.depth >= MAX_DEPTH && tool_policy(name).depth_capped)
     }
 
     /// §2.7 describe_tools 実体: 指定名の schema（policy 済み effective 定義から）を返し、

@@ -78,6 +78,10 @@ pub fn build_agent_context(
         .map(|a| a.instructions.clone())
         .unwrap_or_default();
 
+    // D-1056: skill index は caller で絞られる（#352）ので、固定部ではなく caller 依存部
+    // （system の 2 番目のセグメント）へ置く。並びは名前順で決定的にする（使用回数順だと
+    // 使うたびに並びが変わり、プロンプトキャッシュが外れる）。
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
     let skills_text = if skills.is_empty() {
         String::new()
     } else {
@@ -87,7 +91,8 @@ pub fn build_agent_context(
             .collect();
         // index（名前 + 説明）だけを載せ、本文は read_skill で必要時に掘り下げさせる（#119）。
         format!(
-            "\n\nYour skills (index only — call read_skill(name) to get a skill's full body):\n{}",
+            "{}Your skills (index only — call read_skill(name) to get a skill's full body):\n{}",
+            opencrab_llm_types::SYSTEM_SEGMENT_BREAK,
             list.join("\n")
         )
     };
@@ -190,7 +195,7 @@ pub fn build_agent_context(
          revises the criteria.\n\
          - Trivial single-message replies do not need a ledger entry.\n\
          \n\
-         {skills_text}{character_section}{instructions_section}{curated_section}",
+         {character_section}{instructions_section}{curated_section}{skills_text}",
     );
 
     (prompt, agent_name)

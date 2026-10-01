@@ -67,21 +67,56 @@ impl opencrab_llm::traits::LlmProvider for CapturingStub {
         &self,
         request: opencrab_llm::message::ChatRequest,
     ) -> anyhow::Result<opencrab_llm::message::ChatResponse> {
-        let names = request
-            .functions
-            .clone()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|f| f.name)
-            .collect::<Vec<_>>();
-        self.seen.lock().unwrap().push(names);
+        // D-1056: 可視性は caller に依らないので、実行 caller は「owner_only の ws_read を
+        // 実際に呼んだ結果」で観測する。1 回目は ws_read を呼び、2 回目にその tool 結果を
+        // `tool_result:<本文>` として記録して終える。
+        let tool_result = request.messages.iter().rev().find_map(|m| {
+            (m.role == opencrab_llm::message::Role::Tool).then(|| match &m.content {
+                Some(opencrab_llm::message::MessageContent::Text(t)) => t.clone(),
+                _ => String::new(),
+            })
+        });
+        let message = match tool_result {
+            Some(result) => {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push(vec![format!("tool_result:{result}")]);
+                opencrab_llm::message::Message::assistant("done\nNO_REPLY")
+            }
+            None => {
+                let names = request
+                    .functions
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|f| f.name)
+                    .collect::<Vec<_>>();
+                self.seen.lock().unwrap().push(names);
+                let mut m = opencrab_llm::message::Message::assistant("");
+                m.tool_calls = Some(vec![opencrab_llm::message::ToolCall {
+                    id: "call-ws-read".to_string(),
+                    call_type: "function".to_string(),
+                    function: opencrab_llm::message::FunctionCall {
+                        name: "ws_read".to_string(),
+                        arguments: r#"{"path":"x.txt"}"#.to_string(),
+                    },
+                }]);
+                m
+            }
+        };
+        let finish = if message.tool_calls.is_some() {
+            opencrab_llm::message::FinishReason::ToolCalls
+        } else {
+            opencrab_llm::message::FinishReason::Stop
+        };
         Ok(opencrab_llm::message::ChatResponse {
             id: "resp-1".to_string(),
             model: request.model,
             choices: vec![opencrab_llm::message::Choice {
                 index: 0,
-                message: opencrab_llm::message::Message::assistant("done\nNO_REPLY"),
-                finish_reason: Some(opencrab_llm::message::FinishReason::Stop),
+                message,
+                finish_reason: Some(finish),
             }],
             usage: Default::default(),
             created: 0,

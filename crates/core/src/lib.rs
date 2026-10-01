@@ -48,7 +48,7 @@ pub use engine::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
     EngineResult, ExplicitTermination, FoldedInbound, FunctionDefinition, LiveInboundSource,
     LlmCallLog, LlmClient, LlmExchange, LlmExchangeLog, ProviderToolHistory, SkillEngine, ToolCall,
-    ToolDispatcher,
+    ToolDispatcher, SYSTEM_SEGMENT_BREAK,
 };
 pub use heartbeat::HeartbeatConfig;
 pub use identity::Identity;

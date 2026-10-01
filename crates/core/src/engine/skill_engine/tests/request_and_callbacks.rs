@@ -272,6 +272,55 @@
         assert_eq!(*seen2.lock().unwrap(), Some(None));
     }
 
+    /// D-1056: 区切り付き system はプロバイダへ区切り文字を残さず 1 本で届き、固定部・caller 部の
+    /// 終端オフセットが metadata に載る。区切りが無ければ metadata キーは付かない。
+    #[tokio::test]
+    async fn system_segments_are_joined_and_offsets_reach_the_request() {
+        use std::sync::Mutex;
+
+        type Seen = Arc<Mutex<Option<(String, Option<serde_json::Value>)>>>;
+        struct RecordingLlm {
+            seen: Seen,
+        }
+        #[async_trait]
+        impl LlmClient for RecordingLlm {
+            async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+                let system = request
+                    .messages
+                    .iter()
+                    .find(|m| m.role == Role::System)
+                    .map(message_plain_text)
+                    .unwrap_or_default();
+                let segments = request.metadata.get("system_cache_segments").cloned();
+                *self.seen.lock().unwrap() = Some((system, segments));
+                Ok(ChatResponse::text("ok"))
+            }
+        }
+        let run = |system: String| async move {
+            let seen: Seen = Arc::new(Mutex::new(None));
+            let engine = SkillEngine::new(
+                Box::new(RecordingLlm { seen: seen.clone() }),
+                Box::new(MockExecutor::new()),
+                10,
+            );
+            engine.run(&system, "hi", "test-model").await.unwrap();
+            let got = seen.lock().unwrap().take().unwrap();
+            got
+        };
+
+        let b = crate::SYSTEM_SEGMENT_BREAK;
+        let (system, segments) = run(format!("stable{b}skills{b}nostr")).await;
+        assert_eq!(system, "stable\n\nskills\n\nnostr");
+        assert!(!system.contains(b));
+        let ends: Vec<usize> = serde_json::from_value(segments.unwrap()).unwrap();
+        assert_eq!(&system[..ends[0]], "stable");
+        assert_eq!(&system[..ends[1]], "stable\n\nskills");
+
+        let (system, segments) = run("plain".to_string()).await;
+        assert_eq!(system, "plain");
+        assert!(segments.is_none());
+    }
+
     #[tokio::test]
     async fn test_single_tool_call() {
         let llm = MockLlm::new(vec![

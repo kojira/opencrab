@@ -50,6 +50,7 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                     if !pconfig.reasoning_effort.is_empty() {
                         p = p.with_reasoning_effort(&pconfig.reasoning_effort);
                     }
+                    p = p.with_anthropic_cache_control(pconfig.anthropic_cache_control);
                     Some(Arc::new(p))
                 }
             }

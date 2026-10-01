@@ -126,6 +126,9 @@ pub struct OpenAiProvider {
     /// テレメトリ用の表示名。ルーティングキーは router 登録時に別途決まるため、
     /// これは接続先を人間に見せるためのラベルにすぎない（既定は形式名 "openai"）。
     name: String,
+    /// Anthropic のプロンプトキャッシュ目印を載せるか（D-1056）。hermit-shell のように
+    /// OpenAI 形式を Anthropic へ中継する接続先だけで有効にする（本物の OpenAI は 400）。
+    anthropic_cache_control: bool,
 }
 
 impl OpenAiProvider {
@@ -137,7 +140,14 @@ impl OpenAiProvider {
             org_id: None,
             reasoning_effort: None,
             name: "openai".to_string(),
+            anthropic_cache_control: false,
         }
+    }
+
+    /// Anthropic のプロンプトキャッシュ目印を載せる（D-1056。hermit 向け）。
+    pub fn with_anthropic_cache_control(mut self, enabled: bool) -> Self {
+        self.anthropic_cache_control = enabled;
+        self
     }
 
     /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
@@ -181,7 +191,7 @@ impl OpenAiProvider {
     }
 
     /// Build the JSON body for a chat completion request.
-    fn build_request_body(&self, request: &ChatRequest) -> Value {
+    pub(super) fn build_request_body(&self, request: &ChatRequest) -> Value {
         let mut body = serde_json::json!({
             "model": request.model,
             "messages": super::openai_compat::messages_to_json(&request.messages),
@@ -252,6 +262,9 @@ impl OpenAiProvider {
                     });
                 }
             }
+        }
+        if self.anthropic_cache_control {
+            super::anthropic_cache_markers::apply(&mut body, request);
         }
 
         body

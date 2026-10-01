@@ -120,7 +120,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/bridge/executor.rs",
-      "line": 433,
+      "line": 432,
       "snippet": "\"action '{name}' requires a trusted caller (owner/co_agent/trusted_user)\"",
       "classification": "production-violation",
       "violation": "V11",
@@ -1050,7 +1050,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/turn.rs",
-      "line": 140,
+      "line": 136,
       "snippet": "channel_id: Some(&address),",
       "classification": "production-violation",
       "violation": "V11",

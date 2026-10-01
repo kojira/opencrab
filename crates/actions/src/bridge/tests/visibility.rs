@@ -297,8 +297,11 @@ fn test_list_tools_agent_cannot_see_skill_actions() {
     let names = policy_visible_names(&executor);
     let has = |n: &str| names.iter().any(|x| x == n);
 
-    assert!(!has("create_skill"), "Agent should NOT see create_skill");
-    assert!(!has("execute_skill"), "Agent should NOT see execute_skill");
+    // D-1056: 可視性は caller で絞らない。実行は trusted ゲートで拒否される。
+    assert!(has("create_skill"), "Agent sees create_skill (D-1056)");
+    assert!(has("execute_skill"), "Agent sees execute_skill (D-1056)");
+    assert!(!executor.policy_allows("create_skill"));
+    assert!(!executor.policy_allows("execute_skill"));
     assert!(
         has("gw_action_a"),
         "Agent should still see regular gateway actions"
@@ -386,13 +389,16 @@ async fn resumed_turn_keeps_owner_and_trusted_tools() {
         "resume 後に owner_only のツールが消えている: {names:?}"
     );
 
-    // 対照: 最小権限へ降格すると同じツールが丸ごと消える（= このバグの実害）。
+    assert!(resumed.policy_allows("create_skill"));
+    assert!(resumed.policy_allows("update_instructions"));
+
+    // 対照: 最小権限へ降格すると同じツールが実行できなくなる（= このバグの実害）。
+    // D-1056 以降は可視性が caller に依らないので、実行可否で見る。
     let (_dir2, ctx2) = test_context_with_caller(CallerIdentity::Agent);
     let demoted = BridgedExecutor::new(ActionDispatcher::new(), ctx2)
         .with_gateway_actions(Arc::new(MockGatewayActionsWithSkills));
-    let demoted_names: Vec<String> = policy_visible_names(&demoted);
-    assert!(!demoted_names.iter().any(|n| n == "create_skill"));
-    assert!(!demoted_names.iter().any(|n| n == "update_instructions"));
+    assert!(!demoted.policy_allows("create_skill"));
+    assert!(!demoted.policy_allows("update_instructions"));
 }
 
 // ---- owner_only_actions filtering ----
@@ -423,8 +429,8 @@ fn test_list_tools_agent_cannot_see_update_instructions() {
     );
 }
 
-/// `configure_llm_provider`（#118）は owner 限定。gateway が定義を出しても
-/// 非 owner には可視化されず、名前指定の実行も dispatch で拒否されること。
+/// `configure_llm_provider`（#118）は owner 限定。D-1056 以降は非 owner にも可視だが、
+/// 名前指定の実行は dispatch で拒否されること。
 #[tokio::test]
 async fn test_configure_llm_provider_is_owner_only() {
     struct GwConfig;
@@ -456,16 +462,15 @@ async fn test_configure_llm_provider_is_owner_only() {
         }
     }
 
-    // Agent: 一覧に出ず、名前指定の実行も owner ゲートで拒否される。
+    // Agent: 一覧には出る（D-1056）が、名前指定の実行は owner ゲートで拒否される。
     let (_d, actx) = test_context_with_caller(CallerIdentity::Agent);
     let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), actx)
         .with_gateway_actions(Arc::new(GwConfig));
-    // #923: owner-only 可視性は narrowing 前の policy 層で検証する。
     assert!(
-        !policy_visible_names(&agent_exec)
+        policy_visible_names(&agent_exec)
             .iter()
             .any(|n| n == "configure_llm_provider"),
-        "Agent must NOT see configure_llm_provider"
+        "Agent sees configure_llm_provider (D-1056)"
     );
     let r = agent_exec
         .execute("configure_llm_provider", &json!({"provider": "acp"}))
