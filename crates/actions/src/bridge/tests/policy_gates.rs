@@ -189,6 +189,9 @@ const SKILL_LEARNING_TRUSTED_ONLY: &[&str] = &[
     "learn_from_experience",
     "learn_from_peer",
     "reflect_and_learn",
+    // スキルを外す/戻す（棚の書き換え）も同じゲート。
+    "retire_my_skill",
+    "restore_my_skill",
 ];
 
 /// #351: スキル生成（`create_my_skill`）と自律学習（`learn_from_experience` /

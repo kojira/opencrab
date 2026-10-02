@@ -10514,6 +10514,34 @@
         },
         "result": {
           "data": null,
+          "error": "rejected: action 'restore_my_skill' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "restore_my_skill"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'retire_my_skill' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "retire_my_skill"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
           "error": "rejected: action 'retract_memory_core' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
