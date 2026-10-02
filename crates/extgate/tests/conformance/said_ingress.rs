@@ -165,9 +165,11 @@ async fn gateway_context_and_reply_target_reach_storage_and_turn() {
         .unwrap()
         .last()
         .is_some_and(|prompt| prompt.contains("gateway supplied context")));
+    // D-1067: said の reply_target は「受信発言が指す先」（表示用メタ）で、ターンの既定
+    // 返信先ではない。既定返信先は常にターンの起点（said の origin）。
     assert_eq!(
         h.runtime.reply_targets.lock().unwrap().last().cloned(),
-        Some(Some("opaque:reply:42".to_string()))
+        Some(Some("context-origin".to_string()))
     );
 
     let metadata: String = h

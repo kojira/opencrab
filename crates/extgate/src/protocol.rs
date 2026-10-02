@@ -253,7 +253,8 @@ pub struct Said {
     pub start_turn: bool,
     /// Optional gateway-provided system context. Core treats it as opaque text.
     pub system_context: Option<String>,
-    /// Optional external reply reference, persisted without interpretation.
+    /// Optional reference to what the inbound message itself points at, persisted without
+    /// interpretation for conversation display. Not the turn's reply destination (D-1067).
     pub reply_target: Option<String>,
     /// Restrict live inbound folding to this speaker without naming a platform.
     pub only_speaker: bool,

@@ -245,7 +245,9 @@ pub fn process_said<R: AgentRuntime>(
             &session_id,
             said.system_context.as_deref().unwrap_or(""),
             Some(seq),
-            said.reply_target.as_deref().or(Some(said.origin.as_str())),
+            // D-1067: 既定返信先はターンの起点（受信発言そのもの）。said.reply_target は
+            // 受信発言が指す先（会話表示用メタ）なので返信先に使わない。
+            Some(said.origin.as_str()),
         );
     }
     Ok(SaidOutcome { seq: Some(seq) })
