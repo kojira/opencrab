@@ -18,6 +18,7 @@ use crate::config::{
     InstanceConfig, InstancePlacement, WatchFilter, WatchPlacement,
 };
 use crate::dedup::SeenEvents;
+use crate::follows::SharedAccess;
 use crate::harness::HarnessOverrides;
 use crate::map::{
     bundle_id, classify_route, map_event, normalize_author_id, parse_watch_line, BundlePlace, Lane,
@@ -121,7 +122,8 @@ pub fn spawn_instance(
         cfg,
         secret,
         nostaro_bin,
-        post_config,
+        post_config.clone(),
+        crate::follows::following_out_path(&post_config, &place.instance_id),
         metrics,
         seen,
         overrides,
@@ -146,10 +148,14 @@ fn supervise_lanes(
     secret: Option<Arc<String>>,
     nostaro_bin: PathBuf,
     post_config: PathBuf,
+    following_out: PathBuf,
     metrics: Arc<SaidMetrics>,
     seen: Arc<SeenEvents>,
     overrides: HarnessOverrides,
 ) {
+    // admission が読む access。store 由来の固定分にフォローリスト（kind:3）を定期反映する。
+    let base_access = cfg.access.clone();
+    let access: SharedAccess = Arc::new(std::sync::RwLock::new(base_access.clone()));
     tokio::spawn(async move {
         loop {
             wait_until_bound(&client, &address).await;
@@ -165,7 +171,19 @@ fn supervise_lanes(
                 seen.clone(),
                 cancel.clone(),
                 overrides.fake_watch.clone(),
+                access.clone(),
             );
+            if overrides.fake_watch.is_none() {
+                handles.push(crate::follows::spawn_refresher(
+                    access.clone(),
+                    base_access.clone(),
+                    nostaro_bin.clone(),
+                    post_config.clone(),
+                    secret.clone(),
+                    cfg.self_pubkey.clone(),
+                    following_out.clone(),
+                ));
+            }
             // core からの say（返信本文）を消費して nostaro post で publish する consumer。
             handles.push(spawn_say_consumer(
                 client.clone(),
@@ -265,6 +283,10 @@ async fn wait_until_unbound(client: &InstanceClient, address: &str) {
     }
 }
 
+fn snapshot(access: &SharedAccess) -> AccessConfig {
+    access.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// default(メンション)車線は常設。watch は追加車線。
 struct LaneSpawn {
     lane: Lane,
@@ -300,6 +322,7 @@ fn start_lanes(
     seen: Arc<SeenEvents>,
     cancel: Arc<Notify>,
     fake_watch: Option<PathBuf>,
+    access: SharedAccess,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     plan_lane_spawns(&cfg)
         .into_iter()
@@ -311,7 +334,7 @@ fn start_lanes(
                 cfg.relays.clone(),
                 planned.filter,
                 cfg.self_pubkey.clone(),
-                cfg.access.clone(),
+                access.clone(),
                 planned.watch,
                 secret.clone(),
                 nostaro_bin.clone(),
@@ -332,7 +355,7 @@ fn spawn_lane(
     relays: Vec<String>,
     filter: WatchFilter,
     self_pubkey: String,
-    access: AccessConfig,
+    access: SharedAccess,
     watch: Option<WatchPlacement>,
     secret: Option<Arc<String>>,
     nostaro_bin: PathBuf,
@@ -371,7 +394,7 @@ fn spawn_lane(
                 let self_pubkey = self_pubkey.clone();
                 let metrics = metrics.clone();
                 let seen = seen.clone();
-                let access = access.clone();
+                let access = snapshot(&access);
                 tokio::spawn(async move {
                     handle_line(
                         &client,
@@ -414,7 +437,7 @@ fn spawn_lane(
                     &address,
                     &lane,
                     &self_pubkey,
-                    &access,
+                    &snapshot(&access),
                     beyond,
                     &pending,
                     &metrics,

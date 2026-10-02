@@ -5,6 +5,7 @@ pub mod admission;
 pub mod config;
 pub mod daemon;
 pub mod dedup;
+pub mod follows;
 pub mod harness;
 pub mod map;
 pub mod ops;
