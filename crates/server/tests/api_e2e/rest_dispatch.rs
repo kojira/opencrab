@@ -56,13 +56,8 @@ async fn test_rest_message_dispatches_tool_as_background_subtask() {
         id: "tc-dispatch-1".to_string(),
         call_type: "function".to_string(),
         function: FunctionCall {
-            name: "learn_from_experience".to_string(),
-            arguments: serde_json::json!({
-                "skill_name": "background_work",
-                "description": "d",
-                "situation_pattern": "s",
-                "guidance": "g"
-            })
+            name: "summarize_and_save".to_string(),
+            arguments: serde_json::json!({"content": "c", "filename": "notes/dispatch.md"})
             .to_string(),
         },
     }]);

@@ -20,7 +20,7 @@ pub struct BridgedExecutor {
     /// MCP ツール源（`GatewayActions` 実装）。gateway_actions とは別スロット
     /// （MCP は全ターンで利用可、gateway は transport 毎で単数のため）。
     mcp_actions: Option<Arc<dyn GatewayActions>>,
-    depth: u32,
+    pub(super) depth: u32,
     tool_event_sink: Option<Arc<dyn ToolEventSink>>,
     /// この run を起こした inbound メッセージの返信先（gateway 不透明 token / #158 S1）。
     /// `gateway_call_context` が `GatewayCallContext.reply_target` に載せ、宛先引数を
@@ -273,7 +273,7 @@ impl BridgedExecutor {
     /// 許可（無制限）。`Some` のときは集合に載る名前だけを許す。`policy_allows`（caller/depth
     /// ゲート）とは独立の**追加**述語で、`list_tools`（可視）と `dispatch_inner`（実行）の
     /// 両方が同じこの述語を通すことで「見えるが呼べない / 見えないが呼べる」の食い違いを防ぐ。
-    fn run_allows(&self, name: &str) -> bool {
+    pub(super) fn run_allows(&self, name: &str) -> bool {
         match &self.tool_allowlist {
             None => true,
             Some(set) => set.contains(name),
@@ -316,14 +316,14 @@ impl BridgedExecutor {
         }
     }
 
-    fn caller_is_owner(&self) -> bool {
+    pub(super) fn caller_is_owner(&self) -> bool {
         // #485: co_agent は owner 等価（オーナー指示 2026-08-10。#330 を覆す）。owner 判定の
         // 唯一の源は `CallerIdentity::is_owner_equivalent`。OWNER_ONLY_ACTIONS（execute_shell /
         // ws_* / configure_* / (add|remove)_allowed_command 等）の可視性・実行の双方がここを通る。
         self.context.caller.is_owner_equivalent()
     }
 
-    fn caller_is_trusted(&self) -> bool {
+    pub(super) fn caller_is_trusted(&self) -> bool {
         matches!(
             self.context.caller,
             crate::traits::CallerIdentity::Owner
@@ -426,34 +426,8 @@ impl BridgedExecutor {
             error: Some(format!("{REJECTION_CODE_PREFIX}{msg}")),
             ..Default::default()
         };
-        let policy = tool_policy(name);
-        if policy.owner_only && !self.caller_is_owner() {
-            return reject(format!("action '{name}' requires owner"));
-        }
-        if policy.trusted_only && !self.caller_is_trusted() {
-            return reject(format!(
-                "action '{name}' requires a trusted caller (owner/co_agent/trusted_user)"
-            ));
-        }
-        if self.depth >= 1 && self.is_blocked_in_subengine(name) {
-            return reject(format!(
-                "action '{name}' is not available in sub-engines (depth {})",
-                self.depth
-            ));
-        }
-        if self.depth >= MAX_DEPTH && policy.depth_capped {
-            return reject(format!(
-                "{name} is not available at depth {} (max nesting: {MAX_DEPTH})",
-                self.depth
-            ));
-        }
-        // この run の許可リスト（#368）: caller/depth ゲートを通っても、許可リストの外なら
-        // 実行を拒否する。MCP/dispatcher/gateway のどのスロットへ振り分ける**前**に効かせる
-        // ことで、全スロットを 1 箇所で覆う（見えないが呼べる、を塞ぐ）。
-        if !self.run_allows(name) {
-            return reject(format!(
-                "action '{name}' is not available in this run (tool allowlist)"
-            ));
+        if let Some(msg) = self.gate_rejection(name) {
+            return reject(msg);
         }
 
         // MCP ツール（mcp__ プレフィックス）は MCP プロバイダへ振り分ける。gateway が
@@ -762,6 +736,10 @@ impl ActionExecutor for BridgedExecutor {
             }
         }
         set
+    }
+
+    fn rejects_before_run(&self, name: &str) -> bool {
+        self.gate_rejection(name).is_some()
     }
 
     /// 発話クラス（撃ちっぱなし・§3.3.1 C4）のツール名集合。索引から

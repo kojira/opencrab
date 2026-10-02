@@ -260,13 +260,8 @@ async fn test_rest_sink_completes_session_after_last_subtask_settles() {
         id: "tc-sink-1".to_string(),
         call_type: "function".to_string(),
         function: FunctionCall {
-            name: "learn_from_experience".to_string(),
-            arguments: serde_json::json!({
-                "skill_name": "sink_check",
-                "description": "d",
-                "situation_pattern": "s",
-                "guidance": "g"
-            })
+            name: "summarize_and_save".to_string(),
+            arguments: serde_json::json!({"content": "c", "filename": "notes/dispatch.md"})
             .to_string(),
         },
     }]);

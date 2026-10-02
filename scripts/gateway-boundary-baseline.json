@@ -119,8 +119,8 @@
     },
     {
       "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/bridge/executor.rs",
-      "line": 435,
+      "path": "crates/actions/src/bridge/gate.rs",
+      "line": 15,
       "snippet": "\"action '{name}' requires a trusted caller (owner/co_agent/trusted_user)\"",
       "classification": "production-violation",
       "violation": "V11",

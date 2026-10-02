@@ -231,3 +231,60 @@
         // 長時間の鍵探索（Dispatchable 属性）は含まれない = dispatch 対象。
         assert!(!inline.contains("nostr_generate_key"));
     }
+
+    /// [回帰] caller の権限で実行前に拒否されるツールは背景化しない（inline で同ターンに拒否を返す）。
+    ///
+    /// 背景化すると同ターンには `spawned` しか返らず、拒否が subtask 完了として次ターンに
+    /// 届く。権限のない caller（例: 未信頼の他エージェント）が owner 専用の `execute_shell` を
+    /// 呼ぶたびに「取り出してる」→拒否→再試行のループになっていた。
+    #[test]
+    fn caller_rejected_tools_are_not_dispatched() {
+        use crate::bridge::BridgedExecutor;
+        use crate::dispatcher::ActionDispatcher;
+        use crate::traits::{ActionContext, CallerIdentity};
+
+        let dispatcher_for = |caller: CallerIdentity| {
+            let conn = opencrab_db::init_memory().unwrap();
+            let db = opencrab_db::Db::from_connection(conn);
+            let dir = tempfile::TempDir::new().unwrap();
+            let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+            let ctx = ActionContext {
+                caller,
+                agent_id: "agent-x".to_string(),
+                agent_name: "X".to_string(),
+                session_id: Some("discord-agent-x-1-2".to_string()),
+                db: db.clone(),
+                workspace: Arc::new(ws),
+                last_metrics_id: Arc::new(Mutex::new(None)),
+                model_override: Arc::new(Mutex::new(None)),
+                current_purpose: Arc::new(Mutex::new("conversation".to_string())),
+                runtime_info: Arc::new(Mutex::new(crate::RuntimeInfo {
+                    default_model: "mock:test".to_string(),
+                    active_model: None,
+                    available_providers: vec![],
+                    gateway: "discord".to_string(),
+                })),
+            };
+            let executor: Arc<dyn ActionExecutor> = Arc::new(SharedExecutor(Arc::new(
+                BridgedExecutor::new(ActionDispatcher::new(), ctx),
+            )));
+            let registry: SubtaskRegistry = Arc::new(DashMap::new());
+            let sink = Arc::new(RecordingSink::default());
+            (
+                dir,
+                SubtaskToolDispatcher::new(executor, registry, db, sink, "agent-x", "p"),
+            )
+        };
+
+        let (_d1, agent) = dispatcher_for(CallerIdentity::Agent);
+        assert!(
+            !agent.should_dispatch("execute_shell"),
+            "未信頼 caller の owner 専用ツールは inline（同ターンで拒否）"
+        );
+
+        let (_d2, owner) = dispatcher_for(CallerIdentity::Owner);
+        assert!(
+            owner.should_dispatch("execute_shell"),
+            "権限のある caller では従来どおり背景化する"
+        );
+    }

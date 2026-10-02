@@ -73,6 +73,16 @@ pub trait ActionExecutor: Send + Sync {
     fn utterance_tool_names(&self) -> std::collections::HashSet<String> {
         std::collections::HashSet::new()
     }
+
+    /// この run で、実行前のゲート（caller の権限など）により拒否されるツールか。既定は `false`。
+    ///
+    /// 拒否されるツールは背景 subtask 化しない（dispatcher が `should_dispatch` で参照する）。
+    /// 背景化すると同ターンには `spawned` しか返らず、拒否は subtask 完了として次のターンに
+    /// 届く。モデルは起動できたと思って「やってる」と言い、届いた拒否でまた同じツールを呼ぶ
+    /// ループになる。inline なら拒否が同ターンの tool_result で返る。
+    fn rejects_before_run(&self, _name: &str) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
