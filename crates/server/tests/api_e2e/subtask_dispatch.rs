@@ -38,14 +38,9 @@ async fn test_dispatched_subtask_carries_the_run_caller_to_settlement() {
             id: "tc-298".to_string(),
             call_type: "function".to_string(),
             function: FunctionCall {
-                name: "learn_from_experience".to_string(),
-                arguments: serde_json::json!({
-                    "skill_name": "background_work",
-                    "description": "d",
-                    "situation_pattern": "s",
-                    "guidance": "g"
-                })
-                .to_string(),
+                name: "summarize_and_save".to_string(),
+            arguments: serde_json::json!({"content": "c", "filename": "notes/dispatch.md"})
+            .to_string(),
             },
         }]);
         mock.push_text_response("バックグラウンドで実行を開始しました\nNO_REPLY");

@@ -48,6 +48,9 @@ impl ActionExecutor for SharedExecutor {
     fn utterance_tool_names(&self) -> HashSet<String> {
         self.0.utterance_tool_names()
     }
+    fn rejects_before_run(&self, name: &str) -> bool {
+        self.0.rejects_before_run(name)
+    }
 }
 
 /// 既定で auto-dispatch **しない**（＝ inline 実行のまま）ツールのうち、**制御ツールと
@@ -355,7 +358,8 @@ impl ToolDispatcher for SubtaskToolDispatcher {
         if tool_name.starts_with(crate::bridge::MCP_TOOL_PREFIX) {
             return false;
         }
-        !self.non_dispatch.contains(tool_name)
+        // 実行前に拒否されるツールは inline に残し、拒否を同ターンで返す。
+        !self.non_dispatch.contains(tool_name) && !self.executor.rejects_before_run(tool_name)
     }
 
     fn is_utterance(&self, tool_name: &str) -> bool {
