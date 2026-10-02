@@ -171,6 +171,10 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "learn_from_experience",
     "learn_from_peer",
     "reflect_and_learn",
+    // スキルを外す/戻す: 棚を書き換える（以後のスキル可視性が変わる）点で作成と同じ。
+    // 外部会話から勝手に外させたり、外したものを戻させたりできないよう同じゲートに揃える。
+    "retire_my_skill",
+    "restore_my_skill",
     // 時間トリガー（#455 / #612）。**owner 限定にはしない**（自分の定時実行を自分で決めるのが
     // 目的で、本人が触るターン〔時間トリガー / ダッシュボード / オーナー会話〕は caller=Owner）。一方 caller=Agent（未信頼の外部ユーザー会話ターン）へ
     // 開けると、会話で「毎朝○時に外部出力する」を仕込ませられる（#240 の再来）ので塞ぐ。
