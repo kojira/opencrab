@@ -4,10 +4,10 @@
 mod result_reference_tests {
     use super::result_reference;
 
-    /// 読みは元のファイル名がそのまま参照になる。
+    /// 大きい読み（本文 500 トークン超）は元のファイル名がそのまま参照になる。
     #[test]
     fn read_results_leave_only_a_reference() {
-        let body = "秘密の設計メモ本文".repeat(50);
+        let body = "秘密の設計メモ本文".repeat(400);
         let result = serde_json::json!({
             "success": true,
             "data": {
@@ -28,6 +28,26 @@ mod result_reference_tests {
         assert!(r.contains("docs/design.md"), "ファイル名が無い: {r}");
         assert!(r.contains("18000"), "規模が無い: {r}");
         assert!(r.contains("続きあり"), "続きの有無が無い: {r}");
+    }
+
+    /// 小さい読み（本文 500 トークン以下）は**本文のまま次のターンへ残す**。
+    ///
+    /// 本番（2026-10-03 水平思考クイズ）: 出題時に保存した約 430 トークンの答えファイルを
+    /// owner 起点のターンで `ws_read` しても、次のターンには参照 1 行しか残らなかった。ws_read は
+    /// owner 専用なので、他の人が起点のターンでは読み直せず、答えを見ずに判定していた。
+    #[test]
+    fn small_read_results_keep_their_body() {
+        let body = "## 答え\n夫は自分の死後も妻が寂しくないよう、毎晩9時に鳴る仕掛けを残した。\n".repeat(5);
+        let result = serde_json::json!({
+            "success": true,
+            "data": {"path": "umigame/q3_answer.md", "content": body, "start_line": 1,
+                     "estimated_tokens": 430, "has_more": false}
+        })
+        .to_string();
+
+        let r = result_reference("ws_read", &result);
+        assert!(r.contains("毎晩9時に鳴る仕掛け"), "小さい読みの本文が消えた: {r}");
+        assert!(r.contains("umigame/q3_answer.md"), "ファイル名が無い: {r}");
     }
 
     /// くらぶ暴走の根因修正: **コマンド実行の stdout 本文を会話へ残す**（#709 の畳みを execute_shell
