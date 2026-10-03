@@ -31,6 +31,9 @@
 /// catch-all の中立文言は成功を主張しないが、それだけでは将来この不変条件を破る新ツールの失敗が
 /// 黙って要約されて消える。判定を一箇所に集めることで `failures_are_never_summarized_as_success`
 /// テストがどちらの経路が落ちても落ちる。
+/// 次のターンへ本文ごと残す読み取り結果の上限（トークン）。これを超える読みは参照 1 行にする。
+const KEEP_READ_BODY_MAX_TOKENS: usize = 500;
+
 pub(crate) fn result_reference(tool_name: &str, result_json: &str) -> String {
     let reference = build_result_reference(tool_name, result_json);
     shorter_of_reference_or_body(reference, result_json)
@@ -136,6 +139,15 @@ fn build_result_reference(tool_name: &str, result_json: &str) -> String {
 
     // ファイルの読み: 元のファイル名がそのまま参照になる。
     if let Some(path) = d.get("path").and_then(|x| x.as_str()) {
+        // 小さい読み（本文 KEEP_READ_BODY_MAX_TOKENS 以下）は本文ごと次のターンへ残す。
+        // 読み直しの道具（ws_read）は owner 専用で、他の人が起点のターンでは読み直せない。
+        // 本番 2026-10-03: 約 430 トークンの答えファイルが参照 1 行になり、以後のターンで
+        // 答えを見ずに判定していた。
+        if let Some(content) = d.get("content").and_then(|x| x.as_str()) {
+            if !crate::tokens::tokens_reach_limit(content, KEEP_READ_BODY_MAX_TOKENS + 1) {
+                return format!("{path} を読んだ:\n{content}");
+            }
+        }
         if d.get("content").is_some() {
             let start = d.get("start_line").and_then(|x| x.as_u64());
             let lines = d
