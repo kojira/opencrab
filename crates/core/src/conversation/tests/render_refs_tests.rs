@@ -195,10 +195,13 @@ mod render_refs_tests {
     /// §9A.1 / row292: DI operation（reply）の tool_call は完了後も arguments（本文）が
     /// 会話へ verbatim 残る。nostr_run 時代の本文喪失の再発防止。preserve_arg_call_ids を
     /// 付けない同一 call は従来どおり →log 参照へ短縮され本文が消えることを対照で示す。
+    /// 対照を成立させるため本文は 1,000 トークン超（小さい引数は preserve 無しでも残る）。
     fn reply_tool_call(preserve: bool) -> SessionLogRow {
+        let text = format!("次ターンに残るべき本文{}", "。".repeat(4000));
+        let args = serde_json::json!({"event": "e3", "text": text}).to_string();
         let tcj = serde_json::json!([{
             "id": "call_reply1",
-            "function": {"name": "reply", "arguments": "{\"event\":\"e3\",\"text\":\"次ターンに残るべき本文\"}"}
+            "function": {"name": "reply", "arguments": args}
         }])
         .to_string();
         let meta = if preserve {

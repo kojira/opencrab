@@ -113,10 +113,16 @@ pub fn format_single_log_with_echo(
                                         // 内部整合値なので出さず、log 参照だけ短く残す（row295b・#707）。
                                         // ただし DI operation の call（preserve_arg_call_ids）は reply
                                         // 本文が次ターンで消えないよう verbatim 保持し短縮しない（§9A.1/row292）。
+                                        // 小さい引数（KEEP_BODY_MAX_TOKENS 以下）は中身のまま残す。
+                                        // 本番 2026-10-03: ws_write した答えが参照だけになり、他の人が
+                                        // 起点のターン（ws_read 不可）で答えを見られなかった。
                                         let args = if completed_ids
                                             .is_some_and(|set| set.contains(id))
                                             && !preserve.contains(id)
-                                        {
+                                            && crate::tokens::tokens_reach_limit(
+                                                &args,
+                                                super::tool_result_fold::KEEP_BODY_MAX_TOKENS + 1,
+                                            ) {
                                             format!("→log:{}", log.id.unwrap_or(0))
                                         } else {
                                             args
