@@ -4,10 +4,10 @@
 mod result_reference_tests {
     use super::result_reference;
 
-    /// 大きい読み（本文 500 トークン超）は元のファイル名がそのまま参照になる。
+    /// 大きい読み（本文 1,000 トークン超）は元のファイル名がそのまま参照になる。
     #[test]
     fn read_results_leave_only_a_reference() {
-        let body = "秘密の設計メモ本文".repeat(400);
+        let body = "秘密の設計メモ本文".repeat(800);
         let result = serde_json::json!({
             "success": true,
             "data": {
@@ -30,7 +30,7 @@ mod result_reference_tests {
         assert!(r.contains("続きあり"), "続きの有無が無い: {r}");
     }
 
-    /// 小さい読み（本文 500 トークン以下）は**本文のまま次のターンへ残す**。
+    /// 小さい読み（本文 1,000 トークン以下）は**本文のまま次のターンへ残す**。
     ///
     /// 本番（2026-10-03 水平思考クイズ）: 出題時に保存した約 430 トークンの答えファイルを
     /// owner 起点のターンで `ws_read` しても、次のターンには参照 1 行しか残らなかった。ws_read は
