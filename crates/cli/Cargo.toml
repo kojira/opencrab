@@ -25,6 +25,8 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+axum = { workspace = true }
+opencrab-gate-client = { workspace = true }
 
 [lints]
 workspace = true

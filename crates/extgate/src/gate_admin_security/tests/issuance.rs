@@ -91,16 +91,32 @@ async fn issued_namespace_principal_provisions_new_instance_without_restart() {
     let instance = format!("/api/gate-instances/{}", derived("agent-town"));
 
     // Without a grant the new association is refused even for an in-scope principal.
-    assert_eq!(status(&core.app, "PUT", &instance, &bearer, &instance_body(2, None)).await, 409);
+    assert_eq!(
+        status(
+            &core.app,
+            "PUT",
+            &instance,
+            &bearer,
+            &instance_body(2, None)
+        )
+        .await,
+        409
+    );
 
     let grant = {
         let mut conn = core.state.db.lock().unwrap();
         issue_subject_grant(&mut conn, "agent-town", 2, 600 * 1_000_000_000, now).unwrap()
     };
     let body = instance_body(2, Some(grant.expose_secret()));
-    assert_eq!(status(&core.app, "PUT", &instance, &bearer, &body).await, 201);
+    assert_eq!(
+        status(&core.app, "PUT", &instance, &bearer, &body).await,
+        201
+    );
     // Byte-identical retry needs no second grant; the grant itself is single-use.
-    assert_eq!(status(&core.app, "PUT", &instance, &bearer, &body).await, 200);
+    assert_eq!(
+        status(&core.app, "PUT", &instance, &bearer, &body).await,
+        200
+    );
 
     let binding_id = Uuid::new_v4();
     let binding = serde_json::json!({
@@ -110,7 +126,10 @@ async fn issued_namespace_principal_provisions_new_instance_without_restart() {
     })
     .to_string();
     let binding_uri = format!("/api/gate-bindings/{binding_id}");
-    assert_eq!(status(&core.app, "PUT", &binding_uri, &bearer, &binding).await, 201);
+    assert_eq!(
+        status(&core.app, "PUT", &binding_uri, &bearer, &binding).await,
+        201
+    );
     assert_eq!(status(&core.app, "GET", &instance, &bearer, "").await, 200);
 
     let conn = core.state.db.lock().unwrap();
@@ -145,7 +164,10 @@ async fn unauthorized_provisioning_paths_are_rejected() {
 
     // The bootstrap principal is exact-scoped to subject 1: it cannot reach subject 2.
     let body = instance_body(2, Some(grant("agent-town", 2).unwrap().expose_secret()));
-    assert_eq!(status(&core.app, "PUT", &town_uri, &original, &body).await, 401);
+    assert_eq!(
+        status(&core.app, "PUT", &town_uri, &original, &body).await,
+        401
+    );
     // The new principal cannot pick an instance ID outside its namespace derivation.
     let random = format!("/api/gate-instances/{}", Uuid::new_v4());
     assert_eq!(status(&core.app, "PUT", &random, &town, &body).await, 401);

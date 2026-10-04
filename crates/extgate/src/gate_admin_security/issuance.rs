@@ -232,7 +232,9 @@ pub fn issue_subject_grant(
     {
         return Err(SecurityError::InvalidConfig);
     }
-    let expires_at = now.checked_add(ttl_nanos).ok_or(SecurityError::InvalidConfig)?;
+    let expires_at = now
+        .checked_add(ttl_nanos)
+        .ok_or(SecurityError::InvalidConfig)?;
     opencrab_db::queries::issue_subject_association_grant(
         conn, agent_id, subject_id, expires_at, now,
     )

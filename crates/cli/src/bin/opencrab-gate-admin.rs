@@ -77,7 +77,11 @@ impl Args {
     }
 
     fn only(&self, allowed: &[&str]) -> Result<()> {
-        match self.values.iter().find(|(key, _)| !allowed.contains(&key.as_str())) {
+        match self
+            .values
+            .iter()
+            .find(|(key, _)| !allowed.contains(&key.as_str()))
+        {
             Some((key, _)) => bail!("unknown option --{key}"),
             None => Ok(()),
         }
@@ -167,7 +171,10 @@ fn principal_issue(db: &str, args: &Args) -> Result<String> {
         }),
         "subject",
     )?;
-    let instances = unique(args.all("instance").into_iter().map(canonical_uuid), "instance")?;
+    let instances = unique(
+        args.all("instance").into_iter().map(canonical_uuid),
+        "instance",
+    )?;
     let scope = match (instances.is_empty(), args.optional("creation-namespace")?) {
         (false, None) => PrincipalScope::Exact(instances),
         (true, Some(namespace)) => PrincipalScope::CreationNamespace(canonical_uuid(namespace)?),
@@ -200,7 +207,10 @@ fn principal_issue(db: &str, args: &Args) -> Result<String> {
         let _ = std::fs::remove_file(&out);
         return Err(error.context("credential write failed; principal revoked"));
     }
-    Ok(format!("issued principal {principal_id}; bearer written to {}", out.display()))
+    Ok(format!(
+        "issued principal {principal_id}; bearer written to {}",
+        out.display()
+    ))
 }
 
 fn principal_revoke(db: &str, args: &Args) -> Result<String> {
