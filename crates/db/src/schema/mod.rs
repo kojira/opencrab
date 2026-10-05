@@ -140,6 +140,12 @@ pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Schema version this binary writes. Operator tools that must not migrate a live
+/// database compare it against `PRAGMA user_version` and refuse on mismatch.
+pub fn supported_schema_version() -> i64 {
+    latest_version_for_init()
+}
+
 fn latest_version_for_init() -> i64 {
     MIGRATIONS
         .into_iter()

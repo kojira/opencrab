@@ -568,3 +568,5 @@ fn audit_is_sanitized_and_append_only() {
         .execute("DELETE FROM gate_admin_request_audit", [])
         .is_err());
 }
+
+mod issuance;

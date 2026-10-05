@@ -62,12 +62,21 @@ impl Operation {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, SecurityError> {
+    /// Exact closed-identifier lookup; unknown or empty names are never a wildcard.
+    pub fn from_name(value: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|operation| operation.as_str() == value)
-            .ok_or(SecurityError::InvalidManifest)
     }
+
+    fn parse(value: &str) -> Result<Self, SecurityError> {
+        Self::from_name(value).ok_or(SecurityError::InvalidManifest)
+    }
+}
+
+/// The only instance ID a creation-namespace principal may target for `agent_id`.
+pub fn namespace_instance_id(namespace: &Uuid, agent_id: &str) -> Uuid {
+    Uuid::new_v5(namespace, format!("instance\0{agent_id}").as_bytes())
 }
 
 pub struct CredentialManifest {
@@ -450,98 +459,11 @@ pub fn bootstrap(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| SecurityError::Store)?;
-    let rows = load_principals(&tx)?;
-    if rows.iter().any(|row| row.sealed_at.is_none())
-        || rows.iter().any(|row| row.id == manifest.principal_id)
-    {
-        return Err(SecurityError::Conflict);
-    }
-    let matches = matching_ids(&rows, &manifest.token[..]);
-    if !matches.is_empty() {
-        return Err(SecurityError::Conflict);
-    }
-    if let Some(rotation) = &manifest.rotation {
-        let predecessor = rows
-            .iter()
-            .find(|row| row.id == rotation.predecessor_principal_id)
-            .ok_or(SecurityError::Conflict)?;
-        if predecessor.revoked_at.is_some()
-            || predecessor.expires_at <= now
-            || rotation.overlap_deadline <= now
-            || rotation.overlap_deadline > predecessor.expires_at
-            || rotation.overlap_deadline > manifest.expires_at
-        {
-            return Err(SecurityError::Conflict);
-        }
-    }
-    let mut salt = Zeroizing::new([0_u8; 32]);
-    getrandom::fill(&mut *salt).map_err(|_| SecurityError::Store)?;
-    let hash = credential_hash(&salt[..], &manifest.token[..]);
-    let scope_mode = if manifest.creation_namespace.is_some() {
-        "creation_namespace"
-    } else {
-        "exact"
-    };
-    tx.execute(
-        "INSERT INTO gate_admin_principals
-         (principal_id, credential_salt, credential_hash, scope_mode, created_at, expires_at,
-          revoked_at, sealed_at, predecessor_principal_id, overlap_deadline)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7, ?8)",
-        params![
-            manifest.principal_id,
-            &salt[..],
-            &hash[..],
-            scope_mode,
-            now,
-            manifest.expires_at,
-            manifest
-                .rotation
-                .as_ref()
-                .map(|value| &value.predecessor_principal_id),
-            manifest
-                .rotation
-                .as_ref()
-                .map(|value| value.overlap_deadline),
-        ],
-    )
-    .map_err(|_| SecurityError::Conflict)?;
-    for operation in &manifest.operations {
-        tx.execute(
-            "INSERT INTO gate_admin_principal_operations VALUES (?1, ?2)",
-            params![manifest.principal_id, operation.as_str()],
-        )
-        .map_err(|_| SecurityError::Store)?;
-    }
-    for subject_id in &manifest.subject_ids {
-        tx.execute(
-            "INSERT INTO gate_admin_principal_subjects VALUES (?1, ?2)",
-            params![manifest.principal_id, subject_id],
-        )
-        .map_err(|_| SecurityError::Store)?;
-    }
-    for instance_id in &manifest.instance_ids {
-        tx.execute(
-            "INSERT INTO gate_admin_principal_instances VALUES (?1, ?2)",
-            params![manifest.principal_id, instance_id.to_string()],
-        )
-        .map_err(|_| SecurityError::Store)?;
-    }
-    if let Some(namespace) = manifest.creation_namespace {
-        tx.execute(
-            "INSERT INTO gate_admin_principal_creation_namespaces VALUES (?1, ?2)",
-            params![manifest.principal_id, namespace.to_string()],
-        )
-        .map_err(|_| SecurityError::Store)?;
-    }
-    tx.execute(
-        "UPDATE gate_admin_principals SET sealed_at=?2 WHERE principal_id=?1",
-        params![manifest.principal_id, now],
-    )
-    .map_err(|_| SecurityError::Store)?;
+    let scanned_principals = issuance::create_sealed_in_tx(&tx, manifest, now)?;
     tx.commit().map_err(|_| SecurityError::Store)?;
     Ok(BootstrapOutcome {
         created: true,
-        scanned_principals: rows.len(),
+        scanned_principals,
     })
 }
 
@@ -699,7 +621,7 @@ pub fn authorize_target(
             )
             .map_err(|_| SecurityError::Unauthorized)?;
         let namespace = Uuid::parse_str(&namespace).map_err(|_| SecurityError::Store)?;
-        Uuid::new_v5(&namespace, format!("instance\0{agent_id}").as_bytes()) == instance_id
+        namespace_instance_id(&namespace, &agent_id) == instance_id
     };
     if !subject_allowed || !instance_allowed {
         return Err(SecurityError::Unauthorized);
@@ -727,7 +649,12 @@ pub fn authorize(
 }
 
 mod audit;
+mod issuance;
 pub use audit::{append_audit, append_audit_for_attempt, audited_mutation};
+pub use issuance::{
+    issue_principal, issue_subject_grant, IssuedCredential, PrincipalRequest, PrincipalScope,
+    MAX_SUBJECT_GRANT_TTL_NANOS,
+};
 
 #[cfg(test)]
 mod tests;

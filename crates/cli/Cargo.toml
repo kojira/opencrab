@@ -19,6 +19,14 @@ rusqlite = { workspace = true }
 opencrab-server = { path = "../server" }
 dotenvy = { workspace = true }
 uuid = { workspace = true }
+chrono = { workspace = true }
+opencrab-extgate = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+axum = { workspace = true }
+opencrab-gate-client = { workspace = true }
 
 [lints]
 workspace = true

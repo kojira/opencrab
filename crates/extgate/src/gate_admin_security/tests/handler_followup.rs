@@ -76,7 +76,7 @@ async fn protected_router_serves_all_six_scoped_operations_with_database_credent
     );
 }
 
-async fn protected_request(
+pub(super) async fn protected_request(
     app: &axum::Router,
     method: &str,
     uri: &str,
