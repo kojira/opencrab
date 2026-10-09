@@ -3,90 +3,10 @@
   "purpose": "Issue #1006 S0 line-specific reviewed burn-down; entries are debts or explicit gateway-store provenance, never wildcard exceptions",
   "review": {
     "status": "line-by-line-reviewed",
-    "finding_count": 123,
+    "finding_count": 115,
     "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance"
   },
   "entries": [
-    {
-      "rule": "gateway-db-open",
-      "path": "crates/discord-gateway/src/daemon.rs",
-      "line": 725,
-      "snippet": "let store = DiscordStore::open(&config.database_path)?;",
-      "classification": "valid-gateway-owned-store",
-      "violation": "V02",
-      "owner_stage": "S5",
-      "expires_when": "retain only while provenance remains the daemon-owned gateway database"
-    },
-    {
-      "rule": "gateway-db-open",
-      "path": "crates/discord-gateway/src/store.rs",
-      "line": 110,
-      "snippet": "let conn = Connection::open(path)?;",
-      "classification": "valid-gateway-owned-store",
-      "violation": "V02",
-      "owner_stage": "S5",
-      "expires_when": "retain only while provenance remains the daemon-owned gateway database"
-    },
-    {
-      "rule": "gateway-db-open",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 744,
-      "snippet": "let store = NostrStore::open(&config.database_path)?;",
-      "classification": "valid-gateway-owned-store",
-      "violation": "V02",
-      "owner_stage": "S5",
-      "expires_when": "retain only while provenance remains the daemon-owned gateway database"
-    },
-    {
-      "rule": "gateway-db-open",
-      "path": "crates/nostr-gateway/src/store.rs",
-      "line": 117,
-      "snippet": "let conn = Connection::open(path)?;",
-      "classification": "valid-gateway-owned-store",
-      "violation": "V02",
-      "owner_stage": "S5",
-      "expires_when": "retain only while provenance remains the daemon-owned gateway database"
-    },
-    {
-      "rule": "gateway-db-open",
-      "path": "crates/web-gateway/src/owner.rs",
-      "line": 39,
-      "snippet": "let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));",
-      "classification": "valid-gateway-owned-store",
-      "violation": "V02",
-      "owner_stage": "S5",
-      "expires_when": "retain only while provenance remains the daemon-owned gateway database"
-    },
-    {
-      "rule": "gateway-db-open",
-      "path": "crates/web-gateway/src/store.rs",
-      "line": 71,
-      "snippet": "let conn = Connection::open(path)?;",
-      "classification": "valid-gateway-owned-store",
-      "violation": "V02",
-      "owner_stage": "S5",
-      "expires_when": "retain only while provenance remains the daemon-owned gateway database"
-    },
-    {
-      "rule": "reviewed-gateway-dev-dependency",
-      "path": "crates/server/Cargo.toml",
-      "line": 80,
-      "snippet": "opencrab-nostr-gateway = { workspace = true }",
-      "classification": "dev-only-qc",
-      "violation": "V14",
-      "owner_stage": "S11",
-      "expires_when": "retain only while isolated QC needs it and cargo tree --edges no-dev remains free of the daemon"
-    },
-    {
-      "rule": "reviewed-gateway-dev-dependency",
-      "path": "crates/server/Cargo.toml",
-      "line": 83,
-      "snippet": "opencrab-discord-gateway = { workspace = true }",
-      "classification": "dev-only-qc",
-      "violation": "V14",
-      "owner_stage": "S11",
-      "expires_when": "retain only while isolated QC needs it and cargo tree --edges no-dev remains free of the daemon"
-    },
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/bridge/executor.rs",
@@ -1241,21 +1161,21 @@
   "coverage": [
     {
       "violation": "V13",
-      "classification": "valid-production",
-      "path": "crates/cli-gateway/Cargo.toml",
-      "line": 18,
-      "needle": "opencrab-gate-client.workspace",
+      "classification": "moved-to-gateway-repository",
+      "path": "scripts/gateway_boundary_audit.py",
+      "line": 836,
+      "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
-      "expires_when": "never remove unless CLI durable concrete state is introduced; preserve generic-client-only boundary"
+      "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
     },
     {
       "violation": "V14",
-      "classification": "dev-only-qc",
-      "path": "crates/server/Cargo.toml",
-      "line": 80,
-      "needle": "opencrab-nostr-gateway",
+      "classification": "moved-to-gateway-repository",
+      "path": "scripts/gateway_boundary_audit.py",
+      "line": 836,
+      "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
-      "expires_when": "must remain dev-only and absent from cargo tree --edges no-dev while QC needs it"
+      "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
     },
     {
       "violation": "V15",
@@ -1331,48 +1251,57 @@
     },
     {
       "violation": "V01",
-      "classification": "closed-production-violation",
-      "path": "crates/nostr-gateway/Cargo.toml",
-      "line": 29,
-      "needle": "opencrab-process-supervisor.workspace",
-      "owner_stage": "S5",
-      "expires_when": "retain no-dev dependency proof that concrete daemons do not link core, db, legacy concrete libraries, or server"
+      "classification": "moved-to-gateway-repository",
+      "path": "scripts/gateway_boundary_audit.py",
+      "line": 836,
+      "needle": "concrete gateway packages belong in the gateway repository, not core",
+      "owner_stage": "S11",
+      "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
     },
     {
       "violation": "V03",
-      "classification": "closed-production-violation",
-      "path": "crates/nostr-gateway/src/daemon_tests.rs",
-      "line": 633,
-      "needle": "s5_nostr_runtime_config_rejects_core_and_legacy_database_paths",
-      "owner_stage": "S5",
-      "expires_when": "retain runtime legacy-path rejection and absence of import code"
+      "classification": "moved-to-gateway-repository",
+      "path": "scripts/gateway_boundary_audit.py",
+      "line": 836,
+      "needle": "concrete gateway packages belong in the gateway repository, not core",
+      "owner_stage": "S11",
+      "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
     },
     {
       "violation": "V04",
-      "classification": "closed-production-violation",
-      "path": "crates/discord-gateway/src/daemon_tests.rs",
-      "line": 220,
-      "needle": "s5_discord_daemon_runs_and_crash_state_persists_while_server_is_stopped",
-      "owner_stage": "S5",
-      "expires_when": "retain daemon-owned server-stopped lifecycle proof"
+      "classification": "moved-to-gateway-repository",
+      "path": "scripts/gateway_boundary_audit.py",
+      "line": 836,
+      "needle": "concrete gateway packages belong in the gateway repository, not core",
+      "owner_stage": "S11",
+      "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
     },
     {
       "violation": "V05",
-      "classification": "closed-production-violation",
-      "path": "crates/process-supervisor/src/tests.rs",
-      "line": 4,
-      "needle": "s5_process_supervisor_has_no_concrete_gateway_vocabulary",
-      "owner_stage": "S5",
-      "expires_when": "retain platform-neutral process utility assertion"
+      "classification": "moved-to-gateway-repository",
+      "path": "scripts/gateway_boundary_audit.py",
+      "line": 836,
+      "needle": "concrete gateway packages belong in the gateway repository, not core",
+      "owner_stage": "S11",
+      "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
     },
     {
       "violation": "V12",
-      "classification": "closed-production-violation",
-      "path": "crates/web-gateway/src/store.rs",
-      "line": 23,
-      "needle": "CREATE TABLE IF NOT EXISTS identity_projections (",
-      "owner_stage": "S5",
-      "expires_when": "retain Web-owned store/admin and independent runtime proof"
+      "classification": "moved-to-gateway-repository",
+      "path": "scripts/gateway_boundary_audit.py",
+      "line": 836,
+      "needle": "concrete gateway packages belong in the gateway repository, not core",
+      "owner_stage": "S11",
+      "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
+    },
+    {
+      "violation": "V02",
+      "classification": "moved-to-gateway-repository",
+      "path": "scripts/gateway_boundary_audit.py",
+      "line": 836,
+      "needle": "concrete gateway packages belong in the gateway repository, not core",
+      "owner_stage": "S11",
+      "expires_when": "never; gateway-owned stores live in the gateway repository (Issue #1074)"
     }
   ]
 }

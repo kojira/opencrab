@@ -1,6 +1,6 @@
 # opencrab-gate-client
 
-in-tree Rust gateway 共用の V3 protocol=2 client / wire / json。core crate の wire DTO は依存しない。独立実装の原則は `samples/` にだけ適用する（POLICY-BUILTIN-GATES 裁定 3）。
+Rust gateway 共用の V3 protocol=2 client / wire / json。core crate の wire DTO は依存しない。利用者は gateway リポジトリ（[opencrab-gateways](https://github.com/kojira/opencrab-gateways)）の各 gateway で、この crate を core の rev 固定の git 依存で参照する（Issue #1074）。独立実装の原則は gateway リポジトリの `samples/` にだけ適用する（POLICY-BUILTIN-GATES 裁定 3）。
 
 | ファイル | 役割 |
 |---|---|

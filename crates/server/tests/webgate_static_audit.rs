@@ -209,11 +209,11 @@ fn ui_has_exactly_one_create_web_conversation_client() {
 }
 
 #[test]
-fn operator_bearer_is_absent_from_gateway_and_browser() {
+fn operator_bearer_is_absent_from_browser() {
+    // web-gateway 側の同じ検査は gateway リポジトリ（Issue #1074）にある。
     let mut files = Vec::new();
     walk_ext(&crate_root().join("../../web/src"), "ts", &mut files);
     walk_ext(&crate_root().join("../../web/src"), "tsx", &mut files);
-    walk_rs(&crate_root().join("../web-gateway/src"), &mut files);
     let mut hits = Vec::new();
     for path in &files {
         let text = fs::read_to_string(path).unwrap();
@@ -223,7 +223,7 @@ fn operator_bearer_is_absent_from_gateway_and_browser() {
     }
     assert!(
         hits.is_empty(),
-        "operator Bearer leaked into gateway/browser:\n{}",
+        "operator Bearer leaked into browser:\n{}",
         hits.join("\n")
     );
 }
@@ -235,19 +235,5 @@ fn withdrawn_posts_do_not_create_bindings() {
         !sessions.contains("create_gate_binding_in_tx"),
         "POST /api/sessions must not create a gate binding"
     );
-    let mut gw = Vec::new();
-    walk_rs(&crate_root().join("../web-gateway/src"), &mut gw);
-    let mut hits = Vec::new();
-    for path in &gw {
-        let text = fs::read_to_string(path).unwrap();
-        if text.contains("create_gate_binding_in_tx") || text.contains("INSERT INTO gate_bindings")
-        {
-            hits.push(path.display().to_string());
-        }
-    }
-    assert!(
-        hits.is_empty(),
-        "gateway message POST must not create bindings:\n{}",
-        hits.join("\n")
-    );
+    // web-gateway が binding を作らないことの検査は gateway リポジトリ（Issue #1074）にある。
 }

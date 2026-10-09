@@ -15,4 +15,4 @@ DESIGN-WEBGATE §7.4a / §7.4a-r1 / §7.2c-r1 の必須層。jsdom/vitest の代
 | `run.mjs` | ハーネス起動 → `playwright test` → 停止 |
 | `web-conversation.spec.ts` | 上記 2 本のブラウザ操作 |
 
-実行: `pnpm run test:e2e`（リポジトリルートで `opencrab-server` / `web-gateway` を debug ビルドできること）。
+実行: `OPENCRAB_WEB_GATEWAY_BIN=<opencrab-gateways の target/debug/web-gateway> pnpm run test:e2e`。`opencrab-server` はこのリポジトリで debug ビルドする。web-gateway は gateway リポジトリ（opencrab-gateways）でビルドする（Issue #1074）。

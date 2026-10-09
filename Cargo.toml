@@ -5,22 +5,16 @@ members = [
     "crates/llm",
     "crates/llm-types",
     "crates/gateway",
-    "crates/process-supervisor",
     "crates/actions",
     "crates/db",
     "crates/discord",
     "crates/nostr",
-    "crates/web-gateway",
-    "crates/nostr-gateway",
-    "crates/discord-gateway",
     "crates/gate-client",
     "crates/mcp",
     "crates/server",
     "crates/cli",
     "crates/voice",
     "crates/extgate",
-    "crates/cli-gateway",
-    "crates/gateway-migrate",
 ]
 
 [workspace.lints.clippy]
@@ -95,18 +89,12 @@ opencrab-llm = { path = "crates/llm" }
 opencrab-voice = { path = "crates/voice" }
 opencrab-llm-types = { path = "crates/llm-types" }
 opencrab-gateway = { path = "crates/gateway" }
-opencrab-process-supervisor = { path = "crates/process-supervisor" }
 opencrab-actions = { path = "crates/actions" }
 opencrab-db = { path = "crates/db" }
 opencrab-discord = { path = "crates/discord" }
 opencrab-nostr = { path = "crates/nostr" }
 opencrab-extgate = { path = "crates/extgate", default-features = false }
-opencrab-web-gateway = { path = "crates/web-gateway" }
-opencrab-nostr-gateway = { path = "crates/nostr-gateway" }
-opencrab-discord-gateway = { path = "crates/discord-gateway" }
 opencrab-gate-client = { path = "crates/gate-client" }
-opencrab-cli-gateway = { path = "crates/cli-gateway" }
-opencrab-gateway-migrate = { path = "crates/gateway-migrate" }
 opencrab-mcp = { path = "crates/mcp" }
 
 # 開発ビルド高速化: デバッグ情報を減らしてリンク時間とバイナリサイズを削減。

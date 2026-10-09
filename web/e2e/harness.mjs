@@ -361,18 +361,22 @@ function spawnLogged(bin, args, cwd, env, logPath) {
   return child;
 }
 
+// web-gateway は gateway リポジトリ（opencrab-gateways）でビルドする（Issue #1074）。
+function webGatewayBin() {
+  const bin = process.env.OPENCRAB_WEB_GATEWAY_BIN;
+  if (!bin) {
+    throw new Error(
+      'OPENCRAB_WEB_GATEWAY_BIN is required: build web-gateway in the opencrab-gateways repository',
+    );
+  }
+  return bin;
+}
+
 async function ensureBins() {
   const server = binPath('opencrab-server');
-  const gw = binPath('web-gateway');
+  const gw = webGatewayBin();
   if (!existsSync(server)) {
     await run('cargo', ['build', '-p', 'opencrab-server', '--bin', 'opencrab-server'], REPO_ROOT);
-  }
-  if (!existsSync(gw)) {
-    await run(
-      'cargo',
-      ['build', '-p', 'opencrab-web-gateway', '--bin', 'web-gateway'],
-      REPO_ROOT,
-    );
   }
   if (!existsSync(server) || !existsSync(gw)) {
     throw new Error(`missing binaries: ${server} / ${gw}`);
@@ -475,7 +479,7 @@ export async function startHarness() {
   );
 
   const gw = spawnLogged(
-    binPath('web-gateway'),
+    webGatewayBin(),
     [placement],
     root,
     { ...process.env, RUST_LOG: 'web_gateway=info,opencrab_web_gateway=info' },

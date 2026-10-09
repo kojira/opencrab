@@ -31,7 +31,7 @@
 - **Conversation Compaction** — Token-budget-based automatic compaction; replaces older messages with memory index topic summaries, keeping recent logs in full
 - **Skill System** — Standard and acquired skills with effectiveness tracking, usage metrics, and guidance-based execution where the LLM dynamically calls `execute_shell`
 - **Multi-Channel Communication** — REST API, CLI, WebSocket, web dashboard, Discord and Nostr gateway adapters
-- **Standalone terminal gateway** — `opencrab-cli-gateway` provides a human REPL or strict JSONL stream for one exact pre-provisioned agent/session over the generic V3 Unix-socket protocol
+- **Standalone terminal gateway** — `opencrab-cli-gateway` (in the [opencrab-gateways](https://github.com/kojira/opencrab-gateways) repository) provides a human REPL or strict JSONL stream for one exact pre-provisioned agent/session over the generic V3 Unix-socket protocol
 - **Per-Agent Discord Gateway** — DB-persisted Discord config per agent with independent start/stop lifecycle management
 - **Per-Agent Nostr Gateway** — DB-persisted key and relay config per agent; an agent can generate a key and adopt it as its own identity, which also brings the gateway up (see [Nostr](#nostr))
 - **Message Debounce** — Per (channel, sender) debounce window batches rapid messages into a single request
@@ -63,20 +63,22 @@ opencrab/
 │   ├── mcp/        # MCP client (external tool servers as child processes)
 │   ├── server/     # Axum REST API server (hot-reload config watcher), agent response pipeline
 │   ├── cli/        # Database-management REPL CLI
-│   ├── cli-gateway/# Standalone text REPL/JSONL gateway over generic V3 UDS
 │   ├── discord/    # Discord gateway with per-agent manager and message loop
 │   ├── nostr/      # Nostr gateway: per-agent key/relay config, per-session queue,
 │   │               #   concurrency cap, and a thin `nostaro` CLI passthrough
-│   ├── web-gateway/# Dashboard gateway: axum router/handlers (POST web/send, SSE GET web/stream),
-│   │               #   per-session SSE fan-out, web-{agent}-{conversation} session-id convention,
-│   │               #   subtask-completion sink, per-session-serialized response entry point.
-│   │               #   Runs agents / persists via the WebAgentRunner trait (implemented by server)
+│   ├── extgate/    # Core side of the external-gateway V3 protocol (runtime UDS, gate-admin)
+│   ├── gate-client/# Client side of the V3 protocol, used by the gateway processes
 │   └── voice/      # STT/TTS provider layer (OpenAI-compatible STT, VOICEVOX/OpenAI TTS)
 ├── web/            # React frontend (Vite + Tailwind CSS + i18n EN/JA)
 ├── config/         # Configuration files (hot-reloaded)
 ├── docs/           # Design docs and assets
 └── skills/         # Standard skill definitions (Markdown)
 ```
+
+The gateway processes (`discord-gateway`, `nostr-gateway`, `web-gateway`, `cli-gateway`), their
+end-to-end QC and the process conformance suite live in
+[kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways). They talk to this core only
+through `gate-client` over the V3 Unix-socket protocol, pinned to an exact core revision.
 
 **Direction of travel**: the goal is a structure where the **core keeps running while the outer layers (transports, extensions) can be swapped without downtime** — ultimately so that agents can develop opencrab itself. Generic functionality must not live in transport crates, state belongs to the core, and the upper layer should not name individual gateways. See **[docs/design-plugin-architecture.md](docs/design-plugin-architecture.md)** before adding a new gateway or moving code between crates.
 
