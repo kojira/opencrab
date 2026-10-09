@@ -90,3 +90,30 @@ jobs:
         run: |
           python3 -m unittest scripts.tests.test_gateway_boundary_audit -v
           python3 scripts/gateway_boundary_audit.py
+
+  web:
+    name: Web (typecheck / build / test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable pinned pnpm
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `pnpm run build` は tsc -b（型チェック）+ vite build を実行する。
+      - name: Typecheck & build
+        run: pnpm run build
+
+      - name: Test
+        run: pnpm run test
