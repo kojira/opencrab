@@ -147,7 +147,7 @@ pub fn write_relays_config(path: &Path, relays: &[String]) -> std::io::Result<()
 }
 
 /// nsec 等の秘密を潰す（ログ用。config に鍵は載せていないが env 経由の万一の漏れを塞ぐ）。
-fn redact_secrets(s: &str) -> String {
+pub(crate) fn redact_secrets(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;

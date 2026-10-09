@@ -81,6 +81,15 @@ pub async fn run_watch_once(
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("nostaro watch produced no stdout handle"))?;
+    // stderr を読み続けないとパイプが埋まった時点で子が書き込みで固まり、stdout も止まる。
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::info!(line = %crate::post::redact_secrets(&line), "nostaro watch stderr");
+            }
+        });
+    }
     let mut lines = BufReader::new(stdout).lines();
     while let Some(line) = lines.next_line().await? {
         on_line(line);
@@ -224,6 +233,36 @@ mod tests {
         assert!(!argv_line.contains(secret), "{argv_line}");
         assert_eq!(env_line, format!("ENV:{secret}"));
         assert!(std::env::var(SECRET_ENV).is_err());
+    }
+
+    /// 本番で watch が 10/8 から無言で止まった再現。stderr のパイプ（64KB）を誰も読まないと、
+    /// nostaro は stderr への書き込みで固まり、stdout のイベントも流れなくなる。
+    #[tokio::test]
+    async fn watch_keeps_streaming_when_child_floods_stderr() {
+        let _env = crate::ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-nostaro");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nhead -c 262144 /dev/zero | tr '\\0' 'n' >&2\necho EVENT_AFTER_STDERR\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&script).unwrap().permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(&script, p).unwrap();
+        }
+        let mut got = Vec::new();
+        let relays = vec!["wss://example.invalid".to_string()];
+        let filter = WatchFilter::default();
+        let run = run_watch_once(&script, &relays, &filter, None, |line| got.push(line));
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("stderr を読まないと子が固まり watch が止まる")
+            .unwrap();
+        assert_eq!(got, vec!["EVENT_AFTER_STDERR".to_string()]);
     }
 
     #[test]
