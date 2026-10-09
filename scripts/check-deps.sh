@@ -52,18 +52,13 @@ for p in opencrab-core opencrab-db opencrab-gateway opencrab-actions opencrab-ex
 done
 echo "R6(shared/server -> concrete) OK"
 
-# --- R7: platform実装 -> daemon の逆向き依存を禁止する ---
-# daemonがplatform実装を内包する構成ではforward edge自体が無いこともあるため、
-# daemon -> platformは必須にせず、存在する場合にも逆辺が無いことだけを固定する。
-for pair in 'opencrab-discord opencrab-discord-gateway' 'opencrab-nostr opencrab-nostr-gateway'; do
-  set -- $pair
-  platform="$1"
-  daemon="$2"
-  platform_deps="$(cargo tree -p "$platform" --edges no-dev --prefix none --no-dedupe \
-    | sed -E 's/ v[0-9].*//' | sort -u)"
-  if printf '%s\n' "$platform_deps" | grep -qx "$daemon"; then
-    echo "R7 FAIL: $platform が daemon $daemon へ逆向き依存している"
-    exit 1
-  fi
-done
-echo "R7(no platform -> daemon reverse edge) OK"
+# --- R7: concrete gateway は core リポジトリに置かない（Issue #1074） ---
+# discord / nostr / web / cli の各 gateway と、その QC は gateway リポジトリにある。
+# core の workspace に concrete gateway パッケージが戻ってきたら落とす。
+if cargo metadata --format-version 1 --no-deps \
+  | python3 -c 'import json,sys; names=[p["name"] for p in json.load(sys.stdin)["packages"]]; bad=[n for n in names if n.startswith("opencrab-") and n.endswith("-gateway") and n not in ("opencrab-gateway",)]; bad and print("\n".join(bad)); sys.exit(1 if bad else 0)'; then
+  echo "R7(no concrete gateway package in core) OK"
+else
+  echo "R7 FAIL: concrete gateway パッケージは gateway リポジトリへ置く"
+  exit 1
+fi

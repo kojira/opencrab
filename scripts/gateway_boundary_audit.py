@@ -67,21 +67,15 @@ FRESH_BOOTSTRAP_LEGACY_DROP_IDENTITIES = frozenset({
     ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 122, "DROP TABLE IF EXISTS agent_discord_config;"),
     ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 123, 'DROP TABLE IF EXISTS agent_nostr_config;",'),
 })
-VALID_GATEWAY_DB_OPEN_IDENTITIES = {
-    ("gateway-db-open", "crates/discord-gateway/src/daemon.rs", 725, "let store = DiscordStore::open(&config.database_path)?;"),
-    ("gateway-db-open", "crates/discord-gateway/src/store.rs", 110, "let conn = Connection::open(path)?;"),
-    ("gateway-db-open", "crates/nostr-gateway/src/daemon.rs", 744, "let store = NostrStore::open(&config.database_path)?;"),
-    ("gateway-db-open", "crates/nostr-gateway/src/store.rs", 117, "let conn = Connection::open(path)?;"),
-    ("gateway-db-open", "crates/web-gateway/src/owner.rs", 39, "let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));"),
-    ("gateway-db-open", "crates/web-gateway/src/store.rs", 71, "let conn = Connection::open(path)?;"),
-}
+# Concrete gateways and their own stores live in the separate gateway repository
+# (Issue #1074). Core has no gateway-owned store to approve.
+VALID_GATEWAY_DB_OPEN_IDENTITIES: set[tuple[str, str, int, str]] = set()
 # These three exact sites are a generic caller-role naming debt, not operation-name routing.
 # Exact finding identities prevent a moved or duplicated occurrence from inheriting the deferral.
-# Gateway-legacy core state may have exactly these two stopped/offline writers.
-# S8 implements `project-core-state`; S10 may later add `destructive-cleanup`.
+# The S8 offline migrator (`project-core-state`) was removed after the production
+# migration finished (Issue #1074). S10 may later add `destructive-cleanup`.
 # A source marker for any other offline writer fails this audit immediately.
 GATEWAY_LEGACY_OFFLINE_WRITER_ALLOWLIST = frozenset({
-    "project-core-state",
     "destructive-cleanup",
 })
 OFFLINE_WRITER_MARKER = re.compile(
@@ -107,7 +101,6 @@ DEFERRED_GENERIC_CALLER_ROLE_IDENTITIES = {
 VALID_CLASSIFICATIONS = {
     "production-violation",
     "valid-gateway-owned-store",
-    "dev-only-qc",
     "transitional-empty-db-bootstrap",
 }
 
@@ -132,10 +125,6 @@ class RustFunction(NamedTuple):
     @property
     def body(self) -> str:
         return "\n".join(line for _, line in self.lines)
-
-
-def _is_offline_gateway_migrator_manifest(path: str) -> bool:
-    return path == "crates/gateway-migrate/Cargo.toml"
 
 
 def _is_gateway_manifest(path: str) -> bool:
@@ -183,15 +172,11 @@ def _manifest_findings(path: str, text: str) -> list[Finding]:
             line, snippet = _dependency_line(lines, key)
             if table_name != "dev-dependencies" and is_gateway and package in FORBIDDEN_GATEWAY_DEPENDENCIES:
                 findings.append(Finding("gateway-production-dependency", path, line, snippet))
-            if (
-                not is_gateway
-                and not _is_offline_gateway_migrator_manifest(path)
-                and _is_concrete_gateway_package(package)
-            ):
+            if not is_gateway and _is_concrete_gateway_package(package):
+                # Gateway QC lives in the gateway repository (Issue #1074), so core has
+                # no reviewed dev-only edge to a concrete gateway either.
                 if table_name != "dev-dependencies":
                     findings.append(Finding("platform-production-gateway-dependency", path, line, snippet))
-                elif pathlib.PurePosixPath(path).parts[1] == "server":
-                    findings.append(Finding("reviewed-gateway-dev-dependency", path, line, snippet))
                 else:
                     findings.append(Finding("unreviewed-gateway-dev-dependency", path, line, snippet))
     return findings
@@ -618,8 +603,6 @@ def gateway_legacy_offline_writer_errors(files: Mapping[str, str]) -> list[str]:
             errors.append(f"unapproved gateway-legacy offline writer {name}: {paths}")
         if len(paths) != 1:
             errors.append(f"gateway-legacy offline writer {name} has {len(paths)} markers")
-    if "project-core-state" not in found:
-        errors.append("approved project-core-state offline writer marker is missing")
     return errors
 
 
@@ -647,10 +630,8 @@ def _metadata_for(finding: Finding) -> tuple[str, str, str, str]:
         return "production-violation", "V01", "S5", "remove forbidden normal/build dependency from the concrete daemon"
     if finding.rule == "platform-production-gateway-dependency":
         return "production-violation", "V14", "S5/S9", "remove concrete gateway from non-dev dependency graph; keep reviewed QC edge dev-only"
-    if finding.rule == "reviewed-gateway-dev-dependency":
-        return "dev-only-qc", "V14", "S11", "retain only while isolated QC needs it and cargo tree --edges no-dev remains free of the daemon"
     if finding.rule == "unreviewed-gateway-dev-dependency":
-        return "production-violation", "V14", "S0", "remove or explicitly move reviewed QC dependency to server dev-only scope"
+        return "production-violation", "V14", "S0", "gateway QC belongs in the gateway repository; remove the core edge"
     if finding.key in VALID_GATEWAY_DB_OPEN_IDENTITIES:
         return "valid-gateway-owned-store", "V02", "S5", "retain only while provenance remains the daemon-owned gateway database"
     if finding.rule in {"gateway-core-path", "gateway-core-store-open", "gateway-db-open"}:
@@ -678,7 +659,12 @@ def _metadata_for(finding: Finding) -> tuple[str, str, str, str]:
 
 
 def cargo_metadata_evidence(root: pathlib.Path) -> tuple[set[tuple[str, str, str]], list[str]]:
-    """Classify actual Cargo normal/build edges; dev-only QC edges stay evidence."""
+    """Classify actual Cargo edges and reject any concrete gateway package in core.
+
+    Concrete gateways live in the separate gateway repository (Issue #1074). The
+    second value lists concrete gateway packages found in this workspace; it must
+    stay empty.
+    """
     root = root.resolve()
     result = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--no-deps"],
@@ -686,32 +672,25 @@ def cargo_metadata_evidence(root: pathlib.Path) -> tuple[set[tuple[str, str, str
     )
     metadata = json.loads(result.stdout)
     production: set[tuple[str, str, str]] = set()
-    dev_only: list[str] = []
+    concrete_packages: list[str] = []
     for package in metadata["packages"]:
         manifest = pathlib.Path(package["manifest_path"])
         try:
             rel_manifest = manifest.relative_to(root).as_posix()
         except ValueError:
             continue
+        if _is_concrete_gateway_package(package["name"]):
+            concrete_packages.append(package["name"])
         is_gateway = _is_gateway_manifest(rel_manifest)
         for dependency in package["dependencies"]:
             name = dependency["name"]
             kind = dependency.get("kind") or "normal"
             if kind != "dev" and is_gateway and name in FORBIDDEN_GATEWAY_DEPENDENCIES:
                 production.add(("gateway-production-dependency", rel_manifest, name))
-            if (
-                kind != "dev"
-                and not is_gateway
-                and package["name"] != "opencrab-gateway-migrate"
-                and _is_concrete_gateway_package(name)
-            ):
-                production.add(("platform-production-gateway-dependency", rel_manifest, name))
-            if kind == "dev" and _is_concrete_gateway_package(name):
-                if package["name"] == "opencrab-server":
-                    dev_only.append(f"{package['name']} -> {name}")
-                else:
-                    production.add(("unreviewed-gateway-dev-dependency", rel_manifest, name))
-    return production, sorted(dev_only)
+            if not is_gateway and _is_concrete_gateway_package(name):
+                rule = "unreviewed-gateway-dev-dependency" if kind == "dev" else "platform-production-gateway-dependency"
+                production.add((rule, rel_manifest, name))
+    return production, sorted(concrete_packages)
 
 
 def baseline_document(findings: list[Finding]) -> dict:
@@ -848,10 +827,14 @@ def main(argv: list[str] | None = None) -> int:
     errors = check_baseline(findings, document, root)
     errors.extend(gateway_legacy_offline_writer_errors(repository_texts(root)))
     try:
-        metadata_edges, dev_only_edges = cargo_metadata_evidence(root)
+        metadata_edges, concrete_packages = cargo_metadata_evidence(root)
     except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
         errors.append(f"cargo metadata evidence failed: {error}")
-        metadata_edges, dev_only_edges = set(), []
+        metadata_edges, concrete_packages = set(), []
+    if concrete_packages:
+        errors.append(
+            f"concrete gateway packages belong in the gateway repository, not core: {concrete_packages}"
+        )
     source_edges = set()
     for finding in findings:
         if finding.rule not in {
@@ -877,7 +860,6 @@ def main(argv: list[str] | None = None) -> int:
     for finding in findings:
         counts[finding.rule] = counts.get(finding.rule, 0) + 1
     print(f"gateway boundary audit OK: {len(findings)} classified findings; {counts}")
-    print(f"cargo metadata allowed dev-only QC edges: {dev_only_edges}")
     return 0
 
 

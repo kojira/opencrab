@@ -71,13 +71,13 @@ class GatewayBoundaryMutationTests(unittest.TestCase):
             )
             self.assertEqual(AUDIT._metadata_for(moved)[0], "production-violation")
 
-    def test_s10_reviewed_boundary_burn_down_has_exactly_123_findings(self):
+    def test_s10_reviewed_boundary_burn_down_has_exactly_115_findings(self):
         root = pathlib.Path(__file__).parents[2]
         baseline = json.loads((root / "scripts/gateway-boundary-baseline.json").read_text())
         findings = AUDIT.audit_texts(AUDIT.repository_texts(root))
-        self.assertEqual(len(findings), 123)
-        self.assertEqual(len(baseline["entries"]), 123)
-        self.assertEqual(baseline["review"]["finding_count"], 123)
+        self.assertEqual(len(findings), 115)
+        self.assertEqual(len(baseline["entries"]), 115)
+        self.assertEqual(baseline["review"]["finding_count"], 115)
         self.assertFalse(
             [finding for finding in findings if finding.rule == "public-gate-admin-reachable"]
         )
@@ -121,25 +121,29 @@ class GatewayBoundaryMutationTests(unittest.TestCase):
             "the S4 static boundary must fail on a reintroduced platform destination",
         )
 
-    def test_gateway_legacy_offline_writer_allowlist_rejects_third_writer(self):
-        approved = {
-            "crates/gateway-migrate/src/command.rs":
-                "// gateway-legacy offline writer: project-core-state\n",
+    def test_gateway_legacy_offline_writer_allowlist_rejects_unapproved_writer(self):
+        self.assertEqual(AUDIT.gateway_legacy_offline_writer_errors({}), [])
+        mutated = {
+            "crates/rogue/src/main.rs": "// gateway-legacy offline writer: emergency-repair\n",
         }
-        self.assertEqual(AUDIT.gateway_legacy_offline_writer_errors(approved), [])
-        mutated = dict(approved)
-        mutated["crates/rogue/src/main.rs"] = (
-            "// gateway-legacy offline writer: emergency-repair\n"
-        )
         self.assertTrue(
             any(
                 "unapproved gateway-legacy offline writer emergency-repair" in error
                 for error in AUDIT.gateway_legacy_offline_writer_errors(mutated)
             )
         )
+        removed = {
+            "crates/rogue/src/main.rs": "// gateway-legacy offline writer: project-core-state\n",
+        }
+        self.assertTrue(
+            any(
+                "unapproved gateway-legacy offline writer project-core-state" in error
+                for error in AUDIT.gateway_legacy_offline_writer_errors(removed)
+            )
+        )
         self.assertEqual(
             AUDIT.GATEWAY_LEGACY_OFFLINE_WRITER_ALLOWLIST,
-            frozenset({"project-core-state", "destructive-cleanup"}),
+            frozenset({"destructive-cleanup"}),
         )
 
     def rules(self, files):
@@ -192,7 +196,7 @@ example-daemon = { package = "opencrab-example-gateway", path = "../example-gate
         }
         self.assertIn("platform-production-gateway-dependency", self.rules(files))
 
-    def test_dev_only_qc_dependency_is_not_production(self):
+    def test_server_dev_gateway_edge_is_rejected_after_repository_split(self):
         files = {
             "crates/server/Cargo.toml": """
 [package]
@@ -202,8 +206,7 @@ opencrab-example-gateway = { path = "../example-gateway" }
 """
         }
         self.assertNotIn("platform-production-gateway-dependency", self.rules(files))
-        self.assertNotIn("unreviewed-gateway-dev-dependency", self.rules(files))
-        self.assertIn("reviewed-gateway-dev-dependency", self.rules(files))
+        self.assertIn("unreviewed-gateway-dev-dependency", self.rules(files))
 
     def test_dev_gateway_edge_outside_reviewed_server_qc_scope_is_rejected(self):
         files = {
@@ -252,15 +255,15 @@ opencrab-example-gateway = { path = "../example-gateway" }
         """))
         return temp, root
 
-    def test_cargo_metadata_allows_reviewed_server_dev_qc_edge(self):
+    def test_cargo_metadata_rejects_server_dev_gateway_edge_and_concrete_package(self):
         temp, root = self._metadata_workspace("[dev-dependencies]")
         with temp:
-            production, dev_only = AUDIT.cargo_metadata_evidence(root)
-        self.assertNotIn(
-            ("platform-production-gateway-dependency", "crates/server/Cargo.toml", "opencrab-example-gateway"),
+            production, concrete_packages = AUDIT.cargo_metadata_evidence(root)
+        self.assertIn(
+            ("unreviewed-gateway-dev-dependency", "crates/server/Cargo.toml", "opencrab-example-gateway"),
             production,
         )
-        self.assertIn("opencrab-server -> opencrab-example-gateway", dev_only)
+        self.assertEqual(["opencrab-example-gateway"], concrete_packages)
         self.assertIn(
             ("gateway-production-dependency", "crates/example-gateway/Cargo.toml", "opencrab-core"),
             production,
@@ -682,21 +685,6 @@ opencrab-example-gateway = { path = "../example-gateway" }
         errors = AUDIT.check_baseline([finding], document)
         self.assertTrue(any("classification mismatch" in error for error in errors), errors)
 
-    def test_valid_gateway_db_open_requires_exact_finding_identity(self):
-        approved_sites = sorted((path, line, snippet) for _, path, line, snippet in AUDIT.VALID_GATEWAY_DB_OPEN_IDENTITIES)
-        for path, approved_line, snippet in approved_sites:
-            with self.subTest(path=path):
-                source = "\n" * (approved_line - 1) + snippet + "\n" + snippet + "\n"
-                findings = self.findings({path: source}, "gateway-db-open")
-                self.assertEqual([approved_line, approved_line + 1], [item.line for item in findings])
-                approved, moved = (AUDIT._metadata_for(item) for item in findings)
-                self.assertEqual("valid-gateway-owned-store", approved[0])
-                self.assertEqual("production-violation", moved[0])
-                document = self._reviewed_document_for(findings[0])
-                errors = AUDIT.check_baseline([findings[1]], document)
-                self.assertTrue(any(error.startswith("UNCLASSIFIED") for error in errors), errors)
-                self.assertTrue(any(error.startswith("STALE baseline entry") for error in errors), errors)
-
     def test_baseline_violation_must_match_normative_metadata(self):
         finding = AUDIT.audit_texts({
             "crates/example-gateway/src/store.rs":
@@ -727,27 +715,13 @@ opencrab-example-gateway = { path = "../example-gateway" }
         errors = AUDIT.check_baseline([finding], document)
         self.assertTrue(any("expires_when mismatch" in error for error in errors), errors)
 
-    def test_s5_gateway_store_open_allowlist_is_exact_and_complete(self):
-        self.assertEqual(len(AUDIT.VALID_GATEWAY_DB_OPEN_IDENTITIES), 6)
-        mutated = next(iter(AUDIT.VALID_GATEWAY_DB_OPEN_IDENTITIES))
-        changed = (mutated[0], mutated[1], mutated[2] + 1, mutated[3])
-        finding = AUDIT.Finding(*changed)
-        self.assertEqual(AUDIT._metadata_for(finding)[0], "production-violation")
+    def test_core_has_no_gateway_owned_store_allowlist(self):
+        self.assertEqual(AUDIT.VALID_GATEWAY_DB_OPEN_IDENTITIES, set())
 
-    def test_s5_runtime_gateway_sources_have_no_core_db_or_legacy_import(self):
+    def test_core_workspace_has_no_concrete_gateway_package(self):
         root = pathlib.Path(__file__).resolve().parents[2]
-        for crate in ["discord-gateway", "nostr-gateway", "web-gateway"]:
-            manifest = (root / "crates" / crate / "Cargo.toml").read_text()
-            for forbidden in ["opencrab-core.workspace", "opencrab-db.workspace", "opencrab-nostr.workspace", "opencrab-gateway.workspace"]:
-                self.assertNotIn(forbidden, manifest.split("[dev-dependencies]")[0])
-            source = "\n".join(
-                path.read_text().split("#[cfg(test)]", 1)[0]
-                for path in (root / "crates" / crate / "src").rglob("*.rs")
-                if not path.name.endswith("_tests.rs")
-            )
-            self.assertNotIn("core_database_path", source)
-            self.assertNotIn("legacy_database_path", source)
-            self.assertNotIn("import_legacy", source)
+        _, concrete_packages = AUDIT.cargo_metadata_evidence(root)
+        self.assertEqual([], concrete_packages)
 
     def test_s5_server_has_no_concrete_identity_configuration_routes(self):
         root = pathlib.Path(__file__).resolve().parents[2]
