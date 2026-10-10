@@ -26,7 +26,7 @@ fn core() -> Core {
         .unwrap()
         .execute_batch(
             "INSERT INTO agents(agent_id,name,persona_name,subject_id) VALUES ('agent-a','a','a',1);
-             INSERT INTO agents(agent_id,name,persona_name,subject_id) VALUES ('agent-town','t','t',2);",
+             INSERT INTO agents(agent_id,name,persona_name,subject_id) VALUES ('agent-ext','t','t',2);",
         )
         .unwrap();
     let state = std::sync::Arc::new(opencrab_extgate::registry::ExtgateState::new_protected(db));
@@ -48,14 +48,14 @@ fn expires_in_days(days: i64) -> String {
     (chrono::Utc::now() + chrono::Duration::days(days)).to_rfc3339()
 }
 
-fn issue_town(core: &Core, out: &Path) -> Result<String> {
+fn issue_ext(core: &Core, out: &Path) -> Result<String> {
     let expires = expires_in_days(30);
     cli(
         core,
         &[
             "principal-issue",
             "--principal-id",
-            "crab-town",
+            "ext-gate",
             "--operation",
             "instance.read",
             "--operation",
@@ -107,9 +107,9 @@ async fn cli_issued_principal_and_grant_provision_instance_over_running_admin_so
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
     // The socket is already serving; the principal is added afterwards, with no restart.
-    let credential = core.root.join("crab-town.credential");
-    let message = issue_town(&core, &credential).unwrap();
-    assert!(message.contains("crab-town"));
+    let credential = core.root.join("ext-gate.credential");
+    let message = issue_ext(&core, &credential).unwrap();
+    assert!(message.contains("ext-gate"));
     assert_eq!(mode(&credential), 0o600);
     let secret = std::fs::read_to_string(&credential).unwrap();
     assert!(
@@ -117,7 +117,7 @@ async fn cli_issued_principal_and_grant_provision_instance_over_running_admin_so
         "bearer must not reach stdout"
     );
 
-    let instance_id = instance_id_for("agent-town");
+    let instance_id = instance_id_for("agent-ext");
     let client = GateAdminClient::from_credential_file(socket.clone(), &credential).unwrap();
     assert!(client.get_instance(&instance_id).await.unwrap().is_none());
     fn desired(grant: Option<&str>) -> DesiredInstance<'_> {
@@ -135,8 +135,8 @@ async fn cli_issued_principal_and_grant_provision_instance_over_running_admin_so
         .await
         .is_err());
 
-    let grant_file = core.root.join("crab-town.grant");
-    grant(&core, "agent-town", "2", "600", &grant_file).unwrap();
+    let grant_file = core.root.join("ext-gate.grant");
+    grant(&core, "agent-ext", "2", "600", &grant_file).unwrap();
     assert_eq!(mode(&grant_file), 0o600);
     let token = std::fs::read_to_string(&grant_file).unwrap();
     let created = client
@@ -148,13 +148,13 @@ async fn cli_issued_principal_and_grant_provision_instance_over_running_admin_so
     let binding_id = uuid::Uuid::new_v4().to_string();
     let session_id = format!("extgate-{binding_id}");
     let binding = client
-        .put_binding(&binding_id, &instance_id, "town:room", &session_id, "town")
+        .put_binding(&binding_id, &instance_id, "ext:room", &session_id, "ext")
         .await
         .unwrap();
-    assert_eq!(binding.address, "town:room");
+    assert_eq!(binding.address, "ext:room");
 
     // Revocation through the CLI takes effect on the next request, again without restart.
-    cli(&core, &["principal-revoke", "--principal-id", "crab-town"]).unwrap();
+    cli(&core, &["principal-revoke", "--principal-id", "ext-gate"]).unwrap();
     assert!(client.get_instance(&instance_id).await.is_err());
     server.abort();
 }
@@ -236,12 +236,12 @@ fn cli_refuses_unscoped_or_overreaching_issuance() {
     // Grants: pair mismatch and TTL above one hour are refused, and leave no file.
     let grant_out = core.root.join("g.grant");
     assert!(grant(&core, "agent-a", "2", "600", &grant_out).is_err());
-    assert!(grant(&core, "agent-town", "2", "3601", &grant_out).is_err());
+    assert!(grant(&core, "agent-ext", "2", "3601", &grant_out).is_err());
     assert!(!grant_out.exists());
 
     // An existing path is never overwritten (and no principal is created).
     std::fs::write(&out, "keep").unwrap();
-    assert!(issue_town(&core, &out).is_err());
+    assert!(issue_ext(&core, &out).is_err());
     assert_eq!(std::fs::read_to_string(&out).unwrap(), "keep");
     let count: i64 = core
         .state
