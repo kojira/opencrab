@@ -137,8 +137,14 @@ mod tests {
             // Wire metadata validation, not prompt-field sanitization.
             crates_dir.join("extgate").join("src").join("protocol.rs"),
             // Outbound attachment file-name validation (D-1079a), not prompt-field sanitization.
-            crates_dir.join("extgate").join("src").join("outbound_files.rs"),
-            crates_dir.join("gate-client").join("src").join("outbound.rs"),
+            crates_dir
+                .join("extgate")
+                .join("src")
+                .join("outbound_files.rs"),
+            crates_dir
+                .join("gate-client")
+                .join("src")
+                .join("outbound.rs"),
         ];
 
         let mut offenders = Vec::new();
