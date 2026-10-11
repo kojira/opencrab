@@ -149,7 +149,6 @@ pub fn build_memory_index_section(
     } else {
         opencrab_db::queries::count_memory_units(conn, agent_id)?
     };
-    let topic_counts = opencrab_db::queries::count_topics_per_period(conn, agent_id)?;
 
     let mut month_lines: Vec<String> = Vec::new();
     for p in past_periods.iter().take(MEMORY_INDEX_MAX_MONTHS) {
@@ -159,12 +158,10 @@ pub fn build_memory_index_section(
         } else {
             "(summary pending)".to_string()
         };
-        // child_count は直下の session 数なので topic 総数は別クエリで引く
-        let n_topics = topic_counts.get(&p.id).copied().unwrap_or(0);
-        month_lines.push(format!(
-            "- [{sid}] {} ({n_topics} topics): {summary}",
-            p.title
-        ));
+        // topic 件数は出さない（D-1078）: 件数は topic が増えるたびに変わり、月行
+        // （= セクション先頭寄り）を毎ターン書き換えてプロンプトキャッシュを壊す。
+        // 月行は月次要約が作り直されたときだけ変わる。件数は browse_memory_index で引ける。
+        month_lines.push(format!("- [{sid}] {}: {summary}", p.title));
     }
     // ブロック別予算で古い側から刈る（月と topic が互いを締め出さない）。
     // リストは新しい順なので take_within_budget は新しい記憶を優先して残す。
@@ -366,7 +363,7 @@ mod tests {
         assert!(!section.contains("[p3] 2026-06"));
         // ロールアップ済みは要約、未ロールアップは pending
         assert!(section.contains("4月はDiscord連携に集中した。"));
-        assert!(section.contains("[p2] 2026-05 (0 topics): (summary pending)"));
+        assert!(section.contains("[p2] 2026-05: (summary pending)"));
         // 現在月 topic: 他セッションのみ、現セッションと daily_log は出ない
         assert!(section.contains("[t1] 06-10 他セッションの話"));
         assert!(!section.contains("現セッションの話"));
@@ -409,7 +406,7 @@ mod tests {
         let section = build_memory_index_section(&conn, "a1", "s")
             .unwrap()
             .unwrap();
-        assert!(section.contains("[p1] 2026-03 (1 topics): 3月の月次要約。"));
+        assert!(section.contains("[p1] 2026-03: 3月の月次要約。"));
         assert!(!section.contains("This month's topics"));
     }
 
@@ -525,12 +522,46 @@ mod tests {
             section,
             "[Memory Index] (your long-term memory; retrieve_memory_nodes(short_id) for full logs, search_memory_index(query) to search)\n\
              Months:\n\
-             - [p1] 2026-04 (0 topics): 4月はDiscord連携に集中した。\n\
-             - [p2] 2026-05 (0 topics): (summary pending)\n\
+             - [p1] 2026-04: 4月はDiscord連携に集中した。\n\
+             - [p2] 2026-05: (summary pending)\n\
              This month's topics (other sessions):\n\
              - [t1] 06-10 他セッションの話"
         );
         assert!(!section.contains("Declared memories"));
+    }
+
+    /// D-1078: month lines carry no topic count, so a topic added under a month does not
+    /// change that month's line (the line only changes when the month is re-rolled).
+    #[test]
+    fn month_line_is_stable_when_a_topic_is_added_to_that_month() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed(&conn);
+        let before = build_memory_index_section(&conn, "a1", "current-session")
+            .unwrap()
+            .unwrap();
+        use opencrab_db::queries::*;
+        insert_index_node(
+            &conn,
+            &mk_node("s4", "session", Some("p1"), "S", None, None),
+        )
+        .unwrap();
+        insert_index_node(
+            &conn,
+            &mk_node(
+                "t4",
+                "topic",
+                Some("s4"),
+                "4月の話",
+                Some("x"),
+                Some("2026-04-20"),
+            ),
+        )
+        .unwrap();
+        let after = build_memory_index_section(&conn, "a1", "current-session")
+            .unwrap()
+            .unwrap();
+        assert_eq!(before, after);
+        assert!(!after.contains("topics)"), "{after}");
     }
 
     /// unit は出る / unit が覆う範囲の topic は出ない / 覆っていない範囲は出る。

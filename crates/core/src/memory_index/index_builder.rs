@@ -201,7 +201,9 @@ impl IndexBuilder {
             }
 
             // 期間ノード（年月）を確保。
-            // ラベルはログ自身のタイムスタンプから導出する。インデックス実行時刻
+            // ラベルはこのバッチ（= これから作る topic）のログ自身のタイムスタンプから
+            // 導出する。topic の date_from と同じ「最古ログの created_at」の月なので、
+            // topic は必ず自分の date_from の月の下に入る（D-1078）。インデックス実行時刻
             // （Utc::now()）を使うと、rebuild や遅延インデックス時に過去のセッションが
             // すべて実行月のバケットへ誤分類される。
             let period_label = session_logs
@@ -245,8 +247,21 @@ impl IndexBuilder {
                 }
             }
 
-            // セッションノードを確保
-            let session_node_id = format!("session-{agent_id}-{session_id}");
+            // セッションノードを確保（セッション × 月ごとに 1 つ — D-1078）。
+            // 長寿命セッションの topic を開始月に積み続けると、その月の行と月次要約が
+            // 毎ターン変わる（プロンプトキャッシュを壊す）。v59 以前の旧 id
+            // （`session-{agent}-{session}`）が既にこの月の下にあればそれを使い、
+            // 無ければ月付きの id を使う。
+            let session_node_id = {
+                let db = conn
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+                let legacy_id = format!("session-{agent_id}-{session_id}");
+                match opencrab_db::queries::get_index_node(&db, &legacy_id)? {
+                    Some(n) if n.parent_id.as_deref() == Some(period_id.as_str()) => legacy_id,
+                    _ => format!("session-{agent_id}-{session_id}-{period_label}"),
+                }
+            };
             {
                 let db = conn
                     .lock()

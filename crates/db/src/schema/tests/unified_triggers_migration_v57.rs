@@ -146,7 +146,7 @@ fn v57_moves_enabled_session_heartbeats_into_agent_schedules_and_drops_old_stora
         .unwrap();
 
     initialize(&conn).unwrap();
-    assert_eq!(schema_version(&conn).unwrap(), 58);
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
 
     let rows = v57_schedule_rows(&conn);
     assert_eq!(
@@ -235,7 +235,7 @@ fn v57_rejects_enabled_heartbeat_without_interval_or_below_floor() {
 #[test]
 fn v57_fresh_schema_has_no_heartbeat_storage() {
     let fresh = crate::init_memory().unwrap();
-    assert_eq!(schema_version(&fresh).unwrap(), 58);
+    assert_eq!(schema_version(&fresh).unwrap(), latest_version());
     for table in V57_OLD_HEARTBEAT_TABLES {
         assert!(!table_exists(&fresh, table).unwrap(), "{table} must be absent");
     }
