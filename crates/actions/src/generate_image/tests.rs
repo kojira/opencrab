@@ -221,6 +221,43 @@ async fn generate_image_refuses_symlinked_output_dir() {
     assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
 }
 
+/// 出力先が workspace 内の別ディレクトリを指す symlink でも拒否する（解決前の名前で判定する）。
+#[cfg(unix)]
+#[tokio::test]
+async fn generate_image_refuses_output_dir_symlinked_inside_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let inside = dir.path().join("inside");
+    std::fs::create_dir(&inside).unwrap();
+    std::os::unix::fs::symlink(&inside, dir.path().join("generated_images")).unwrap();
+    let action = GenerateImageAction::new(Some(FakeGenerator::ok(PNG_1X1)));
+    let ctx = context(dir.path(), crate::CallerIdentity::Owner);
+    let r = action.execute(&json!({"prompt": "x"}), &ctx).await;
+    assert!(!r.success, "{:?}", r.data);
+    assert!(std::fs::read_dir(&inside).unwrap().next().is_none());
+}
+
+/// 通常は背景 dispatch で走り `images` は結果に乗らないため、本文・説明は「見える」と言わず
+/// `view_image` にそのパスを渡すよう案内する。
+#[tokio::test]
+async fn generate_image_result_text_points_to_view_image_without_claiming_visibility() {
+    let dir = tempfile::tempdir().unwrap();
+    let action = GenerateImageAction::new(Some(FakeGenerator::ok(PNG_1X1)));
+    let ctx = context(dir.path(), crate::CallerIdentity::Owner);
+    let r = action.execute(&json!({"prompt": "x"}), &ctx).await;
+    assert!(r.success, "{:?}", r.error);
+    let data = r.data.unwrap();
+    let path = data["path"].as_str().unwrap();
+    let message = data["message"].as_str().unwrap();
+    assert!(message.contains(path), "{message}");
+    assert!(message.contains("view_image"), "{message}");
+    assert!(message.contains(&format!("path={path}")), "{message}");
+    assert!(!message.contains("見える"), "{message}");
+
+    let description = action.description();
+    assert!(description.contains("view_image"), "{description}");
+    assert!(!description.contains("見える"), "{description}");
+}
+
 // ---- 方針（owner 限定・背景 dispatch）----
 
 #[test]

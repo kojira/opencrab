@@ -2,8 +2,9 @@
 //!
 //! 生成した PNG は `generated_images/<UTC時刻>-<短いID>.png` に新規作成で書く（上書きしない・
 //! シンボリックリンクの出力先は拒否する）。結果にはワークスペース相対パスとバイト数だけを
-//! 載せ、画像そのものは `ActionResult.images`（`view_image` と同じ経路）で次の LLM 呼び出しに
-//! 見せる。base64 は結果本文にもログにも出さない。
+//! 載せる。通常は背景 dispatch で走り、その経路は `ActionResult.images` を運ばないため、
+//! 本文と説明は「`view_image` にそのパスを渡せば見られる」と案内する（見えているとは書かない）。
+//! `images` はインライン実行の経路向けに引き続き載せる。base64 は結果本文にもログにも出さない。
 
 use std::io::Write as _;
 use std::path::Path;
@@ -37,8 +38,8 @@ impl GenerateImageAction {
 /// 保存済みの画像。
 struct SavedImage {
     relative_path: String,
-    /// 次の LLM 呼び出しで見せる縮小版。正規化の上限（20 MiB）を超える・デコードできない
-    /// 場合は `None`（ファイルは保存する）。
+    /// インライン実行時に `ActionResult.images` へ載せる縮小版。正規化の上限（20 MiB）を
+    /// 超える・デコードできない場合は `None`（ファイルは保存する）。
     shown: Option<NormalizedImage>,
 }
 
@@ -65,15 +66,18 @@ fn save_generated_png(
         }
     };
 
-    let dir = ws.resolve_path(OUTPUT_DIR)?;
-    match std::fs::symlink_metadata(&dir) {
+    // symlink の判定は解決前の名前で行う（`resolve_path` はリンクを辿るので、解決後の
+    // パスでは workspace 内を指す symlink を見分けられない）。
+    let unresolved = ws.root().join(OUTPUT_DIR);
+    match std::fs::symlink_metadata(&unresolved) {
         Ok(meta) => anyhow::ensure!(
             meta.is_dir() && !meta.file_type().is_symlink(),
             "{OUTPUT_DIR} exists but is not a regular directory"
         ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&dir)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&unresolved)?,
         Err(e) => return Err(e.into()),
     }
+    let dir = ws.resolve_path(OUTPUT_DIR)?;
 
     let id = uuid::Uuid::new_v4().simple().to_string();
     let name = format!(
@@ -103,7 +107,8 @@ impl Action for GenerateImageAction {
 
     fn description(&self) -> &str {
         "画像を生成してワークスペースに PNG で保存する（ChatGPT サブスクリプション）。\
-         生成には1〜2分かかる。完了すると保存先の相対パスが返り、その画像は次の応答から見える。\
+         生成には1〜2分かかる。完了すると保存先の相対パス（path）が返る。\
+         画像を確認するには view_image に path=<そのパス> を渡す。\
          ユーザーに渡すときは既存の投稿・添付ツールでそのファイルを使う。"
     }
 
@@ -162,18 +167,14 @@ impl Action for GenerateImageAction {
             request_id = generated.request_id.as_deref().unwrap_or(""),
             "generate_image saved"
         );
-        let preview_note = if saved.shown.is_some() {
-            "この画像は次の応答から見える。"
-        } else {
-            "画像が大きすぎるため次の応答には添付しない（必要なら view_image で確認する）。"
-        };
         let mut data = json!({
             "path": saved.relative_path,
             "size_bytes": size_bytes,
             "message": format!(
-                "画像を {} に保存した（{} bytes）。{preview_note}\
+                "画像を {path} に保存した（{size_bytes} bytes）。\
+                 確認するには view_image に path={path} を渡す。\
                  ユーザーに渡すときは既存の投稿・添付ツールでこのファイルを使う。",
-                saved.relative_path, size_bytes
+                path = saved.relative_path,
             ),
         });
         if let Some(revised) = generated.revised_prompt {
