@@ -2,6 +2,7 @@ use indexmap::IndexMap;
 use std::sync::Arc;
 
 use crate::common::*;
+use crate::generate_image::GenerateImageAction;
 use crate::learning::*;
 use crate::llm_analysis::*;
 use crate::llm_evaluation::*;
@@ -41,6 +42,8 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(WsDeleteAction));
         dispatcher.register(Arc::new(WsMkdirAction));
         dispatcher.register(Arc::new(ViewImageAction));
+        // 画像生成（D-1076）。生成器は server が chatgpt プロバイダから差し替え登録する。
+        dispatcher.register(Arc::new(GenerateImageAction::new(None)));
 
         // 学習アクション登録
         dispatcher.register(Arc::new(LearnFromExperienceAction));

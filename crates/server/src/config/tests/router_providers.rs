@@ -269,6 +269,49 @@
         }
     }
 
+    /// D-1076: chatgpt 形式の provider があれば、その OAuth で画像生成器を配線する。
+    /// 名乗り名（セクションキー）が chatgpt でなくても形式で判定する。
+    #[test]
+    fn chatgpt_provider_wires_image_generator() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "sub".to_string(),
+            ProviderConfig {
+                provider_type: "chatgpt".to_string(),
+                ..Default::default()
+            },
+        );
+        let config = LlmConfig {
+            providers,
+            default_provider: "sub".to_string(),
+            ..Default::default()
+        };
+        let router = build_llm_router(&config).unwrap();
+        assert!(router.image_generator().is_some());
+    }
+
+    /// D-1076: chatgpt 形式が無ければ画像生成器は無い（API キー系へのフォールバック無し）。
+    #[test]
+    fn non_chatgpt_providers_leave_image_generator_unset() {
+        let mut providers = HashMap::new();
+        for ty in ["openai", "anthropic", "codex"] {
+            providers.insert(
+                ty.to_string(),
+                ProviderConfig {
+                    api_key: "x".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        let config = LlmConfig {
+            providers,
+            default_provider: "openai".to_string(),
+            ..Default::default()
+        };
+        let router = build_llm_router(&config).unwrap();
+        assert!(router.image_generator().is_none());
+    }
+
     /// #660: dashboard から **既定 provider を enabled=false** にする操作は reload で
     /// hard error になる（意図した挙動変化）。他 provider が残るのに既定名だけが消えると、
     /// bare model 要求が黙って fallback へ流れる——本 PR が塞いだ状態の実行時再構成なので、

@@ -6,6 +6,7 @@ use futures::stream::BoxStream;
 use tokio::time::Duration;
 use tracing::{debug, info, warn};
 
+use crate::image_generation::ImageGenerator;
 use crate::message::{ChatRequest, ChatResponse, ChatStreamDelta};
 use crate::metrics::MetricsCollector;
 use crate::traits::LlmProvider;
@@ -29,6 +30,8 @@ pub struct LlmRouter {
     /// Maps alias names to "provider:model" strings.
     model_mapping: HashMap<String, String>,
     metrics: Option<MetricsCollector>,
+    /// 画像生成器（D-1076）。chat の provider 群とは別枠で持ち、retry / fallback を通さない。
+    image_generator: Option<Arc<dyn ImageGenerator>>,
 }
 
 impl LlmRouter {
@@ -39,6 +42,7 @@ impl LlmRouter {
             fallback_chain: Vec::new(),
             model_mapping: HashMap::new(),
             metrics: None,
+            image_generator: None,
         }
     }
 
@@ -86,6 +90,16 @@ impl LlmRouter {
     /// Attach a metrics collector to the router.
     pub fn set_metrics(&mut self, metrics: MetricsCollector) {
         self.metrics = Some(metrics);
+    }
+
+    /// 画像生成器を設定する（D-1076。server が chatgpt 形式の provider から配線する）。
+    pub fn set_image_generator(&mut self, generator: Arc<dyn ImageGenerator>) {
+        self.image_generator = Some(generator);
+    }
+
+    /// 設定済みの画像生成器（無ければ `None`。他 provider へのフォールバックは無い）。
+    pub fn image_generator(&self) -> Option<Arc<dyn ImageGenerator>> {
+        self.image_generator.clone()
     }
 
     /// Get a provider by name.
@@ -522,6 +536,7 @@ impl std::fmt::Debug for LlmRouter {
             .field("default_provider", &self.default_provider)
             .field("fallback_chain", &self.fallback_chain)
             .field("model_mapping", &self.model_mapping)
+            .field("image_generator", &self.image_generator.is_some())
             .finish()
     }
 }

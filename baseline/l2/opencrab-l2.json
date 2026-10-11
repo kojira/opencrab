@@ -29,7 +29,7 @@
       "5xx": 4
     },
     "tool_effects_observed": 43,
-    "tool_success_uncollected_count": 6
+    "tool_success_uncollected_count": 7
   },
   "http": {
     "probes": [
@@ -9355,6 +9355,7 @@
       },
       "success_uncollected_l3": {
         "delete_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
+        "generate_image": "Success requires a live ChatGPT subscription image endpoint and OAuth credentials; the collector has no chatgpt provider. Request/response/error handling is covered by opencrab-llm mock-server tests and file saving by opencrab-actions unit tests.",
         "get_my_schedules": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "run_my_schedule": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
         "set_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
@@ -9606,6 +9607,18 @@
           "success": false
         },
         "tool": "execute_shell"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "prompt"
+        ],
+        "result": {
+          "data": null,
+          "error": "prompt is required and must not be empty",
+          "success": false
+        },
+        "tool": "generate_image"
       },
       {
         "arguments": {},
@@ -10252,6 +10265,20 @@
           "success": false
         },
         "tool": "execute_shell"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'generate_image' requires owner",
+          "success": false
+        },
+        "tool": "generate_image"
       },
       {
         "caller": "agent",
@@ -15147,6 +15174,12 @@
       },
       {
         "facet": "success",
+        "reason": "Success requires a live ChatGPT subscription image endpoint and OAuth credentials; the collector has no chatgpt provider. Request/response/error handling is covered by opencrab-llm mock-server tests and file saving by opencrab-actions unit tests.",
+        "status": "uncollected",
+        "tool": "generate_image"
+      },
+      {
+        "facet": "success",
         "reason": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "status": "uncollected",
         "tool": "get_my_schedules"
@@ -15205,6 +15238,7 @@
           "delete_my_schedule",
           "evaluate_response",
           "execute_shell",
+          "generate_image",
           "generate_inner_voice",
           "get_default_subtask_webhook",
           "get_default_webhook",
@@ -15291,6 +15325,7 @@
           "delete_my_schedule",
           "evaluate_response",
           "execute_shell",
+          "generate_image",
           "generate_inner_voice",
           "get_default_subtask_webhook",
           "get_default_webhook",
@@ -15377,6 +15412,7 @@
           "delete_my_schedule",
           "evaluate_response",
           "execute_shell",
+          "generate_image",
           "generate_inner_voice",
           "get_default_subtask_webhook",
           "get_default_webhook",
@@ -15463,6 +15499,7 @@
           "delete_my_schedule",
           "evaluate_response",
           "execute_shell",
+          "generate_image",
           "generate_inner_voice",
           "get_default_subtask_webhook",
           "get_default_webhook",
@@ -15541,6 +15578,7 @@
           "declare_done",
           "evaluate_response",
           "execute_shell",
+          "generate_image",
           "generate_inner_voice",
           "get_system_info",
           "get_task",
@@ -15601,6 +15639,7 @@
           "declare_done",
           "evaluate_response",
           "execute_shell",
+          "generate_image",
           "generate_inner_voice",
           "get_system_info",
           "get_task",
@@ -15667,6 +15706,7 @@
           "declare_done",
           "delete_my_schedule",
           "evaluate_response",
+          "generate_image",
           "generate_inner_voice",
           "get_default_subtask_webhook",
           "get_default_webhook",
@@ -15772,6 +15812,7 @@
           "declare_done",
           "delete_my_schedule",
           "evaluate_response",
+          "generate_image",
           "generate_inner_voice",
           "get_default_subtask_webhook",
           "get_default_webhook",

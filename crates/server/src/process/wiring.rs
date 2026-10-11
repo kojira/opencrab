@@ -87,6 +87,12 @@ where
             | opencrab_actions::CallerIdentity::CoAgent { .. }
             | opencrab_actions::CallerIdentity::TrustedUser
     );
+    // 画像生成（D-1076）: chatgpt 形式の provider があればその生成器で差し替え登録する。
+    dispatcher.register(Arc::new(
+        opencrab_actions::generate_image::GenerateImageAction::new(
+            state.llm_router.get().image_generator(),
+        ),
+    ));
     let system_actions: Arc<dyn opencrab_gateway::GatewayActions> =
         Arc::new(crate::system_actions::SystemGatewayActions::new(
             state.clone(),

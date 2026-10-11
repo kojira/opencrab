@@ -22,6 +22,10 @@ const KNOWN_PROVIDER_TYPES: &[&str] = &[
 pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
     let mut router = LlmRouter::new();
 
+    // 画像生成器（D-1076）は chatgpt 形式の provider の OAuth を使う。複数あれば既定 provider を
+    // 優先し、次にセクションキー順で最初のもの（HashMap 順に依存しない）。
+    let mut image_generator: Option<(String, Arc<ChatGptProvider>)> = None;
+
     for (name, pconfig) in &config.providers {
         // 形式（type）でクライアント実装を選ぶ。セクションキー `name` は「名乗り名」
         // （接続先の実体・ルーティングキー）で、`type` は「形式」。`type` 省略時は
@@ -222,7 +226,18 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                     p = p.with_timeout_secs(pconfig.timeout_secs);
                 }
                 p = p.with_include_encrypted_content(pconfig.include_reasoning_encrypted_content);
-                Some(Arc::new(p))
+                let p = Arc::new(p);
+                let preferred = match &image_generator {
+                    None => true,
+                    Some((current, _)) => {
+                        *current != config.default_provider
+                            && (*name == config.default_provider || name < current)
+                    }
+                };
+                if preferred {
+                    image_generator = Some((name.clone(), p.clone()));
+                }
+                Some(p as Arc<dyn LlmProvider>)
             }
             other => {
                 // 未知の形式は起動を止める（黙って落とさない）。旧実装はここで
@@ -276,6 +291,11 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
             p = config.default_provider,
         );
     }
+    if let Some((name, generator)) = image_generator {
+        info!(provider = %name, "Image generator configured");
+        router.set_image_generator(generator);
+    }
+
     // Set default provider
     router.set_default_provider(&config.default_provider);
 

@@ -105,6 +105,8 @@ pub const CORE_DISPATCHABLE_ACTIONS: &[&str] = &[
     // スキル生成（server 側の gateway ツール `create_skill` と同分類。あちらは
     // 定義で `class.dispatch == Dispatchable` を名乗る）。
     "create_my_skill",
+    // 画像生成（D-1076）。1 枚 1〜3 分かかるので背景で走らせ、完了報告で保存先を返す。
+    "generate_image",
 ];
 
 /// spawn_subtask のネスト上限。
@@ -151,6 +153,8 @@ pub const OWNER_ONLY_ACTIONS: &[&str] = &[
     // 起こす」操作なので、オーナー / co_agent 以外（外部ユーザー由来の caller=Agent）には出さない。
     // 発火の実行内容は定時発火と同一（別経路を作らない）。
     "run_my_schedule",
+    // 画像生成（D-1076）。オーナーの ChatGPT サブスクリプションの利用枠を消費するため owner のみ。
+    "generate_image",
 ];
 
 /// owner / co_agent / trusted_user のみ（素の Agent は不可）のアクション（#45）。
