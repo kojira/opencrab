@@ -15,6 +15,7 @@ use tokio::sync::oneshot;
 use crate::commands::CommandRegistry;
 use crate::error::{ErrorCode, GateError};
 use crate::operations::{FinalDelivery, GatewayOperationDeclaration};
+use crate::outbound_files::StagedFile;
 use crate::turn_queue::SessionTurnQueues;
 
 /// hello 済みで未 close の接続。
@@ -54,6 +55,8 @@ pub enum Pending {
         binding_id: String,
         operation: String,
         reply: oneshot::Sender<OperationOutcome>,
+        /// Outbox copies of declared workspace files; deleted at terminal state.
+        staged_files: Vec<StagedFile>,
     },
     /// 発話クラス（撃ちっぱなし・DESIGN-RESUME-SETTLE §3.3・第三柱）の invoke 応答待ち。
     /// `Say` と同型で operation_call を作らず deliveries 行だけを terminal 化する（settle/resume
@@ -64,6 +67,8 @@ pub enum Pending {
         binding_id: String,
         /// ❌ を付ける発端 origin（単一メンションのみ Some・bundle/曖昧は None）。
         reply_target: Option<String>,
+        /// Outbox copies of declared workspace files; deleted at terminal state.
+        staged_files: Vec<StagedFile>,
     },
 }
 
@@ -201,6 +206,8 @@ pub struct ExtgateState {
     halt_notify: tokio::sync::Notify,
     next_identity: AtomicU64,
     attachment_inbox_root: Mutex<Option<PathBuf>>,
+    attachment_outbox_root: Mutex<Option<PathBuf>>,
+    workspace_base: Mutex<Option<String>>,
     reserved_tool_name: Mutex<Option<ReservedToolNameFn>>,
     pub turn_queues: Arc<SessionTurnQueues>,
     pub commands: CommandRegistry,
@@ -228,6 +235,8 @@ impl ExtgateState {
             halt_notify: tokio::sync::Notify::new(),
             next_identity: AtomicU64::new(1),
             attachment_inbox_root: Mutex::new(None),
+            attachment_outbox_root: Mutex::new(None),
+            workspace_base: Mutex::new(None),
             reserved_tool_name: Mutex::new(None),
             turn_queues: Arc::new(SessionTurnQueues::new()),
             commands: CommandRegistry::with_builtins()
@@ -345,6 +354,28 @@ impl ExtgateState {
 
     pub fn attachment_inbox_root(&self) -> Option<PathBuf> {
         self.attachment_inbox_root.lock().ok()?.clone()
+    }
+
+    /// Core-owned root for outbound workspace-file copies (`format: workspace-file`).
+    pub fn set_attachment_outbox_root(&self, root: PathBuf) {
+        *self
+            .attachment_outbox_root
+            .lock()
+            .expect("attachment outbox root") = Some(root);
+    }
+
+    pub fn attachment_outbox_root(&self) -> Option<PathBuf> {
+        self.attachment_outbox_root.lock().ok()?.clone()
+    }
+
+    /// Agent workspace template (`{agent_id}` placeholder) used to resolve
+    /// workspace-file paths for the calling agent.
+    pub fn set_workspace_base(&self, base: String) {
+        *self.workspace_base.lock().expect("workspace base") = Some(base);
+    }
+
+    pub fn workspace_base(&self) -> Option<String> {
+        self.workspace_base.lock().ok()?.clone()
     }
 
     /// builtin / 既存 tool 名 collision 判定を登録する。

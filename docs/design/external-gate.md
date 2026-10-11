@@ -55,6 +55,8 @@ ErrDetail  = string | null
 
 `Attachment.url` は absolute `https` URL。`attachments` は配列として必須で、画像が無いときは `[]`。`said.text` と `attachments` が同時に空なら `bad_request` で記録 0。添付 byte、base64、multipart、local path は受理しない。
 
+> 注: 受信の local file 添付は [DC-953](../design-generic-inbound-attachments.md) で追加された。送信側では、operation 宣言の `"format": "workspace-file"` field を core が outbox コピーの descriptor `{id,name,media_type,size,sha256,local_path}`（`local_path` は outbox root 相対）へ書き換えて invoke payload に載せる（[D-1079a](../design-generic-outbound-attachments.md)）。byte や base64 は frame に載せない。
+
 ### 3.3 message の完全表
 
 表の field は全て必須である。追加 field は §3.1 の規則で無視する。

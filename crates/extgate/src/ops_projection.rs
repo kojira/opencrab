@@ -20,6 +20,7 @@ use crate::operation_calls::{invoke_and_wait_for_digest, invoke_utterance_for_di
 use crate::operations::{
     AllowedCaller, GatewayOperationDeclaration, OperationDispatch, Sharing, SubEngine,
 };
+use crate::outbound_files::stage_workspace_files;
 use crate::registry::ExtgateState;
 
 /// 1 binding/session に対する宣言能力の投影。RunRequest.gateway_actions へ載せる。
@@ -193,6 +194,24 @@ impl GatewayActions for ExtgateOpsGatewayActions {
             };
         }
         let payload = self.resolve_payload(name, args);
+        // Declared `format:"workspace-file"` fields become outbox descriptors before any
+        // delivery/speech row or invoke frame exists; a rejection writes nothing.
+        let (payload, staged_files) = match stage_workspace_files(
+            &self.state,
+            &self.instance_id,
+            &self.agent_id,
+            declaration,
+            &payload,
+        ) {
+            Ok(staged) => staged,
+            Err(e) => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(e.to_string()),
+                };
+            }
+        };
 
         // 発話クラス（撃ちっぱなし・§3.3.1 C5）: operation_call を作らず delivery で crash-safe
         // 永続し、await しない（settle/resume を起こさない）。モデルへは最小 ack（成功封筒・
@@ -214,6 +233,7 @@ impl GatewayActions for ExtgateOpsGatewayActions {
                 target_origin.as_deref(),
                 ctx.tool_call_id.as_deref(),
                 &self.declaration_digest,
+                staged_files,
             )
             .await
             {
@@ -239,6 +259,7 @@ impl GatewayActions for ExtgateOpsGatewayActions {
             name,
             &self.declaration_digest,
             &payload,
+            staged_files,
         )
         .await
         {

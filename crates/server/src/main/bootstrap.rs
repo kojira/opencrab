@@ -35,6 +35,35 @@ fn configure_attachment_inbox(
     Ok(inbox)
 }
 
+fn attachment_outbox_path(database_path: &Path) -> PathBuf {
+    database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("attachments/outbox")
+}
+
+/// Creates the private core-owned outbox for declared workspace files, removes
+/// copies left by a previous process (no call survives a restart) and gives
+/// extgate the outbox root plus the agent workspace template.
+fn configure_attachment_outbox(
+    extgate: &opencrab_extgate::ExtgateState,
+    database_path: &Path,
+    workspace_base: &str,
+) -> anyhow::Result<PathBuf> {
+    let outbox = attachment_outbox_path(database_path);
+    std::fs::create_dir_all(&outbox)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&outbox, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    let outbox = outbox.canonicalize()?;
+    let removed = opencrab_extgate::outbound_files::sweep_attachment_outbox(&outbox)?;
+    if removed > 0 {
+        tracing::info!(removed, "startup: removed stale outbound attachment copies");
+    }
+    extgate.set_attachment_outbox_root(outbox.clone());
+    extgate.set_workspace_base(workspace_base.to_string());
+    Ok(outbox)
+}
+
 #[cfg(test)]
 thread_local! {
     static INJECTED_GATE_ADMIN_STARTUP_FAULT: std::cell::RefCell<Option<&'static str>> = const { std::cell::RefCell::new(None) };
@@ -120,6 +149,11 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     inject_gate_admin_startup_fault("router")?;
     let gate_admin_router = opencrab_extgate::admin_router(extgate.clone());
     configure_attachment_inbox(&extgate, Path::new(&cfg.database.path))?;
+    configure_attachment_outbox(
+        &extgate,
+        Path::new(&cfg.database.path),
+        &cfg.agent.workspace_path,
+    )?;
 
     // #553: 起動時リコンサイル。新プロセスの subtask registry（in-memory）は必ず空なので、
     // この時点で status='active' の subtask セッションは定義上すべて孤児（前プロセスと共に
@@ -273,6 +307,42 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
                 std::fs::metadata(inbox).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_outbox_is_derived_from_the_core_database_directory() {
+        let database = std::path::Path::new("runtime/data/opencrab.db");
+        assert_eq!(
+            super::attachment_outbox_path(database),
+            std::path::Path::new("runtime/data/attachments/outbox")
+        );
+    }
+
+    #[test]
+    fn startup_configures_a_private_outbox_and_sweeps_stale_copies() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("data/opencrab.db");
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let stale_dir = temp.path().join("data/attachments/outbox/instance-1");
+        std::fs::create_dir_all(&stale_dir).unwrap();
+        std::fs::write(stale_dir.join("stale.bin"), b"left over").unwrap();
+        let db = opencrab_db::Db::open(database.to_str().unwrap()).unwrap();
+        let extgate = opencrab_extgate::ExtgateState::new_protected(db);
+
+        let outbox =
+            super::configure_attachment_outbox(&extgate, &database, "ws/{agent_id}").unwrap();
+
+        assert_eq!(extgate.attachment_outbox_root().as_deref(), Some(&*outbox));
+        assert_eq!(extgate.workspace_base().as_deref(), Some("ws/{agent_id}"));
+        assert!(!stale_dir.join("stale.bin").exists(), "stale copy swept");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(outbox).unwrap().permissions().mode() & 0o777,
                 0o700
             );
         }

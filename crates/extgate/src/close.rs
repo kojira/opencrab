@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::delivery::mark_indeterminate;
 use crate::error::ErrorCode;
 use crate::operation_calls::close_pending_invokes;
+use crate::outbound_files::remove_staged_files;
 use crate::protocol::{err_frame, write_json};
 use crate::registry::{ExtgateState, Pending};
 
@@ -53,8 +54,23 @@ pub async fn close_live(
                 Pending::Say { delivery_id } => says.push(delivery_id),
                 // 発話クラスは say と同じ deliveries 行なので同じ経路で indeterminate 化する
                 // （oneshot を持たない＝resume を起こさない）。
-                Pending::Utterance { delivery_id, .. } => says.push(delivery_id),
-                Pending::Invoke { call_id, reply, .. } => invokes.push((call_id, reply)),
+                Pending::Utterance {
+                    delivery_id,
+                    staged_files,
+                    ..
+                } => {
+                    remove_staged_files(&staged_files);
+                    says.push(delivery_id);
+                }
+                Pending::Invoke {
+                    call_id,
+                    reply,
+                    staged_files,
+                    ..
+                } => {
+                    remove_staged_files(&staged_files);
+                    invokes.push((call_id, reply));
+                }
                 Pending::Bind { .. } => {}
             }
         }

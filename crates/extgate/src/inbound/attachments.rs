@@ -1,10 +1,12 @@
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
 use crate::error::{ErrorCode, GateError};
+use crate::file_copy::{
+    copy_regular_file, lower_hex, open_leaf_no_follow, CopyFailure, FileIdentity,
+};
 use crate::protocol::{Said, SaidAttachment};
 use crate::registry::ExtgateState;
 
@@ -182,100 +184,29 @@ pub(super) fn remove_local_files(state: &ExtgateState, said: &Said) {
     }
 }
 
-struct FileIdentity {
-    #[cfg(unix)]
-    dev: u64,
-    #[cfg(unix)]
-    ino: u64,
-}
-
-impl FileIdentity {
-    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            Self {
-                dev: metadata.dev(),
-                ino: metadata.ino(),
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = metadata;
-            Self {}
-        }
-    }
-
-    fn matches(&self, metadata: &std::fs::Metadata) -> bool {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            metadata.file_type().is_file()
-                && self.dev == metadata.dev()
-                && self.ino == metadata.ino()
-        }
-        #[cfg(not(unix))]
-        {
-            metadata.file_type().is_file()
-        }
-    }
-}
-
 fn copy_verified(
     source: &Path,
     temp: &Path,
     expected_size: u64,
     expected_hash: &str,
 ) -> Result<FileIdentity, GateError> {
-    let mut source_options = std::fs::OpenOptions::new();
-    source_options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        source_options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut input = source_options
-        .open(source)
-        .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
+    let mut input =
+        open_leaf_no_follow(source).map_err(|_| GateError::new(ErrorCode::BadRequest))?;
     let metadata = input
         .metadata()
         .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
     if !metadata.is_file() || metadata.len() != expected_size {
         return Err(GateError::new(ErrorCode::BadRequest));
     }
-    let identity = FileIdentity::from_metadata(&metadata);
-    let mut output_options = std::fs::OpenOptions::new();
-    output_options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        output_options.mode(0o600);
-    }
-    let mut output = output_options.open(temp).map_err(|_| GateError::store())?;
-    let mut hash = Sha256::new();
-    let mut actual = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = input
-            .read(&mut buffer)
-            .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
-        if read == 0 {
-            break;
-        }
-        actual = actual
-            .checked_add(read as u64)
-            .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
-        hash.update(&buffer[..read]);
-        output
-            .write_all(&buffer[..read])
-            .map_err(|_| GateError::store())?;
-    }
-    output.sync_all().map_err(|_| GateError::store())?;
-    if actual != expected_size || lower_hex(&hash.finalize()) != expected_hash {
+    let copied = copy_regular_file(&mut input, temp).map_err(|failure| match failure {
+        CopyFailure::Source => GateError::new(ErrorCode::BadRequest),
+        CopyFailure::Destination => GateError::store(),
+    })?;
+    if copied.size != expected_size || copied.sha256 != expected_hash {
         let _ = std::fs::remove_file(temp);
         return Err(GateError::new(ErrorCode::BadRequest));
     }
-    Ok(identity)
+    Ok(copied.identity)
 }
 
 fn validate_file(
@@ -328,16 +259,6 @@ fn escape_attr(value: &str) -> String {
         .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-}
-
-fn lower_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 #[cfg(test)]
