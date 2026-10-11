@@ -244,7 +244,13 @@ pub fn compact_with_bridge(
                 continue;
             }
         }
-        // 許容マージン: 要約が覆っていない区間、または境目の 1 組は高水位まで逐語で残す。
+        // 許容マージン: 要約が覆っていない区間、または（要約が無いとき）境目の 1 組は高水位まで
+        // 逐語で残す。要約が覆う組はここで切る（残すと要約が入らず低水位を越える / D-1077）。
+        let uncovered_gap = !bridge.is_empty() && !super::bridge::is_covered(bridge, newest);
+        if !bridge.is_empty() && !uncovered_gap {
+            cut = true;
+            continue;
+        }
         if used + tokens <= conversation_high {
             used += tokens;
             kept.extend(g.items.iter().cloned());
@@ -254,10 +260,10 @@ pub fn compact_with_bridge(
                 .filter_map(|i| i.log_id)
                 .min()
                 .or(oldest_verbatim);
-            if !bridge.is_empty() && !super::bridge::is_covered(bridge, newest) {
+            if uncovered_gap {
                 continue;
             }
-        } else if !bridge.is_empty() && !super::bridge::is_covered(bridge, newest) {
+        } else if uncovered_gap {
             gap = true;
         }
         cut = true;
@@ -477,13 +483,38 @@ mod tests {
         let out = compact_with_bridge(&items, 9_000, 6_000, &bridge);
         assert!(out.fired);
         assert!(out.after_tokens <= 6_000, "after={}", out.after_tokens);
-        // 逐語は 6_000 × 50% = 3_000 まで（直近 30 件）＋境目の 1 件（m69）。
-        assert!(out.text.contains("[m69:100]") && !out.text.contains("[m68:100]"));
-        // 残り約 2_900 を要約で埋める（逐語の直前の要約から新しい順）。
-        assert!(out.text.contains("- [t68]"), "{}", out.text);
-        assert!(!out.text.contains("- [t69]"), "{}", out.text);
+        // 逐語は 6_000 × 50% = 3_000 まで（直近 30 件）。要約が覆う境目の m69 はマージンで残さない。
+        assert!(out.text.contains("[m70:100]") && !out.text.contains("[m69:100]"));
+        // 残り約 3_000 を要約で埋める（逐語の直前の要約から新しい順）。
+        assert!(out.text.contains("- [t69]"), "{}", out.text);
+        assert!(!out.text.contains("- [t70]"), "{}", out.text);
         assert!(out.after_tokens > 5_000, "after={}", out.after_tokens);
         assert!(!out.text.contains("- [t0]"), "{}", out.text);
+    }
+
+    /// D-1077: 要約が覆っている境目の大きな組は、高水位までのマージンで逐語に残さない。
+    /// 残すと要約が入らないまま全体が低水位を越える。
+    #[test]
+    fn covered_large_boundary_group_does_not_exceed_low_water() {
+        let mut items: Vec<CompactItem> = (0..30)
+            .map(|i| item_at(&format!("m{i}"), 100, CompactLane::OldHistory, i))
+            .collect();
+        items[9].tokens = 3_000;
+        let bridge: Vec<_> = (0..30)
+            .map(|i| super::super::bridge::BridgeLine {
+                start_log_id: i,
+                end_log_id: i,
+                text: format!("- [t{i}] summary"),
+                tokens: 50,
+            })
+            .collect();
+        // 全体 5_900 > 高水位 5_000。直近 20 件（m10..m29）= 2_000 が逐語の予算（4_000 × 50%）
+        // ちょうどで、m9 を足すと 5_000（高水位以内）になる。
+        let out = compact_with_bridge(&items, 5_000, 4_000, &bridge);
+        assert!(out.fired);
+        assert!(out.after_tokens <= 4_000, "after={}", out.after_tokens);
+        assert!(!out.text.contains("[m9:3000]"), "{}", out.text);
+        assert!(out.text.contains("[m10:100]") && out.text.contains("- [t9]"));
     }
 
     /// D-1077: 直近の逐語だけで低水位に達して要約が入らないときも、古い側への案内は残す。

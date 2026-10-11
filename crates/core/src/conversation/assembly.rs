@@ -76,7 +76,47 @@ pub fn build_conversation_string_with_waters(
     include_memory_index: bool,
 ) -> Result<String, anyhow::Error> {
     let prefix = build_context_prefix_sections(conn, session_id, agent_id, include_memory_index);
+    let (inner_budget, inner_low) =
+        history_waters_after_prefix(&prefix, conversation_high, conversation_low);
+    let inner = build_conversation_inner(conn, session_id, agent_id, inner_budget, inner_low)?;
 
+    // #691: 履歴が空（真似る対象が無い）ときは出力指示を付けない。
+    let history_is_empty = inner == NO_MESSAGES_MARKER;
+
+    let mut parts = prefix.ordered();
+    if history_is_empty {
+        parts.push(inner);
+    } else {
+        parts.push(format!(
+            "{CONVERSATION_HISTORY_START}\n{inner}\n{CONVERSATION_HISTORY_END}"
+        ));
+    }
+    Ok(parts.join("\n\n"))
+}
+
+/// 履歴本文（`<conversation_history>` の内側）に使える二水位。
+///
+/// `conversation_high` / `conversation_low` から、会話車線に計上する前置（台帳・人物像）、
+/// その区切り、履歴タグを引いた値。開始組立とターン終了の正時（D-1077）が同じ量
+/// （組立本文の token）を同じ水位で比べるための単一の計算。ずれると、終了時が書いた
+/// スナップショットを次の開始時が毎ターン刈り直してプロンプトキャッシュが切れる。
+pub fn conversation_history_waters(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    agent_id: &str,
+    conversation_high: usize,
+    conversation_low: usize,
+) -> (usize, usize) {
+    // [Memory Index] は fixed 済みで水位から引かないので組み立てない。
+    let prefix = build_context_prefix_sections(conn, session_id, agent_id, false);
+    history_waters_after_prefix(&prefix, conversation_high, conversation_low)
+}
+
+fn history_waters_after_prefix(
+    prefix: &ContextPrefixSections,
+    conversation_high: usize,
+    conversation_low: usize,
+) -> (usize, usize) {
     // conversation_high から引くのは会話車線（台帳・人物像）。MI は fixed 済み。
     let mut inner_budget = conversation_high;
     for section in prefix.billed() {
@@ -92,21 +132,7 @@ pub fn build_conversation_string_with_waters(
         + estimate_tokens("\n\n");
     inner_budget = inner_budget.saturating_sub(boundary_cost);
     let prefix_cost = conversation_high.saturating_sub(inner_budget);
-    let inner_low = conversation_low.saturating_sub(prefix_cost);
-    let inner = build_conversation_inner(conn, session_id, agent_id, inner_budget, inner_low)?;
-
-    // #691: 履歴が空（真似る対象が無い）ときは出力指示を付けない。
-    let history_is_empty = inner == NO_MESSAGES_MARKER;
-
-    let mut parts = prefix.ordered();
-    if history_is_empty {
-        parts.push(inner);
-    } else {
-        parts.push(format!(
-            "{CONVERSATION_HISTORY_START}\n{inner}\n{CONVERSATION_HISTORY_END}"
-        ));
-    }
-    Ok(parts.join("\n\n"))
+    (inner_budget, conversation_low.saturating_sub(prefix_cost))
 }
 
 /// 会話本文の前に置く固定セクション（台帳 / [Memory Index] / [Impressions]）。
