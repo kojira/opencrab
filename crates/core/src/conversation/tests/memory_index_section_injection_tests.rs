@@ -240,7 +240,8 @@ mod memory_index_section_injection_tests {
         // Memory Index は専用 cap 判定（apply_line_items）済みとして通す。
         // 826-B で現行セッション topic の [Past context summary] は廃止。
         let out = build_conversation_string(&conn, "cur-sess", "a1", 900).unwrap();
-        assert_eq!(out.matches("[Memory Index]").count(), 1);
+        // セクション見出しで数える（古い履歴への案内文も "[Memory Index]" を指す）。
+        assert_eq!(out.matches("[Memory Index] (your long-term memory").count(), 1);
         assert!(!out.contains("[Past context summary"));
         // 他セッション topic は Memory Index 側のみ。現セッション topic はどちらにも出ない。
         assert!(!out.contains("[t-cur]"));

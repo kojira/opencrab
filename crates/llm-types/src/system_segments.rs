@@ -16,6 +16,11 @@ pub const SYSTEM_CACHE_SEGMENTS_METADATA: &str = "system_cache_segments";
 /// user 本文を text part に割る（連結すると元の本文に戻る）。
 pub const USER_CACHE_SEGMENTS_METADATA: &str = "user_cache_segments";
 
+/// ChatRequest.metadata のキー（D-1077）。値は先頭 user メッセージのバイトオフセット 1 つで、
+/// 会話履歴内のトピック要約（bridge）の末尾（＝最初の逐語の先頭）。[`USER_CACHE_SEGMENTS_METADATA`]
+/// に含まれる区切りのときだけ使う。キャッシュ目印を置くプロバイダが、ここにも目印を置く。
+pub const USER_CACHE_BRIDGE_END_METADATA: &str = "user_cache_bridge_end";
+
 /// `SYSTEM_SEGMENT_BREAK` で区切った system を、空セグメントを落として `"\n\n"` で連結する。
 /// 戻り値の 2 つ目は、セグメント 0（固定部）と 1（caller 依存部）のうち非空のものの結合後
 /// バイト終端（= キャッシュの区切り位置）。区切りが 1 つも無ければ `None`。
