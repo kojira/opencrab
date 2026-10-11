@@ -220,3 +220,70 @@ fn v59_leaves_correctly_parented_index_untouched() {
     assert_eq!(v59_snapshot(&conn), before, "a rolled month without moves stays rolled");
 }
 
+
+#[test]
+fn v59_removed_session_node_leaves_no_category_member_rows() {
+    let conn = crate::init_memory().unwrap();
+    v59_seed_misparented_index(&conn);
+    // `session-a1-late` loses its only topic and is removed by v59.
+    conn.execute_batch(
+        "INSERT INTO memory_category_members (agent_id, topic_id, category_id, created_at)
+         VALUES ('a1', 'session-a1-late', 'cat-x', '2025-08-01T00:00:00Z'),
+                ('a1', 'topic-other', 'session-a1-late', '2025-08-01T00:00:00Z');",
+    )
+    .unwrap();
+    initialize(&conn).unwrap();
+    let dangling: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memory_category_members
+             WHERE topic_id = 'session-a1-late' OR category_id = 'session-a1-late'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(dangling, 0);
+}
+
+fn v59_assert_child_count_matches(conn: &Connection, id: &str) {
+    let (stored, actual): (i64, i64) = conn
+        .query_row(
+            "SELECT child_count,
+                    (SELECT COUNT(*) FROM memory_index_nodes c WHERE c.parent_id = n.id)
+             FROM memory_index_nodes n WHERE n.id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, actual, "{id} child_count");
+}
+
+#[test]
+fn v59_recomputes_root_child_count_for_created_period() {
+    let conn = crate::init_memory().unwrap();
+    v59_seed_misparented_index(&conn);
+    conn.execute("UPDATE memory_index_nodes SET child_count = 2 WHERE id = 'root-a1'", [])
+        .unwrap();
+    initialize(&conn).unwrap();
+    // 2025-10 is created under the root: 2 -> 3 children.
+    v59_assert_child_count_matches(&conn, "root-a1");
+}
+
+#[test]
+fn v59_recomputes_root_child_count_for_removed_period() {
+    let conn = crate::init_memory().unwrap();
+    v59_node(&conn, "root-a1", None, "root", "Memory Root", None, None, "r0", None);
+    v59_node(&conn, "period-a1-2025-07", Some("root-a1"), "period", "2025-07", None, None, "p1", None);
+    v59_node(&conn, "period-a1-2025-08", Some("root-a1"), "period", "2025-08", None, None, "p2", None);
+    v59_node(&conn, "session-a1-x", Some("period-a1-2025-07"), "session", "S", Some("x"), None, "s1", None);
+    v59_node(&conn, "topic-x", Some("session-a1-x"), "topic", "x", Some("x"), Some("2025-08-03"), "t1", None);
+    conn.execute("UPDATE memory_index_nodes SET child_count = 2 WHERE id = 'root-a1'", [])
+        .unwrap();
+    conn.execute_batch("PRAGMA user_version = 58").unwrap();
+    initialize(&conn).unwrap();
+    // 2025-07 is emptied and removed: 2 -> 1 child.
+    let gone: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memory_index_nodes WHERE id = 'period-a1-2025-07'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(gone, 0);
+    v59_assert_child_count_matches(&conn, "root-a1");
+}

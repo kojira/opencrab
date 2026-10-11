@@ -10,8 +10,9 @@
 //! un-suffixed session node stays as the node for the month it is already under. Missing
 //! period nodes are created. Every period that lost or gained topics gets
 //! `summary_refreshed_at = NULL`, so the normal rollup pass regenerates its summary (no LLM
-//! call here). Session and period nodes left without children are removed. Topics without a
-//! usable `date_from` are left where they are.
+//! call here). Session and period nodes left without children are removed (with their FTS
+//! and category member rows), and `child_count` is recomputed for every touched session,
+//! period and root. Topics without a usable `date_from` are left where they are.
 //!
 //! Idempotent: a second run finds no topic whose month differs from its period's title.
 
@@ -53,11 +54,21 @@ fn reparent_topics_to_own_month(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     let has_fts = table_exists(conn, "memory_index_fts")?;
+    let has_members = table_exists(conn, "memory_category_members")?;
+    let cleanup = NodeCleanup {
+        has_fts,
+        has_members,
+    };
     let now = chrono::Utc::now().to_rfc3339();
     let mut short_ids = ShortIdAllocator::default();
     // (agent_id, node id) of every session / period node that gained or lost topics.
     let mut touched_periods: BTreeSet<(String, String)> = BTreeSet::new();
     let mut touched_sessions: BTreeSet<(String, String)> = BTreeSet::new();
+    // (agent_id, root id) of every parent of a period that may be created or removed.
+    let touched_roots: BTreeSet<(String, String)> = misplaced
+        .iter()
+        .filter_map(|t| t.root_id.clone().map(|r| (t.agent_id.clone(), r)))
+        .collect();
 
     // (agent, session, month) -> log range of the topics that move there.
     let mut targets: BTreeMap<MonthTarget, (Option<i64>, Option<i64>)> = BTreeMap::new();
@@ -135,7 +146,7 @@ fn reparent_topics_to_own_month(conn: &Connection) -> rusqlite::Result<()> {
     drop(update);
 
     for (agent_id, session_id) in &touched_sessions {
-        remove_if_childless(conn, has_fts, agent_id, session_id)?;
+        remove_if_childless(conn, cleanup, agent_id, session_id)?;
     }
     for (agent_id, period_id) in &touched_periods {
         conn.execute(
@@ -143,9 +154,13 @@ fn reparent_topics_to_own_month(conn: &Connection) -> rusqlite::Result<()> {
              WHERE id = ?2",
             params![now, period_id],
         )?;
-        remove_if_childless(conn, has_fts, agent_id, period_id)?;
+        remove_if_childless(conn, cleanup, agent_id, period_id)?;
     }
-    for (agent_id, id) in touched_sessions.iter().chain(touched_periods.iter()) {
+    for (agent_id, id) in touched_sessions
+        .iter()
+        .chain(touched_periods.iter())
+        .chain(touched_roots.iter())
+    {
         conn.execute(
             "UPDATE memory_index_nodes
              SET child_count = (SELECT COUNT(*) FROM memory_index_nodes c
@@ -349,9 +364,17 @@ fn insert_fts(
     Ok(())
 }
 
+/// Which side tables exist; a removed node's rows are deleted from them as well, mirroring
+/// `queries::delete_index_node`.
+#[derive(Clone, Copy)]
+struct NodeCleanup {
+    has_fts: bool,
+    has_members: bool,
+}
+
 fn remove_if_childless(
     conn: &Connection,
-    has_fts: bool,
+    cleanup: NodeCleanup,
     agent_id: &str,
     id: &str,
 ) -> rusqlite::Result<()> {
@@ -363,10 +386,17 @@ fn remove_if_childless(
     if has_children {
         return Ok(());
     }
-    if has_fts {
+    if cleanup.has_fts {
         conn.execute(
             "DELETE FROM memory_index_fts WHERE node_id = ?1",
             params![id],
+        )?;
+    }
+    if cleanup.has_members {
+        conn.execute(
+            "DELETE FROM memory_category_members
+             WHERE agent_id = ?1 AND (topic_id = ?2 OR category_id = ?2)",
+            params![agent_id, id],
         )?;
     }
     conn.execute("DELETE FROM memory_index_nodes WHERE id = ?1", params![id])?;
