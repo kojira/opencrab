@@ -301,6 +301,10 @@ async fn workspace_file_rejections_have_zero_side_effects() {
     std::fs::create_dir_all(&real_dir).unwrap();
     std::fs::write(real_dir.join("f.txt"), b"f").unwrap();
     std::os::unix::fs::symlink(&real_dir, f.workspace.join("dir-link")).unwrap();
+    let fifo = std::ffi::CString::new(f.workspace.join("pipe").into_os_string().into_encoded_bytes())
+        .unwrap();
+    // SAFETY: NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
 
     let cases: Vec<(&str, Value)> = vec![
         ("traversal", json!(["ok.txt", "../outside.txt"])),
@@ -309,16 +313,20 @@ async fn workspace_file_rejections_have_zero_side_effects() {
         ("symlink leaf (inside)", json!(["inner-link.txt"])),
         ("symlinked dir", json!(["dir-link/f.txt"])),
         ("directory", json!(["dir"])),
+        ("fifo", json!(["ok.txt", "pipe"])),
         ("missing", json!(["ok.txt", "nope.txt"])),
         ("non-string item", json!([1])),
         ("not an array", json!("ok.txt")),
     ];
     let ctx = GatewayCallContext::for_agent("agent-1");
     for (label, files) in cases {
-        let result = f
-            .proj
-            .execute("post_with_files", &json!({"text": "t", "files": files}), &ctx)
-            .await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            f.proj
+                .execute("post_with_files", &json!({"text": "t", "files": files}), &ctx),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{label}: must be rejected promptly"));
         assert!(!result.success, "{label}: must be rejected");
         let error = result.error.unwrap();
         assert!(error.starts_with("workspace_file_rejected: files"), "{label}: {error}");

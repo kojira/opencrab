@@ -269,7 +269,7 @@ impl Stager {
             return Err(err("not a regular file"));
         }
         // Every component is opened with O_NOFOLLOW, closing the check/open race.
-        let mut input = crate::secure_path::open_file_no_follow(&lexical)
+        let mut input = crate::secure_path::open_regular_file_no_follow_nonblocking(&lexical)
             .map_err(|_| err("file cannot be opened without following links"))?;
         let id = uuid::Uuid::new_v4().to_string();
         let file_name = format!("{id}.bin");
