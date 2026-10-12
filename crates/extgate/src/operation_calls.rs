@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::error::{ErrorCode, GateError};
 use crate::ids::now_nanos;
+use crate::outbound_files::{remove_staged_files, StagedFile};
 use crate::protocol::{invoke_frame, write_json};
 use crate::registry::{ExtgateState, OperationOutcome, Pending};
 
@@ -47,7 +48,16 @@ pub async fn invoke_and_wait(
     operation: &str,
     payload: &Value,
 ) -> Result<Value, InvokeError> {
-    invoke_and_wait_checked(state, instance_id, binding_id, operation, None, payload).await
+    invoke_and_wait_checked(
+        state,
+        instance_id,
+        binding_id,
+        operation,
+        None,
+        payload,
+        Vec::new(),
+    )
+    .await
 }
 
 pub(crate) async fn invoke_and_wait_for_digest(
@@ -57,6 +67,7 @@ pub(crate) async fn invoke_and_wait_for_digest(
     operation: &str,
     expected_digest: &str,
     payload: &Value,
+    staged_files: Vec<StagedFile>,
 ) -> Result<Value, InvokeError> {
     invoke_and_wait_checked(
         state,
@@ -65,6 +76,7 @@ pub(crate) async fn invoke_and_wait_for_digest(
         operation,
         Some(expected_digest),
         payload,
+        staged_files,
     )
     .await
 }
@@ -76,7 +88,10 @@ async fn invoke_and_wait_checked(
     operation: &str,
     expected_digest: Option<&str>,
     payload: &Value,
+    staged_files: Vec<StagedFile>,
 ) -> Result<Value, InvokeError> {
+    // Outbox copies are removed on every return until the pending entry owns them.
+    let mut staged = StagedFilesGuard(staged_files);
     // §10.6 step 1: live + acknowledged binding + live declaration を再検査。
     let (writer, declaration, declaration_digest) = {
         let reg = state
@@ -159,6 +174,7 @@ async fn invoke_and_wait_checked(
                 binding_id: binding_id.to_string(),
                 operation: operation.to_string(),
                 reply: reply_tx,
+                staged_files: staged.release(),
             },
         );
     }
@@ -243,6 +259,7 @@ pub async fn invoke_utterance(
         reply_target_origin,
         provided_call_id,
         None,
+        Vec::new(),
     )
     .await
 }
@@ -262,6 +279,7 @@ pub(crate) async fn invoke_utterance_for_digest(
     reply_target_origin: Option<&str>,
     provided_call_id: Option<&str>,
     expected_digest: &str,
+    staged_files: Vec<StagedFile>,
 ) -> Result<(), InvokeError> {
     invoke_utterance_checked(
         state,
@@ -277,6 +295,7 @@ pub(crate) async fn invoke_utterance_for_digest(
         reply_target_origin,
         provided_call_id,
         Some(expected_digest),
+        staged_files,
     )
     .await
 }
@@ -298,7 +317,10 @@ async fn invoke_utterance_checked(
     // ある場合は invoke フレームの call_id に採用する（無ければ合成 uuid にフォールバック）。
     provided_call_id: Option<&str>,
     expected_digest: Option<&str>,
+    staged_files: Vec<StagedFile>,
 ) -> Result<(), InvokeError> {
+    // Outbox copies are removed on every return until the pending entry owns them.
+    let mut staged = StagedFilesGuard(staged_files);
     // live + acknowledged binding + live declaration を再検査（invoke_and_wait と同じ）。
     let (writer, declaration, declaration_digest) = {
         let reg = state
@@ -349,6 +371,15 @@ async fn invoke_utterance_checked(
     );
     if let Some(t) = reply_target_id {
         speech_meta.insert("reply_target".to_string(), Value::String(t.to_string()));
+    }
+    // Attached workspace files are part of what was said; record names only.
+    if !staged.0.is_empty() {
+        let names = staged
+            .0
+            .iter()
+            .map(|file| serde_json::json!({ "name": file.name }))
+            .collect();
+        speech_meta.insert("attachments".to_string(), Value::Array(names));
     }
     let speech_meta = Value::Object(speech_meta).to_string();
 
@@ -421,6 +452,7 @@ async fn invoke_utterance_checked(
                 delivery_id: delivery_id.clone(),
                 binding_id: binding_id.to_string(),
                 reply_target: reply_target_origin.map(str::to_string),
+                staged_files: staged.release(),
             },
         );
     }
@@ -453,6 +485,21 @@ async fn invoke_utterance_checked(
         return Err(InvokeError::new(ErrorCode::Disconnect));
     }
     Ok(())
+}
+
+/// Owns outbox copies until a pending entry takes them; drop removes them.
+struct StagedFilesGuard(Vec<StagedFile>);
+
+impl StagedFilesGuard {
+    fn release(&mut self) -> Vec<StagedFile> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for StagedFilesGuard {
+    fn drop(&mut self) {
+        remove_staged_files(&self.0);
+    }
 }
 
 /// call を terminal 化する（§5.3）。DB のみ。terminal 遷移は

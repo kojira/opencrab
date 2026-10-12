@@ -3,7 +3,9 @@
 pub mod admin;
 pub mod client;
 pub mod json;
+pub mod outbound;
 pub mod wire;
 
 pub use client::{InvokeHandler, InvokeOutcome, SayPolicy};
+pub use outbound::{open_verified, OutboundFile, OutboundFileError};
 pub use wire::{FinalDelivery, RuntimeCapabilities};

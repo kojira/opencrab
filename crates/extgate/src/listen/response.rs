@@ -7,6 +7,7 @@ use crate::close::close_live;
 use crate::delivery::{mark_delivered, mark_failed, mark_indeterminate};
 use crate::error::ErrorCode;
 use crate::operation_calls::terminalize_call;
+use crate::outbound_files::remove_staged_files;
 use crate::protocol::WireResponse;
 use crate::registry::{ExtgateState, OperationOutcome, Pending};
 
@@ -176,7 +177,11 @@ pub(crate) async fn handle_response(
             delivery_id,
             binding_id,
             reply_target,
+            staged_files,
         } => {
+            // Any response is terminal for the outbox copies: the gateway has
+            // finished reading them (ok/err) or the connection is closing.
+            remove_staged_files(&staged_files);
             handle_utterance_response(
                 state,
                 writer,
@@ -189,7 +194,13 @@ pub(crate) async fn handle_response(
             )
             .await
         }
-        Pending::Invoke { call_id, reply, .. } => {
+        Pending::Invoke {
+            call_id,
+            reply,
+            staged_files,
+            ..
+        } => {
+            remove_staged_files(&staged_files);
             handle_invoke_response(state, writer, instance_id, identity, &resp, &call_id, reply)
                 .await
         }

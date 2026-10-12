@@ -125,7 +125,7 @@ mod tests {
 
         // メソッド名まで広げて綴り変種を拾う（限界は上記 doc 参照）。
         let needle = "is_control";
-        let allowed: [std::path::PathBuf; 3] = [
+        let allowed: [std::path::PathBuf; 5] = [
             crates_dir.join("core").join("src").join("injection.rs"),
             // Frozen v56 heartbeat-instructions sanitizer used only by the v57 migration (#612).
             crates_dir
@@ -136,6 +136,15 @@ mod tests {
                 .join("v57.rs"),
             // Wire metadata validation, not prompt-field sanitization.
             crates_dir.join("extgate").join("src").join("protocol.rs"),
+            // Outbound attachment file-name validation (D-1079a), not prompt-field sanitization.
+            crates_dir
+                .join("extgate")
+                .join("src")
+                .join("outbound_files.rs"),
+            crates_dir
+                .join("gate-client")
+                .join("src")
+                .join("outbound.rs"),
         ];
 
         let mut offenders = Vec::new();
