@@ -17,3 +17,4 @@ use opencrab_llm_types::{
 
 include!("core_process_e2e/governor_scenarios.rs");
 include!("core_process_e2e/assembly_identifiers.rs");
+include!("core_process_e2e/bridge_hysteresis.rs");

@@ -184,6 +184,12 @@ pub(super) fn request_metadata(
             opencrab_llm_types::USER_CACHE_SEGMENTS_METADATA.to_string(),
             serde_json::json!(offsets),
         );
+        if let Some(bridge_end) = super::turn_budget::user_cache_bridge_end(messages) {
+            m.insert(
+                opencrab_llm_types::USER_CACHE_BRIDGE_END_METADATA.to_string(),
+                serde_json::json!(bridge_end),
+            );
+        }
     }
     m
 }

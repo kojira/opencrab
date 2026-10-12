@@ -15,6 +15,12 @@
 //! 4. 先頭 user の最後の履歴エントリ（5m）。先頭 user の後にメッセージ（tool 往復等）が
 //!    あれば、代わりに最後のメッセージの最後の text（5m）
 //!
+//! 履歴の先頭にトピック要約（bridge）があり、その末尾（[`USER_CACHE_BRIDGE_END_METADATA`]）が
+//! 区切りに含まれるとき（D-1077）は、2 を外して bridge 末尾（5m）に置く。圧縮から次の圧縮までは
+//! bridge が変わらないので、新しい発言で最後の履歴エントリの位置がずれても bridge までは読める。
+//! system の caller 依存部は固定部の目印から最大でも数千 token で、bridge（最大で低水位近く）
+//! より書き直しが安いのでこちらを外す（どちらを外すかは常にこの順で決まる）。
+//!
 //! 先頭 user は区切り位置で text part に割る（連結すると元の本文に戻る）。会話は 1 エントリ
 //! ずつ伸びるので、前回までのエントリの part 境界が prefix として一致し、そこまで読める。
 //!
@@ -34,7 +40,10 @@
 
 use serde_json::{json, Value};
 
-use crate::message::{ChatRequest, SYSTEM_CACHE_SEGMENTS_METADATA, USER_CACHE_SEGMENTS_METADATA};
+use crate::message::{
+    ChatRequest, SYSTEM_CACHE_SEGMENTS_METADATA, USER_CACHE_BRIDGE_END_METADATA,
+    USER_CACHE_SEGMENTS_METADATA,
+};
 
 fn ttl_1h() -> Value {
     json!({"type": "ephemeral", "ttl": "1h"})
@@ -50,8 +59,26 @@ pub(super) fn apply(body: &mut Value, request: &ChatRequest) {
     if !has_tools {
         return;
     }
-    let segment_ends = metadata_offsets(request, SYSTEM_CACHE_SEGMENTS_METADATA);
+    let mut segment_ends = metadata_offsets(request, SYSTEM_CACHE_SEGMENTS_METADATA);
     let user_offsets = metadata_offsets(request, USER_CACHE_SEGMENTS_METADATA);
+    let user_text_len = body["messages"]
+        .get(1)
+        .filter(|msg| msg["role"] == "user")
+        .and_then(|msg| msg["content"].as_str())
+        .map(str::len);
+    let bridge_end = request
+        .metadata
+        .get(USER_CACHE_BRIDGE_END_METADATA)
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .filter(|end| {
+            user_offsets.len() >= 3
+                && user_offsets[1..user_offsets.len() - 1].contains(end)
+                && user_text_len.is_some_and(|len| *end < len)
+        });
+    if bridge_end.is_some() {
+        segment_ends.truncate(1);
+    }
     let Some(messages) = body["messages"].as_array_mut() else {
         return;
     };
@@ -68,7 +95,7 @@ pub(super) fn apply(body: &mut Value, request: &ChatRequest) {
         .filter(|msg| msg["role"] == "user" && !user_offsets.is_empty())
         .and_then(|msg| {
             let text = msg["content"].as_str()?.to_string();
-            let parts = user_parts(&text, &user_offsets, !has_later_messages)?;
+            let parts = user_parts(&text, &user_offsets, bridge_end, !has_later_messages)?;
             msg["content"] = Value::Array(parts);
             Some(())
         });
@@ -103,10 +130,15 @@ fn metadata_offsets(request: &ChatRequest, key: &str) -> Vec<usize> {
 
 /// 先頭 user 本文を `offsets`（`[履歴開始, 各エントリ先頭..., 閉じタグ]`）で text part に割る。
 ///
-/// 履歴の手前の part に 5m。`mark_last_entry` なら閉じタグ直前の part（最後の履歴エントリ）
-/// にも 5m。空 part は作らず、連結すると `text` に戻る。区切りが本文と合わなければ `None`
+/// 履歴の手前の part に 5m。`bridge_end` があればそこで終わる part（トピック要約）にも 5m。
+/// `mark_last_entry` なら閉じタグ直前の part（最後の履歴エントリ）にも 5m。空 part は作らず、連結すると `text` に戻る。区切りが本文と合わなければ `None`
 /// （割らずに従来の目印へ戻す）。
-fn user_parts(text: &str, offsets: &[usize], mark_last_entry: bool) -> Option<Vec<Value>> {
+fn user_parts(
+    text: &str,
+    offsets: &[usize],
+    bridge_end: Option<usize>,
+    mark_last_entry: bool,
+) -> Option<Vec<Value>> {
     let valid = offsets.len() >= 2
         && offsets.windows(2).all(|w| w[0] < w[1])
         && offsets
@@ -130,7 +162,8 @@ fn user_parts(text: &str, offsets: &[usize], mark_last_entry: bool) -> Option<Ve
         let mut part = json!({"type": "text", "text": &text[start..end]});
         let is_prefix = end == history_start;
         let is_last_entry = mark_last_entry && end == closing && start > history_start;
-        if is_prefix || is_last_entry {
+        let is_bridge = bridge_end == Some(end);
+        if is_prefix || is_bridge || is_last_entry {
             part["cache_control"] = ttl_5m();
         }
         parts.push(part);
@@ -198,7 +231,8 @@ fn mark_last_text(msg: &mut Value) {
 mod tests {
     use crate::message::{
         ChatRequest, FunctionCall, FunctionDefinition, Message, MessageContent, ToolCall,
-        SYSTEM_CACHE_SEGMENTS_METADATA, USER_CACHE_SEGMENTS_METADATA,
+        SYSTEM_CACHE_SEGMENTS_METADATA, USER_CACHE_BRIDGE_END_METADATA,
+        USER_CACHE_SEGMENTS_METADATA,
     };
     use crate::providers::OpenAiProvider;
     use serde_json::{json, Value};
@@ -482,6 +516,111 @@ mod tests {
         let parts = body["messages"][1]["content"].as_array().unwrap();
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0]["text"], HISTORY_USER);
+        assert_eq!(count_markers(&body), 4);
+    }
+
+    const BRIDGE_USER: &str = "[Memory Index]\nmi\n\n<conversation_history>\n[Earlier in this conversation]\n- [t1] T1: s1\n[u1|owner][t]:\nhi\n[me][t]:\nyo\n</conversation_history>";
+
+    fn bridge_request(system_ends: Option<Vec<usize>>) -> ChatRequest {
+        let mut req = request("stable\n\nskills", system_ends, true);
+        req.messages[1] = Message::user(BRIDGE_USER);
+        let at = |needle: &str| BRIDGE_USER.find(needle).unwrap();
+        let offsets = vec![
+            at("<conversation_history>"),
+            at("[u1|owner]"),
+            at("[me]"),
+            at("</conversation_history>"),
+        ];
+        req.metadata
+            .insert(USER_CACHE_SEGMENTS_METADATA.to_string(), json!(offsets));
+        req.metadata.insert(
+            USER_CACHE_BRIDGE_END_METADATA.to_string(),
+            json!(at("[u1|owner]")),
+        );
+        req
+    }
+
+    fn user_marked(body: &Value) -> Vec<(String, bool)> {
+        body["messages"][1]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                (
+                    p["text"].as_str().unwrap().to_string(),
+                    p.get("cache_control").is_some(),
+                )
+            })
+            .collect()
+    }
+
+    /// D-1077: トピック要約（bridge）の末尾に 4 点目の目印。system の区切りが 1 つなら
+    /// system 1h・履歴手前 5m・bridge 末尾 5m・最後の履歴エントリ 5m の 4 点。
+    #[test]
+    fn enabled_bridge_end_gets_fourth_marker() {
+        let body = OpenAiProvider::new("k")
+            .with_anthropic_cache_control(true)
+            .build_request_body(&bridge_request(Some(vec![6])));
+        let parts = user_marked(&body);
+        let texts: Vec<&str> = parts.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(texts.concat(), BRIDGE_USER);
+        assert_eq!(
+            parts,
+            vec![
+                ("[Memory Index]\nmi\n\n".to_string(), true),
+                (
+                    "<conversation_history>\n[Earlier in this conversation]\n- [t1] T1: s1\n"
+                        .to_string(),
+                    true
+                ),
+                ("[u1|owner][t]:\nhi\n".to_string(), false),
+                ("[me][t]:\nyo\n".to_string(), true),
+                ("</conversation_history>".to_string(), false),
+            ]
+        );
+        let mut ttls = Vec::new();
+        marker_ttls(&body["messages"], &mut ttls);
+        assert_eq!(ttls, vec!["1h", "5m", "5m", "5m"]);
+        assert_eq!(count_markers(&body), 4);
+    }
+
+    /// D-1077: system の区切りが 2 つ（1h×2）だと 5 点になるので、system の caller 依存部の
+    /// 目印を外す（固定部 1h・履歴手前・bridge 末尾・最後の履歴エントリの 4 点。上限 4 点を守る）。
+    #[test]
+    fn enabled_bridge_end_with_two_system_segments_drops_caller_marker() {
+        let body = OpenAiProvider::new("k")
+            .with_anthropic_cache_control(true)
+            .build_request_body(&bridge_request(Some(vec![6, 14])));
+        let system = body["messages"][0]["content"].as_array().unwrap();
+        let system_marked: Vec<(&str, bool)> = system
+            .iter()
+            .map(|p| {
+                (
+                    p["text"].as_str().unwrap(),
+                    p.get("cache_control").is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(system_marked, vec![("stable", true), ("\n\nskills", false)]);
+        let marked: Vec<bool> = user_marked(&body).iter().map(|(_, m)| *m).collect();
+        assert_eq!(marked, vec![true, true, false, true, false]);
+        let mut ttls = Vec::new();
+        marker_ttls(&body["messages"], &mut ttls);
+        assert_eq!(ttls, vec!["1h", "5m", "5m", "5m"]);
+        assert_eq!(count_markers(&body), 4);
+    }
+
+    /// bridge 末尾が区切りに無い（本文と合わない）なら無視して従来の 4 点。
+    #[test]
+    fn enabled_bridge_end_not_in_offsets_is_ignored() {
+        let mut req = bridge_request(Some(vec![6, 14]));
+        req.metadata
+            .insert(USER_CACHE_BRIDGE_END_METADATA.to_string(), json!(3));
+        let body = OpenAiProvider::new("k")
+            .with_anthropic_cache_control(true)
+            .build_request_body(&req);
+        let marked: Vec<bool> = user_marked(&body).iter().map(|(_, m)| *m).collect();
+        assert_eq!(marked, vec![true, false, false, true, false]);
         assert_eq!(count_markers(&body), 4);
     }
 

@@ -59,6 +59,7 @@ pub(super) fn user_cache_segments(messages: &[Message]) -> Option<Vec<usize>> {
         return None;
     };
     let (start, end) = conversation_history_range(text)?;
+    let bridge_end = bridge_end_offset(text, start, end);
     let mut offsets = vec![start - CONVERSATION_HISTORY_START.len()];
     let mut line_start = start;
     while line_start < end {
@@ -68,13 +69,53 @@ pub(super) fn user_cache_segments(messages: &[Message]) -> Option<Vec<usize>> {
         let line = &text[line_start..line_end];
         // ターン終了の注記は直前エントリの末尾へ後から足されるので、別 part にして既存エントリ
         // の part を不変に保つ（足されたエントリの part が変わると、そこに置いた目印が外れる）。
-        if is_entry_header_line(line) || line.starts_with("[turn_terminated") {
+        if is_entry_header_line(line)
+            || line.starts_with("[turn_terminated")
+            || Some(line_start) == bridge_end
+        {
             offsets.push(line_start);
         }
         line_start = line_end + 1;
     }
     offsets.push(end);
     Some(offsets)
+}
+
+/// D-1077: 先頭 user の会話履歴内にあるトピック要約（bridge）の末尾（＝最初の逐語の先頭）。
+///
+/// 圧縮後の履歴は「古い履歴の案内（任意）→ bridge ヘッダ → 1 行 1 件の要約行（`- [`）→ 逐語」
+/// の順（`compact_with_bridge`）。bridge が無い、または後ろに逐語が無ければ `None`。
+/// 返す位置は [`user_cache_segments`] の区切りにも入る。
+pub(super) fn user_cache_bridge_end(messages: &[Message]) -> Option<usize> {
+    let msg = messages.get(1).filter(|m| m.role == Role::User)?;
+    let Some(MessageContent::Text(text)) = &msg.content else {
+        return None;
+    };
+    let (start, end) = conversation_history_range(text)?;
+    bridge_end_offset(text, start, end)
+}
+
+fn bridge_end_offset(text: &str, start: usize, end: usize) -> Option<usize> {
+    let mut line_start = start;
+    let mut in_bridge = false;
+    while line_start < end {
+        let line_end = text[line_start..end]
+            .find('\n')
+            .map_or(end, |i| line_start + i);
+        let line = &text[line_start..line_end];
+        if in_bridge {
+            if !line.starts_with("- [") {
+                return Some(line_start);
+            }
+        } else if line == crate::context_budget::BRIDGE_HEADER {
+            in_bridge = true;
+        } else if !line.is_empty() && !line.starts_with("[Earlier conversation is in your memory") {
+            // bridge は履歴の先頭（案内の直後）にだけ置かれる。
+            return None;
+        }
+        line_start = line_end + 1;
+    }
+    None
 }
 
 fn is_toolish_user_block(block: &str) -> bool {
@@ -456,7 +497,7 @@ pub(super) fn seat_tool_result(
 
 #[cfg(test)]
 mod tests {
-    use super::{conversation_history_range, user_cache_segments};
+    use super::{conversation_history_range, user_cache_bridge_end, user_cache_segments};
     use opencrab_llm_types::Message;
 
     /// D-1056: 区切りは開始タグ・各エントリ先頭・閉じタグ。履歴以外の形では返さない。
@@ -480,6 +521,39 @@ mod tests {
             None
         );
         assert_eq!(user_cache_segments(&[Message::system("s")]), None);
+    }
+
+    /// D-1077: 圧縮後の履歴は「古い履歴の案内 → トピック要約（bridge）→ 逐語」。bridge の末尾
+    /// （最初の逐語エントリの手前）も区切りにして、bridge が変わらない回はそこまで読めるようにする。
+    #[test]
+    fn user_cache_segments_cut_after_topic_bridge() {
+        let bridge = crate::context_budget::BRIDGE_HEADER;
+        let text = format!(
+            "[Memory Index]\nmi\n\n<conversation_history>\n{bridge}\n- [t1] (10-01 00:00) T1: s1\n- [t2] T2: s2\n{{\"ref\":\"log:3\",\"digest\":\"ab\",\"bytes\":9}}\n[u1|a][2026-01-01 00:00:00]:\nhi\n[me][2026-01-01 00:00:01]:\nyo\n</conversation_history>"
+        );
+        let messages = vec![Message::system("s"), Message::user(text.as_str())];
+        let offsets = user_cache_segments(&messages).unwrap();
+        let at = |o: usize| &text[o..];
+        assert!(at(offsets[0]).starts_with("<conversation_history>"));
+        // 最初の逐語が参照化されたツール組（ヘッダ行でない）でも、bridge の直後で区切る。
+        assert!(
+            at(offsets[1]).starts_with("{\"ref\""),
+            "bridge の末尾＝最初の逐語の手前で区切る: {offsets:?}"
+        );
+        assert!(at(offsets[2]).starts_with("[u1|a]"));
+        assert!(at(offsets[3]).starts_with("[me]"));
+        assert!(at(offsets[4]).starts_with("</conversation_history>"));
+        assert_eq!(offsets.len(), 5);
+        assert_eq!(user_cache_bridge_end(&messages), Some(offsets[1]));
+        let no_bridge = "<conversation_history>\n[u1|a][t]:\nhi\n</conversation_history>";
+        assert_eq!(
+            user_cache_bridge_end(&[Message::system("s"), Message::user(no_bridge)]),
+            None
+        );
+        assert!(
+            text[offsets[0]..offsets[1]].contains("- [t2] T2: s2"),
+            "bridge は履歴開始から最初のエントリまでの 1 区間に収まる"
+        );
     }
 
     #[test]

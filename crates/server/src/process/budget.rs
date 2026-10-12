@@ -58,9 +58,16 @@ fn persist_turn_end_snapshot(
     let assembled =
         opencrab_core::context_budget::assemble_from_snapshot(&conn, session_id, agent_id)?;
     let bridge = opencrab_core::context_budget::load_bridge_lines(&conn, agent_id, session_id)?;
-    let mut gov =
-        opencrab_core::context_budget::TurnGovernor::new(conversation_high, conversation_low)
-            .with_bridge(bridge);
+    // 開始組立と同じ量（履歴本文）を同じ水位で比べる。ずれると次の開始時が刈り直す（D-1077）。
+    let (history_high, history_low) = opencrab_core::conversation::conversation_history_waters(
+        &conn,
+        session_id,
+        agent_id,
+        conversation_high,
+        conversation_low,
+    );
+    let mut gov = opencrab_core::context_budget::TurnGovernor::new(history_high, history_low)
+        .with_bridge(bridge);
     gov.finish_turn(
         &conn,
         session_id,
