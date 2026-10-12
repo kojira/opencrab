@@ -36,6 +36,12 @@ async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> b
 
 /// invoke を実行して応答する。戻り値は「接続を閉じるべきか」（Indeterminate のとき true）。
 async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) -> bool {
+    {
+        let inner = client.inner.lock().await;
+        if inner.closed || inner.generation != generation {
+            return true;
+        }
+    }
     tracing::info!(
         instance_id = %client.instance_id,
         binding_id = %inv.binding_id,
@@ -64,6 +70,9 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) ->
             // client never classifies an operation by name.
             if inv.effect == "utterance" {
                 let mut inner = client.inner.lock().await;
+                if inner.closed || inner.generation != generation {
+                    return true;
+                }
                 if let Some(turn) = inner.pending_turn.get_mut(&inv.binding_id) {
                     turn.saw_utterance = true;
                 }
@@ -293,6 +302,9 @@ async fn handle_turn_failed(client: &InstanceClient, tf: TurnFailed) {
 
 async fn handle_response(client: &InstanceClient, resp: WireResponse, generation: u64) {
     let mut inner = client.inner.lock().await;
+    if inner.closed || inner.generation != generation {
+        return;
+    }
     if let Some(pending) = inner.pending_commands.remove(&resp.id) {
         let outcome = if resp.ok {
             resp.result.ok_or(CommandError::Disconnected)
@@ -356,6 +368,9 @@ async fn close_all(client: &InstanceClient, code: &str, generation: u64) {
         return;
     }
     inner.closed = true;
+    if let Some(stop) = inner.stop.take() {
+        let _ = stop.send(());
+    }
     let drained: Vec<(String, String)> = inner.acknowledged.drain().collect();
     for (address, binding_id) in drained {
         inner.remembered.insert(address, binding_id);

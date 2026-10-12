@@ -28,3 +28,8 @@ include!("client/handlers.rs");
 mod completed_tests {
     include!("client/tests.rs");
 }
+
+#[cfg(test)]
+mod transport_tests {
+    include!("client/transport_tests.rs");
+}

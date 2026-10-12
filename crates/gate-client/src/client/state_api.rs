@@ -1,5 +1,7 @@
 /// gateway が invoke を実行する handler（DI 拡張 §5）。短縮参照(uN/eN/cN)は core が origin/pubkey へ
 /// 解決済みで payload に入る。gateway は platform ID を導いて実行し、三結果のいずれかを返す。
+/// The connection owns this future and drops it on close. Keep external effects inside the
+/// future (not detached tasks); cancellation cannot undo effects already transmitted.
 #[async_trait::async_trait]
 pub trait InvokeHandler: Send + Sync {
     async fn handle(
@@ -201,6 +203,7 @@ struct Inner {
     live: HashMap<String, LiveQueue>,
     closed: bool,
     generation: u64,
+    stop: Option<tokio::sync::watch::Sender<()>>,
 }
 
 pub struct InstanceClient {
@@ -215,6 +218,7 @@ pub struct InstanceClient {
     inner: Mutex<Inner>,
     write: Mutex<WriteOut>,
     closed_notify: Notify,
+    connection: Mutex<Option<tokio::task::JoinHandle<()>>>,
     req_seq: AtomicU64,
 }
 
@@ -246,9 +250,11 @@ impl InstanceClient {
                 live: HashMap::new(),
                 closed: true,
                 generation: 0,
+                stop: None,
             }),
             write: Mutex::new(WriteOut { tx }),
             closed_notify: Notify::new(),
+            connection: Mutex::new(None),
             req_seq: AtomicU64::new(1),
         }
     }
