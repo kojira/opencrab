@@ -106,8 +106,7 @@ pub fn update_period_rollup(
 }
 
 /// period ノード id → 配下（period→session→topic）の topic 総数。
-/// period.child_count は直下の **session** 数なので、月行の「N topics」表示には
-/// こちらを使う。
+/// period.child_count は直下の **session** 数なので、topic 数はこちらで数える。
 pub fn count_topics_per_period(
     conn: &Connection,
     agent_id: &str,
