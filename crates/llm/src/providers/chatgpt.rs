@@ -15,6 +15,7 @@ const DEFAULT_MODEL: &str = "gpt-5.5";
 
 mod auth;
 mod image;
+mod imagegen;
 mod request;
 mod response;
 mod transport;
@@ -38,6 +39,11 @@ pub struct ChatGptProvider {
     include_encrypted_content: bool,
     /// `client` に設定済みの read timeout（秒）。`Client` からは読み出せないので保持する。
     timeout_secs: u64,
+    /// 画像生成専用の HTTP クライアント（D-1076）。生成は 1〜3 分かかるため、
+    /// チャットの `client`（`timeout_secs`）とは別の長い timeout で持つ。
+    imagegen_client: Client,
+    /// `imagegen_client` に設定済みの timeout（秒）。
+    imagegen_timeout_secs: u64,
     /// テレメトリ用の表示名（既定は形式名 "chatgpt"）。ルーティングキーは
     /// router 登録時に別途決まる。
     name: String,
@@ -61,6 +67,8 @@ impl ChatGptProvider {
             reasoning_effort: Some("low".to_string()),
             include_encrypted_content: false,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
+            imagegen_client: build_client(imagegen::IMAGEGEN_TIMEOUT_SECS),
+            imagegen_timeout_secs: imagegen::IMAGEGEN_TIMEOUT_SECS,
             name: "chatgpt".to_string(),
         }
     }
@@ -79,6 +87,14 @@ impl ChatGptProvider {
     pub fn with_timeout_secs(mut self, secs: u64) -> Self {
         self.client = build_client(secs);
         self.timeout_secs = secs;
+        self
+    }
+
+    /// テスト用: 画像生成クライアントの timeout を差し替える（既定 300 秒）。
+    #[cfg(test)]
+    fn with_imagegen_timeout_secs(mut self, secs: u64) -> Self {
+        self.imagegen_client = build_client(secs);
+        self.imagegen_timeout_secs = secs;
         self
     }
 

@@ -56,6 +56,9 @@ mod curated_long_term_injection_tests;
 #[path = "tests/error_body_with_prompt_size.rs"]
 mod error_body_with_prompt_size_tests;
 #[cfg(test)]
+#[path = "tests/generate_image_wiring.rs"]
+mod generate_image_wiring_tests;
+#[cfg(test)]
 #[path = "tests/no_forced_reply.rs"]
 mod no_forced_reply_tests;
 #[cfg(test)]

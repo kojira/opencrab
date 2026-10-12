@@ -1,4 +1,5 @@
 pub mod error;
+pub mod image_generation;
 pub mod image_input;
 pub mod message;
 pub mod metrics;
@@ -8,6 +9,9 @@ pub mod traits;
 
 // Re-export primary types for convenience.
 pub use error::{api_error, LlmError};
+pub use image_generation::{
+    GeneratedImage, ImageGenerationError, ImageGenerationRequest, ImageGenerator,
+};
 pub use message::{
     ChatRequest, ChatResponse, ChatStreamDelta, Choice, ContentPart, DeltaMessage, FinishReason,
     FunctionCall, FunctionCallBehavior, FunctionDefinition, ImageUrl, Message, MessageContent,

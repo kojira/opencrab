@@ -99,3 +99,6 @@ pub use webhook_target::{
     WebhookSource, ATTACHMENT_CONTENT_TYPE, ATTACHMENT_MAX_BYTES, ATTACHMENT_PREVIEW_CHARS,
     ATTACHMENT_THRESHOLD_CHARS,
 };
+
+// 画像生成（D-1076）。境界監査の行番号ベースラインをずらさないよう末尾に置く。
+pub mod generate_image;

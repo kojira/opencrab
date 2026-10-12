@@ -1442,6 +1442,39 @@
           "activation": "always",
           "classification": {
             "collection_status": "observed",
+            "dispatch": "dispatchable",
+            "sharing": "agent_bound",
+            "sub_engine": "not_exposed"
+          },
+          "description": "画像を生成してワークスペースに PNG で保存する（ChatGPT サブスクリプション）。生成には1〜2分かかる。完了すると保存先の相対パス（path）が返る。画像を確認するには view_image に path=<そのパス> を渡す。ユーザーに渡すときは既存の投稿・添付ツールでそのファイルを使う。",
+          "input_schema": {
+            "properties": {
+              "prompt": {
+                "description": "生成したい画像の説明（空不可）",
+                "type": "string"
+              },
+              "transparent_background": {
+                "description": "背景を透過にする（既定 false）",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "prompt"
+            ],
+            "type": "object"
+          },
+          "name": "generate_image",
+          "origin": "dispatcher",
+          "visibility": {
+            "depth_capped": false,
+            "owner_only": true,
+            "trusted_only": false
+          }
+        },
+        {
+          "activation": "always",
+          "classification": {
+            "collection_status": "observed",
             "dispatch": "inline",
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
