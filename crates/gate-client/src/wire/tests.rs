@@ -23,6 +23,25 @@ fn said_author_label_is_additive_and_optional() {
     assert_eq!(labeled["author_label"], "Alice");
 }
 
+/// D-1081: `model_profile` is emitted only for a non-default profile.
+#[test]
+fn said_model_profile_is_sent_only_when_not_default() {
+    let mut context = SaidContext {
+        caller: SaidCaller::Owner,
+        start_turn: true,
+        system_context: None,
+        reply_target: None,
+        live_inbound_scope: LiveInboundScope::All,
+        model_profile: TurnModelProfile::Default,
+    };
+    let frame = |context: &SaidContext| {
+        said_frame_with_context("said:1", "b", "o", "a", None, Some(context), "hi", &[])
+    };
+    assert!(frame(&context).get("model_profile").is_none());
+    context.model_profile = TurnModelProfile::Realtime;
+    assert_eq!(frame(&context)["model_profile"], "realtime");
+}
+
 #[test]
 fn config_digest_is_sha256_lowerhex() {
     let d = config_digest("owner-1");

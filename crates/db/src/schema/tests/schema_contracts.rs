@@ -45,7 +45,6 @@ fn v60_adds_nullable_session_model_preserving_rows() {
     };
     let fresh = crate::init_memory().expect("fresh");
     assert_eq!(schema_version(&fresh).unwrap(), latest_version());
-    assert_eq!(latest_version(), 60);
     assert_eq!(column(&fresh), Some(("TEXT".to_string(), 0, None)));
 
     let old = crate::init_memory().expect("v59 fixture");
@@ -77,4 +76,45 @@ fn v60_adds_nullable_session_model_preserving_rows() {
         .query_row("SELECT COUNT(*) FROM agent_sessions WHERE session_id='s1'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(members, 1);
+}
+
+/// D-1081 v61: schema 60 upgrades to a nullable `sessions.realtime_model` (NULL = follow the
+/// session's model) without touching existing session rows; a fresh install matches.
+#[test]
+fn v61_adds_nullable_session_realtime_model_preserving_rows() {
+    let column = |conn: &Connection| -> Option<(String, i64, Option<String>)> {
+        conn.query_row(
+            "SELECT type, \"notnull\", dflt_value FROM pragma_table_info('sessions') WHERE name='realtime_model'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok()
+    };
+    let fresh = crate::init_memory().expect("fresh");
+    assert_eq!(latest_version(), 61);
+    assert_eq!(schema_version(&fresh).unwrap(), latest_version());
+    assert_eq!(column(&fresh), Some(("TEXT".to_string(), 0, None)));
+
+    let old = crate::init_memory().expect("v60 fixture");
+    if column(&old).is_some() {
+        old.execute_batch("ALTER TABLE sessions DROP COLUMN realtime_model")
+            .unwrap();
+    }
+    old.execute_batch(
+        "PRAGMA user_version = 60;
+         INSERT INTO sessions (id, theme, created_at, updated_at, model)
+           VALUES ('s1', 'addr', 'now', 'now', 'prov:session-m');",
+    )
+    .unwrap();
+    initialize(&old).expect("upgrade 60 -> latest");
+    assert_eq!(schema_version(&old).unwrap(), latest_version());
+    assert_eq!(column(&old), column(&fresh));
+    let (model, realtime): (Option<String>, Option<String>) = old
+        .query_row(
+            "SELECT model, realtime_model FROM sessions WHERE id='s1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((model.as_deref(), realtime), (Some("prov:session-m"), None));
 }

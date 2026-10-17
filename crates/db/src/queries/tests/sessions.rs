@@ -207,3 +207,48 @@ fn session_model_lookup_failures_are_errors() {
         .unwrap();
     assert!(effective_model_for_session(&conn, "a1", "sess-a", "srv:default").is_err());
 }
+
+/// D-1081: a realtime turn resolves realtime slot > session override > agent model > server
+/// default; the default-profile chain ignores the realtime slot.
+#[test]
+fn realtime_model_chain_falls_through_session_agent_and_default() {
+    let conn = setup();
+    d1080_agent(&conn, "a1", Some("prov:agent-m"));
+    d1080_session(&conn, "sess-a", r#"["a1"]"#);
+    d1080_session(&conn, "sess-b", r#"["a1"]"#);
+    let rt = |s: &str| effective_realtime_model_for_session(&conn, "a1", s, "srv:default").unwrap();
+    let def = |s: &str| effective_model_for_session(&conn, "a1", s, "srv:default").unwrap();
+
+    assert_eq!(get_session_realtime_model(&conn, "sess-a").unwrap(), None);
+    assert!(set_session_realtime_model(&conn, "sess-a", Some("prov:light")).unwrap());
+    assert!(set_session_model(&conn, "sess-a", Some("prov:session-m")).unwrap());
+    assert_eq!(
+        get_session_realtime_model(&conn, "sess-a").unwrap().as_deref(),
+        Some("prov:light")
+    );
+    assert_eq!(rt("sess-a"), "prov:light");
+    assert_eq!(def("sess-a"), "prov:session-m");
+    assert_eq!(rt("sess-b"), "prov:agent-m");
+
+    assert!(set_session_realtime_model(&conn, "sess-a", None).unwrap());
+    assert_eq!(rt("sess-a"), "prov:session-m");
+    assert!(set_session_model(&conn, "sess-a", None).unwrap());
+    assert_eq!(rt("sess-a"), "prov:agent-m");
+    d1080_agent(&conn, "a1", None);
+    assert_eq!(rt("sess-a"), "srv:default");
+}
+
+/// D-1081: a missing session or a failed realtime lookup is an error, never a fallback.
+#[test]
+fn realtime_model_lookup_failures_are_errors() {
+    let conn = setup();
+    d1080_agent(&conn, "a1", Some("prov:agent-m"));
+    assert!(effective_realtime_model_for_session(&conn, "a1", "missing", "srv:default").is_err());
+    assert!(get_session_realtime_model(&conn, "missing").is_err());
+    assert!(!set_session_realtime_model(&conn, "missing", Some("prov:light")).unwrap());
+
+    d1080_session(&conn, "sess-a", r#"["a1"]"#);
+    conn.execute_batch("ALTER TABLE sessions RENAME COLUMN realtime_model TO realtime_gone")
+        .unwrap();
+    assert!(effective_realtime_model_for_session(&conn, "a1", "sess-a", "srv:default").is_err());
+}

@@ -80,6 +80,7 @@ impl<R: AgentRuntime> TimedFireSink for ExtgateTimedFireSink<R> {
             only_speaker: false,
             speaker_id: String::new(),
             system_context: req.prompt,
+            model_profile: opencrab_actions::TurnModelProfile::Default,
         };
         tokio::spawn(async move {
             run_v3_said_less_turn(sink, req.caller, None).await;

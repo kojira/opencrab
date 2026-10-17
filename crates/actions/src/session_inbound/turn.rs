@@ -1,7 +1,7 @@
 use super::normalize::NormalizedInbound;
 use crate::agent_runtime::AgentRuntime;
 use crate::transcript::TranscriptSource;
-use crate::RunRequest;
+use crate::{RunRequest, TurnModelProfile};
 use opencrab_core::EngineResult;
 
 /// 確保 + inbound 記録の失敗。順序は ensure → record（[`prepare_session_inbound`] と同一）。
@@ -57,10 +57,13 @@ pub fn prepare_session_inbound_write(
 ///
 /// 会話構築に失敗したら `None`（現行どおり run しない）。`Some` は run の
 /// `Result` そのもの（成功も失敗もゲートの配送へ渡す）。
+/// `profile` は発端 said の宣言（D-1081）。ターンのモデルはここで 1 回だけ決まる。
+#[allow(clippy::too_many_arguments)]
 pub async fn start_session_turn<R, Wrap, Build>(
     runtime: &R,
     source: TranscriptSource,
     inbound: &NormalizedInbound<'_>,
+    profile: TurnModelProfile,
     system_prompt: &str,
     runtime_context_text: &str,
     wrap_conversation: Wrap,
@@ -76,6 +79,7 @@ where
         runtime,
         inbound.session_id,
         inbound.agent_id,
+        profile,
         system_prompt,
         runtime_context_text,
         wrap_conversation,
@@ -87,10 +91,12 @@ where
 /// resume / 継続ターン（直列ロック内）。会話構築 + `run_agent_response`。
 ///
 /// inbound フックは呼ばない（受信は既に記録済み。subtask / interaction の現行どおり）。
+#[allow(clippy::too_many_arguments)]
 pub async fn run_session_turn<R, Wrap, Build>(
     runtime: &R,
     session_id: &str,
     agent_id: &str,
+    profile: TurnModelProfile,
     system_prompt: &str,
     runtime_context_text: &str,
     wrap_conversation: Wrap,
@@ -103,7 +109,7 @@ where
 {
     // D-1080: the session's model is read once here (inside the serialized section) and pinned
     // for the whole turn. A set/reset that lands mid-turn applies from the next turn.
-    let model = match runtime.session_turn_model(agent_id, session_id) {
+    let model = match runtime.session_turn_model(agent_id, session_id, profile) {
         Ok(model) => model,
         Err(e) => {
             tracing::error!(

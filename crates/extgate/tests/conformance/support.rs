@@ -13,7 +13,7 @@ use opencrab_actions::subtask::{settle_completed, SettleContext};
 use opencrab_actions::{
     AgentRuntime, CallerIdentity, InboundMessageRecord, InteractionRecord, ModelAdminError,
     ModelAdministration, ModelSnapshot, OutboundReplyRecord, RunRequest, SessionLocks,
-    SubtaskLifecycle, SubtaskRegistries, TranscriptSource,
+    SessionModelList, SubtaskLifecycle, SubtaskRegistries, TranscriptSource, TurnModelProfile,
 };
 use opencrab_core::EngineResult;
 use opencrab_db::queries::{AgentRow, SessionRow};
@@ -56,6 +56,9 @@ struct TestRuntime {
     sender_names: Arc<Mutex<Vec<String>>>,
     images: Arc<Mutex<Vec<Vec<String>>>>,
     turn_entered: Arc<Notify>,
+    /// D-1081: every `session_turn_model` profile, in turn-start order.
+    turn_profiles: Arc<Mutex<Vec<TurnModelProfile>>>,
+    last_sink: Arc<Mutex<Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>>>,
 }
 
 impl TestRuntime {
@@ -76,6 +79,8 @@ impl TestRuntime {
             sender_names: Arc::new(Mutex::new(Vec::new())),
             images: Arc::new(Mutex::new(Vec::new())),
             turn_entered: Arc::new(Notify::new()),
+            turn_profiles: Arc::new(Mutex::new(Vec::new())),
+            last_sink: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -134,41 +139,32 @@ impl ModelAdministration for TestRuntime {
         &self,
         agent_id: &str,
         session_id: &str,
-    ) -> Result<ModelSnapshot, ModelAdminError> {
-        let default_model = self.list_models(agent_id).await?.current_model;
-        let configured_model = opencrab_db::queries::get_session_model(
-            &*self.db.lock().map_err(|_| ModelAdminError::Internal)?,
-            session_id,
-        )
-        .map_err(|_| ModelAdminError::TargetUnavailable)?;
-        Ok(ModelSnapshot {
-            models: vec!["openai:gpt-5".to_string()],
-            current_model: configured_model.clone().unwrap_or(default_model.clone()),
-            configured_model,
-            default_model,
-        })
+    ) -> Result<SessionModelList, ModelAdminError> {
+        self.session_model_list(agent_id, session_id).await
     }
 
     async fn set_session_model(
         &self,
         agent_id: &str,
         session_id: &str,
+        profile: TurnModelProfile,
         model: &str,
     ) -> Result<ModelSnapshot, ModelAdminError> {
         if model != "openai:gpt-5" && model != "gpt-5" {
             return Err(ModelAdminError::NotFound);
         }
-        self.write_session_model(session_id, Some("openai:gpt-5"))?;
-        self.list_session_models(agent_id, session_id).await
+        self.write_session_model(session_id, profile, Some("openai:gpt-5"))?;
+        self.session_model_snapshot(agent_id, session_id, profile).await
     }
 
     async fn reset_session_model(
         &self,
         agent_id: &str,
         session_id: &str,
+        profile: TurnModelProfile,
     ) -> Result<ModelSnapshot, ModelAdminError> {
-        self.write_session_model(session_id, None)?;
-        self.list_session_models(agent_id, session_id).await
+        self.write_session_model(session_id, profile, None)?;
+        self.session_model_snapshot(agent_id, session_id, profile).await
     }
 }
 
@@ -177,6 +173,7 @@ impl AgentRuntime for TestRuntime {
     async fn run_agent_response(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
         self.sink_seen
             .store(req.completion_sink.is_some(), Ordering::SeqCst);
+        *self.last_sink.lock().unwrap() = req.completion_sink.clone();
         let initial_read_origin = req.initial_read_origin.clone();
         let result_origin = initial_read_origin.clone();
         let on_read_origin = req.on_read_origin.clone();
@@ -290,7 +287,13 @@ impl AgentRuntime for TestRuntime {
         }
         Ok(1024)
     }
-    fn session_turn_model(&self, _agent_id: &str, _session_id: &str) -> anyhow::Result<String> {
+    fn session_turn_model(
+        &self,
+        _agent_id: &str,
+        _session_id: &str,
+        profile: TurnModelProfile,
+    ) -> anyhow::Result<String> {
+        self.turn_profiles.lock().unwrap().push(profile);
         Ok("mock:test".to_string())
     }
     fn has_llm_providers(&self) -> bool {

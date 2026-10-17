@@ -310,6 +310,7 @@ async fn settlement_is_consumed_on_next_turn() {
         only_speaker: false,
         speaker_id: "u1".into(),
         system_context: String::new(),
+        model_profile: TurnModelProfile::Default,
     };
     settle_completed(
         &h.runtime.subtask_registry_for(&session_id),
@@ -372,6 +373,7 @@ async fn s3_subtask_continuation_routes_by_exact_generic_session_without_prefix(
         only_speaker: true,
         speaker_id: "npub-u1".into(),
         system_context: String::new(),
+        model_profile: TurnModelProfile::Default,
     };
     settle_completed(
         &h.runtime.subtask_registry_for(&session_id),
@@ -425,6 +427,7 @@ async fn settlement_during_active_parent_resumes_after_parent_turn() {
         only_speaker: false,
         speaker_id: "user-1".into(),
         system_context: String::new(),
+        model_profile: TurnModelProfile::Default,
     };
 
     let locks = h.runtime.session_locks();
@@ -498,6 +501,7 @@ async fn assert_failed_completion_resume_has_no_ended(reply: &str, budget_fails:
         only_speaker: false,
         speaker_id: "u1".into(),
         system_context: String::new(),
+        model_profile: TurnModelProfile::Default,
     };
     settle_completed(
         &h.runtime.subtask_registry_for(&session_id),

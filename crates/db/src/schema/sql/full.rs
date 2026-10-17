@@ -263,7 +263,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- DEFAULT '{}' は「未設定」= 現行挙動を維持。
     policy_json TEXT NOT NULL DEFAULT '{}',
     -- D-1080: セッション単位のモデル上書き。NULL = エージェントのモデルを継承。
-    model TEXT
+    model TEXT,
+    -- D-1081: realtime ターン用のモデル。NULL = このセッションのモデルに従う。
+    realtime_model TEXT
 );
 
 -- ============================================

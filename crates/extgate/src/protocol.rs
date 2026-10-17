@@ -258,6 +258,8 @@ pub struct Said {
     pub reply_target: Option<String>,
     /// Restrict live inbound folding to this speaker without naming a platform.
     pub only_speaker: bool,
+    /// D-1081: which session model slot a turn started by this said uses (`model_profile`).
+    pub model_profile: opencrab_actions::TurnModelProfile,
     pub text: String,
     pub attachments: Vec<SaidAttachment>,
 }
@@ -486,6 +488,16 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
         Some(Value::String(scope)) if scope == "speaker" => true,
         _ => return Err(GateError::new(ErrorCode::BadRequest)),
     };
+    let model_profile = match obj.get("model_profile") {
+        None | Some(Value::Null) => opencrab_actions::TurnModelProfile::Default,
+        Some(Value::String(profile)) if profile == "default" => {
+            opencrab_actions::TurnModelProfile::Default
+        }
+        Some(Value::String(profile)) if profile == "realtime" => {
+            opencrab_actions::TurnModelProfile::Realtime
+        }
+        _ => return Err(GateError::new(ErrorCode::BadRequest)),
+    };
     let text = require_str(obj, "text")?;
     let attachments = parse_attachments(obj.get("attachments"))?;
     if text.is_empty() && attachments.is_empty() {
@@ -502,6 +514,7 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
         system_context,
         reply_target,
         only_speaker,
+        model_profile,
         text,
         attachments,
     })
