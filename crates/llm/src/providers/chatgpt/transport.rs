@@ -100,71 +100,15 @@ impl LlmProvider for ChatGptProvider {
         &self,
         request: ChatRequest,
     ) -> Result<opencrab_llm_types::LlmExchange> {
-        debug!(model = %request.model, "ChatGPT chat completion");
-        let web_search_requested = request
-            .metadata
-            .get("web_search")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let mut token = self.fresh_access_token().await?;
-        let mut account_id = extract_account_id(&token)?;
-        // http(s) 画像は自分で取得して data URI 化してから送る（後述）。
-        let request = self.inline_remote_images(&request).await;
-        let body = self.build_request_body(&request, true);
-        let body_str = serde_json::to_string(&body).unwrap_or_default();
-        tracing::warn!(
-            model = %request.model,
-            has_instructions = body.get("instructions").is_some(),
-            instructions_len = body["instructions"].as_str().map(|s| s.len()).unwrap_or(0),
-            input_count = body["input"].as_array().map(|a| a.len()).unwrap_or(0),
-            has_reasoning = body.get("reasoning").is_some(),
-            reasoning_effort = body["reasoning"]["effort"].as_str().unwrap_or("none"),
-            body_len = body_str.len(),
-            "ChatGPT chat_completion: sending request"
-        );
-        // リトライは router が所有する（#46）。以前はここで独自に3回リトライしており、
-        // router の同一プロバイダ3回リトライと重なって最大9回の HTTP 試行になっていた。
-        // 429/5xx は型付き api_error で返せば router が retryable と分類して再試行する。
-        // 例外: 401 だけはトークンリフレッシュがプロバイダの能力なので、ここで
-        // 1回だけリフレッシュ→再送する（router は auth エラーをリトライしない）。
-        let mut refreshed = false;
-        let (status, text) = loop {
-            let resp = self
-                .request_builder("codex/responses", &token, &account_id)
-                .json(&body)
-                .send()
-                .await
-                .context("ChatGPT API request failed")?;
+        self.exchange(request, None).await
+    }
 
-            let status = resp.status();
-            let text = resp
-                .text()
-                .await
-                .context("ChatGPT: failed to read response body")?;
-
-            tracing::warn!(status = %status, body_len = text.len(), "ChatGPT chat_completion response received");
-
-            if status == reqwest::StatusCode::UNAUTHORIZED && !refreshed {
-                refreshed = true;
-                tracing::info!("ChatGPT returned 401; refreshing token and retrying once");
-                token = self.refresh_access_token(Some(&token)).await?;
-                account_id = extract_account_id(&token)?;
-                continue;
-            }
-            break (status, text);
-        };
-
-        if !status.is_success() {
-            tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion error response");
-            return Err(crate::error::api_error("ChatGPT", status, text));
-        }
-
-        let result = self.parse_exchange(&text, &request.model, web_search_requested);
-        tracing::warn!(
-            success = result.is_ok(),
-            "ChatGPT chat_completion parse result"
-        );
-        result
+    async fn chat_completion_with_history_observed(
+        &self,
+        request: ChatRequest,
+        sink: OutputTextSink,
+    ) -> Result<opencrab_llm_types::LlmExchange> {
+        self.exchange(request, Some(&sink)).await
     }
 
     async fn chat_completion_stream(
@@ -291,5 +235,86 @@ impl LlmProvider for ChatGptProvider {
 
     async fn health_check(&self) -> Result<bool> {
         Ok(self.load_access_token().is_ok())
+    }
+}
+
+impl ChatGptProvider {
+    async fn exchange(
+        &self,
+        request: ChatRequest,
+        sink: Option<&OutputTextSink>,
+    ) -> Result<opencrab_llm_types::LlmExchange> {
+        debug!(model = %request.model, "ChatGPT chat completion");
+        let web_search_requested = request
+            .metadata
+            .get("web_search")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut token = self.fresh_access_token().await?;
+        let mut account_id = extract_account_id(&token)?;
+        // http(s) 画像は自分で取得して data URI 化してから送る（後述）。
+        let request = self.inline_remote_images(&request).await;
+        let body = self.build_request_body(&request, true);
+        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        tracing::warn!(
+            model = %request.model,
+            has_instructions = body.get("instructions").is_some(),
+            instructions_len = body["instructions"].as_str().map(|s| s.len()).unwrap_or(0),
+            input_count = body["input"].as_array().map(|a| a.len()).unwrap_or(0),
+            has_reasoning = body.get("reasoning").is_some(),
+            reasoning_effort = body["reasoning"]["effort"].as_str().unwrap_or("none"),
+            body_len = body_str.len(),
+            "ChatGPT chat_completion: sending request"
+        );
+        // リトライは router が所有する（#46）。以前はここで独自に3回リトライしており、
+        // router の同一プロバイダ3回リトライと重なって最大9回の HTTP 試行になっていた。
+        // 429/5xx は型付き api_error で返せば router が retryable と分類して再試行する。
+        // 例外: 401 だけはトークンリフレッシュがプロバイダの能力なので、ここで
+        // 1回だけリフレッシュ→再送する（router は auth エラーをリトライしない）。
+        let mut refreshed = false;
+        let (status, text) = loop {
+            let resp = self
+                .request_builder("codex/responses", &token, &account_id)
+                .json(&body)
+                .send()
+                .await
+                .context("ChatGPT API request failed")?;
+
+            let status = resp.status();
+            // D-1083: only a 2xx body of an observed call is read incrementally; error bodies and
+            // unobserved calls are read whole as before.
+            let text = match sink {
+                Some(sink) if status.is_success() => {
+                    self::observe::read_observed_body(resp, sink).await?
+                }
+                _ => resp
+                    .text()
+                    .await
+                    .context("ChatGPT: failed to read response body")?,
+            };
+
+            tracing::warn!(status = %status, body_len = text.len(), "ChatGPT chat_completion response received");
+
+            if status == reqwest::StatusCode::UNAUTHORIZED && !refreshed {
+                refreshed = true;
+                tracing::info!("ChatGPT returned 401; refreshing token and retrying once");
+                token = self.refresh_access_token(Some(&token)).await?;
+                account_id = extract_account_id(&token)?;
+                continue;
+            }
+            break (status, text);
+        };
+
+        if !status.is_success() {
+            tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion error response");
+            return Err(crate::error::api_error("ChatGPT", status, text));
+        }
+
+        let result = self.parse_exchange(&text, &request.model, web_search_requested);
+        tracing::warn!(
+            success = result.is_ok(),
+            "ChatGPT chat_completion parse result"
+        );
+        result
     }
 }

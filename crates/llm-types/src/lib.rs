@@ -60,6 +60,18 @@ pub struct LlmExchange {
     pub provider_tool_history: ProviderToolHistory,
 }
 
+/// Assistant output text observed while an observed chat call is still running (D-1083).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputTextEvent {
+    /// Text appended to the first output text item of the current attempt.
+    Delta(String),
+    /// A new attempt starts after deltas of a failed attempt were already forwarded.
+    Reset,
+}
+
+/// Synchronous, non-blocking receiver of [`OutputTextEvent`]s.
+pub type OutputTextSink = std::sync::Arc<dyn Fn(OutputTextEvent) + Send + Sync>;
+
 /// Role of a message participant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
