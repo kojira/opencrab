@@ -33,6 +33,7 @@ async fn test_dispatched_subtask_carries_the_run_caller_to_settlement() {
         let (app, _db, mock, state) = create_test_app_with_state();
         let (agent_id, _app) = create_test_agent_named(app, "DispatchCaller", "TestPersona").await;
         let session_id = format!("web-{agent_id}-u298");
+        insert_member_session(&state, &session_id, &agent_id);
 
         mock.push_tool_call_response(vec![ToolCall {
             id: "tc-298".to_string(),

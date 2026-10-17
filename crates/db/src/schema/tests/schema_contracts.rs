@@ -30,3 +30,51 @@ fn task_ledger_schema_parity() {
     assert_eq!(dump(&fresh), dump(&migrated));
     assert_eq!(dump(&fresh).len(), 5, "expected 2 tables + 3 indexes");
 }
+
+/// D-1080 v60: schema 59 upgrades to a nullable `sessions.model` (NULL = inherit) without
+/// touching agents, sessions or bindings; a fresh install gets the identical column.
+#[test]
+fn v60_adds_nullable_session_model_preserving_rows() {
+    let column = |conn: &Connection| -> Option<(String, i64, Option<String>)> {
+        conn.query_row(
+            "SELECT type, \"notnull\", dflt_value FROM pragma_table_info('sessions') WHERE name='model'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok()
+    };
+    let fresh = crate::init_memory().expect("fresh");
+    assert_eq!(schema_version(&fresh).unwrap(), latest_version());
+    assert_eq!(latest_version(), 60);
+    assert_eq!(column(&fresh), Some(("TEXT".to_string(), 0, None)));
+
+    let old = crate::init_memory().expect("v59 fixture");
+    if column(&old).is_some() {
+        old.execute_batch("ALTER TABLE sessions DROP COLUMN model").unwrap();
+    }
+    old.execute_batch(
+        "PRAGMA user_version = 59;
+         INSERT INTO agents (agent_id, name, persona_name, model, created_at, updated_at)
+           VALUES ('a1', 'A', 'p', 'prov:agent-m', 'now', 'now');
+         INSERT INTO sessions (id, theme, created_at, updated_at) VALUES ('s1', 'addr', 'now', 'now');
+         INSERT INTO agent_sessions (agent_id, session_id) VALUES ('a1', 's1');",
+    )
+    .unwrap();
+    initialize(&old).expect("upgrade 59 -> latest");
+    assert_eq!(schema_version(&old).unwrap(), latest_version());
+    assert_eq!(column(&old), column(&fresh));
+    let (theme, model): (String, Option<String>) = old
+        .query_row("SELECT theme, model FROM sessions WHERE id='s1'", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!((theme.as_str(), model), ("addr", None));
+    let agent_model: Option<String> = old
+        .query_row("SELECT model FROM agents WHERE agent_id='a1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(agent_model.as_deref(), Some("prov:agent-m"));
+    let members: i64 = old
+        .query_row("SELECT COUNT(*) FROM agent_sessions WHERE session_id='s1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(members, 1);
+}

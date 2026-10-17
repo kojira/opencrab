@@ -114,3 +114,96 @@ fn test_session_crud() {
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].id, "session-1");
 }
+
+fn d1080_agent(conn: &Connection, agent_id: &str, model: Option<&str>) {
+    upsert_agent(
+        conn,
+        &AgentRow {
+            agent_id: agent_id.to_string(),
+            name: agent_id.to_string(),
+            job_title: None,
+            organization: None,
+            image_url: None,
+            persona_name: "p".to_string(),
+            personality: None,
+            instructions: String::new(),
+            model: model.map(str::to_string),
+            reasoning_effort: None,
+            web_search: None,
+            metadata_json: None,
+        },
+    )
+    .unwrap();
+}
+
+fn d1080_session(conn: &Connection, id: &str, participants: &str) {
+    insert_session(
+        conn,
+        &SessionRow {
+            id: id.to_string(),
+            mode: "generic".to_string(),
+            theme: id.to_string(),
+            phase: "active".to_string(),
+            turn_number: 0,
+            status: "active".to_string(),
+            participant_ids_json: participants.to_string(),
+            facilitator_id: None,
+            done_count: 0,
+            max_turns: None,
+            metadata_json: None,
+        },
+    )
+    .unwrap();
+}
+
+/// D-1080: a session override wins over the agent model and the server default, sessions of the
+/// same agent stay independent, and a reset session follows the (changed) agent default.
+#[test]
+fn session_model_overrides_are_isolated_and_reset_follows_agent_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("d1080.db");
+    {
+        let conn = Connection::open(&path).unwrap();
+        crate::schema::initialize(&conn).unwrap();
+        d1080_agent(&conn, "a1", Some("prov:agent-m"));
+        d1080_session(&conn, "sess-a", r#"["a1"]"#);
+        d1080_session(&conn, "sess-b", r#"["a1"]"#);
+        assert_eq!(get_session_model(&conn, "sess-a").unwrap(), None);
+        assert!(set_session_model(&conn, "sess-a", Some("prov:m1")).unwrap());
+        assert!(set_session_model(&conn, "sess-b", Some("prov:m2")).unwrap());
+    }
+    // A fresh connection sees the persisted overrides.
+    let conn = Connection::open(&path).unwrap();
+    crate::schema::initialize(&conn).unwrap();
+    let eff = |s: &str| effective_model_for_session(&conn, "a1", s, "srv:default").unwrap();
+    assert_eq!(eff("sess-a"), "prov:m1");
+    assert_eq!(eff("sess-b"), "prov:m2");
+
+    assert!(set_session_model(&conn, "sess-a", None).unwrap());
+    d1080_agent(&conn, "a1", Some("prov:agent-changed"));
+    assert_eq!(get_session_model(&conn, "sess-a").unwrap(), None);
+    assert_eq!(eff("sess-a"), "prov:agent-changed");
+    assert_eq!(eff("sess-b"), "prov:m2");
+    assert_eq!(
+        get_agent(&conn, "a1").unwrap().unwrap().model.as_deref(),
+        Some("prov:agent-changed")
+    );
+
+    d1080_agent(&conn, "a1", None);
+    assert_eq!(eff("sess-a"), "srv:default");
+}
+
+/// D-1080: a missing session or a failed lookup is an error, never the default model.
+#[test]
+fn session_model_lookup_failures_are_errors() {
+    let conn = setup();
+    d1080_agent(&conn, "a1", Some("prov:agent-m"));
+    assert!(effective_model_for_session(&conn, "a1", "missing", "srv:default").is_err());
+    assert!(get_session_model(&conn, "missing").is_err());
+    assert!(!set_session_model(&conn, "missing", Some("prov:m1")).unwrap());
+
+    d1080_session(&conn, "sess-a", r#"["a1"]"#);
+    conn.execute_batch("ALTER TABLE sessions RENAME COLUMN model TO model_gone")
+        .unwrap();
+    assert!(effective_model_for_session(&conn, "a1", "sess-a", "srv:default").is_err());
+}

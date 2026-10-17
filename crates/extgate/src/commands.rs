@@ -48,6 +48,7 @@ impl CommandError {
             ),
             ModelAdminError::InvalidArgs => Self::invalid_args(),
             ModelAdminError::Validation(message) => Self::new("model_validation_failed", message),
+            ModelAdminError::TargetUnavailable => Self::binding_not_found(),
             ModelAdminError::Internal => Self::internal(),
         }
     }
@@ -55,6 +56,8 @@ impl CommandError {
 
 pub struct CommandContext<'a> {
     pub agent_id: &'a str,
+    /// Canonical session of the authenticated binding (never taken from command args).
+    pub session_id: &'a str,
     pub caller: &'a SaidCaller,
     pub models: &'a dyn ModelAdministration,
 }
@@ -83,6 +86,9 @@ impl CommandRegistry {
         registry.register("list_models", Arc::new(ListModels))?;
         registry.register("set_model", Arc::new(SetModel))?;
         registry.register("reset_model", Arc::new(ResetModel))?;
+        registry.register("list_session_models", Arc::new(ListSessionModels))?;
+        registry.register("set_session_model", Arc::new(SetSessionModel))?;
+        registry.register("reset_session_model", Arc::new(ResetSessionModel))?;
         Ok(registry)
     }
 
@@ -195,6 +201,92 @@ impl CommandHandler for ResetModel {
             .reset_model(context.agent_id)
             .await
             .map(mutation_result)
+            .map_err(CommandError::from_model)
+    }
+}
+
+fn session_list_result(snapshot: ModelSnapshot) -> Value {
+    json!({
+        "scope": "session",
+        "models": snapshot.models,
+        "configured_model": snapshot.configured_model,
+        "current_model": snapshot.current_model,
+        "default_model": snapshot.default_model,
+    })
+}
+
+fn session_mutation_result(snapshot: ModelSnapshot) -> Value {
+    json!({
+        "scope": "session",
+        "configured_model": snapshot.configured_model,
+        "current_model": snapshot.current_model,
+        "default_model": snapshot.default_model,
+        "applies": "next_turn",
+    })
+}
+
+struct ListSessionModels;
+
+#[async_trait]
+impl CommandHandler for ListSessionModels {
+    async fn handle(
+        &self,
+        context: CommandContext<'_>,
+        args: &Map<String, Value>,
+    ) -> Result<Value, CommandError> {
+        if !args.is_empty() {
+            return Err(CommandError::invalid_args());
+        }
+        context
+            .models
+            .list_session_models(context.agent_id, context.session_id)
+            .await
+            .map(session_list_result)
+            .map_err(CommandError::from_model)
+    }
+}
+
+struct SetSessionModel;
+
+#[async_trait]
+impl CommandHandler for SetSessionModel {
+    async fn handle(
+        &self,
+        context: CommandContext<'_>,
+        args: &Map<String, Value>,
+    ) -> Result<Value, CommandError> {
+        if args.len() != 1 {
+            return Err(CommandError::invalid_args());
+        }
+        let Some(model) = args.get("model").and_then(Value::as_str) else {
+            return Err(CommandError::invalid_args());
+        };
+        context
+            .models
+            .set_session_model(context.agent_id, context.session_id, model)
+            .await
+            .map(session_mutation_result)
+            .map_err(CommandError::from_model)
+    }
+}
+
+struct ResetSessionModel;
+
+#[async_trait]
+impl CommandHandler for ResetSessionModel {
+    async fn handle(
+        &self,
+        context: CommandContext<'_>,
+        args: &Map<String, Value>,
+    ) -> Result<Value, CommandError> {
+        if !args.is_empty() {
+            return Err(CommandError::invalid_args());
+        }
+        context
+            .models
+            .reset_session_model(context.agent_id, context.session_id)
+            .await
+            .map(session_mutation_result)
             .map_err(CommandError::from_model)
     }
 }

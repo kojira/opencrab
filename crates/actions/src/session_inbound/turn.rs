@@ -101,12 +101,26 @@ where
     Wrap: FnOnce(&str) -> String,
     Build: FnOnce(String) -> RunRequest,
 {
+    // D-1080: the session's model is read once here (inside the serialized section) and pinned
+    // for the whole turn. A set/reset that lands mid-turn applies from the next turn.
+    let model = match runtime.session_turn_model(agent_id, session_id) {
+        Ok(model) => model,
+        Err(e) => {
+            tracing::error!(
+                session_id = %session_id,
+                agent_id = %agent_id,
+                "session turn model lookup failed: {e}"
+            );
+            return Some(Err(e));
+        }
+    };
     // #826: fail-loud 予算。既定へは落とさず、一意名（超過は `context_budget_exhausted`）で
     // ログしてこのターンを run しない（`None`）。`system_prompt` / `runtime_context_text` は
     // `wrap_conversation` が前置する実 request と一致させること（呼び出し側の契約）。
     let budget = match runtime.context_budget_tokens(
         agent_id,
         session_id,
+        &model,
         system_prompt,
         runtime_context_text,
     ) {
@@ -125,6 +139,7 @@ where
     let raw = match runtime.build_conversation_string(
         session_id,
         agent_id,
+        &model,
         budget,
         system_prompt,
         runtime_context_text,
@@ -140,5 +155,9 @@ where
         }
     };
     let conversation = wrap_conversation(&raw);
-    Some(runtime.run_agent_response(build_run(conversation)).await)
+    Some(
+        runtime
+            .run_agent_response(build_run(conversation).with_pinned_model(model))
+            .await,
+    )
 }

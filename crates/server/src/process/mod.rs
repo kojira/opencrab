@@ -179,10 +179,19 @@ pub async fn run_agent_response(
     std::fs::create_dir_all(&ws_path).ok();
     let workspace = opencrab_core::workspace::Workspace::from_root(std::path::Path::new(&ws_path))?;
 
-    let effective_model = {
-        let conn = state.db.lock().unwrap();
-        opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
-            .unwrap_or_else(|_| state.default_model.clone())
+    // D-1080: one model for the whole turn. A pinned model (session turns) wins; otherwise the
+    // model is resolved once here. Lookup failure stops the turn instead of using the default.
+    let effective_model = match req.pinned_model.clone() {
+        Some(model) => model,
+        None => {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::effective_model_for_session(
+                &conn,
+                agent_id,
+                session_id,
+                &state.default_model,
+            )?
+        }
     };
     // per-agent の推論（thinking）強度。空/未設定なら None（プロバイダー既定に従う）。
     let agent_reasoning_effort = {
@@ -526,6 +535,7 @@ pub async fn run_agent_response(
                     agent_id,
                     session_id,
                     default_model: &state.default_model,
+                    pinned_model: Some(&effective_model),
                     policy: &state.context_budget_policy(),
                     system_prompt,
                     runtime_context_text: runtime_text,
@@ -615,6 +625,7 @@ pub async fn run_agent_response(
             state,
             agent_id,
             session_id,
+            &effective_model,
             depth,
             restarts_this_call,
             req.trigger_message_id.as_deref(),
@@ -640,7 +651,19 @@ pub async fn run_agent_response(
         if let Some((high, low)) = last_waters {
             spawn_background_turn_end_snapshot(state, session_id, agent_id, high, low);
         }
-        spawn_background_index_build(state, agent_id, &effective_model);
+        // The memory index build is agent maintenance: it stays on the agent's model.
+        let index_model = {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
+        };
+        match index_model {
+            Ok(index_model) => spawn_background_index_build(state, agent_id, &index_model),
+            Err(e) => tracing::warn!(
+                agent_id = %agent_id,
+                error = %e,
+                "memory index build skipped: agent model lookup failed"
+            ),
+        }
         if let Ok(ref engine_result) = result {
             record_used_skills(state, agent_id, session_id, &engine_result.response);
         }

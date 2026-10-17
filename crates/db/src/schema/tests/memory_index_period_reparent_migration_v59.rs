@@ -87,7 +87,7 @@ fn v59_reparents_topics_to_their_own_month_and_marks_months_stale() {
         .unwrap();
 
     initialize(&conn).unwrap();
-    assert_eq!(schema_version(&conn).unwrap(), 59);
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
 
     // Parents: every dated topic is under a session node whose period is its own month.
     assert_eq!(v59_parent(&conn, "topic-aug").as_deref(), Some("session-a1-nostr"));
@@ -202,7 +202,7 @@ fn v59_is_idempotent() {
     let first = v59_snapshot(&conn);
     conn.execute_batch("PRAGMA user_version = 58").unwrap();
     initialize(&conn).unwrap();
-    assert_eq!(schema_version(&conn).unwrap(), 59);
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
     assert_eq!(v59_snapshot(&conn), first);
 }
 
