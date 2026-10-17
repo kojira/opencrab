@@ -19,6 +19,7 @@ pub mod operation_calls;
 pub mod operations;
 pub mod ops_projection;
 pub mod outbound_files;
+pub mod partial_stream;
 pub mod protocol;
 pub mod race;
 pub mod registry;

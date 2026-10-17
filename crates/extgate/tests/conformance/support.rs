@@ -59,6 +59,7 @@ struct TestRuntime {
     /// D-1081: every `session_turn_model` profile, in turn-start order.
     turn_profiles: Arc<Mutex<Vec<TurnModelProfile>>>,
     last_sink: Arc<Mutex<Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>>>,
+    partial_script: PartialScript,
 }
 
 impl TestRuntime {
@@ -81,6 +82,7 @@ impl TestRuntime {
             turn_entered: Arc::new(Notify::new()),
             turn_profiles: Arc::new(Mutex::new(Vec::new())),
             last_sink: Arc::new(Mutex::new(None)),
+            partial_script: PartialScript::default(),
         }
     }
 }
@@ -192,6 +194,7 @@ impl AgentRuntime for TestRuntime {
         if let (Some(origin), Some(cb)) = (initial_read_origin, on_read_origin) {
             cb(origin).await;
         }
+        self.partial_script.play(&req.on_partial_text, &req.on_continuation_speech).await;
         self.turn_entered.notify_waiters();
         // 旧 V3（sink 無し）はツールを同期実行する。sink があれば detach 済みなので待たない。
         if req.completion_sink.is_none() {

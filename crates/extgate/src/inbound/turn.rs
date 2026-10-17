@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use opencrab_actions::{
     delivery_effect, start_session_turn, AgentRuntime, NormalizedInbound, RunRequest,
-    SubtaskCompletionSink, TranscriptSource,
+    SubtaskCompletionSink, TranscriptSource, TurnModelProfile,
 };
 
 use crate::completion::{v3_attach_dispatch, ExtgateCompletionSink};
 use crate::delivery::apply_delivery_effect;
 use crate::error::ErrorCode;
 use crate::listen::{emit_activity, emit_ended_activity};
+use crate::partial_stream::PartialStreamSlot;
 use crate::protocol::Said;
 use crate::registry::ExtgateState;
 
@@ -102,6 +103,17 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                 let (system, name) = runtime.build_agent_context(&agent_id, &caller);
                 let system = crate::completion::with_system_context(system, &system_context);
                 let last_continuation_say = Arc::new(std::sync::Mutex::new(None::<String>));
+                // D-1083: only a realtime-profile turn streams partial text; every say of the turn
+                // takes the slot.
+                let partial_stream = PartialStreamSlot::new();
+                let partial_hook = (model_profile == TurnModelProfile::Realtime).then(|| {
+                    crate::partial_stream::partial_text_hook(
+                        Arc::clone(&state),
+                        instance_id.clone(),
+                        binding_id.clone(),
+                        partial_stream.clone(),
+                    )
+                });
                 let turn_res = {
                     let runtime = runtime.clone();
                     let session_id = session_id.clone();
@@ -127,6 +139,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     let hook_reply = reply_target.clone();
                     let request_reply_target = reply_target.clone();
                     let hook_last_continuation_say = Arc::clone(&last_continuation_say);
+                    let hook_partial_stream = partial_stream.clone();
                     tokio::spawn(async move {
                         let inbound = NormalizedInbound {
                             session_id: &session_id,
@@ -239,6 +252,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                     let hse = hook_session.clone();
                                     let hr = hook_reply.clone();
                                     let latest = Arc::clone(&hook_last_continuation_say);
+                                    let partial_stream = hook_partial_stream.clone();
                                     Arc::new(move |speech: String| {
                                         let hs = Arc::clone(&hs);
                                         let hi = hi.clone();
@@ -247,6 +261,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                         let hse = hse.clone();
                                         let hr = hr.clone();
                                         let latest = Arc::clone(&latest);
+                                        let stream_id = partial_stream.take_for_say();
                                         Box::pin(async move {
                                             let delivery_id =
                                                 crate::delivery::deliver_intermediate_say(
@@ -257,6 +272,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                                     &hse,
                                                     &speech,
                                                     hr.as_deref(),
+                                                    stream_id.as_deref(),
                                                 )
                                                 .await
                                                 .map_err(|e| {
@@ -271,6 +287,9 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                         })
                                     })
                                 });
+                                if let Some(hook) = partial_hook.clone() {
+                                    req = req.with_on_partial_text(hook);
+                                }
                                 // Gateway が与えた opaque な返信先だけを subtask 完了へ持ち回る。
                                 // 内部 origin を外部返信先として推測しない。
                                 if let Some(target) = request_reply_target.clone() {
@@ -329,6 +348,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             &session_id,
                             effect,
                             reply_target.as_deref(),
+                            partial_stream.take_for_say().as_deref(),
                         )
                         .await;
                         let parent_session_has_running =

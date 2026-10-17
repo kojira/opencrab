@@ -94,15 +94,22 @@ pub fn bind_frame(binding_id: &str, address: &str) -> Value {
 /// say フレーム。`reply_target` を渡すと payload に載る（gateway が返信先を導けない
 /// resume ターン等で、発端イベントの origin を明示する）。省略時は gateway 側の相関
 /// （直前に送った said の origin）に委ねる。
+///
+/// D-1083: `stream_id` names the partial stream whose released text this say completes. It is
+/// set only when that stream released text.
 pub fn say_frame(
     delivery_id: &str,
     binding_id: &str,
     body: &str,
     reply_target: Option<&str>,
+    stream_id: Option<&str>,
 ) -> Value {
     let mut payload = json!({ "text": body });
     if let Some(target) = reply_target {
         payload["reply_target"] = json!(target);
+    }
+    if let Some(stream_id) = stream_id {
+        payload["stream_id"] = json!(stream_id);
     }
     json!({
         "id": delivery_id,
@@ -173,6 +180,17 @@ pub fn ended_activity_frame(
     let mut frame = activity_frame(binding_id, activity_id, "ended", None, completed_target);
     frame["silent_origins"] = json!(silent_origins);
     frame
+}
+
+/// D-1083: cumulative released text of one partial stream. It has no `id`: gateways that do not
+/// know the frame ignore it without a reply and keep the connection.
+pub fn partial_frame(binding_id: &str, stream_id: &str, text: &str) -> Value {
+    json!({
+        "m": "partial",
+        "binding_id": binding_id,
+        "stream_id": stream_id,
+        "text": text,
+    })
 }
 
 /// R3(❌): ターン失敗通知フレーム。id を持たない fire-and-forget 通知（activity と同型）。
