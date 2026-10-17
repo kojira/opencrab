@@ -20,6 +20,7 @@ fn resolve_runtime_envelope(
     conn: &rusqlite::Connection,
     agent_id: &str,
     session_id: &str,
+    model: &str,
     system_prompt: &str,
     runtime_context_text: &str,
 ) -> Result<process::ContextBudgetEnvelope, opencrab_core::context_budget::ContextBudgetError> {
@@ -29,6 +30,7 @@ fn resolve_runtime_envelope(
         agent_id,
         session_id,
         default_model: &state.default_model,
+        pinned_model: Some(model),
         policy: &state.context_budget_policy(),
         system_prompt,
         runtime_context_text,
@@ -172,6 +174,143 @@ impl ModelAdministration for AppState {
             default_model: self.default_model.clone(),
         })
     }
+
+    async fn list_session_models(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<ModelSnapshot, ModelAdminError> {
+        let models = crate::api::llm::available_models(self)
+            .await
+            .map_err(|_| ModelAdminError::Internal)?;
+        let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+        let configured_model = session_model_target(&conn, agent_id, session_id)?;
+        let agent_model = self.agent_model(&conn, agent_id)?;
+        Ok(session_snapshot(models, configured_model, agent_model))
+    }
+
+    async fn set_session_model(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        model: &str,
+    ) -> Result<ModelSnapshot, ModelAdminError> {
+        let exact_canonical_request = model.trim() == model
+            && model
+                .split_once(':')
+                .is_some_and(|(provider, model_id)| !provider.is_empty() && !model_id.is_empty());
+        {
+            let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+            let configured_model = session_model_target(&conn, agent_id, session_id)?;
+            if exact_canonical_request && configured_model.as_deref() == Some(model) {
+                let agent_model = self.agent_model(&conn, agent_id)?;
+                return Ok(session_snapshot(Vec::new(), configured_model, agent_model));
+            }
+        }
+
+        let models = crate::api::llm::available_models(self)
+            .await
+            .map_err(|_| ModelAdminError::Internal)?;
+        let canonical =
+            crate::api::llm::resolve_exact_model(&models, model).map_err(|error| match error {
+                crate::api::llm::ModelResolutionError::InvalidArgs => ModelAdminError::InvalidArgs,
+                crate::api::llm::ModelResolutionError::NotFound => ModelAdminError::NotFound,
+                crate::api::llm::ModelResolutionError::Ambiguous => ModelAdminError::Ambiguous,
+            })?;
+
+        // Membership re-check, validation and write share this one DB lock. The session lock is
+        // never taken: a running turn keeps its pinned model; the change applies next turn.
+        let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+        let configured_model = session_model_target(&conn, agent_id, session_id)?;
+        if configured_model.as_deref() != Some(canonical.as_str()) {
+            crate::process::check_agent_model_change(&conn, None, Some(&canonical), true)
+                .map_err(ModelAdminError::Validation)?;
+            if !opencrab_db::queries::set_session_model(&conn, session_id, Some(&canonical))
+                .map_err(|_| ModelAdminError::Internal)?
+            {
+                return Err(ModelAdminError::TargetUnavailable);
+            }
+        }
+        let agent_model = self.agent_model(&conn, agent_id)?;
+        Ok(session_snapshot(models, Some(canonical), agent_model))
+    }
+
+    async fn reset_session_model(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<ModelSnapshot, ModelAdminError> {
+        let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+        let configured_model = session_model_target(&conn, agent_id, session_id)?;
+        let agent_model = self.agent_model(&conn, agent_id)?;
+        if configured_model.is_some() {
+            // The inherited model must be usable before the override is dropped.
+            opencrab_core::context_budget::ensure_model_context_window_registered(
+                &conn,
+                &agent_model,
+            )
+            .and_then(|()| {
+                opencrab_core::context_budget::ensure_model_max_output_tokens_registered(
+                    &conn,
+                    &agent_model,
+                )
+            })
+            .map_err(ModelAdminError::Validation)?;
+            if !opencrab_db::queries::set_session_model(&conn, session_id, None)
+                .map_err(|_| ModelAdminError::Internal)?
+            {
+                return Err(ModelAdminError::TargetUnavailable);
+            }
+        }
+        Ok(session_snapshot(Vec::new(), None, agent_model))
+    }
+}
+
+impl AppState {
+    /// The agent's effective model (agent > server default); what a reset session inherits.
+    fn agent_model(
+        &self,
+        conn: &rusqlite::Connection,
+        agent_id: &str,
+    ) -> Result<String, ModelAdminError> {
+        opencrab_db::queries::effective_model_for_agent(conn, agent_id, &self.default_model)
+            .map_err(|_| ModelAdminError::Internal)
+    }
+}
+
+/// The session's override, provided `session_id` exists and its members are exactly `[agent_id]`.
+fn session_model_target(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    session_id: &str,
+) -> Result<Option<String>, ModelAdminError> {
+    if opencrab_db::queries::get_session(conn, session_id)
+        .map_err(|_| ModelAdminError::Internal)?
+        .is_none()
+    {
+        return Err(ModelAdminError::TargetUnavailable);
+    }
+    let members = opencrab_db::queries::list_session_participants(conn, session_id)
+        .map_err(|_| ModelAdminError::Internal)?;
+    if members.as_slice() != [agent_id] {
+        return Err(ModelAdminError::TargetUnavailable);
+    }
+    opencrab_db::queries::get_session_model(conn, session_id).map_err(|_| ModelAdminError::Internal)
+}
+
+fn session_snapshot(
+    models: Vec<String>,
+    configured_model: Option<String>,
+    agent_model: String,
+) -> ModelSnapshot {
+    ModelSnapshot {
+        models,
+        current_model: configured_model
+            .clone()
+            .unwrap_or_else(|| agent_model.clone()),
+        configured_model,
+        default_model: agent_model,
+    }
 }
 
 #[async_trait]
@@ -196,6 +335,7 @@ impl AgentRuntime for AppState {
         &self,
         session_id: &str,
         agent_id: &str,
+        model: &str,
         _context_budget_tokens: usize,
         system_prompt: &str,
         runtime_context_text: &str,
@@ -206,6 +346,7 @@ impl AgentRuntime for AppState {
             &conn,
             agent_id,
             session_id,
+            model,
             system_prompt,
             runtime_context_text,
         )?;
@@ -223,6 +364,7 @@ impl AgentRuntime for AppState {
         &self,
         agent_id: &str,
         session_id: &str,
+        model: &str,
         system_prompt: &str,
         runtime_context_text: &str,
     ) -> Result<usize, opencrab_core::context_budget::ContextBudgetError> {
@@ -232,10 +374,21 @@ impl AgentRuntime for AppState {
             &conn,
             agent_id,
             session_id,
+            model,
             system_prompt,
             runtime_context_text,
         )?;
         Ok(env.conversation_high)
+    }
+
+    fn session_turn_model(&self, agent_id: &str, session_id: &str) -> anyhow::Result<String> {
+        let conn = self.db.lock().unwrap();
+        opencrab_db::queries::effective_model_for_session(
+            &conn,
+            agent_id,
+            session_id,
+            &self.default_model,
+        )
     }
 
     fn has_llm_providers(&self) -> bool {
@@ -414,6 +567,10 @@ impl AgentRuntime for AppState {
 #[cfg(test)]
 #[path = "agent_runtime_impl/peer_review_removal_test.rs"]
 mod peer_review_removal_test;
+
+#[cfg(test)]
+#[path = "agent_runtime_impl/session_model_test.rs"]
+mod session_model_test;
 
 fn log_closed_interactions(
     closed: &[opencrab_db::queries::ClosedInteraction],

@@ -64,6 +64,7 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
         &self,
         session_id: &str,
         agent_id: &str,
+        model: &str,
         context_budget_tokens: usize,
         system_prompt: &str,
         runtime_context_text: &str,
@@ -78,9 +79,14 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
         &self,
         agent_id: &str,
         session_id: &str,
+        model: &str,
         system_prompt: &str,
         runtime_context_text: &str,
     ) -> std::result::Result<usize, opencrab_core::context_budget::ContextBudgetError>;
+
+    /// D-1080: the model for one turn of `session_id` (session > agent > server default).
+    /// Read once at turn start; a failed lookup is an error, never the default.
+    fn session_turn_model(&self, agent_id: &str, session_id: &str) -> Result<String>;
 
     /// LLM プロバイダが 1 つ以上使えるか（未設定なら実行せずに返す）。
     fn has_llm_providers(&self) -> bool;

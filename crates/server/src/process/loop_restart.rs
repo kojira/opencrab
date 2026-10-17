@@ -21,10 +21,12 @@ use super::*;
 ///   後日の上限停止で突然殺さない。abandoned は session_logs にも記録する: 台帳
 ///   セクションは active タスクしか描画しないため、blocker エントリだけでは次ターン
 ///   以降のエージェント/ユーザーから不可視になる。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_loop_restart(
     state: &AppState,
     agent_id: &str,
     session_id: &str,
+    turn_model: &str,
     depth: u32,
     restarts_this_call: i64,
     trigger_message_id: Option<&str>,
@@ -167,6 +169,7 @@ pub(super) fn prepare_loop_restart(
         agent_id,
         session_id,
         default_model: &state.default_model,
+        pinned_model: Some(turn_model),
         policy: &state.context_budget_policy(),
         system_prompt: &system_prompt,
         runtime_context_text: &runtime_text,

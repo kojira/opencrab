@@ -101,6 +101,8 @@ pub struct RequestEnvelopeArgs<'a> {
     pub agent_id: &'a str,
     pub session_id: &'a str,
     pub default_model: &'a str,
+    /// D-1080: the model pinned for this turn. `None` = resolve session > agent > default.
+    pub pinned_model: Option<&'a str>,
     pub policy: &'a ContextBudgetPolicy,
     pub system_prompt: &'a str,
     pub runtime_context_text: &'a str,
@@ -110,19 +112,23 @@ pub struct RequestEnvelopeArgs<'a> {
 
 /// モデル解決 → 水位 → 費目計測 → envelope。
 ///
-/// `effective_model_for_agent` の失敗は既定モデルへ落とさず `LookupFailed`。
+/// 解決失敗は既定モデルへ落とさず `LookupFailed`。
 pub fn resolve_agent_request_envelope(
     args: RequestEnvelopeArgs<'_>,
 ) -> Result<ContextBudgetEnvelope, ContextBudgetError> {
-    let spec = opencrab_db::queries::effective_model_for_agent(
-        args.conn,
-        args.agent_id,
-        args.default_model,
-    )
-    .map_err(|e| ContextBudgetError::LookupFailed {
-        spec: args.default_model.to_string(),
-        cause: e.to_string(),
-    })?;
+    let spec = match args.pinned_model {
+        Some(model) => model.to_string(),
+        None => opencrab_db::queries::effective_model_for_session(
+            args.conn,
+            args.agent_id,
+            args.session_id,
+            args.default_model,
+        )
+        .map_err(|e| ContextBudgetError::LookupFailed {
+            spec: args.default_model.to_string(),
+            cause: e.to_string(),
+        })?,
+    };
     let (provider, model) = split_llm_model_spec(&spec);
     let water = resolve_water_levels(args.conn, provider, model, args.policy)?;
     let (memory_index, memory_index_entry_count) =

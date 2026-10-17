@@ -548,27 +548,41 @@ async fn handle_command<R: ModelAdministration>(
         if !acknowledged {
             Err(CommandError::binding_not_found())
         } else {
-            let agent_id = match state.db.lock() {
-                Ok(conn) => conn.query_row(
-                    "SELECT a.agent_id
-                     FROM gate_bindings b
-                     JOIN gate_instances i ON i.instance_id = b.instance_id
-                     JOIN agents a ON a.subject_id = i.subject_id
-                     WHERE b.binding_id = ?1 AND b.instance_id = ?2
-                       AND b.closed_at IS NULL AND i.deleted_at IS NULL",
-                    rusqlite::params![command.binding_id, instance_id],
-                    |row| row.get::<_, String>(0),
-                ),
+            // D-1080: the command target is the binding's canonical session (stored or the
+            // existing canonical resolver for legacy rows), never an address or a client value.
+            let target = match state.db.lock() {
+                Ok(conn) => conn
+                    .query_row(
+                        "SELECT a.agent_id, b.address
+                         FROM gate_bindings b
+                         JOIN gate_instances i ON i.instance_id = b.instance_id
+                         JOIN agents a ON a.subject_id = i.subject_id
+                         WHERE b.binding_id = ?1 AND b.instance_id = ?2
+                           AND b.closed_at IS NULL AND i.deleted_at IS NULL",
+                        rusqlite::params![command.binding_id, instance_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .and_then(|(agent_id, address)| {
+                        opencrab_db::queries::canonical_session_id(
+                            &conn,
+                            &command.binding_id,
+                            &address,
+                        )
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?
+                        .map(|session_id| (agent_id, session_id))
+                        .ok_or(rusqlite::Error::QueryReturnedNoRows)
+                    }),
                 Err(_) => Err(rusqlite::Error::InvalidQuery),
             };
-            match agent_id {
-                Ok(agent_id) => {
+            match target {
+                Ok((agent_id, session_id)) => {
                     state
                         .commands
                         .dispatch(
                             &command.name,
                             CommandContext {
                                 agent_id: &agent_id,
+                                session_id: &session_id,
                                 caller: &command.caller,
                                 models: runtime,
                             },

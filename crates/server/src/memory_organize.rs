@@ -62,7 +62,16 @@ pub struct AppStateTurnRunner<'a> {
 #[async_trait::async_trait]
 impl OrganizeTurnRunner for AppStateTurnRunner<'_> {
     async fn run_turn(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
-        crate::process::run_agent_response(self.state, req).await
+        // Sleep maintenance runs have no session row: they run on the agent's model (D-1080).
+        let model = {
+            let conn = self.state.db.lock().unwrap();
+            opencrab_db::queries::effective_model_for_agent(
+                &conn,
+                &req.agent_id,
+                &self.state.default_model,
+            )?
+        };
+        crate::process::run_agent_response(self.state, req.with_pinned_model(model)).await
     }
 }
 

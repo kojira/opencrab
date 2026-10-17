@@ -1,0 +1,228 @@
+// D-1080: session model commands target the authenticated binding's canonical session.
+
+impl TestRuntime {
+    fn write_session_model(&self, session_id: &str, model: Option<&str>) -> Result<(), ModelAdminError> {
+        let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+        match opencrab_db::queries::set_session_model(&conn, session_id, model) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(ModelAdminError::TargetUnavailable),
+            Err(_) => Err(ModelAdminError::Internal),
+        }
+    }
+}
+
+fn stored_session_model(h: &Harness, session_id: &str) -> Option<String> {
+    let conn = h.state.db.lock().unwrap();
+    opencrab_db::queries::get_session_model(&conn, session_id).unwrap()
+}
+
+fn stored_agent_model(h: &Harness) -> Option<String> {
+    h.state
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT model FROM agents WHERE agent_id = 'agent-1'", [], |row| row.get(0))
+        .unwrap()
+}
+
+async fn send_command(
+    s: &mut UnixStream,
+    id: &str,
+    binding_id: &str,
+    caller: Value,
+    name: &str,
+    args: Value,
+) -> Value {
+    write_frame(
+        s,
+        &json!({
+            "m": "command",
+            "id": id,
+            "binding_id": binding_id,
+            "caller": caller,
+            "name": name,
+            "args": args,
+        }),
+    )
+    .await;
+    read_until(s, |v| v["id"] == id).await
+}
+
+#[tokio::test]
+async fn session_model_commands_change_only_the_bound_session() {
+    let h = Harness::start().await;
+    insert_named_session(&h, "other-session");
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    let session_id = session_id_for_binding(&binding_id);
+
+    let set = send_command(
+        &mut s,
+        "cmd-set",
+        &binding_id,
+        json!({"role": "owner"}),
+        "set_session_model",
+        json!({"model": "gpt-5"}),
+    )
+    .await;
+    assert_eq!(set["m"], "ok", "{set}");
+    assert_eq!(set["result"]["scope"], "session");
+    assert_eq!(set["result"]["configured_model"], "openai:gpt-5");
+    assert_eq!(set["result"]["current_model"], "openai:gpt-5");
+    assert_eq!(set["result"]["applies"], "next_turn");
+    assert_eq!(stored_session_model(&h, &session_id).as_deref(), Some("openai:gpt-5"));
+    assert_eq!(stored_session_model(&h, "other-session"), None);
+    assert_eq!(stored_agent_model(&h), None);
+
+    let list = send_command(
+        &mut s,
+        "cmd-list",
+        &binding_id,
+        json!({"role": "owner"}),
+        "list_session_models",
+        json!({}),
+    )
+    .await;
+    assert_eq!(list["m"], "ok", "{list}");
+    assert_eq!(list["result"]["configured_model"], "openai:gpt-5");
+
+    // A client-supplied session target is not an accepted argument.
+    let spoof = send_command(
+        &mut s,
+        "cmd-spoof",
+        &binding_id,
+        json!({"role": "owner"}),
+        "set_session_model",
+        json!({"model": "gpt-5", "session_id": "other-session"}),
+    )
+    .await;
+    assert_eq!(spoof["code"], "invalid_args");
+    assert_eq!(stored_session_model(&h, "other-session"), None);
+
+    let reset = send_command(
+        &mut s,
+        "cmd-reset",
+        &binding_id,
+        json!({"role": "owner"}),
+        "reset_session_model",
+        json!({}),
+    )
+    .await;
+    assert_eq!(reset["m"], "ok", "{reset}");
+    assert_eq!(reset["result"]["configured_model"], Value::Null);
+    assert_eq!(stored_session_model(&h, &session_id), None);
+    assert_eq!(stored_agent_model(&h), None);
+}
+
+#[tokio::test]
+async fn session_model_commands_reject_non_owner_unknown_and_closed_bindings() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    let session_id = session_id_for_binding(&binding_id);
+
+    let co_agent = send_command(
+        &mut s,
+        "cmd-co",
+        &binding_id,
+        json!({"role": "co_agent", "agent_id": "agent-b"}),
+        "set_session_model",
+        json!({"model": "gpt-5"}),
+    )
+    .await;
+    assert_eq!(co_agent["code"], "forbidden");
+
+    let unknown = send_command(
+        &mut s,
+        "cmd-unknown",
+        &uuid(),
+        json!({"role": "owner"}),
+        "set_session_model",
+        json!({"model": "gpt-5"}),
+    )
+    .await;
+    assert_eq!(unknown["code"], "binding_not_found");
+
+    h.state
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE gate_bindings SET closed_at = 1 WHERE binding_id = ?1",
+            [&binding_id],
+        )
+        .unwrap();
+    let closed = send_command(
+        &mut s,
+        "cmd-closed",
+        &binding_id,
+        json!({"role": "owner"}),
+        "set_session_model",
+        json!({"model": "gpt-5"}),
+    )
+    .await;
+    assert_eq!(closed["code"], "binding_not_found");
+    assert_eq!(stored_session_model(&h, &session_id), None);
+    assert_eq!(stored_agent_model(&h), None);
+}
+
+/// A command during a held turn is answered at once and the connection keeps reading.
+#[tokio::test(start_paused = true)]
+async fn session_model_set_does_not_wait_for_the_running_turn() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    let session_id = session_id_for_binding(&binding_id);
+    let (release_tx, release_rx) = oneshot::channel();
+    *h.runtime.hold_rx.lock().unwrap() = Some(release_rx);
+    let entered = h.runtime.turn_entered.notified();
+    tokio::pin!(entered);
+
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "s-1",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "o-1",
+            "author_id": "u",
+            "text": "first",
+            "attachments": []
+        }),
+    )
+    .await;
+    for _ in 0..80 {
+        tokio::select! {
+            _ = &mut entered => break,
+            _ = tokio::time::advance(Duration::from_millis(5)) => {}
+        }
+    }
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0, "turn is held");
+
+    let set = send_command(
+        &mut s,
+        "cmd-set-held",
+        &binding_id,
+        json!({"role": "owner"}),
+        "set_session_model",
+        json!({"model": "gpt-5"}),
+    )
+    .await;
+    assert_eq!(set["m"], "ok", "{set}");
+    assert_eq!(stored_session_model(&h, &session_id).as_deref(), Some("openai:gpt-5"));
+
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "s-2",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "o-2",
+            "author_id": "u",
+            "text": "second",
+            "attachments": []
+        }),
+    )
+    .await;
+    let ok = read_said_response(&mut s, "s-2").await;
+    assert_eq!(ok["m"], "ok", "later message on the same connection is processed");
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0, "turn still held");
+    release_tx.send(()).unwrap();
+}

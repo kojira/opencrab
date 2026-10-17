@@ -310,7 +310,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 281,
+      "line": 283,
       "snippet": "CREATE TABLE IF NOT EXISTS channel_config (",
       "classification": "production-violation",
       "violation": "V06",
@@ -320,7 +320,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 295,
+      "line": 297,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_channel_guild ON channel_config(guild_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -330,7 +330,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 414,
+      "line": 416,
       "snippet": "CREATE TABLE IF NOT EXISTS trusted_users (",
       "classification": "production-violation",
       "violation": "V06",
@@ -340,7 +340,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 426,
+      "line": 428,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -350,7 +350,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 650,
+      "line": 652,
       "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
       "classification": "production-violation",
       "violation": "V06",
@@ -360,7 +360,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 659,
+      "line": 661,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -490,7 +490,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/server/src/api/agents_messages.rs",
-      "line": 365,
+      "line": 366,
       "snippet": "opencrab_actions::CallerIdentity::TrustedUser => \"trusted_user\",",
       "classification": "production-violation",
       "violation": "V07",
@@ -880,7 +880,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 282,
+      "line": 284,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -890,7 +890,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 284,
+      "line": 286,
       "snippet": "guild_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -900,7 +900,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 293,
+      "line": 295,
       "snippet": "PRIMARY KEY (channel_id, agent_id)",
       "classification": "production-violation",
       "violation": "V06",
@@ -910,7 +910,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 549,
+      "line": 551,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -1020,7 +1020,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/agent_runtime_impl.rs",
-      "line": 431,
+      "line": 588,
       "snippet": "channel_id = %c.channel_id,",
       "classification": "production-violation",
       "violation": "V11",

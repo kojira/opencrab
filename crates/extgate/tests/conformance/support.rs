@@ -130,6 +130,46 @@ impl ModelAdministration for TestRuntime {
             .map_err(|_| ModelAdminError::Internal)?;
         self.list_models(agent_id).await
     }
+    async fn list_session_models(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<ModelSnapshot, ModelAdminError> {
+        let default_model = self.list_models(agent_id).await?.current_model;
+        let configured_model = opencrab_db::queries::get_session_model(
+            &*self.db.lock().map_err(|_| ModelAdminError::Internal)?,
+            session_id,
+        )
+        .map_err(|_| ModelAdminError::TargetUnavailable)?;
+        Ok(ModelSnapshot {
+            models: vec!["openai:gpt-5".to_string()],
+            current_model: configured_model.clone().unwrap_or(default_model.clone()),
+            configured_model,
+            default_model,
+        })
+    }
+
+    async fn set_session_model(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        model: &str,
+    ) -> Result<ModelSnapshot, ModelAdminError> {
+        if model != "openai:gpt-5" && model != "gpt-5" {
+            return Err(ModelAdminError::NotFound);
+        }
+        self.write_session_model(session_id, Some("openai:gpt-5"))?;
+        self.list_session_models(agent_id, session_id).await
+    }
+
+    async fn reset_session_model(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<ModelSnapshot, ModelAdminError> {
+        self.write_session_model(session_id, None)?;
+        self.list_session_models(agent_id, session_id).await
+    }
 }
 
 #[async_trait]
@@ -220,6 +260,7 @@ impl AgentRuntime for TestRuntime {
         &self,
         session_id: &str,
         _agent_id: &str,
+        _model: &str,
         _budget: usize,
         _system_prompt: &str,
         _runtime_context_text: &str,
@@ -236,6 +277,7 @@ impl AgentRuntime for TestRuntime {
         &self,
         _agent_id: &str,
         _session_id: &str,
+        _model: &str,
         _system_prompt: &str,
         _runtime_context_text: &str,
     ) -> std::result::Result<usize, opencrab_core::context_budget::ContextBudgetError> {
@@ -247,6 +289,9 @@ impl AgentRuntime for TestRuntime {
             );
         }
         Ok(1024)
+    }
+    fn session_turn_model(&self, _agent_id: &str, _session_id: &str) -> anyhow::Result<String> {
+        Ok("mock:test".to_string())
     }
     fn has_llm_providers(&self) -> bool {
         true

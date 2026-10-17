@@ -135,6 +135,9 @@ pub struct RunRequest {
     ///
     /// 対話ターン・heartbeat・subtask は `true` のままで一切変わらない。
     pub persist_turn_logs: bool,
+    /// D-1080: the model this whole turn uses (envelopes, output cap, engine). `None` = resolve
+    /// once at process entry with session > agent > server default.
+    pub pinned_model: Option<String>,
 }
 
 impl RunRequest {
@@ -171,6 +174,7 @@ impl RunRequest {
             live_inbound_scope: LiveInboundScope::AllOthers,
             tool_allowlist: None,
             persist_turn_logs: true,
+            pinned_model: None,
         }
     }
 
@@ -274,6 +278,12 @@ impl RunRequest {
     /// [`RunRequest::persist_turn_logs`] を参照。
     pub fn without_turn_logs(mut self) -> Self {
         self.persist_turn_logs = false;
+        self
+    }
+
+    /// D-1080: pins the model resolved at turn start for the whole turn.
+    pub fn with_pinned_model(mut self, model: impl Into<String>) -> Self {
+        self.pinned_model = Some(model.into());
         self
     }
 }

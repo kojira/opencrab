@@ -116,3 +116,24 @@ async fn create_test_agent(app: Router) -> (String, Router) {
     (agent_id, app)
 }
 
+/// D-1080: a direct `run_agent_response` on a real session needs its `sessions` row.
+fn insert_member_session(state: &AppState, session_id: &str, agent_id: &str) {
+    let conn = state.db.lock().unwrap();
+    opencrab_db::queries::insert_session(
+        &conn,
+        &opencrab_db::queries::SessionRow {
+            id: session_id.to_string(),
+            mode: "autonomous".to_string(),
+            theme: session_id.to_string(),
+            phase: "active".to_string(),
+            turn_number: 0,
+            status: "active".to_string(),
+            participant_ids_json: serde_json::json!([agent_id]).to_string(),
+            facilitator_id: None,
+            done_count: 0,
+            max_turns: None,
+            metadata_json: None,
+        },
+    )
+    .unwrap();
+}

@@ -261,7 +261,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at TEXT NOT NULL,
     -- セッションのポリシー（権限毎デバウンス・即応する inbound 種別）。
     -- DEFAULT '{}' は「未設定」= 現行挙動を維持。
-    policy_json TEXT NOT NULL DEFAULT '{}'
+    policy_json TEXT NOT NULL DEFAULT '{}',
+    -- D-1080: セッション単位のモデル上書き。NULL = エージェントのモデルを継承。
+    model TEXT
 );
 
 -- ============================================
