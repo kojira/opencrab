@@ -85,8 +85,14 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     ) -> std::result::Result<usize, opencrab_core::context_budget::ContextBudgetError>;
 
     /// D-1080: the model for one turn of `session_id` (session > agent > server default).
+    /// D-1081: a `Realtime` turn first uses the session's realtime slot.
     /// Read once at turn start; a failed lookup is an error, never the default.
-    fn session_turn_model(&self, agent_id: &str, session_id: &str) -> Result<String>;
+    fn session_turn_model(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        profile: crate::TurnModelProfile,
+    ) -> Result<String>;
 
     /// LLM プロバイダが 1 つ以上使えるか（未設定なら実行せずに返す）。
     fn has_llm_providers(&self) -> bool;

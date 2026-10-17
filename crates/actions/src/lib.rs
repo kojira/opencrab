@@ -42,7 +42,9 @@ pub use bridge::{
 };
 pub use continue_marker::visible_speech_after_markers;
 pub use dispatcher::ActionDispatcher;
-pub use model_admin::{ModelAdminError, ModelAdministration, ModelSnapshot};
+pub use model_admin::{
+    ModelAdminError, ModelAdministration, ModelSnapshot, SessionModelList, TurnModelProfile,
+};
 pub use no_reply::{
     terminate_at_no_reply, DeliveryContext, NoReplyTermination, NO_REPLY_LOG_TARGET,
     NO_REPLY_SENTINEL, NO_REPLY_TRAILING_DISCARDED_TAG,

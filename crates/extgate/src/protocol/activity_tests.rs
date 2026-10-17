@@ -139,3 +139,34 @@ fn rejects_local_attachment_path_traversal() {
         }
     ));
 }
+
+/// D-1081: `model_profile` is optional and strict; absent/null/"default" keep the default slot.
+#[test]
+fn said_model_profile_is_strict_and_optional() {
+    use opencrab_actions::TurnModelProfile;
+    let mut frame = serde_json::json!({
+        "id": "said-1", "m": "said",
+        "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "origin": "event-1", "author_id": "sender-1",
+        "text": "hello", "attachments": []
+    });
+    let profile = |frame: &serde_json::Value| match parse_inbound(frame).unwrap() {
+        InboundMsg::Said(said) => Some(said.model_profile),
+        InboundMsg::Invalid {
+            code: ErrorCode::BadRequest,
+            ..
+        } => None,
+        _ => panic!("unexpected message"),
+    };
+    assert_eq!(profile(&frame), Some(TurnModelProfile::Default));
+    frame["model_profile"] = json!("realtime");
+    assert_eq!(profile(&frame), Some(TurnModelProfile::Realtime));
+    frame["model_profile"] = json!("default");
+    assert_eq!(profile(&frame), Some(TurnModelProfile::Default));
+    frame["model_profile"] = serde_json::Value::Null;
+    assert_eq!(profile(&frame), Some(TurnModelProfile::Default));
+    for bad in [json!("bogus"), json!("Realtime"), json!(1), json!({})] {
+        frame["model_profile"] = bad.clone();
+        assert_eq!(profile(&frame), None, "{bad}");
+    }
+}

@@ -9,7 +9,10 @@
 
 use async_trait::async_trait;
 
-use opencrab_actions::{AgentRuntime, ModelAdminError, ModelAdministration, ModelSnapshot};
+use opencrab_actions::{
+    AgentRuntime, ModelAdminError, ModelAdministration, ModelSnapshot, SessionModelList,
+    TurnModelProfile,
+};
 
 use crate::process;
 use crate::AppState;
@@ -179,20 +182,31 @@ impl ModelAdministration for AppState {
         &self,
         agent_id: &str,
         session_id: &str,
-    ) -> Result<ModelSnapshot, ModelAdminError> {
+    ) -> Result<SessionModelList, ModelAdminError> {
         let models = crate::api::llm::available_models(self)
             .await
             .map_err(|_| ModelAdminError::Internal)?;
         let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
         let configured_model = session_model_target(&conn, agent_id, session_id)?;
         let agent_model = self.agent_model(&conn, agent_id)?;
-        Ok(session_snapshot(models, configured_model, agent_model))
+        let snapshot = session_snapshot(models, configured_model, agent_model);
+        let realtime_configured_model =
+            opencrab_db::queries::get_session_realtime_model(&conn, session_id)
+                .map_err(|_| ModelAdminError::Internal)?;
+        Ok(SessionModelList {
+            realtime_current_model: realtime_configured_model
+                .clone()
+                .unwrap_or_else(|| snapshot.current_model.clone()),
+            realtime_configured_model,
+            snapshot,
+        })
     }
 
     async fn set_session_model(
         &self,
         agent_id: &str,
         session_id: &str,
+        profile: TurnModelProfile,
         model: &str,
     ) -> Result<ModelSnapshot, ModelAdminError> {
         let exact_canonical_request = model.trim() == model
@@ -202,7 +216,14 @@ impl ModelAdministration for AppState {
         {
             let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
             let configured_model = session_model_target(&conn, agent_id, session_id)?;
-            if exact_canonical_request && configured_model.as_deref() == Some(model) {
+            if profile == TurnModelProfile::Realtime {
+                let realtime_model =
+                    opencrab_db::queries::get_session_realtime_model(&conn, session_id)
+                        .map_err(|_| ModelAdminError::Internal)?;
+                if exact_canonical_request && realtime_model.as_deref() == Some(model) {
+                    return self.realtime_snapshot(&conn, agent_id, session_id, Vec::new());
+                }
+            } else if exact_canonical_request && configured_model.as_deref() == Some(model) {
                 let agent_model = self.agent_model(&conn, agent_id)?;
                 return Ok(session_snapshot(Vec::new(), configured_model, agent_model));
             }
@@ -222,6 +243,26 @@ impl ModelAdministration for AppState {
         // never taken: a running turn keeps its pinned model; the change applies next turn.
         let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
         let configured_model = session_model_target(&conn, agent_id, session_id)?;
+        if profile == TurnModelProfile::Realtime {
+            let realtime_model =
+                opencrab_db::queries::get_session_realtime_model(&conn, session_id)
+                    .map_err(|_| ModelAdminError::Internal)?;
+            if realtime_model.as_deref() != Some(canonical.as_str()) {
+                crate::process::check_agent_model_change(&conn, None, Some(&canonical), true)
+                    .map_err(ModelAdminError::Validation)?;
+                self.ensure_realtime_input_high(&conn, agent_id, session_id, &canonical)?;
+                if !opencrab_db::queries::set_session_realtime_model(
+                    &conn,
+                    session_id,
+                    Some(&canonical),
+                )
+                .map_err(|_| ModelAdminError::Internal)?
+                {
+                    return Err(ModelAdminError::TargetUnavailable);
+                }
+            }
+            return self.realtime_snapshot(&conn, agent_id, session_id, models);
+        }
         if configured_model.as_deref() != Some(canonical.as_str()) {
             crate::process::check_agent_model_change(&conn, None, Some(&canonical), true)
                 .map_err(ModelAdminError::Validation)?;
@@ -239,9 +280,22 @@ impl ModelAdministration for AppState {
         &self,
         agent_id: &str,
         session_id: &str,
+        profile: TurnModelProfile,
     ) -> Result<ModelSnapshot, ModelAdminError> {
         let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
         let configured_model = session_model_target(&conn, agent_id, session_id)?;
+        if profile == TurnModelProfile::Realtime {
+            // Reset makes realtime turns follow the session model, which default turns already use.
+            if opencrab_db::queries::get_session_realtime_model(&conn, session_id)
+                .map_err(|_| ModelAdminError::Internal)?
+                .is_some()
+                && !opencrab_db::queries::set_session_realtime_model(&conn, session_id, None)
+                    .map_err(|_| ModelAdminError::Internal)?
+            {
+                return Err(ModelAdminError::TargetUnavailable);
+            }
+            return self.realtime_snapshot(&conn, agent_id, session_id, Vec::new());
+        }
         let agent_model = self.agent_model(&conn, agent_id)?;
         if configured_model.is_some() {
             // The inherited model must be usable before the override is dropped.
@@ -275,6 +329,63 @@ impl AppState {
     ) -> Result<String, ModelAdminError> {
         opencrab_db::queries::effective_model_for_agent(conn, agent_id, &self.default_model)
             .map_err(|_| ModelAdminError::Internal)
+    }
+
+    /// Realtime-profile result: configured = realtime slot, current = effective realtime model,
+    /// default = the session's default-profile model (what an unset slot follows).
+    fn realtime_snapshot(
+        &self,
+        conn: &rusqlite::Connection,
+        agent_id: &str,
+        session_id: &str,
+        models: Vec<String>,
+    ) -> Result<ModelSnapshot, ModelAdminError> {
+        let configured_model = opencrab_db::queries::get_session_realtime_model(conn, session_id)
+            .map_err(|_| ModelAdminError::Internal)?;
+        let default_model = opencrab_db::queries::effective_model_for_session(
+            conn,
+            agent_id,
+            session_id,
+            &self.default_model,
+        )
+        .map_err(|_| ModelAdminError::Internal)?;
+        Ok(session_snapshot(models, configured_model, default_model))
+    }
+
+    /// Rejects a realtime model whose `input_high` under the live context-budget policy is lower
+    /// than that of the session's default-profile model, so realtime turns never get a smaller
+    /// conversation budget than the session already uses. Equal is accepted.
+    fn ensure_realtime_input_high(
+        &self,
+        conn: &rusqlite::Connection,
+        agent_id: &str,
+        session_id: &str,
+        realtime_model: &str,
+    ) -> Result<(), ModelAdminError> {
+        use opencrab_core::context_budget::{resolve_water_levels, split_llm_model_spec};
+        let policy = self.context_budget_policy();
+        let session_model = opencrab_db::queries::effective_model_for_session(
+            conn,
+            agent_id,
+            session_id,
+            &self.default_model,
+        )
+        .map_err(|_| ModelAdminError::Internal)?;
+        let input_high = |model: &str| {
+            let (provider, model_id) = split_llm_model_spec(model);
+            resolve_water_levels(conn, provider, model_id, &policy)
+                .map(|levels| levels.input_high)
+                .map_err(|error| ModelAdminError::Validation(error.to_string()))
+        };
+        let realtime_high = input_high(realtime_model)?;
+        let session_high = input_high(&session_model)?;
+        if realtime_high < session_high {
+            return Err(ModelAdminError::Validation(format!(
+                "{realtime_model} has a smaller conversation budget ({realtime_high} tokens) than \
+                 the session model {session_model} ({session_high} tokens)."
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -381,14 +492,29 @@ impl AgentRuntime for AppState {
         Ok(env.conversation_high)
     }
 
-    fn session_turn_model(&self, agent_id: &str, session_id: &str) -> anyhow::Result<String> {
+    fn session_turn_model(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        profile: TurnModelProfile,
+    ) -> anyhow::Result<String> {
         let conn = self.db.lock().unwrap();
-        opencrab_db::queries::effective_model_for_session(
-            &conn,
-            agent_id,
-            session_id,
-            &self.default_model,
-        )
+        match profile {
+            TurnModelProfile::Default => opencrab_db::queries::effective_model_for_session(
+                &conn,
+                agent_id,
+                session_id,
+                &self.default_model,
+            ),
+            TurnModelProfile::Realtime => {
+                opencrab_db::queries::effective_realtime_model_for_session(
+                    &conn,
+                    agent_id,
+                    session_id,
+                    &self.default_model,
+                )
+            }
+        }
     }
 
     fn has_llm_providers(&self) -> bool {

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use opencrab_actions::{
     delivery_effect, run_session_turn, AgentRuntime, CallerIdentity, LiveInboundScope, RunRequest,
-    SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
+    SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled, TurnModelProfile,
 };
 
 use crate::delivery::apply_delivery_effect;
@@ -91,6 +91,8 @@ pub struct ExtgateCompletionSink<R: AgentRuntime> {
     pub only_speaker: bool,
     pub speaker_id: String,
     pub system_context: String,
+    /// D-1081: profile of the turn that created this sink; said-less resumes reuse it.
+    pub model_profile: TurnModelProfile,
 }
 
 impl<R: AgentRuntime> Clone for ExtgateCompletionSink<R> {
@@ -105,6 +107,7 @@ impl<R: AgentRuntime> Clone for ExtgateCompletionSink<R> {
             only_speaker: self.only_speaker,
             speaker_id: self.speaker_id.clone(),
             system_context: self.system_context.clone(),
+            model_profile: self.model_profile,
         }
     }
 }
@@ -209,6 +212,7 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                 &sink.runtime,
                 &sink.session_id,
                 &sink.agent_id,
+                sink.model_profile,
                 &system,
                 "",
                 |raw| raw.to_string(),

@@ -47,6 +47,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     let reply_target = reply_target.map(str::to_string);
     let caller = asserted_caller(&said.caller);
     let only_speaker = said.only_speaker;
+    let model_profile = said.model_profile;
     if !state.turn_queues.try_reserve(&session_id) {
         #[cfg(any(test, feature = "extgate-probe"))]
         state
@@ -163,11 +164,13 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 only_speaker,
                                 speaker_id: author_id.clone(),
                                 system_context,
+                                model_profile,
                             });
                         start_session_turn(
                             &runtime,
                             TranscriptSource::new("external", "external_response"),
                             &inbound,
+                            model_profile,
                             &system,
                             // extgate は会話へ runtime context を前置しない（wrap は素通し）。
                             // 予算計上もそれに合わせて空文字（実 request と一致させる契約）。

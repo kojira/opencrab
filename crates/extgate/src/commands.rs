@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use opencrab_actions::{ModelAdminError, ModelAdministration, ModelSnapshot};
+use opencrab_actions::{
+    ModelAdminError, ModelAdministration, ModelSnapshot, SessionModelList, TurnModelProfile,
+};
 use serde_json::{json, Map, Value};
 
 use crate::protocol::SaidCaller;
@@ -205,24 +207,49 @@ impl CommandHandler for ResetModel {
     }
 }
 
-fn session_list_result(snapshot: ModelSnapshot) -> Value {
+fn session_list_result(list: SessionModelList) -> Value {
+    let snapshot = list.snapshot;
     json!({
         "scope": "session",
         "models": snapshot.models,
         "configured_model": snapshot.configured_model,
         "current_model": snapshot.current_model,
         "default_model": snapshot.default_model,
+        "realtime_configured_model": list.realtime_configured_model,
+        "realtime_current_model": list.realtime_current_model,
     })
 }
 
-fn session_mutation_result(snapshot: ModelSnapshot) -> Value {
-    json!({
+fn session_mutation_result(profile: TurnModelProfile, snapshot: ModelSnapshot) -> Value {
+    let mut result = json!({
         "scope": "session",
         "configured_model": snapshot.configured_model,
         "current_model": snapshot.current_model,
         "default_model": snapshot.default_model,
         "applies": "next_turn",
-    })
+    });
+    if profile == TurnModelProfile::Realtime {
+        result["profile"] = json!("realtime");
+    }
+    result
+}
+
+/// Session mutations accept their own keys plus an optional `profile:"realtime"`; any other key
+/// or profile value is `invalid_args`.
+fn session_profile_arg(
+    args: &Map<String, Value>,
+    own_keys: &[&str],
+) -> Result<TurnModelProfile, CommandError> {
+    let profile = match args.get("profile") {
+        None => TurnModelProfile::Default,
+        Some(Value::String(profile)) if profile == "realtime" => TurnModelProfile::Realtime,
+        Some(_) => return Err(CommandError::invalid_args()),
+    };
+    let expected = own_keys.len() + usize::from(profile == TurnModelProfile::Realtime);
+    if args.len() != expected || !own_keys.iter().all(|key| args.contains_key(*key)) {
+        return Err(CommandError::invalid_args());
+    }
+    Ok(profile)
 }
 
 struct ListSessionModels;
@@ -255,17 +282,15 @@ impl CommandHandler for SetSessionModel {
         context: CommandContext<'_>,
         args: &Map<String, Value>,
     ) -> Result<Value, CommandError> {
-        if args.len() != 1 {
-            return Err(CommandError::invalid_args());
-        }
+        let profile = session_profile_arg(args, &["model"])?;
         let Some(model) = args.get("model").and_then(Value::as_str) else {
             return Err(CommandError::invalid_args());
         };
         context
             .models
-            .set_session_model(context.agent_id, context.session_id, model)
+            .set_session_model(context.agent_id, context.session_id, profile, model)
             .await
-            .map(session_mutation_result)
+            .map(|snapshot| session_mutation_result(profile, snapshot))
             .map_err(CommandError::from_model)
     }
 }
@@ -279,14 +304,12 @@ impl CommandHandler for ResetSessionModel {
         context: CommandContext<'_>,
         args: &Map<String, Value>,
     ) -> Result<Value, CommandError> {
-        if !args.is_empty() {
-            return Err(CommandError::invalid_args());
-        }
+        let profile = session_profile_arg(args, &[])?;
         context
             .models
-            .reset_session_model(context.agent_id, context.session_id)
+            .reset_session_model(context.agent_id, context.session_id, profile)
             .await
-            .map(session_mutation_result)
+            .map(|snapshot| session_mutation_result(profile, snapshot))
             .map_err(CommandError::from_model)
     }
 }

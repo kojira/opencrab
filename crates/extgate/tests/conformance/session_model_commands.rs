@@ -1,13 +1,71 @@
 // D-1080: session model commands target the authenticated binding's canonical session.
 
 impl TestRuntime {
-    fn write_session_model(&self, session_id: &str, model: Option<&str>) -> Result<(), ModelAdminError> {
+    fn write_session_model(
+        &self,
+        session_id: &str,
+        profile: TurnModelProfile,
+        model: Option<&str>,
+    ) -> Result<(), ModelAdminError> {
         let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
-        match opencrab_db::queries::set_session_model(&conn, session_id, model) {
+        let written = match profile {
+            TurnModelProfile::Default => {
+                opencrab_db::queries::set_session_model(&conn, session_id, model)
+            }
+            TurnModelProfile::Realtime => {
+                opencrab_db::queries::set_session_realtime_model(&conn, session_id, model)
+            }
+        };
+        match written {
             Ok(true) => Ok(()),
             Ok(false) => Err(ModelAdminError::TargetUnavailable),
             Err(_) => Err(ModelAdminError::Internal),
         }
+    }
+
+    async fn session_model_list(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<SessionModelList, ModelAdminError> {
+        let default_model = self.list_models(agent_id).await?.current_model;
+        let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+        let configured_model = opencrab_db::queries::get_session_model(&conn, session_id)
+            .map_err(|_| ModelAdminError::TargetUnavailable)?;
+        let realtime_configured_model =
+            opencrab_db::queries::get_session_realtime_model(&conn, session_id)
+                .map_err(|_| ModelAdminError::TargetUnavailable)?;
+        let current_model = configured_model.clone().unwrap_or(default_model.clone());
+        Ok(SessionModelList {
+            realtime_current_model: realtime_configured_model
+                .clone()
+                .unwrap_or(current_model.clone()),
+            realtime_configured_model,
+            snapshot: ModelSnapshot {
+                models: vec!["openai:gpt-5".to_string()],
+                current_model,
+                configured_model,
+                default_model,
+            },
+        })
+    }
+
+    async fn session_model_snapshot(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        profile: TurnModelProfile,
+    ) -> Result<ModelSnapshot, ModelAdminError> {
+        let list = self.session_model_list(agent_id, session_id).await?;
+        Ok(match profile {
+            TurnModelProfile::Default => list.snapshot,
+            TurnModelProfile::Realtime => ModelSnapshot {
+                models: list.snapshot.models,
+                configured_model: list.realtime_configured_model,
+                current_model: list.realtime_current_model,
+                default_model: list.snapshot.current_model,
+            },
+        })
     }
 }
 
@@ -225,4 +283,89 @@ async fn session_model_set_does_not_wait_for_the_running_turn() {
     assert_eq!(ok["m"], "ok", "later message on the same connection is processed");
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0, "turn still held");
     release_tx.send(()).unwrap();
+}
+
+fn stored_realtime_model(h: &Harness, session_id: &str) -> Option<String> {
+    let conn = h.state.db.lock().unwrap();
+    opencrab_db::queries::get_session_realtime_model(&conn, session_id).unwrap()
+}
+
+/// D-1081: `profile:"realtime"` targets only the realtime slot of the bound session, echoes the
+/// profile, and any other argument shape is `invalid_args` with nothing written.
+#[tokio::test]
+async fn realtime_profile_commands_change_only_the_realtime_slot() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    let session_id = session_id_for_binding(&binding_id);
+    let owner = || json!({"role": "owner"});
+
+    let set = send_command(
+        &mut s,
+        "rt-set",
+        &binding_id,
+        owner(),
+        "set_session_model",
+        json!({"model": "gpt-5", "profile": "realtime"}),
+    )
+    .await;
+    assert_eq!(set["m"], "ok", "{set}");
+    assert_eq!(set["result"]["profile"], "realtime");
+    assert_eq!(set["result"]["configured_model"], "openai:gpt-5");
+    assert_eq!(set["result"]["current_model"], "openai:gpt-5");
+    assert_eq!(set["result"]["default_model"], "mock:test");
+    assert_eq!(set["result"]["applies"], "next_turn");
+    assert_eq!(stored_realtime_model(&h, &session_id).as_deref(), Some("openai:gpt-5"));
+    assert_eq!(stored_session_model(&h, &session_id), None);
+
+    let list = send_command(&mut s, "rt-list", &binding_id, owner(), "list_session_models", json!({})).await;
+    assert_eq!(list["m"], "ok", "{list}");
+    assert_eq!(list["result"]["configured_model"], Value::Null);
+    assert_eq!(list["result"]["current_model"], "mock:test");
+    assert_eq!(list["result"]["realtime_configured_model"], "openai:gpt-5");
+    assert_eq!(list["result"]["realtime_current_model"], "openai:gpt-5");
+
+    for (id, name, args) in [
+        ("bad-1", "set_session_model", json!({"model": "gpt-5", "profile": "default"})),
+        ("bad-2", "set_session_model", json!({"model": "gpt-5", "profile": "bogus"})),
+        ("bad-3", "set_session_model", json!({"model": "gpt-5", "profile": true})),
+        ("bad-4", "set_session_model", json!({"profile": "realtime"})),
+        ("bad-5", "set_session_model", json!({"model": "gpt-5", "profile": "realtime", "x": 1})),
+        ("bad-6", "reset_session_model", json!({"profile": "default"})),
+        ("bad-7", "reset_session_model", json!({"profile": "realtime", "x": 1})),
+        ("bad-8", "reset_session_model", json!({"model": "gpt-5"})),
+        ("bad-9", "list_session_models", json!({"profile": "realtime"})),
+    ] {
+        let reply = send_command(&mut s, id, &binding_id, owner(), name, args).await;
+        assert_eq!(reply["code"], "invalid_args", "{id}: {reply}");
+    }
+    assert_eq!(stored_realtime_model(&h, &session_id).as_deref(), Some("openai:gpt-5"));
+    assert_eq!(stored_session_model(&h, &session_id), None);
+
+    let co_agent = send_command(
+        &mut s,
+        "rt-co",
+        &binding_id,
+        json!({"role": "co_agent", "agent_id": "agent-b"}),
+        "reset_session_model",
+        json!({"profile": "realtime"}),
+    )
+    .await;
+    assert_eq!(co_agent["code"], "forbidden");
+
+    let reset = send_command(
+        &mut s,
+        "rt-reset",
+        &binding_id,
+        owner(),
+        "reset_session_model",
+        json!({"profile": "realtime"}),
+    )
+    .await;
+    assert_eq!(reset["m"], "ok", "{reset}");
+    assert_eq!(reset["result"]["profile"], "realtime");
+    assert_eq!(reset["result"]["configured_model"], Value::Null);
+    assert_eq!(reset["result"]["current_model"], "mock:test");
+    assert_eq!(reset["result"]["default_model"], "mock:test");
+    assert_eq!(stored_realtime_model(&h, &session_id), None);
+    assert_eq!(stored_agent_model(&h), None);
 }

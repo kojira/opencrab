@@ -151,6 +151,45 @@ pub fn effective_model_for_session(
     }
 }
 
+/// D-1081: the session's realtime slot (`sessions.realtime_model`). `Ok(None)` = realtime turns
+/// follow the session's default-profile model. A missing session is an error, not "unset".
+pub fn get_session_realtime_model(conn: &Connection, session_id: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT realtime_model FROM sessions WHERE id = ?1",
+        params![session_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()?
+    .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))
+}
+
+/// Writes the session's realtime slot (`None` clears it). Returns `false` if no such session.
+pub fn set_session_realtime_model(
+    conn: &Connection,
+    session_id: &str,
+    model: Option<&str>,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE sessions SET realtime_model = ?2, updated_at = ?3 WHERE id = ?1",
+        params![session_id, model, Utc::now().to_rfc3339()],
+    )?;
+    Ok(changed == 1)
+}
+
+/// Model for a realtime turn of `session_id`: realtime slot > session override > `agents.model`
+/// > `default_model`. A missing session or a failed lookup is an error, never the default.
+pub fn effective_realtime_model_for_session(
+    conn: &Connection,
+    agent_id: &str,
+    session_id: &str,
+    default_model: &str,
+) -> Result<String> {
+    match get_session_realtime_model(conn, session_id)?.filter(|m| !m.is_empty()) {
+        Some(model) => Ok(model),
+        None => effective_model_for_session(conn, agent_id, session_id, default_model),
+    }
+}
+
 /// セッションポリシー（`sessions.policy_json`）。`SessionRow` / 外形 API には載せない。
 ///
 /// 行が無ければ `None`。DEFAULT `'{}'` は「未設定」＝現行挙動（RULINGS Q2）。

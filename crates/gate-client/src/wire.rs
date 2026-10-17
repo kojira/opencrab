@@ -233,6 +233,26 @@ pub struct SaidContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_target: Option<String>,
     pub live_inbound_scope: LiveInboundScope,
+    /// D-1081: kind of turn this said starts. Sent only when not `Default`.
+    #[serde(skip_serializing_if = "TurnModelProfile::is_default")]
+    pub model_profile: TurnModelProfile,
+}
+
+/// Which session model slot core uses for the turn this said starts. The gateway declares the
+/// interaction kind; core owns the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnModelProfile {
+    #[default]
+    Default,
+    /// Latency-sensitive conversational turn.
+    Realtime,
+}
+
+impl TurnModelProfile {
+    fn is_default(&self) -> bool {
+        *self == Self::Default
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -285,6 +305,10 @@ pub fn said_frame_with_context(
         }
         frame["live_inbound_scope"] =
             serde_json::to_value(context.live_inbound_scope).expect("scope serializes");
+        if !context.model_profile.is_default() {
+            frame["model_profile"] =
+                serde_json::to_value(context.model_profile).expect("profile serializes");
+        }
     }
     frame
 }
