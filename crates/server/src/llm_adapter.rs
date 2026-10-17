@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 
-use opencrab_core::{ChatRequest, ChatResponse, LlmClient, LlmExchange};
+use opencrab_core::{ChatRequest, ChatResponse, LlmClient, LlmExchange, OutputTextSink};
 
 /// Configuration for metrics recording.
 pub struct MetricsContext {
@@ -61,6 +61,26 @@ impl LlmClient for LlmRouterAdapter {
     }
 
     async fn chat_with_history(&self, request: ChatRequest) -> Result<LlmExchange> {
+        self.routed_exchange(request, None).await
+    }
+
+    /// D-1083: same routing, metrics and logs as [`Self::chat_with_history`], and forwards the
+    /// router's output text events to `sink`.
+    async fn chat_with_history_observed(
+        &self,
+        request: ChatRequest,
+        sink: OutputTextSink,
+    ) -> Result<LlmExchange> {
+        self.routed_exchange(request, Some(sink)).await
+    }
+}
+
+impl LlmRouterAdapter {
+    async fn routed_exchange(
+        &self,
+        request: ChatRequest,
+        sink: Option<OutputTextSink>,
+    ) -> Result<LlmExchange> {
         let model_requested = request.model.clone();
         let mut request = request;
         if self.agent_id.is_some() {
@@ -69,7 +89,14 @@ impl LlmClient for LlmRouterAdapter {
 
         let start = std::time::Instant::now();
         let router = self.router.get();
-        let exchange = router.chat_completion_with_history(request).await?;
+        let exchange = match sink {
+            Some(sink) => {
+                router
+                    .chat_completion_with_history_observed(request, sink)
+                    .await?
+            }
+            None => router.chat_completion_with_history(request).await?,
+        };
         let latency_ms = start.elapsed().as_millis() as i64;
 
         // Record metrics to DB if context is available.

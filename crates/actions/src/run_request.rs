@@ -85,6 +85,9 @@ pub struct RunRequest {
     /// #964: 次の LLM request に新しく含める said の origin を、`llm.chat` の直前に read state
     /// （👀）として通知するフック。extgate V3 だけが渡す。None なら通知しない。
     pub on_read_origin: Option<ReadOriginHook>,
+    /// D-1083: receiver of complete sentences released while each LLM call is running. Only the
+    /// extgate realtime-profile turn sets it. None keeps the unobserved LLM call.
+    pub on_partial_text: Option<opencrab_core::PartialTextHook>,
     /// #964: 初回 LLM request に含まれる発端 said の origin。said の無い resume / heartbeat と
     /// extgate 以外は None。通知は [`Self::on_read_origin`] がある場合だけ request 直前に行う。
     pub initial_read_origin: Option<String>,
@@ -166,6 +169,7 @@ impl RunRequest {
             on_response_text: None,
             on_continuation_speech: None,
             on_read_origin: None,
+            on_partial_text: None,
             initial_read_origin: None,
             completion_sink: None,
             subtask_registry: None,
@@ -212,6 +216,12 @@ impl RunRequest {
     /// #964: LLM request 直前の read state（👀）通知フックを設定する。
     pub fn with_on_read_origin(mut self, cb: ReadOriginHook) -> Self {
         self.on_read_origin = Some(cb);
+        self
+    }
+
+    /// D-1083: observe each LLM call and deliver released partial text to `cb`.
+    pub fn with_on_partial_text(mut self, cb: opencrab_core::PartialTextHook) -> Self {
+        self.on_partial_text = Some(cb);
         self
     }
 

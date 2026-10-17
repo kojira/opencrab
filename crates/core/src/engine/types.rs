@@ -5,8 +5,8 @@ use serde_json::Value;
 
 // Canonical LLM message model shared with the provider/router layer.
 pub use opencrab_llm_types::{
-    ChatRequest, ChatResponse, FunctionDefinition, LlmExchange, ProviderToolHistory, ToolCall,
-    SYSTEM_SEGMENT_BREAK,
+    ChatRequest, ChatResponse, FunctionDefinition, LlmExchange, OutputTextEvent, OutputTextSink,
+    ProviderToolHistory, ToolCall, SYSTEM_SEGMENT_BREAK,
 };
 
 // ---------------------------------------------------------------------------
@@ -260,6 +260,17 @@ pub trait LlmClient: Send + Sync {
             response: self.chat(request).await?,
             provider_tool_history: Default::default(),
         })
+    }
+
+    /// D-1083: like [`Self::chat_with_history`], and forwards output text to `sink` while the
+    /// response arrives. Clients that cannot observe text ignore the sink.
+    async fn chat_with_history_observed(
+        &self,
+        request: ChatRequest,
+        sink: OutputTextSink,
+    ) -> Result<LlmExchange> {
+        let _ = sink;
+        self.chat_with_history(request).await
     }
 }
 
