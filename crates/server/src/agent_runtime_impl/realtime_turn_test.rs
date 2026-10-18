@@ -189,7 +189,12 @@ fn fixture() -> Fixture {
                 .unwrap();
                 opencrab_db::queries::insert_session_log_at(
                     &conn,
-                    &log_row("tool_result", Some("a1"), &format!("tool-result-{i:02}"), None),
+                    &log_row(
+                        "tool_result",
+                        Some("a1"),
+                        &format!("tool-result-{i:02}"),
+                        None,
+                    ),
                     &at,
                 )
                 .unwrap();
@@ -224,7 +229,10 @@ async fn profile_turn(f: &Fixture, profile: TurnModelProfile) -> opencrab_core::
         TurnModelProfile::Realtime => f.state.build_realtime_context("a1"),
         TurnModelProfile::Default => f.state.build_agent_context("a1", &CallerIdentity::Owner),
     };
-    let system = format!("{system}{}GATEWAY-CONTEXT", opencrab_llm_types::SYSTEM_SEGMENT_BREAK);
+    let system = format!(
+        "{system}{}GATEWAY-CONTEXT",
+        opencrab_llm_types::SYSTEM_SEGMENT_BREAK
+    );
     let inbound = NormalizedInbound {
         session_id: "sess-a",
         agent_id: "a1",
@@ -299,7 +307,10 @@ async fn default_profile_turn_keeps_the_full_request() {
     assert!(system.contains("## More tools"));
     assert!(request.functions.as_ref().is_some_and(|f| !f.is_empty()));
     assert_eq!(request.reasoning_effort.as_deref(), Some("high"));
-    assert_eq!(request.metadata.get("web_search"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        request.metadata.get("web_search"),
+        Some(&serde_json::json!(true))
+    );
 }
 
 /// L1/L3/L4: a realtime turn sends one small request (persona, SOUL, the fixed block and the
@@ -317,7 +328,10 @@ async fn realtime_turn_is_one_small_request_without_tools() {
 
     let request = &requests[0];
     let system = system_text(request);
-    assert!(system.starts_with("You are Kani (kani-persona)."), "{system}");
+    assert!(
+        system.starts_with("You are Kani (kani-persona)."),
+        "{system}"
+    );
     assert!(system.contains("SOUL: cheerful and brief."));
     assert!(system.contains("NO_REPLY"));
     assert!(system.contains("<conversation_history>"));
@@ -335,7 +349,10 @@ async fn realtime_turn_is_one_small_request_without_tools() {
         "## Task Ledger",
         "## Memory & Context",
     ] {
-        assert!(!system.contains(absent), "realtime system has {absent:?}: {system}");
+        assert!(
+            !system.contains(absent),
+            "realtime system has {absent:?}: {system}"
+        );
     }
     let fixed_len = system.chars().count()
         - "SOUL: cheerful and brief.".chars().count()
@@ -368,12 +385,26 @@ async fn realtime_conversation_is_the_last_20_speech_rows() {
     }
     let indexes: Vec<usize> = seen.iter().map(|(_, i)| *i).collect();
     assert_eq!(indexes, (20..40).collect::<Vec<_>>(), "{user}");
-    assert!(seen.windows(2).all(|w| w[0].0 < w[1].0), "oldest first: {user}");
-    for absent in ["tool-call-", "tool-result-", "system-row-", "[Memory Index]"] {
-        assert!(!user.contains(absent), "realtime conversation has {absent:?}: {user}");
+    assert!(
+        seen.windows(2).all(|w| w[0].0 < w[1].0),
+        "oldest first: {user}"
+    );
+    for absent in [
+        "tool-call-",
+        "tool-result-",
+        "system-row-",
+        "[Memory Index]",
+    ] {
+        assert!(
+            !user.contains(absent),
+            "realtime conversation has {absent:?}: {user}"
+        );
     }
     assert!(user.contains("<conversation_history>"));
-    assert!(user.contains("[Kani]"), "own rows use the agent name: {user}");
+    assert!(
+        user.contains("[Kani]"),
+        "own rows use the agent name: {user}"
+    );
 }
 
 /// L5: a bare NO_REPLY ends a realtime turn silently after one call.
