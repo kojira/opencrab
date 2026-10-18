@@ -136,8 +136,9 @@ where
 
 /// D-1085: a provisional (speculative) realtime run, outside the session lock. Its conversation
 /// is the session's speech rows up to `high_water` followed by `pending` (the not yet recorded
-/// user line and prelude). The run is lightweight and provisional and persists no turn logs; the
-/// caller decides later whether the result becomes the turn's result.
+/// user line and prelude). The run is lightweight and provisional; `gate` holds its gated tools
+/// and its turn logs until the caller promotes it (§12).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_provisional_turn<R, Build>(
     runtime: &R,
     session_id: &str,
@@ -145,6 +146,7 @@ pub async fn run_provisional_turn<R, Build>(
     system_prompt: &str,
     high_water: i64,
     pending: &[SessionLogRow],
+    gate: opencrab_core::PromotionGate,
     build_run: Build,
 ) -> Option<anyhow::Result<EngineResult>>
 where
@@ -163,7 +165,7 @@ where
         system_prompt,
         "",
         |raw| raw.to_string(),
-        |conversation| build_run(conversation).as_provisional().without_turn_logs(),
+        |conversation| build_run(conversation).as_provisional(gate),
     )
     .await
 }

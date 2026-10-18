@@ -2,10 +2,14 @@
 
 use std::sync::Arc;
 
-use opencrab_actions::{run_provisional_turn, AgentRuntime, RunRequest};
+use opencrab_actions::{
+    run_provisional_turn, AgentRuntime, RunRequest, SubtaskCompletionSink, TurnModelProfile,
+};
+use opencrab_core::PromotionGate;
 use opencrab_db::queries::SessionLogRow;
 
 use super::{ProvisionalInputs, PROVISIONAL_TTL};
+use crate::completion::{v3_attach_dispatch, ExtgateCompletionSink};
 use crate::error::{ErrorCode, GateError};
 use crate::inbound::{
     agent_prelude_row, asserted_caller, binding_said_error, channel_whitelisted,
@@ -16,7 +20,9 @@ use crate::protocol::Provisional;
 use crate::registry::ExtgateState;
 
 /// Starts the provisional run without the session lock and registers it. Reads the session once
-/// (high-water mark); writes nothing. A provisional the said would not admit starts nothing.
+/// (high-water mark); writes nothing before its promotion. A provisional the said would not admit
+/// starts nothing. §12: the run gets the gateway operations and the dispatch sink the said's
+/// normal turn would get, so its tool set is the same.
 pub(crate) async fn start_provisional<R: AgentRuntime>(
     state: &Arc<ExtgateState>,
     runtime: &R,
@@ -85,11 +91,36 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
         Some(provisional.provisional_id.clone()),
     );
     let caller = asserted_caller(&inputs.caller);
+    let gate = PromotionGate::new();
+    let ops_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> =
+        crate::ops_projection::ExtgateOpsGatewayActions::for_binding(
+            Arc::clone(state),
+            instance_id,
+            binding_id,
+            &session_id,
+            &row.agent_id,
+        )
+        .map(|a| Arc::new(a) as Arc<dyn opencrab_gateway::GatewayActions>);
+    let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(ExtgateCompletionSink {
+        state: Arc::clone(state),
+        runtime: runtime.clone(),
+        instance_id: instance_id.to_string(),
+        binding_id: binding_id.to_string(),
+        agent_id: row.agent_id.clone(),
+        session_id: session_id.clone(),
+        only_speaker: false,
+        speaker_id: inputs.author_id.clone(),
+        system_context: inputs.system_context.clone(),
+        model_profile: TurnModelProfile::Realtime,
+    });
     let task = {
         let runtime = runtime.clone();
         let session_id = session_id.clone();
         let agent_id = row.agent_id.clone();
+        let author_id = inputs.author_id.clone();
+        let gate = gate.clone();
         tokio::spawn(async move {
+            let registry = runtime.subtask_registry_for(&session_id);
             run_provisional_turn(
                 &runtime,
                 &session_id,
@@ -97,8 +128,9 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
                 &system,
                 high_water,
                 &pending,
+                gate,
                 |conversation| {
-                    RunRequest::new(
+                    let mut req = RunRequest::new(
                         agent_id.clone(),
                         name.clone(),
                         session_id.clone(),
@@ -107,7 +139,11 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
                         "extgate",
                         caller.clone(),
                     )
-                    .with_on_partial_text(hook)
+                    .with_on_partial_text(hook);
+                    if let Some(ga) = ops_actions {
+                        req = req.with_gateway_actions(ga);
+                    }
+                    v3_attach_dispatch(req, false, author_id, registry, sink)
                 },
             )
             .await
@@ -120,6 +156,7 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
         high_water,
         inputs,
         stream,
+        gate,
         task,
     );
     let reaper_state = Arc::clone(state);

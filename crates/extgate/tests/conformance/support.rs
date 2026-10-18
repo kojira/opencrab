@@ -60,8 +60,10 @@ struct TestRuntime {
     turn_profiles: Arc<Mutex<Vec<TurnModelProfile>>>,
     /// D-1085: `RunRequest::lightweight` of every run, in run order.
     lightweight_runs: Arc<Mutex<Vec<bool>>>,
-    /// D-1085: `(RunRequest::provisional, persist_turn_logs)` of every run, in run order.
+    /// D-1085: `(RunRequest::provisional, promotion_gate.is_some())` of every run, in run order.
     provisional_runs: Arc<Mutex<Vec<(bool, bool)>>>,
+    /// D-1085 §12: [`ToolSources`] of every run, in run order.
+    tool_sources: Arc<Mutex<Vec<ToolSources>>>,
     last_sink: Arc<Mutex<Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>>>,
     partial_script: PartialScript,
 }
@@ -87,6 +89,7 @@ impl TestRuntime {
             turn_profiles: Arc::new(Mutex::new(Vec::new())),
             lightweight_runs: Arc::new(Mutex::new(Vec::new())),
             provisional_runs: Arc::new(Mutex::new(Vec::new())),
+            tool_sources: Arc::new(Mutex::new(Vec::new())),
             last_sink: Arc::new(Mutex::new(None)),
             partial_script: PartialScript::default(),
         }
@@ -190,7 +193,11 @@ impl AgentRuntime for TestRuntime {
             .unwrap()
             .push(req.system_prompt.clone());
         self.lightweight_runs.lock().unwrap().push(req.lightweight);
-        self.provisional_runs.lock().unwrap().push((req.provisional, req.persist_turn_logs));
+        self.provisional_runs
+            .lock()
+            .unwrap()
+            .push((req.provisional, req.promotion_gate.is_some()));
+        self.tool_sources.lock().unwrap().push(tool_sources(&req));
         self.reply_targets
             .lock()
             .unwrap()

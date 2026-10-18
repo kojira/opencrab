@@ -1,7 +1,11 @@
 use opencrab_core::{context_budget::ContextBudgetError, EngineResult, ExplicitTermination};
 
-fn insert_event(db: &opencrab_db::Db, agent_id: &str, session_id: &str, event: serde_json::Value) {
-    let event_type = event["type"].as_str().unwrap_or("turn_event").to_string();
+fn insert_event(
+    writer: &super::TurnLogWriter,
+    agent_id: &str,
+    session_id: &str,
+    event: serde_json::Value,
+) {
     let log = opencrab_db::queries::SessionLogRow {
         id: None,
         agent_id: agent_id.to_string(),
@@ -13,16 +17,12 @@ fn insert_event(db: &opencrab_db::Db, agent_id: &str, session_id: &str, event: s
         metadata_json: None,
         created_at: None,
     };
-    if let Ok(conn) = db.lock() {
-        if let Err(error) = opencrab_db::queries::insert_session_log(&conn, &log) {
-            tracing::error!(agent_id, session_id, event_type, %error, "failed to persist turn end event");
-        }
-    }
+    writer.write(log, "turn end event");
 }
 
 /// 正常な明示終了と、engine 内で判別できた資源切れを会話履歴へ保存する。
 pub(super) fn persist_result(
-    db: &opencrab_db::Db,
+    writer: &super::TurnLogWriter,
     agent_id: &str,
     session_id: &str,
     result: &anyhow::Result<EngineResult>,
@@ -50,19 +50,19 @@ pub(super) fn persist_result(
         }),
     };
     if let Some(event) = event {
-        insert_event(db, agent_id, session_id, event);
+        insert_event(writer, agent_id, session_id, event);
     }
 }
 
 /// request envelope の構築中に尽きた予算は engine result を作れないため、その場で保存する。
 pub(super) fn persist_context_budget_error(
-    db: &opencrab_db::Db,
+    writer: &super::TurnLogWriter,
     agent_id: &str,
     session_id: &str,
     error: &ContextBudgetError,
 ) {
     if let Some(event) = context_budget_event(error) {
-        insert_event(db, agent_id, session_id, event);
+        insert_event(writer, agent_id, session_id, event);
     }
 }
 
@@ -97,7 +97,12 @@ mod tests {
     #[test]
     fn iteration_limit_is_persisted_without_assistant_speech() {
         let db = opencrab_db::Db::memory().unwrap();
-        persist_result(&db, "a", "s", &Ok(engine_result(true)));
+        persist_result(
+            &crate::process::TurnLogWriter::direct(db.clone()),
+            "a",
+            "s",
+            &Ok(engine_result(true)),
+        );
 
         let logs = {
             let conn = db.lock().unwrap();

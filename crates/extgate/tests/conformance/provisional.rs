@@ -136,7 +136,7 @@ async fn provisional_run_streams_tagged_partials_and_records_nothing() {
         assert_ne!(frame["m"], "say", "{frame}");
         assert_ne!(frame["m"], "activity", "{frame}");
     }
-    assert_eq!(*h.runtime.provisional_runs.lock().unwrap(), [(true, false)]);
+    assert_eq!(*h.runtime.provisional_runs.lock().unwrap(), [(true, true)]);
     assert_eq!(*h.runtime.lightweight_runs.lock().unwrap(), [true]);
     assert_eq!(table_row_count(&h, "memory_sessions"), 0);
     assert_eq!(table_row_count(&h, "external_origins"), 0);
@@ -219,7 +219,7 @@ async fn said_with_other_text_falls_back_to_the_normal_turn() {
     assert!(frames.iter().any(|f| f["m"] == "say"));
     assert_eq!(
         *h.runtime.provisional_runs.lock().unwrap(),
-        [(true, false), (false, true)],
+        [(true, true), (false, false)],
         "provisional + normal turn"
     );
     let conversation = h.runtime.conversations.lock().unwrap().last().cloned().unwrap();
@@ -358,4 +358,29 @@ async fn agent_prelude_must_match_for_promotion() {
         let calls = h.runtime.provisional_runs.lock().unwrap().len();
         assert_eq!(calls, if promoted { 1 } else { 2 }, "{said_prelude:?}");
     }
+}
+
+/// §12: the provisional run gets the operations and the dispatch sink of the said's normal turn,
+/// so the two runs offer the same tools.
+#[tokio::test]
+async fn provisional_run_has_the_normal_turn_tool_sources() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    let binding_id = uuid();
+    put_instance_config(&h, &instance_id, TOOL_DRIVEN_B64).await;
+    put_binding(&h, &binding_id, &instance_id, "chan-1").await;
+    let mut s = h.connect().await;
+    hello_ok_digest(&mut s, &instance_id, 1, &tool_driven_digest()).await;
+    assert_eq!(ack_bind(&mut s).await, binding_id);
+    wait_acknowledged(&h, &instance_id, &binding_id).await;
+    start_streaming_provisional(&h, &mut s, &binding_id, "（音声）今日は").await;
+
+    write_frame(&mut s, &committed_said("v1", &binding_id, PROVISIONAL_ID, "（音声）今日はいい天気")).await;
+    assert_eq!(read_said_response(&mut s, "v1").await["m"], "ok");
+    commit_frames(&mut s, "v1").await;
+
+    let sources = h.runtime.tool_sources.lock().unwrap().clone();
+    assert_eq!(sources.len(), 2, "provisional + normal turn: {sources:?}");
+    assert_eq!(sources[0], (vec!["reply".to_string()], true));
+    assert_eq!(sources[0], sources[1]);
 }

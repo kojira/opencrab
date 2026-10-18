@@ -1,9 +1,11 @@
 //! LLM-driven agent engine.
 
+pub mod promotion_gate;
 pub mod skill_engine;
 pub mod types;
 pub mod xml_parser;
 
+pub use promotion_gate::PromotionGate;
 pub use skill_engine::{PartialTextEvent, PartialTextGate, PartialTextHook, SkillEngine};
 pub use types::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,

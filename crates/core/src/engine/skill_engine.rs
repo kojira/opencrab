@@ -133,6 +133,8 @@ pub struct SkillEngine {
     /// D-1085: the first generation without tool calls ends the run. Its text (marker
     /// stripped) is the final response; a bare `NO_REPLY` is a silent end. Off by default.
     single_generation: bool,
+    /// D-1085 §12: a provisional run's promotion gate and the tool names that run without it.
+    promotion_gate: Option<(super::PromotionGate, std::collections::HashSet<String>)>,
 }
 
 /// LLM へ返す tool_result の退避先設定（#284）。
@@ -185,12 +187,45 @@ impl SkillEngine {
             conversation_high: None,
             conversation_low: None,
             single_generation: false,
+            promotion_gate: None,
         }
     }
 
     /// D-1085: end the run at the first generation without tool calls (see the field).
     pub fn set_single_generation(&mut self, enabled: bool) {
         self.single_generation = enabled;
+    }
+
+    /// D-1085 §12: a batch with a tool outside `read_only` waits for `gate` before it runs.
+    pub fn set_promotion_gate(
+        &mut self,
+        gate: super::PromotionGate,
+        read_only: std::collections::HashSet<String>,
+    ) {
+        self.promotion_gate = Some((gate, read_only));
+    }
+
+    /// D-1085 §12: waits for the promotion before a batch with a gated tool. An aborted gate
+    /// fails the run, so none of the batch runs.
+    async fn await_promotion_for(&self, tool_calls: &[opencrab_llm_types::ToolCall]) -> Result<()> {
+        let Some((gate, read_only)) = &self.promotion_gate else {
+            return Ok(());
+        };
+        if tool_calls
+            .iter()
+            .all(|tc| read_only.contains(&tc.function.name))
+        {
+            return Ok(());
+        }
+        tracing::debug!(
+            tools = tool_calls.len(),
+            "provisional run waits for promotion"
+        );
+        if gate.promoted().await {
+            Ok(())
+        } else {
+            anyhow::bail!("provisional run aborted before a gated tool")
+        }
     }
 
     /// Set the resolved assistant display identity used by canonical in-turn history rendering.

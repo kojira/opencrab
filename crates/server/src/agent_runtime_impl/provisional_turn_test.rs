@@ -10,21 +10,46 @@ async fn provisional_run(
     high_water: i64,
     pending: &[opencrab_db::queries::SessionLogRow],
 ) -> opencrab_core::EngineResult {
+    provisional_run_with(f, high_water, pending, opencrab_core::PromotionGate::new(), None)
+        .await
+        .expect("provisional succeeded")
+}
+
+/// [`provisional_run`] with its promotion gate and the gateway's declared operations.
+async fn provisional_run_with(
+    f: &Fixture,
+    high_water: i64,
+    pending: &[opencrab_db::queries::SessionLogRow],
+    gate: opencrab_core::PromotionGate,
+    gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>>,
+) -> anyhow::Result<opencrab_core::EngineResult> {
     let (system, name) = f.state.build_realtime_context("a1");
-    run_provisional_turn(&f.state, "sess-a", "a1", &system, high_water, pending, |conversation| {
-        RunRequest::new(
-            "a1",
-            name.clone(),
-            "sess-a",
-            system.clone(),
-            conversation,
-            "test",
-            CallerIdentity::Owner,
-        )
-    })
+    run_provisional_turn(
+        &f.state,
+        "sess-a",
+        "a1",
+        &system,
+        high_water,
+        pending,
+        gate,
+        |conversation| {
+            let req = RunRequest::new(
+                "a1",
+                name.clone(),
+                "sess-a",
+                system.clone(),
+                conversation,
+                "test",
+                CallerIdentity::Owner,
+            );
+            match gateway_actions {
+                Some(ga) => req.with_gateway_actions(ga),
+                None => req,
+            }
+        },
+    )
     .await
     .expect("provisional ran")
-    .expect("provisional succeeded")
 }
 
 fn high_water(f: &Fixture) -> i64 {
@@ -68,7 +93,6 @@ async fn provisional_conversation_is_the_snapshot_then_the_pending_lines() {
 
     let requests = f.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 1, "one LLM call");
-    assert!(requests[0].functions.is_none());
     let user = user_text(&requests[0]);
     assert!(!user.contains("AFTER-SNAPSHOT"), "{user}");
     assert!(!user.contains("agent-speech-19"), "only the last 20 rows: {user}");

@@ -40,7 +40,7 @@ pub(crate) use wiring::{
 use budget::spawn_background_turn_end_snapshot;
 use callbacks::{
     merge_image_urls, normalize_image_urls, set_llm_log_callback, set_run_notifier_callbacks,
-    set_turn_log_callbacks,
+    set_turn_log_callbacks, TurnLogWriter,
 };
 use live_inbound::SubtaskSteerInbound;
 use loop_restart::prepare_loop_restart;
@@ -194,7 +194,7 @@ pub async fn run_agent_response(
         }
     };
     // per-agent の推論（thinking）強度。空/未設定なら None（プロバイダー既定に従う）。
-    // D-1085: a lightweight turn does not apply the per-agent effort or web search.
+    // D-1085: a lightweight turn does not apply the per-agent effort (§12: web search applies).
     let agent_reasoning_effort = if req.lightweight {
         None
     } else {
@@ -202,7 +202,7 @@ pub async fn run_agent_response(
         opencrab_db::queries::effective_reasoning_effort_for_agent(&conn, agent_id).unwrap_or(None)
     };
     // per-agent の本文URL読取り（provider native web_search / url_context）。既定は無効。
-    let agent_web_search = !req.lightweight && {
+    let agent_web_search = {
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::web_search_enabled_for_agent(&conn, agent_id).unwrap_or(false)
     };
@@ -271,12 +271,7 @@ pub async fn run_agent_response(
             subtask_registry: subtask_registry.clone(),
             completion_sink: req.completion_sink.clone(),
             reply_target: req.reply_target.clone(),
-            // D-1085: a lightweight turn sees and runs no tools.
-            tool_allowlist: if req.lightweight {
-                Some(Vec::new())
-            } else {
-                req.tool_allowlist.clone()
-            },
+            tool_allowlist: req.tool_allowlist.clone(),
         },
         |caller_is_trusted| {
             state.mcp_manager.as_ref().map(|manager| {
@@ -356,6 +351,20 @@ pub async fn run_agent_response(
     );
     engine.set_assistant_history_name(agent_name.to_string());
     engine.set_single_generation(req.lightweight);
+    // D-1085 §12: a provisional run waits for its promotion before any tool but the read-only set.
+    if let Some(gate) = &req.promotion_gate {
+        engine.set_promotion_gate(
+            gate.clone(),
+            opencrab_actions::PROVISIONAL_READ_ONLY_TOOLS
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+        );
+    }
+    let turn_log_writer = match &req.promotion_gate {
+        Some(gate) => TurnLogWriter::until_promoted(state.db.clone(), gate),
+        None => TurnLogWriter::direct(state.db.clone()),
+    };
 
     // #676（案Y）: 送るプロバイダのモデルは、出力上限（max_output_tokens）を model_pricing から
     // 実能力値で解決して engine に渡す。未登録（NULL / 0 以下 / 行なし）なら fail loud で
@@ -495,7 +504,7 @@ pub async fn run_agent_response(
             .unwrap_or_default();
         set_turn_log_callbacks(
             &mut engine,
-            state.db.clone(),
+            turn_log_writer.clone(),
             agent_id.to_string(),
             session_id.to_string(),
             tool_result_workspace,
@@ -569,7 +578,10 @@ pub async fn run_agent_response(
                 Err(e) => {
                     if req.persist_turn_logs {
                         end_event::persist_context_budget_error(
-                            &state.db, agent_id, session_id, &e,
+                            &turn_log_writer,
+                            agent_id,
+                            session_id,
+                            &e,
                         );
                     }
                     return Err(e.into());
@@ -656,7 +668,7 @@ pub async fn run_agent_response(
 
     // 配送しない制御終端も、通常 speech と分離した system event として監査可能にする。
     if req.persist_turn_logs {
-        end_event::persist_result(&state.db, agent_id, session_id, &result);
+        end_event::persist_result(&turn_log_writer, agent_id, session_id, &result);
     }
 
     // 記憶インデックスの背景ビルドとスキル利用回数は depth 0（メインターン）のみ。

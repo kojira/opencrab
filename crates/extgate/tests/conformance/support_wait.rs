@@ -40,3 +40,32 @@ fn insert_named_session(h: &Harness, id: &str) {
     )
     .unwrap();
 }
+
+/// The bind of `binding_id` is acknowledged in the live registry.
+async fn wait_acknowledged(h: &Harness, instance_id: &str, binding_id: &str) {
+    for _ in 0..50 {
+        let acked = h
+            .state
+            .lock_registry()
+            .unwrap()
+            .get(instance_id)
+            .is_some_and(|e| e.acknowledged.contains(binding_id));
+        if acked {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("bind not acknowledged: {binding_id}");
+}
+
+/// D-1085 §12: a run's declared gateway operation names and whether it has a dispatch sink.
+type ToolSources = (Vec<String>, bool);
+
+fn tool_sources(req: &RunRequest) -> ToolSources {
+    let op_names = req
+        .gateway_actions
+        .as_ref()
+        .map(|ga| ga.definitions().into_iter().map(|d| d.name).collect())
+        .unwrap_or_default();
+    (op_names, req.completion_sink.is_some())
+}

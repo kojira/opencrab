@@ -27,8 +27,13 @@ pub(crate) async fn take_promotion(
     key: PromotionKey<'_>,
 ) -> Option<TakenProvisional> {
     let promoted = match state.provisionals.take(key.binding_id, key.provisional_id) {
-        Some(taken) if matches(state, &key, &taken) => Some(taken),
+        Some(taken) if matches(state, &key, &taken) => {
+            // The said's own rows are recorded: the run's held rows follow them.
+            taken.gate.promote();
+            Some(taken)
+        }
         Some(taken) => {
+            taken.gate.abort();
             taken.task.abort();
             let _ = taken.task.await;
             None

@@ -5,12 +5,14 @@
 //! recorded. When the committed said carries the same `provisional_id` and the same inputs, and
 //! the session gained no other row since the snapshot, the turn reuses the run's result
 //! ([`promote::take_promotion`]); otherwise the run is aborted and the normal turn runs.
+//! §12: the run waits on its promotion gate before any tool outside the read-only set; the
+//! promotion opens the gate and records the rows the run held.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use opencrab_core::EngineResult;
+use opencrab_core::{EngineResult, PromotionGate};
 use tokio::task::JoinHandle;
 
 use crate::partial_stream::PartialStreamSlot;
@@ -44,6 +46,7 @@ struct Entry {
     high_water: i64,
     inputs: ProvisionalInputs,
     stream: PartialStreamSlot,
+    gate: PromotionGate,
     task: ProvisionalTask,
 }
 
@@ -53,6 +56,7 @@ pub(crate) struct TakenProvisional {
     pub high_water: i64,
     pub inputs: ProvisionalInputs,
     pub stream: PartialStreamSlot,
+    pub gate: PromotionGate,
     pub task: ProvisionalTask,
 }
 
@@ -80,6 +84,7 @@ impl ProvisionalRegistry {
         high_water: i64,
         inputs: ProvisionalInputs,
         stream: PartialStreamSlot,
+        gate: PromotionGate,
         task: ProvisionalTask,
     ) -> u64 {
         let serial = {
@@ -93,6 +98,7 @@ impl ProvisionalRegistry {
                 && !(binding == binding_id
                     && (id == provisional_id || entry.inputs.author_id == inputs.author_id));
             if !keep {
+                entry.gate.abort();
                 entry.task.abort();
             }
             keep
@@ -106,6 +112,7 @@ impl ProvisionalRegistry {
         let excess = (on_binding.len() + 1).saturating_sub(PROVISIONALS_PER_BINDING);
         for (_, id) in on_binding.into_iter().take(excess) {
             if let Some(entry) = entries.remove(&(binding_id.to_string(), id)) {
+                entry.gate.abort();
                 entry.task.abort();
             }
         }
@@ -118,6 +125,7 @@ impl ProvisionalRegistry {
                 high_water,
                 inputs,
                 stream,
+                gate,
                 task,
             },
         );
@@ -132,6 +140,7 @@ impl ProvisionalRegistry {
             .expect("provisional registry lock")
             .remove(&(binding_id.to_string(), provisional_id.to_string()))?;
         if entry.started.elapsed() >= PROVISIONAL_TTL {
+            entry.gate.abort();
             entry.task.abort();
             return None;
         }
@@ -140,6 +149,7 @@ impl ProvisionalRegistry {
             high_water: entry.high_water,
             inputs: entry.inputs,
             stream: entry.stream,
+            gate: entry.gate,
             task: entry.task,
         })
     }
@@ -151,6 +161,7 @@ impl ProvisionalRegistry {
             .lock()
             .expect("provisional registry lock")
             .remove(&(binding_id.to_string(), provisional_id.to_string()))?;
+        entry.gate.abort();
         entry.task.abort();
         Some(entry.task)
     }
@@ -169,6 +180,7 @@ impl ProvisionalRegistry {
             .is_some_and(|entry| entry.serial == serial)
         {
             if let Some(entry) = entries.remove(&key) {
+                entry.gate.abort();
                 entry.task.abort();
             }
         }
