@@ -100,7 +100,12 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     None,
                 )
                 .await;
-                let (system, name) = runtime.build_agent_context(&agent_id, &caller);
+                // D-1085: a realtime said runs a lightweight turn on the small realtime prompt.
+                let (system, name) = if model_profile == TurnModelProfile::Realtime {
+                    runtime.build_realtime_context(&agent_id)
+                } else {
+                    runtime.build_agent_context(&agent_id, &caller)
+                };
                 let system = crate::completion::with_system_context(system, &system_context);
                 let last_continuation_say = Arc::new(std::sync::Mutex::new(None::<String>));
                 // D-1083: only a realtime-profile turn streams partial text; every say of the turn

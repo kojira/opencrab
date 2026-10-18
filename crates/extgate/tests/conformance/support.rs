@@ -58,6 +58,8 @@ struct TestRuntime {
     turn_entered: Arc<Notify>,
     /// D-1081: every `session_turn_model` profile, in turn-start order.
     turn_profiles: Arc<Mutex<Vec<TurnModelProfile>>>,
+    /// D-1085: `RunRequest::lightweight` of every run, in run order.
+    lightweight_runs: Arc<Mutex<Vec<bool>>>,
     last_sink: Arc<Mutex<Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>>>,
     partial_script: PartialScript,
 }
@@ -81,6 +83,7 @@ impl TestRuntime {
             images: Arc::new(Mutex::new(Vec::new())),
             turn_entered: Arc::new(Notify::new()),
             turn_profiles: Arc::new(Mutex::new(Vec::new())),
+            lightweight_runs: Arc::new(Mutex::new(Vec::new())),
             last_sink: Arc::new(Mutex::new(None)),
             partial_script: PartialScript::default(),
         }
@@ -183,6 +186,7 @@ impl AgentRuntime for TestRuntime {
             .lock()
             .unwrap()
             .push(req.system_prompt.clone());
+        self.lightweight_runs.lock().unwrap().push(req.lightweight);
         self.reply_targets
             .lock()
             .unwrap()
@@ -257,7 +261,7 @@ impl AgentRuntime for TestRuntime {
         ("sys".into(), agent_id.to_string())
     }
     fn build_realtime_context(&self, agent_id: &str) -> (String, String) {
-        ("sys".into(), agent_id.to_string())
+        ("realtime-sys".into(), agent_id.to_string())
     }
     fn build_recent_conversation_string(
         &self,
