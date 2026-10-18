@@ -698,6 +698,10 @@ mod peer_review_removal_test;
 #[path = "agent_runtime_impl/session_model_test.rs"]
 mod session_model_test;
 
+#[cfg(test)]
+#[path = "agent_runtime_impl/realtime_turn_test.rs"]
+mod realtime_turn_test;
+
 fn log_closed_interactions(
     closed: &[opencrab_db::queries::ClosedInteraction],
     scope: Option<&str>,
