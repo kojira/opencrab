@@ -578,3 +578,36 @@ async fn agent_prelude_is_the_agent_line_after_the_said_in_both_histories() {
 include!("provisional_turn_test.rs");
 // D-1085 §12: tools of lightweight and provisional runs.
 include!("provisional_gate_test.rs");
+
+/// D-1086: a turn request carries the session effort of its profile's slot. The realtime slot
+/// reaches realtime turns only; the default slot overrides the agent effort for default turns
+/// only; with both slots reset the requests are back to agent `high` / provider (none sent).
+#[tokio::test]
+async fn turn_requests_carry_the_session_effort_of_their_profile_slot() {
+    use opencrab_db::queries::{set_session_reasoning_effort, SessionEffortSlot};
+    let f = fixture();
+    let set = |slot, effort: Option<&str>| {
+        let conn = f.state.db.lock().unwrap();
+        assert!(set_session_reasoning_effort(&conn, "sess-a", slot, effort).unwrap());
+    };
+    let last_effort = |f: &Fixture| f.requests.lock().unwrap().last().unwrap().reasoning_effort.clone();
+
+    set(SessionEffortSlot::Realtime, Some("none"));
+    profile_turn(&f, TurnModelProfile::Realtime).await;
+    assert_eq!(last_effort(&f).as_deref(), Some("none"));
+    profile_turn(&f, TurnModelProfile::Default).await;
+    assert_eq!(last_effort(&f).as_deref(), Some("high"), "agent effort, realtime slot ignored");
+
+    set(SessionEffortSlot::Default, Some("low"));
+    profile_turn(&f, TurnModelProfile::Default).await;
+    assert_eq!(last_effort(&f).as_deref(), Some("low"));
+    profile_turn(&f, TurnModelProfile::Realtime).await;
+    assert_eq!(last_effort(&f).as_deref(), Some("none"));
+
+    set(SessionEffortSlot::Default, None);
+    set(SessionEffortSlot::Realtime, None);
+    profile_turn(&f, TurnModelProfile::Default).await;
+    assert_eq!(last_effort(&f).as_deref(), Some("high"));
+    profile_turn(&f, TurnModelProfile::Realtime).await;
+    assert_eq!(last_effort(&f), None, "realtime without a slot follows the provider");
+}

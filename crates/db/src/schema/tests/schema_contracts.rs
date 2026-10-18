@@ -91,7 +91,6 @@ fn v61_adds_nullable_session_realtime_model_preserving_rows() {
         .ok()
     };
     let fresh = crate::init_memory().expect("fresh");
-    assert_eq!(latest_version(), 61);
     assert_eq!(schema_version(&fresh).unwrap(), latest_version());
     assert_eq!(column(&fresh), Some(("TEXT".to_string(), 0, None)));
 
@@ -117,4 +116,61 @@ fn v61_adds_nullable_session_realtime_model_preserving_rows() {
         )
         .unwrap();
     assert_eq!((model.as_deref(), realtime), (Some("prov:session-m"), None));
+}
+
+/// D-1086 v62: schema 61 upgrades to nullable `sessions.reasoning_effort` and
+/// `sessions.realtime_reasoning_effort` (NULL = no override) without touching existing rows; a
+/// fresh install matches and re-running the migration is a no-op.
+#[test]
+fn v62_adds_nullable_session_reasoning_effort_slots_preserving_rows() {
+    let columns = |conn: &Connection| -> Vec<(String, String, i64, Option<String>)> {
+        conn.prepare(
+            "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('sessions')
+             WHERE name IN ('reasoning_effort', 'realtime_reasoning_effort') ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    };
+    let fresh = crate::init_memory().expect("fresh");
+    assert_eq!(latest_version(), 62);
+    assert_eq!(schema_version(&fresh).unwrap(), latest_version());
+    assert_eq!(
+        columns(&fresh),
+        vec![
+            ("realtime_reasoning_effort".to_string(), "TEXT".to_string(), 0, None),
+            ("reasoning_effort".to_string(), "TEXT".to_string(), 0, None),
+        ]
+    );
+
+    let old = crate::init_memory().expect("v61 fixture");
+    old.execute_batch(
+        "ALTER TABLE sessions DROP COLUMN reasoning_effort;
+         ALTER TABLE sessions DROP COLUMN realtime_reasoning_effort;
+         PRAGMA user_version = 61;
+         INSERT INTO sessions (id, theme, created_at, updated_at, model, realtime_model)
+           VALUES ('s1', 'addr', 'now', 'now', 'prov:session-m', 'prov:light');",
+    )
+    .unwrap();
+    initialize(&old).expect("upgrade 61 -> latest");
+    assert_eq!(schema_version(&old).unwrap(), latest_version());
+    assert_eq!(columns(&old), columns(&fresh));
+    let row: (Option<String>, Option<String>, Option<String>, Option<String>) = old
+        .query_row(
+            "SELECT model, realtime_model, reasoning_effort, realtime_reasoning_effort
+             FROM sessions WHERE id='s1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (Some("prov:session-m".to_string()), Some("prov:light".to_string()), None, None)
+    );
+
+    old.execute_batch("PRAGMA user_version = 61;").unwrap();
+    initialize(&old).expect("re-run 61 -> latest is idempotent");
+    assert_eq!(columns(&old), columns(&fresh));
 }

@@ -265,7 +265,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- D-1080: セッション単位のモデル上書き。NULL = エージェントのモデルを継承。
     model TEXT,
     -- D-1081: realtime ターン用のモデル。NULL = このセッションのモデルに従う。
-    realtime_model TEXT
+    realtime_model TEXT,
+    -- D-1086: セッション単位の推論強度。NULL = エージェント → プロバイダー設定に従う。
+    reasoning_effort TEXT,
+    -- D-1086: realtime ターン用の推論強度。NULL = プロバイダー設定に従う。
+    realtime_reasoning_effort TEXT
 );
 
 -- ============================================

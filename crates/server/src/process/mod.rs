@@ -193,13 +193,21 @@ pub async fn run_agent_response(
             )?
         }
     };
-    // per-agent の推論（thinking）強度。空/未設定なら None（プロバイダー既定に従う）。
-    // D-1085: a lightweight turn does not apply the per-agent effort (§12: web search applies).
-    let agent_reasoning_effort = if req.lightweight {
-        None
-    } else {
+    // 推論（thinking）強度。None はプロバイダー設定（無ければモデル既定）に従う。
+    // D-1086: default turns use session > agent; a lightweight turn (D-1085) uses only the
+    // session's realtime slot, never the per-agent effort.
+    let agent_reasoning_effort = {
+        let slot = if req.lightweight {
+            opencrab_db::queries::SessionEffortSlot::Realtime
+        } else {
+            opencrab_db::queries::SessionEffortSlot::Default
+        };
         let conn = state.db.lock().unwrap();
-        opencrab_db::queries::effective_reasoning_effort_for_agent(&conn, agent_id).unwrap_or(None)
+        opencrab_db::queries::effective_reasoning_effort_for_session(
+            &conn, agent_id, session_id, slot,
+        )
+        .map(|(effort, _)| effort)
+        .unwrap_or(None)
     };
     // per-agent の本文URL読取り（provider native web_search / url_context）。既定は無効。
     let agent_web_search = {

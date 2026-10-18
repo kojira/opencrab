@@ -11,9 +11,10 @@ use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use opencrab_actions::subtask::{settle_completed, SettleContext};
 use opencrab_actions::{
-    AgentRuntime, CallerIdentity, InboundMessageRecord, InteractionRecord, ModelAdminError,
-    ModelAdministration, ModelSnapshot, OutboundReplyRecord, RunRequest, SessionLocks,
-    SessionModelList, SubtaskLifecycle, SubtaskRegistries, TranscriptSource, TurnModelProfile,
+    AgentRuntime, CallerIdentity, EffortSnapshot, InboundMessageRecord, InteractionRecord,
+    ModelAdminError, ModelAdministration, ModelSnapshot, OutboundReplyRecord, RunRequest,
+    SessionEffortList, SessionLocks, SessionModelList, SubtaskLifecycle, SubtaskRegistries,
+    TranscriptSource, TurnModelProfile, REASONING_EFFORTS,
 };
 use opencrab_core::EngineResult;
 use opencrab_db::queries::{AgentRow, SessionRow};
@@ -95,89 +96,6 @@ impl TestRuntime {
             partial_script: PartialScript::default(),
             gated_tool: GatedToolScript::default(),
         }
-    }
-}
-
-#[async_trait]
-impl ModelAdministration for TestRuntime {
-    async fn list_models(&self, agent_id: &str) -> Result<ModelSnapshot, ModelAdminError> {
-        let configured_model = self
-            .db
-            .lock()
-            .map_err(|_| ModelAdminError::Internal)?
-            .query_row(
-                "SELECT model FROM agents WHERE agent_id = ?1",
-                [agent_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .map_err(|_| ModelAdminError::Internal)?;
-        Ok(ModelSnapshot {
-            models: vec!["openai:gpt-5".to_string()],
-            current_model: configured_model
-                .clone()
-                .unwrap_or_else(|| "mock:test".to_string()),
-            configured_model,
-            default_model: "mock:test".to_string(),
-        })
-    }
-
-    async fn set_model(
-        &self,
-        agent_id: &str,
-        model: &str,
-    ) -> Result<ModelSnapshot, ModelAdminError> {
-        if model != "openai:gpt-5" && model != "gpt-5" {
-            return Err(ModelAdminError::NotFound);
-        }
-        self.db
-            .lock()
-            .map_err(|_| ModelAdminError::Internal)?
-            .execute(
-                "UPDATE agents SET model = 'openai:gpt-5' WHERE agent_id = ?1",
-                [agent_id],
-            )
-            .map_err(|_| ModelAdminError::Internal)?;
-        self.list_models(agent_id).await
-    }
-
-    async fn reset_model(&self, agent_id: &str) -> Result<ModelSnapshot, ModelAdminError> {
-        self.db
-            .lock()
-            .map_err(|_| ModelAdminError::Internal)?
-            .execute("UPDATE agents SET model = NULL WHERE agent_id = ?1", [agent_id])
-            .map_err(|_| ModelAdminError::Internal)?;
-        self.list_models(agent_id).await
-    }
-    async fn list_session_models(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-    ) -> Result<SessionModelList, ModelAdminError> {
-        self.session_model_list(agent_id, session_id).await
-    }
-
-    async fn set_session_model(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-        profile: TurnModelProfile,
-        model: &str,
-    ) -> Result<ModelSnapshot, ModelAdminError> {
-        if model != "openai:gpt-5" && model != "gpt-5" {
-            return Err(ModelAdminError::NotFound);
-        }
-        self.write_session_model(session_id, profile, Some("openai:gpt-5"))?;
-        self.session_model_snapshot(agent_id, session_id, profile).await
-    }
-
-    async fn reset_session_model(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-        profile: TurnModelProfile,
-    ) -> Result<ModelSnapshot, ModelAdminError> {
-        self.write_session_model(session_id, profile, None)?;
-        self.session_model_snapshot(agent_id, session_id, profile).await
     }
 }
 
