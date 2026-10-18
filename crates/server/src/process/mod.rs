@@ -31,7 +31,7 @@ pub use budget::{
     RequestEnvelopeArgs, DEFAULT_MEMORY_INDEX_TOKEN_CAP,
 };
 pub use live_inbound::{prepend_runtime_context, prepend_runtime_context_with_message_id};
-pub use prompt::{build_agent_context, build_more_tools_index};
+pub use prompt::{build_agent_context, build_more_tools_index, build_realtime_context};
 #[allow(unused_imports)]
 pub(crate) use wiring::{
     build_turn_executor, effective_allowed_commands, resolve_run_tools_config, TurnExecutorWiring,
@@ -194,12 +194,15 @@ pub async fn run_agent_response(
         }
     };
     // per-agent の推論（thinking）強度。空/未設定なら None（プロバイダー既定に従う）。
-    let agent_reasoning_effort = {
+    // D-1085: a lightweight turn does not apply the per-agent effort or web search.
+    let agent_reasoning_effort = if req.lightweight {
+        None
+    } else {
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::effective_reasoning_effort_for_agent(&conn, agent_id).unwrap_or(None)
     };
     // per-agent の本文URL読取り（provider native web_search / url_context）。既定は無効。
-    let agent_web_search = {
+    let agent_web_search = !req.lightweight && {
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::web_search_enabled_for_agent(&conn, agent_id).unwrap_or(false)
     };
@@ -265,7 +268,12 @@ pub async fn run_agent_response(
             subtask_registry: subtask_registry.clone(),
             completion_sink: req.completion_sink.clone(),
             reply_target: req.reply_target.clone(),
-            tool_allowlist: req.tool_allowlist.clone(),
+            // D-1085: a lightweight turn sees and runs no tools.
+            tool_allowlist: if req.lightweight {
+                Some(Vec::new())
+            } else {
+                req.tool_allowlist.clone()
+            },
         },
         |caller_is_trusted| {
             state.mcp_manager.as_ref().map(|manager| {
@@ -344,6 +352,7 @@ pub async fn run_agent_response(
         max_iterations,
     );
     engine.set_assistant_history_name(agent_name.to_string());
+    engine.set_single_generation(req.lightweight);
 
     // #676（案Y）: 送るプロバイダのモデルは、出力上限（max_output_tokens）を model_pricing から
     // 実能力値で解決して engine に渡す。未登録（NULL / 0 以下 / 行なし）なら fail loud で

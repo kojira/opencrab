@@ -210,6 +210,49 @@ pub fn build_agent_context(
     (prompt, agent_name)
 }
 
+/// D-1085: the system prompt of a lightweight turn (realtime profile).
+///
+/// Only the agent's name, persona and personality plus a short fixed block (history tags, the
+/// owner header and the NO_REPLY rule). Long-term memory, user profile, agent rules, skills,
+/// tool sections and instructions are left out so the request stays small.
+///
+/// Returns `(system_prompt, agent_name)`.
+pub fn build_realtime_context(conn: &rusqlite::Connection, agent_id: &str) -> (String, String) {
+    let agent = opencrab_db::queries::get_agent(conn, agent_id)
+        .ok()
+        .flatten();
+    let agent_name = agent
+        .as_ref()
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| agent_id.to_string());
+    let persona = agent
+        .as_ref()
+        .map(|a| a.persona_name.clone())
+        .unwrap_or_default();
+    let character_section = agent
+        .as_ref()
+        .and_then(|a| a.personality.clone())
+        .filter(|p| !p.is_empty())
+        .map(|p| format!("\n\n{p}"))
+        .unwrap_or_default();
+    let prompt = format!(
+        "You are {agent_name} ({persona}).\n\
+         \n\
+         When conversation history is present, it is delimited by `<conversation_history>` and \
+         `</conversation_history>`. Its speaker headers contain an identity and timestamp; a \
+         header containing `|owner` marks a message from your owner. After \
+         the closing tag, output only your own response content; never reproduce or continue \
+         transcript-formatted speaker lines. Your response is posted verbatim; a name prefix \
+         you add is not removed, so it would appear duplicated.\n\
+         \n\
+         Reply to the latest message directly. Write `NO_REPLY` only when you will not reply; \
+         then respond with exactly `NO_REPLY`.\
+         {character_section}{caller_break}",
+        caller_break = opencrab_llm_types::SYSTEM_SEGMENT_BREAK,
+    );
+    (prompt, agent_name)
+}
+
 /// #923 §2.7 静的 index（案B）: ツール名 → カテゴリの写像。1 か所に集約する。
 ///
 /// 常時集合の外にあるツールを describe_tools で取得させるための分類。未知名は "other"。

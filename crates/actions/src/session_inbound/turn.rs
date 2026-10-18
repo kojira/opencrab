@@ -58,6 +58,9 @@ pub fn prepare_session_inbound_write(
 /// 会話構築に失敗したら `None`（現行どおり run しない）。`Some` は run の
 /// `Result` そのもの（成功も失敗もゲートの配送へ渡す）。
 /// `profile` は発端 said の宣言（D-1081）。ターンのモデルはここで 1 回だけ決まる。
+/// D-1085: a `Realtime` said starts a lightweight turn: the conversation is the last
+/// [`LIGHTWEIGHT_TURN_SPEECH_ROWS`] speech rows and the run is [`RunRequest::as_lightweight`].
+/// The caller passes the matching system prompt (`build_realtime_context`).
 #[allow(clippy::too_many_arguments)]
 pub async fn start_session_turn<R, Wrap, Build>(
     runtime: &R,
@@ -75,11 +78,12 @@ where
     Build: FnOnce(String) -> RunRequest,
 {
     runtime.on_inbound_message(source, inbound.agent_id, &inbound.as_record());
-    run_session_turn(
+    run_turn(
         runtime,
         inbound.session_id,
         inbound.agent_id,
         profile,
+        profile == TurnModelProfile::Realtime,
         system_prompt,
         runtime_context_text,
         wrap_conversation,
@@ -87,6 +91,9 @@ where
     )
     .await
 }
+
+/// D-1085: how many recent speech rows a lightweight turn sees.
+pub const LIGHTWEIGHT_TURN_SPEECH_ROWS: usize = 20;
 
 /// resume / 継続ターン（直列ロック内）。会話構築 + `run_agent_response`。
 ///
@@ -97,6 +104,37 @@ pub async fn run_session_turn<R, Wrap, Build>(
     session_id: &str,
     agent_id: &str,
     profile: TurnModelProfile,
+    system_prompt: &str,
+    runtime_context_text: &str,
+    wrap_conversation: Wrap,
+    build_run: Build,
+) -> Option<anyhow::Result<EngineResult>>
+where
+    R: AgentRuntime,
+    Wrap: FnOnce(&str) -> String,
+    Build: FnOnce(String) -> RunRequest,
+{
+    run_turn(
+        runtime,
+        session_id,
+        agent_id,
+        profile,
+        false,
+        system_prompt,
+        runtime_context_text,
+        wrap_conversation,
+        build_run,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_turn<R, Wrap, Build>(
+    runtime: &R,
+    session_id: &str,
+    agent_id: &str,
+    profile: TurnModelProfile,
+    lightweight: bool,
     system_prompt: &str,
     runtime_context_text: &str,
     wrap_conversation: Wrap,
@@ -142,14 +180,20 @@ where
             return None;
         }
     };
-    let raw = match runtime.build_conversation_string(
-        session_id,
-        agent_id,
-        &model,
-        budget,
-        system_prompt,
-        runtime_context_text,
-    ) {
+    let raw = if lightweight {
+        // D-1085: the budget check above stays as the fail-loud guard; nothing is compacted.
+        runtime.build_recent_conversation_string(session_id, agent_id, LIGHTWEIGHT_TURN_SPEECH_ROWS)
+    } else {
+        runtime.build_conversation_string(
+            session_id,
+            agent_id,
+            &model,
+            budget,
+            system_prompt,
+            runtime_context_text,
+        )
+    };
+    let raw = match raw {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(
@@ -161,9 +205,11 @@ where
         }
     };
     let conversation = wrap_conversation(&raw);
-    Some(
-        runtime
-            .run_agent_response(build_run(conversation).with_pinned_model(model))
-            .await,
-    )
+    let req = build_run(conversation).with_pinned_model(model);
+    let req = if lightweight {
+        req.as_lightweight()
+    } else {
+        req
+    };
+    Some(runtime.run_agent_response(req).await)
 }

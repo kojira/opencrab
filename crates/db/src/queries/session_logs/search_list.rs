@@ -197,6 +197,17 @@ pub fn list_recent_session_logs_of_type(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// D-1085: the most recent `limit` speech rows of a session (all speakers), oldest first.
+pub fn list_recent_speech_logs(
+    conn: &Connection,
+    session_id: &str,
+    limit: usize,
+) -> Result<Vec<SessionLogRow>> {
+    let mut rows = list_recent_session_logs_of_type(conn, session_id, "speech", limit)?;
+    rows.reverse();
+    Ok(rows)
+}
+
 /// List the most recent N **user** speech logs of a session (returned in id DESC order).
 ///
 /// 「ユーザーの発言」= `log_type='speech'` かつ発話者がエージェント自身でない行。

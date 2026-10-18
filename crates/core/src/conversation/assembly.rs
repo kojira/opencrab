@@ -94,6 +94,33 @@ pub fn build_conversation_string_with_waters(
     Ok(parts.join("\n\n"))
 }
 
+/// D-1085: the conversation of a lightweight turn: the last `limit` speech rows of the session
+/// (all speakers, oldest first) in the same `<conversation_history>` rendering as a full turn.
+/// No ledger, memory index, impressions, snapshot, tool or system rows, and no compaction.
+pub fn build_recent_conversation_string(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    agent_id: &str,
+    limit: usize,
+) -> Result<String, anyhow::Error> {
+    let logs = opencrab_db::queries::list_recent_speech_logs(conn, session_id, limit)?;
+    if logs.is_empty() {
+        return Ok(NO_MESSAGES_MARKER.to_string());
+    }
+    let mut refs = super::ConversationRefs::build(&logs, agent_id);
+    if let Some(agent) = opencrab_db::queries::get_agent(conn, agent_id)? {
+        refs.set_agent_name(agent.name);
+    }
+    let inner = logs
+        .iter()
+        .map(|log| super::format_single_log_with_echo(log, None, Some(&refs)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(format!(
+        "{CONVERSATION_HISTORY_START}\n{inner}\n{CONVERSATION_HISTORY_END}"
+    ))
+}
+
 /// 履歴本文（`<conversation_history>` の内側）に使える二水位。
 ///
 /// `conversation_high` / `conversation_low` から、会話車線に計上する前置（台帳・人物像）、

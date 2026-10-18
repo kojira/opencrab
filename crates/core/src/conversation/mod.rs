@@ -17,6 +17,7 @@ mod tool_result_fold;
 
 pub use assembly::{
     build_conversation_string, build_conversation_string_with_memory_index,
+    build_recent_conversation_string,
     build_conversation_string_with_waters, conversation_history_waters, CONVERSATION_HISTORY_END,
     CONVERSATION_HISTORY_START, NO_MESSAGES_MARKER, RECENT_MIN_USER_SPEECHES,
 };
