@@ -48,6 +48,14 @@ async fn bound_client() -> (tempfile::TempDir, Arc<InstanceClient>, UnixStream) 
     (dir, client, core)
 }
 
+/// The next live event, or `None` after 2 s (a missing event fails instead of hanging).
+async fn next_live(client: &InstanceClient) -> Option<LiveEvent> {
+    tokio::time::timeout(Duration::from_secs(2), client.next_live(ADDRESS))
+        .await
+        .ok()
+        .flatten()
+}
+
 fn request() -> ProvisionalRequest {
     ProvisionalRequest {
         provisional_id: PROVISIONAL.into(),
@@ -131,7 +139,7 @@ async fn provisional_partial_and_result_reach_the_live_queue() {
     .await
     .unwrap();
     assert_eq!(
-        client.next_live(ADDRESS).await,
+        next_live(&client).await,
         Some(LiveEvent::Partial {
             stream_id: "s1".into(),
             text: "はい。".into(),
@@ -139,7 +147,7 @@ async fn provisional_partial_and_result_reach_the_live_queue() {
         })
     );
     assert_eq!(
-        client.next_live(ADDRESS).await,
+        next_live(&client).await,
         Some(LiveEvent::ProvisionalResult {
             provisional_id: PROVISIONAL.into(),
             promoted: true,
