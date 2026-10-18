@@ -49,7 +49,9 @@ pub use no_reply::{
     terminate_at_no_reply, DeliveryContext, NoReplyTermination, NO_REPLY_LOG_TARGET,
     NO_REPLY_SENTINEL, NO_REPLY_TRAILING_DISCARDED_TAG,
 };
-pub use run_request::{LiveInboundScope, RunRequest, PROVISIONAL_READ_ONLY_TOOLS};
+pub use run_request::{
+    LiveInboundScope, RunRequest, LIGHTWEIGHT_TURN_TOOLS, PROVISIONAL_READ_ONLY_TOOLS,
+};
 pub use session_inbound::{
     accept_inbound, consecutive_trust_groups, delivery_effect, plan_record_only_flags,
     prepare_session_inbound, prepare_session_inbound_write, run_provisional_turn, run_session_turn,

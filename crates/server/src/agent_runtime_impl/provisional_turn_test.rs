@@ -95,7 +95,9 @@ async fn provisional_conversation_is_the_snapshot_then_the_pending_lines() {
     assert_eq!(requests.len(), 1, "one LLM call");
     let user = user_text(&requests[0]);
     assert!(!user.contains("AFTER-SNAPSHOT"), "{user}");
-    assert!(!user.contains("agent-speech-19"), "only the last 20 rows: {user}");
+    // 40 recorded speech rows plus 2 pending: the window starts at the 30th from the end.
+    assert!(!user.contains("agent-speech-11"), "from the 30th speech row back: {user}");
+    assert!(user.contains("user-speech-12"), "{user}");
     assert!(user.contains("agent-speech-39"), "{user}");
     let history = user
         .split(opencrab_core::conversation::CONVERSATION_HISTORY_END)

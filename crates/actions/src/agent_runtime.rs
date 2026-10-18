@@ -56,19 +56,14 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
         caller: &crate::CallerIdentity,
     ) -> (String, String);
 
-    /// D-1085 §13: the conversation of a lightweight turn: the same prefix sections and row
-    /// rendering as [`AgentRuntime::build_conversation_string`] (same envelope decisions for
-    /// `model` / `system_prompt` / `runtime_context_text`), with the history body cut to every
-    /// retained row from the `speech_rows`-th most recent speech row of `window` on. No
+    /// D-1085 §13.1: the conversation of a lightweight turn: the row rendering of
+    /// [`AgentRuntime::build_conversation_string`] over every retained row from the
+    /// `speech_rows`-th most recent speech row of `window` on. No prefix sections and no
     /// compaction.
-    #[allow(clippy::too_many_arguments)]
     fn build_recent_window_conversation_string(
         &self,
         session_id: &str,
         agent_id: &str,
-        model: &str,
-        system_prompt: &str,
-        runtime_context_text: &str,
         speech_rows: usize,
         window: opencrab_core::conversation::RecentWindow<'_>,
     ) -> Result<String>;

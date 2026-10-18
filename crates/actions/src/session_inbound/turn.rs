@@ -60,9 +60,9 @@ pub fn prepare_session_inbound_write(
 /// 会話構築に失敗したら `None`（現行どおり run しない）。`Some` は run の
 /// `Result` そのもの（成功も失敗もゲートの配送へ渡す）。
 /// `profile` は発端 said の宣言（D-1081）。ターンのモデルはここで 1 回だけ決まる。
-/// D-1085: a `Realtime` said starts a lightweight turn: the conversation is the normal one cut to
-/// the last [`LIGHTWEIGHT_TURN_SPEECH_ROWS`] speech rows (§13) and the run is
-/// [`RunRequest::as_lightweight`]. The system prompt is the normal one.
+/// D-1085: a `Realtime` said starts a lightweight turn: the conversation is the normal rendering
+/// of the rows from the [`LIGHTWEIGHT_TURN_SPEECH_ROWS`]-th most recent speech row on (§13.1) and
+/// the run is [`RunRequest::as_lightweight`]. The system prompt is the normal one.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_session_turn<R, Wrap, Build>(
     runtime: &R,
@@ -101,7 +101,7 @@ where
 
 /// D-1085: from how many speech rows back a lightweight turn's history starts (every retained
 /// row from there on is in it).
-pub const LIGHTWEIGHT_TURN_SPEECH_ROWS: usize = 20;
+pub const LIGHTWEIGHT_TURN_SPEECH_ROWS: usize = 30;
 
 /// resume / 継続ターン（直列ロック内）。会話構築 + `run_agent_response`。
 ///
@@ -247,9 +247,6 @@ where
         TurnHistory::Recent(window) => runtime.build_recent_window_conversation_string(
             session_id,
             agent_id,
-            &model,
-            system_prompt,
-            runtime_context_text,
             LIGHTWEIGHT_TURN_SPEECH_ROWS,
             window,
         ),

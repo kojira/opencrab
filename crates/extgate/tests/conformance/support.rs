@@ -278,9 +278,6 @@ impl AgentRuntime for TestRuntime {
         &self,
         session_id: &str,
         agent_id: &str,
-        _model: &str,
-        _system_prompt: &str,
-        _runtime_context_text: &str,
         _speech_rows: usize,
         window: opencrab_core::conversation::RecentWindow<'_>,
     ) -> anyhow::Result<String> {

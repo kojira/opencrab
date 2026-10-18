@@ -107,19 +107,17 @@ pub enum RecentWindow<'a> {
     },
 }
 
-/// D-1085 §13: the conversation of a lightweight turn. The same prefix sections and the same row
-/// rendering as [`build_conversation_string_with_waters`]; only the history body differs: every
-/// retained row (speech, tool, system) from the `speech_rows`-th most recent speech row on, with
-/// no snapshot and no compaction.
+/// D-1085 §13.1: the conversation of a lightweight turn: the row rendering of
+/// [`build_conversation_string_with_waters`] over every retained row (speech, tool, system) from
+/// the `speech_rows`-th most recent speech row on. No prefix sections (ledger, memory index,
+/// impressions), no snapshot and no compaction.
 pub fn build_recent_window_conversation_string(
     conn: &rusqlite::Connection,
     session_id: &str,
     agent_id: &str,
-    include_memory_index: bool,
     speech_rows: usize,
     window: RecentWindow<'_>,
 ) -> Result<String, anyhow::Error> {
-    let prefix = build_context_prefix_sections(conn, session_id, agent_id, include_memory_index);
     let rows = opencrab_db::queries::list_session_logs_by_session(conn, session_id)?;
     let mut all = super::retain_conversation_logs(match window {
         RecentWindow::Live => rows,
@@ -145,15 +143,12 @@ pub fn build_recent_window_conversation_string(
         &all,
         &all[first..],
     );
-    let mut parts = prefix.ordered();
     if inner.is_empty() {
-        parts.push(NO_MESSAGES_MARKER.to_string());
-    } else {
-        parts.push(format!(
-            "{CONVERSATION_HISTORY_START}\n{inner}\n{CONVERSATION_HISTORY_END}"
-        ));
+        return Ok(NO_MESSAGES_MARKER.to_string());
     }
-    Ok(parts.join("\n\n"))
+    Ok(format!(
+        "{CONVERSATION_HISTORY_START}\n{inner}\n{CONVERSATION_HISTORY_END}"
+    ))
 }
 
 /// 履歴本文（`<conversation_history>` の内側）に使える二水位。

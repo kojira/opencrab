@@ -446,27 +446,14 @@ impl AgentRuntime for AppState {
         &self,
         session_id: &str,
         agent_id: &str,
-        model: &str,
-        system_prompt: &str,
-        runtime_context_text: &str,
         speech_rows: usize,
         window: opencrab_core::conversation::RecentWindow<'_>,
     ) -> anyhow::Result<String> {
         let conn = self.db.lock().unwrap();
-        let env = resolve_runtime_envelope(
-            self,
-            &conn,
-            agent_id,
-            session_id,
-            model,
-            system_prompt,
-            runtime_context_text,
-        )?;
         opencrab_core::conversation::build_recent_window_conversation_string(
             &conn,
             session_id,
             agent_id,
-            process::include_memory_index(&env),
             speech_rows,
             window,
         )
