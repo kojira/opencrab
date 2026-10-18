@@ -141,6 +141,9 @@ pub struct RunRequest {
     /// D-1080: the model this whole turn uses (envelopes, output cap, engine). `None` = resolve
     /// once at process entry with session > agent > server default.
     pub pinned_model: Option<String>,
+    /// D-1085: a lightweight turn. No tools, no web search, no per-agent reasoning effort (the
+    /// provider default applies), and the first generation without tool calls ends the run.
+    pub lightweight: bool,
 }
 
 impl RunRequest {
@@ -179,6 +182,7 @@ impl RunRequest {
             tool_allowlist: None,
             persist_turn_logs: true,
             pinned_model: None,
+            lightweight: false,
         }
     }
 
@@ -294,6 +298,12 @@ impl RunRequest {
     /// D-1080: pins the model resolved at turn start for the whole turn.
     pub fn with_pinned_model(mut self, model: impl Into<String>) -> Self {
         self.pinned_model = Some(model.into());
+        self
+    }
+
+    /// D-1085: marks this run as a lightweight turn (see [`RunRequest::lightweight`]).
+    pub fn as_lightweight(mut self) -> Self {
+        self.lightweight = true;
         self
     }
 }

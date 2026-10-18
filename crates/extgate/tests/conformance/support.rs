@@ -256,6 +256,17 @@ impl AgentRuntime for TestRuntime {
     fn build_agent_context(&self, agent_id: &str, _caller: &CallerIdentity) -> (String, String) {
         ("sys".into(), agent_id.to_string())
     }
+    fn build_realtime_context(&self, agent_id: &str) -> (String, String) {
+        ("sys".into(), agent_id.to_string())
+    }
+    fn build_recent_conversation_string(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        _limit: usize,
+    ) -> anyhow::Result<String> {
+        self.build_conversation_string(session_id, agent_id, "", 0, "", "")
+    }
     fn build_conversation_string(
         &self,
         session_id: &str,

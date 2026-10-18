@@ -5,7 +5,10 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use opencrab_actions::{run_session_turn, AgentRuntime, CallerIdentity, RunRequest, TurnModelProfile};
+use opencrab_actions::{
+    start_session_turn, AgentRuntime, CallerIdentity, NormalizedInbound, RunRequest,
+    TranscriptSource, TurnModelProfile,
+};
 use opencrab_llm::message::{ChatRequest, ChatResponse, Choice, FinishReason, Message};
 use opencrab_llm::traits::{LlmProvider, ModelInfo};
 
@@ -214,14 +217,30 @@ fn fixture() -> Fixture {
     }
 }
 
-/// The session turn as the external gate drives it for `profile`.
+/// The inbound session turn as the external gate drives it for `profile`: a realtime said takes the
+/// realtime system prompt, any other the full agent context; the gateway context is appended.
 async fn profile_turn(f: &Fixture, profile: TurnModelProfile) -> opencrab_core::EngineResult {
-    let (system, name) = f.state.build_agent_context("a1", &CallerIdentity::Owner);
+    let (system, name) = match profile {
+        TurnModelProfile::Realtime => f.state.build_realtime_context("a1"),
+        TurnModelProfile::Default => f.state.build_agent_context("a1", &CallerIdentity::Owner),
+    };
     let system = format!("{system}{}GATEWAY-CONTEXT", opencrab_llm_types::SYSTEM_SEGMENT_BREAK);
-    run_session_turn(
+    let inbound = NormalizedInbound {
+        session_id: "sess-a",
+        agent_id: "a1",
+        sender_id: "u1",
+        sender_name: "",
+        avatar_url: None,
+        channel_id: None,
+        pubkey: None,
+        text: "hi",
+        image_urls: &[],
+        external_id: "origin-1",
+    };
+    start_session_turn(
         &f.state,
-        "sess-a",
-        "a1",
+        TranscriptSource::new("external", "external_response"),
+        &inbound,
         profile,
         &system,
         "",
@@ -243,15 +262,139 @@ async fn profile_turn(f: &Fixture, profile: TurnModelProfile) -> opencrab_core::
     .expect("turn succeeded")
 }
 
+fn system_text(request: &ChatRequest) -> String {
+    request
+        .messages
+        .iter()
+        .filter(|m| m.role == opencrab_llm::message::Role::System)
+        .filter_map(|m| m.text_content())
+        .collect()
+}
+
+fn user_text(request: &ChatRequest) -> String {
+    request
+        .messages
+        .iter()
+        .filter(|m| m.role == opencrab_llm::message::Role::User)
+        .filter_map(|m| m.text_content())
+        .collect()
+}
+
+/// L1/L3 (default side): a default-profile turn keeps the full prompt, tools, effort and web
+/// search. Set `D1085_DUMP` to write the captured requests for a byte comparison.
 #[tokio::test]
-async fn d1085_dump_default_request() {
+async fn default_profile_turn_keeps_the_full_request() {
     let f = fixture();
     profile_turn(&f, TurnModelProfile::Default).await;
     let requests = f.requests.lock().unwrap().clone();
-    let _ = &f.reply;
-    std::fs::write(
-        std::env::var("D1085_DUMP").unwrap(),
-        serde_json::to_string_pretty(&requests).unwrap(),
-    )
-    .unwrap();
+    if let Ok(path) = std::env::var("D1085_DUMP") {
+        std::fs::write(path, serde_json::to_string_pretty(&requests).unwrap()).unwrap();
+    }
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    let system = system_text(request);
+    assert!(system.contains("## Long-term Memory"));
+    assert!(system.contains("SKILL-DESCRIPTION"));
+    assert!(system.contains("INSTRUCTIONS-BODY"));
+    assert!(system.contains("## More tools"));
+    assert!(request.functions.as_ref().is_some_and(|f| !f.is_empty()));
+    assert_eq!(request.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(request.metadata.get("web_search"), Some(&serde_json::json!(true)));
+}
+
+/// L1/L3/L4: a realtime turn sends one small request (persona, SOUL, the fixed block and the
+/// gateway context; no memory, rules, skills, tools or instructions), with no tools, no web
+/// search and no agent effort, and a text without the marker is the final response.
+#[tokio::test]
+async fn realtime_turn_is_one_small_request_without_tools() {
+    let f = fixture();
+    *f.reply.lock().unwrap() = "了解。".to_string();
+    let result = profile_turn(&f, TurnModelProfile::Realtime).await;
+    let requests = f.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "one LLM call");
+    assert_eq!(result.response, "了解。");
+    assert!(result.explicit_termination.is_none());
+
+    let request = &requests[0];
+    let system = system_text(request);
+    assert!(system.starts_with("You are Kani (kani-persona)."), "{system}");
+    assert!(system.contains("SOUL: cheerful and brief."));
+    assert!(system.contains("NO_REPLY"));
+    assert!(system.contains("<conversation_history>"));
+    assert!(system.contains("|owner"));
+    assert!(system.ends_with("GATEWAY-CONTEXT"), "{system}");
+    for absent in [
+        "## Long-term Memory",
+        "LONG-TERM-BODY",
+        "SKILL-DESCRIPTION",
+        "read_skill",
+        "## More tools",
+        "INSTRUCTIONS-BODY",
+        "## Instructions",
+        "## Async Behavior",
+        "## Task Ledger",
+        "## Memory & Context",
+    ] {
+        assert!(!system.contains(absent), "realtime system has {absent:?}: {system}");
+    }
+    let fixed_len = system.chars().count()
+        - "SOUL: cheerful and brief.".chars().count()
+        - "GATEWAY-CONTEXT".chars().count();
+    assert!(fixed_len < 1_200, "fixed block is {fixed_len} chars");
+
+    assert!(request.functions.is_none(), "{:?}", request.functions);
+    assert!(request.reasoning_effort.is_none());
+    assert!(!request.metadata.contains_key("web_search"));
+}
+
+/// L2: the realtime conversation is exactly the last 20 speech rows, oldest first, without tool
+/// or system rows.
+#[tokio::test]
+async fn realtime_conversation_is_the_last_20_speech_rows() {
+    let f = fixture();
+    profile_turn(&f, TurnModelProfile::Realtime).await;
+    let requests = f.requests.lock().unwrap().clone();
+    let user = user_text(&requests[0]);
+    let mut seen = Vec::new();
+    for i in 0..40 {
+        let label = if i % 2 == 0 {
+            format!("user-speech-{i:02}")
+        } else {
+            format!("agent-speech-{i:02}")
+        };
+        if let Some(at) = user.find(&label) {
+            seen.push((at, i));
+        }
+    }
+    let indexes: Vec<usize> = seen.iter().map(|(_, i)| *i).collect();
+    assert_eq!(indexes, (20..40).collect::<Vec<_>>(), "{user}");
+    assert!(seen.windows(2).all(|w| w[0].0 < w[1].0), "oldest first: {user}");
+    for absent in ["tool-call-", "tool-result-", "system-row-", "[Memory Index]"] {
+        assert!(!user.contains(absent), "realtime conversation has {absent:?}: {user}");
+    }
+    assert!(user.contains("<conversation_history>"));
+    assert!(user.contains("[Kani]"), "own rows use the agent name: {user}");
+}
+
+/// L5: a bare NO_REPLY ends a realtime turn silently after one call.
+#[tokio::test]
+async fn realtime_bare_no_reply_is_silent_after_one_call() {
+    let f = fixture();
+    *f.reply.lock().unwrap() = "NO_REPLY".to_string();
+    let result = profile_turn(&f, TurnModelProfile::Realtime).await;
+    assert_eq!(f.requests.lock().unwrap().len(), 1);
+    assert_eq!(result.response, "");
+    assert_eq!(
+        result.explicit_termination,
+        Some(opencrab_core::ExplicitTermination::NoReply)
+    );
+    let effect = opencrab_actions::delivery_effect(
+        Ok(result),
+        opencrab_actions::DeliveryContext {
+            session_id: "sess-a",
+            agent_id: "a1",
+            origin: "test",
+        },
+    );
+    assert!(matches!(effect, opencrab_actions::DeliveryEffect::NoReply));
 }

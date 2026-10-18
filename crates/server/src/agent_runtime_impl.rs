@@ -442,6 +442,23 @@ impl AgentRuntime for AppState {
         process::build_agent_context(&conn, agent_id, caller)
     }
 
+    fn build_realtime_context(&self, agent_id: &str) -> (String, String) {
+        let conn = self.db.lock().unwrap();
+        process::build_agent_context(&conn, agent_id, &opencrab_actions::CallerIdentity::Owner)
+    }
+
+    fn build_recent_conversation_string(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        _limit: usize,
+    ) -> anyhow::Result<String> {
+        let conn = self.db.lock().unwrap();
+        process::build_conversation_string_with_waters(
+            &conn, session_id, agent_id, 100_000, 50_000, false,
+        )
+    }
+
     fn build_conversation_string(
         &self,
         session_id: &str,
