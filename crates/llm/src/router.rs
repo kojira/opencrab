@@ -7,7 +7,7 @@ use tokio::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::image_generation::ImageGenerator;
-use crate::message::{ChatRequest, ChatResponse, ChatStreamDelta};
+use crate::message::{ChatRequest, ChatResponse, ChatStreamDelta, OutputTextEvent, OutputTextSink};
 use crate::metrics::MetricsCollector;
 use crate::traits::LlmProvider;
 
@@ -15,6 +15,38 @@ use crate::traits::LlmProvider;
 const MAX_RETRIES: u32 = 3;
 /// Base delay for exponential backoff (doubles each retry: 1s, 2s, 4s).
 const BACKOFF_BASE_MS: u64 = 1000;
+
+/// D-1083: the caller's output text sink across the attempts of one routed call.
+struct ObservedAttempts {
+    sink: OutputTextSink,
+    forwarded: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ObservedAttempts {
+    fn new(sink: OutputTextSink) -> Self {
+        Self {
+            sink,
+            forwarded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Sends `Reset` when an earlier attempt forwarded deltas, and returns the sink for the next
+    /// attempt, which records whether it forwards anything.
+    fn begin_attempt(&self) -> OutputTextSink {
+        use std::sync::atomic::Ordering;
+        if self.forwarded.swap(false, Ordering::SeqCst) {
+            (self.sink)(OutputTextEvent::Reset);
+        }
+        let sink = Arc::clone(&self.sink);
+        let forwarded = Arc::clone(&self.forwarded);
+        Arc::new(move |event| {
+            if matches!(event, OutputTextEvent::Delta(_)) {
+                forwarded.store(true, Ordering::SeqCst);
+            }
+            sink(event);
+        })
+    }
+}
 
 /// LLM Router for dynamic provider switching with fallback chains.
 ///
@@ -222,7 +254,28 @@ impl LlmRouter {
     /// Route a chat completion while preserving provider-executed tool history.
     pub async fn chat_completion_with_history(
         &self,
+        request: ChatRequest,
+    ) -> Result<opencrab_llm_types::LlmExchange> {
+        self.route_exchange(request, None).await
+    }
+
+    /// D-1083: [`Self::chat_completion_with_history`] that forwards output text to `sink`.
+    ///
+    /// Same retry and fallback loop. Before any new attempt that follows forwarded deltas,
+    /// `sink` receives [`OutputTextEvent::Reset`].
+    pub async fn chat_completion_with_history_observed(
+        &self,
+        request: ChatRequest,
+        sink: OutputTextSink,
+    ) -> Result<opencrab_llm_types::LlmExchange> {
+        self.route_exchange(request, Some(ObservedAttempts::new(sink)))
+            .await
+    }
+
+    async fn route_exchange(
+        &self,
         mut request: ChatRequest,
+        observed: Option<ObservedAttempts>,
     ) -> Result<opencrab_llm_types::LlmExchange> {
         let (provider_name, model_name) = self.resolve_model(&request.model)?;
         request.model = model_name;
@@ -239,7 +292,7 @@ impl LlmRouter {
         // Try the resolved provider first (with retries)
         if let Some(provider) = self.providers.get(&provider_name) {
             match self
-                .try_provider_with_retry(provider, &provider_name, &request)
+                .try_provider_with_retry(provider, &provider_name, &request, observed.as_ref())
                 .await
             {
                 Ok(response) => return Ok(response),
@@ -265,7 +318,7 @@ impl LlmRouter {
             if let Some(provider) = self.providers.get(fallback_name) {
                 debug!(provider = %fallback_name, "Trying fallback provider");
                 match self
-                    .try_provider_with_retry(provider, fallback_name, &request)
+                    .try_provider_with_retry(provider, fallback_name, &request, observed.as_ref())
                     .await
                 {
                     Ok(response) => {
@@ -404,6 +457,7 @@ impl LlmRouter {
         provider: &Arc<dyn LlmProvider>,
         provider_name: &str,
         request: &ChatRequest,
+        observed: Option<&ObservedAttempts>,
     ) -> Result<opencrab_llm_types::LlmExchange> {
         let mut last_error = None;
 
@@ -420,7 +474,18 @@ impl LlmRouter {
             }
 
             let start = std::time::Instant::now();
-            match provider.chat_completion_with_history(request.clone()).await {
+            let attempt_result = match observed {
+                Some(observed) => {
+                    provider
+                        .chat_completion_with_history_observed(
+                            request.clone(),
+                            observed.begin_attempt(),
+                        )
+                        .await
+                }
+                None => provider.chat_completion_with_history(request.clone()).await,
+            };
+            match attempt_result {
                 Ok(exchange) => {
                     if let Some(ref metrics) = self.metrics {
                         metrics.record_success(

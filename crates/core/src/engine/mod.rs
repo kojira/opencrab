@@ -4,11 +4,11 @@ pub mod skill_engine;
 pub mod types;
 pub mod xml_parser;
 
-pub use skill_engine::SkillEngine;
+pub use skill_engine::{PartialTextEvent, PartialTextGate, PartialTextHook, SkillEngine};
 pub use types::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
     EngineResult, ExplicitTermination, FoldedInbound, FunctionDefinition, LiveInboundSource,
-    LlmCallLog, LlmClient, LlmExchange, LlmExchangeLog, ProviderToolHistory, ToolCall,
-    ToolDispatcher, SYSTEM_SEGMENT_BREAK,
+    LlmCallLog, LlmClient, LlmExchange, LlmExchangeLog, OutputTextEvent, OutputTextSink,
+    ProviderToolHistory, ToolCall, ToolDispatcher, SYSTEM_SEGMENT_BREAK,
 };
 pub use xml_parser::parse_xml_tool_calls;

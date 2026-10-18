@@ -286,6 +286,7 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                                     &session_id,
                                     &speech,
                                     reply_target.as_deref(),
+                                    None,
                                 )
                                 .await
                                 .map_err(|e| {
@@ -350,6 +351,7 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                 &sink.session_id,
                 effect,
                 reply_target.as_deref(),
+                None,
             )
             .await;
             let parent_session_has_running = !sink

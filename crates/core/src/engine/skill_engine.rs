@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 mod live_inbound;
+mod partial_text;
 mod run;
 mod run_helpers;
 mod silent_origins;
@@ -9,6 +10,8 @@ mod view_images;
 
 use anyhow::Result;
 use tracing;
+
+pub use partial_text::{PartialTextEvent, PartialTextGate, PartialTextHook};
 
 #[cfg(test)]
 use super::types::ChatRequest;
@@ -108,6 +111,9 @@ pub struct SkillEngine {
     /// #964: request に新しく含める origin を `llm.chat` の直前に read state として通知する
     /// フック。None なら通知しない。
     on_read_origin: Option<ReadOriginHook>,
+    /// D-1083: receiver of complete sentences released while each LLM call is running. Some
+    /// switches the LLM call to the observed variant; None keeps the unobserved call.
+    on_partial_text: Option<PartialTextHook>,
     /// 初回 request に含まれる発端 origin。`run_agent_response` の loop restart を跨いでも
     /// 1 回だけ通知するため、request 境界で consume する。
     initial_read_origin: std::sync::Mutex<Option<String>>,
@@ -169,6 +175,7 @@ impl SkillEngine {
             tool_result_offload: None,
             live_inbound: None,
             on_read_origin: None,
+            on_partial_text: None,
             initial_read_origin: std::sync::Mutex::new(None),
             max_output_tokens: None,
             assistant_history_name: None,
@@ -217,6 +224,11 @@ impl SkillEngine {
     /// origin の両方を request 境界で通知する。
     pub fn set_on_folded_origin(&mut self, cb: ReadOriginHook) {
         self.on_read_origin = Some(cb);
+    }
+
+    /// D-1083: observe each LLM call and deliver released partial text to `cb`.
+    pub fn set_on_partial_text(&mut self, cb: PartialTextHook) {
+        self.on_partial_text = Some(cb);
     }
 
     /// #964: 初回 LLM request に含まれる発端 said の origin を設定する。

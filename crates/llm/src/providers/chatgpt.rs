@@ -16,6 +16,7 @@ const DEFAULT_MODEL: &str = "gpt-5.5";
 mod auth;
 mod image;
 mod imagegen;
+mod observe;
 mod request;
 mod response;
 mod transport;

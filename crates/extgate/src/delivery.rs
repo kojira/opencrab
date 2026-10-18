@@ -24,6 +24,7 @@ pub async fn apply_delivery_effect(
     session_id: &str,
     effect: DeliveryEffect,
     reply_target: Option<&str>,
+    stream_id: Option<&str>,
 ) -> Option<String> {
     match effect {
         DeliveryEffect::Text { body, .. } => {
@@ -49,6 +50,7 @@ pub async fn apply_delivery_effect(
                 session_id,
                 &body,
                 reply_target,
+                stream_id,
             )
             .await
             {
@@ -104,6 +106,7 @@ pub async fn deliver_intermediate_say(
     session_id: &str,
     body: &str,
     reply_target: Option<&str>,
+    stream_id: Option<&str>,
 ) -> Result<String, GateError> {
     send_text(
         state,
@@ -113,10 +116,12 @@ pub async fn deliver_intermediate_say(
         session_id,
         body,
         reply_target,
+        stream_id,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_text(
     state: &Arc<ExtgateState>,
     instance_id: &str,
@@ -125,6 +130,7 @@ async fn send_text(
     session_id: &str,
     body: &str,
     reply_target: Option<&str>,
+    stream_id: Option<&str>,
 ) -> Result<String, GateError> {
     let writer = {
         let reg = state.lock_registry()?;
@@ -213,7 +219,7 @@ async fn send_text(
 
     let write_err = write_json(
         &writer,
-        &say_frame(&delivery_id, binding_id, body, reply_target),
+        &say_frame(&delivery_id, binding_id, body, reply_target, stream_id),
     )
     .await
     .is_err();

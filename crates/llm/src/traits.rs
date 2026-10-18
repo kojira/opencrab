@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 
 use crate::message::{ChatRequest, ChatResponse, ChatStreamDelta};
-use opencrab_llm_types::LlmExchange;
+use opencrab_llm_types::{LlmExchange, OutputTextSink};
 
 /// Information about an available model.
 #[derive(Debug, Clone)]
@@ -37,6 +37,18 @@ pub trait LlmProvider: Send + Sync {
             response: self.chat_completion(request).await?,
             provider_tool_history: Default::default(),
         })
+    }
+
+    /// Like [`Self::chat_completion_with_history`], and additionally forwards assistant output
+    /// text to `sink` while the response is still arriving (D-1083). The returned exchange is the
+    /// same as the unobserved call. Providers that cannot observe text ignore the sink.
+    async fn chat_completion_with_history_observed(
+        &self,
+        request: ChatRequest,
+        sink: OutputTextSink,
+    ) -> Result<LlmExchange> {
+        let _ = sink;
+        self.chat_completion_with_history(request).await
     }
 
     /// Perform a streaming chat completion request.

@@ -19,3 +19,4 @@ include!("conformance/hello_diagnostics.rs");
 include!("conformance/workspace_files.rs");
 include!("conformance/session_model_commands.rs");
 include!("conformance/turn_model_profile.rs");
+include!("conformance/partial_stream.rs");

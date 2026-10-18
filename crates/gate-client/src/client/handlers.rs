@@ -10,6 +10,10 @@ async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> b
             handle_turn_failed(client, tf).await;
             false
         }
+        CoreMsg::Partial(partial) => {
+            handle_partial(client, partial).await;
+            false
+        }
         CoreMsg::Invoke(inv) => handle_invoke(client, inv, generation).await,
         CoreMsg::Response(resp) => {
             handle_response(client, resp, generation).await;
@@ -178,6 +182,7 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         delivery_id: say.id.clone(),
         text,
         reply_origin,
+        stream_id: say_stream_id(&say.payload).map(str::to_string),
     });
     if !accepted {
         drop(inner);
@@ -297,6 +302,28 @@ async fn handle_turn_failed(client: &InstanceClient, tf: TurnFailed) {
     let q = inner.live.entry(address).or_insert_with(LiveQueue::new);
     let _ = q.try_push(LiveEvent::TurnFailed {
         reply_origin: tf.origin,
+    });
+}
+
+/// D-1083: core→gate partial text. It has no id, so nothing is written back; an unacknowledged
+/// binding or a full live queue drops it without closing the connection.
+async fn handle_partial(client: &InstanceClient, partial: Partial) {
+    let mut inner = client.inner.lock().await;
+    if inner.closed {
+        return;
+    }
+    let Some(address) = inner
+        .acknowledged
+        .iter()
+        .find(|(_, bid)| *bid == &partial.binding_id)
+        .map(|(a, _)| a.clone())
+    else {
+        return;
+    };
+    let q = inner.live.entry(address).or_insert_with(LiveQueue::new);
+    let _ = q.try_push(LiveEvent::Partial {
+        stream_id: partial.stream_id,
+        text: partial.text,
     });
 }
 

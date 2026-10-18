@@ -7,4 +7,5 @@ include!("response_parsing.rs");
 include!("provider_tool_history.rs");
 include!("model_catalog.rs");
 include!("imagegen.rs");
+include!("observed_output_text.rs");
 include!("live_api.rs");

@@ -301,3 +301,83 @@ fn ensure_model_configured_accepts_registered() {
         .ensure_model_configured("smart")
         .expect("登録済みエイリアスを拒否してはいけない");
 }
+
+/// D-1083 C2: emits deltas, fails on the first attempt, then succeeds with new deltas.
+struct DeltaThenFailProvider {
+    attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for DeltaThenFailProvider {
+    fn name(&self) -> &str {
+        "flaky"
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<crate::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        MockProvider::new("flaky", false)
+            .chat_completion(request)
+            .await
+    }
+    async fn chat_completion_with_history_observed(
+        &self,
+        request: ChatRequest,
+        sink: OutputTextSink,
+    ) -> anyhow::Result<opencrab_llm_types::LlmExchange> {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            sink(OutputTextEvent::Delta("一回目。".into()));
+            anyhow::bail!("stream dropped");
+        }
+        sink(OutputTextEvent::Delta("二回目。".into()));
+        self.chat_completion_with_history(request).await
+    }
+}
+
+#[tokio::test]
+async fn observed_retry_after_forwarded_deltas_sends_reset_first() {
+    let mut router = LlmRouter::new();
+    router.add_provider(Arc::new(DeltaThenFailProvider {
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+    }));
+    router.set_default_provider("flaky");
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink: OutputTextSink = {
+        let events = Arc::clone(&events);
+        Arc::new(move |event| events.lock().unwrap().push(event))
+    };
+
+    let request = ChatRequest::new("m", vec![Message::user("hello")]);
+    router
+        .chat_completion_with_history_observed(request, sink)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            OutputTextEvent::Delta("一回目。".into()),
+            OutputTextEvent::Reset,
+            OutputTextEvent::Delta("二回目。".into()),
+        ]
+    );
+}
+
+/// D-1083: a retry after an attempt that forwarded nothing sends no Reset.
+#[tokio::test]
+async fn observed_retry_without_forwarded_deltas_sends_no_reset() {
+    let mut router = LlmRouter::new();
+    router.add_provider(Arc::new(MockProvider::new("openai", true)));
+    router.set_default_provider("openai");
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink: OutputTextSink = {
+        let events = Arc::clone(&events);
+        Arc::new(move |event| events.lock().unwrap().push(event))
+    };
+    let request = ChatRequest::new("gpt-4o", vec![Message::user("hello")]);
+    assert!(router
+        .chat_completion_with_history_observed(request, sink)
+        .await
+        .is_err());
+    assert!(events.lock().unwrap().is_empty());
+}

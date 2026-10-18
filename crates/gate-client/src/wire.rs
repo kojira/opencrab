@@ -6,6 +6,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::json::{parse_object_no_dup, JsonError};
 
+mod partial;
+pub use partial::{say_stream_id, Partial};
+
 /// LF 込み上限。
 pub const MAX_FRAME: usize = 1_048_576;
 
@@ -439,6 +442,7 @@ pub enum CoreMsg {
     Say(Say),
     Activity(Activity),
     TurnFailed(TurnFailed),
+    Partial(Partial),
     Invoke(Invoke),
     Response(WireResponse),
     Reverse {
@@ -569,6 +573,14 @@ fn parse_core_msg(obj: &Value) -> CoreMsg {
         },
         "turn_failed" => match parse_turn_failed(obj) {
             Ok(t) => CoreMsg::TurnFailed(t),
+            Err(_) => CoreMsg::Invalid {
+                id: opt_id(obj),
+                code: "bad_request",
+                m,
+            },
+        },
+        "partial" => match partial::parse_partial(obj) {
+            Ok(p) => CoreMsg::Partial(p),
             Err(_) => CoreMsg::Invalid {
                 id: opt_id(obj),
                 code: "bad_request",

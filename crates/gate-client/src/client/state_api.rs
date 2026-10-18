@@ -47,7 +47,15 @@ pub enum LiveEvent {
         /// 相乗りした曖昧ケースでは`None`（単一の返信先が無い）。consumerは`Some`を
         /// 対象返信、`None`を「返信先無し」として扱う。返信先を使わないconsumerは無視してよい。
         reply_origin: Option<String>,
+        /// D-1083: the partial stream this say completes. `Some` only when core sent `Partial`
+        /// events with the same id before this say; the text of those partials is a prefix-like
+        /// preview of `text`, which stays the authoritative body.
+        stream_id: Option<String>,
     },
+    /// D-1083: cumulative released text of a realtime-profile turn's stream, sent before the say
+    /// carrying the same `stream_id`. Best effort: dropped silently when the live queue is full.
+    /// Consumers that do not preview text ignore it.
+    Partial { stream_id: String, text: String },
     Activity {
         activity_id: String,
         state: String,
