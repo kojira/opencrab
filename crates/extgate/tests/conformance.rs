@@ -22,3 +22,4 @@ include!("conformance/session_model_commands.rs");
 include!("conformance/turn_model_profile.rs");
 include!("conformance/partial_stream.rs");
 include!("conformance/agent_prelude.rs");
+include!("conformance/provisional.rs");
