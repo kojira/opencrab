@@ -1,6 +1,7 @@
 //! V3 §9 conformance。mock gateway が omoikane 役。
 
 include!("conformance/support.rs");
+include!("conformance/support_wait.rs");
 include!("conformance/liveness.rs");
 include!("conformance/wire_protocol.rs");
 include!("conformance/admin_registry.rs");
