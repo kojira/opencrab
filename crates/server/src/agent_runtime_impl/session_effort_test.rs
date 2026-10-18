@@ -2,7 +2,9 @@
 //! D-1086: session reasoning effort administration on `AppState`.
 
 use opencrab_actions::{ModelAdminError, ModelAdministration, TurnModelProfile};
-use opencrab_db::queries::{get_session_reasoning_effort, ReasoningEffortSource, SessionEffortSlot};
+use opencrab_db::queries::{
+    get_session_reasoning_effort, ReasoningEffortSource, SessionEffortSlot,
+};
 
 fn state() -> crate::AppState {
     let state = crate::test_app_state();
@@ -62,7 +64,10 @@ fn stored(state: &crate::AppState, slot: SessionEffortSlot) -> Option<String> {
 #[tokio::test]
 async fn session_reasoning_effort_set_list_reset_and_rejections() {
     let state = state();
-    let list = state.list_session_reasoning_efforts("a1", "sess-a").await.unwrap();
+    let list = state
+        .list_session_reasoning_efforts("a1", "sess-a")
+        .await
+        .unwrap();
     assert_eq!(list.default.current_effort.as_deref(), Some("high"));
     assert_eq!(list.default.source, ReasoningEffortSource::Agent);
     assert_eq!(list.realtime.current_effort, None);
@@ -75,7 +80,10 @@ async fn session_reasoning_effort_set_list_reset_and_rejections() {
     assert_eq!(rt.configured_effort.as_deref(), Some("low"));
     assert_eq!(rt.current_effort.as_deref(), Some("low"));
     assert_eq!(rt.source, ReasoningEffortSource::Session);
-    assert_eq!(stored(&state, SessionEffortSlot::Realtime).as_deref(), Some("low"));
+    assert_eq!(
+        stored(&state, SessionEffortSlot::Realtime).as_deref(),
+        Some("low")
+    );
     assert_eq!(stored(&state, SessionEffortSlot::Default), None);
 
     for bad in ["minimal", "xhigh", "", " low", "LOW"] {

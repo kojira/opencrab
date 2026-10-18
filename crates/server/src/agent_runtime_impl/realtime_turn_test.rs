@@ -590,13 +590,25 @@ async fn turn_requests_carry_the_session_effort_of_their_profile_slot() {
         let conn = f.state.db.lock().unwrap();
         assert!(set_session_reasoning_effort(&conn, "sess-a", slot, effort).unwrap());
     };
-    let last_effort = |f: &Fixture| f.requests.lock().unwrap().last().unwrap().reasoning_effort.clone();
+    let last_effort = |f: &Fixture| {
+        f.requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .reasoning_effort
+            .clone()
+    };
 
     set(SessionEffortSlot::Realtime, Some("none"));
     profile_turn(&f, TurnModelProfile::Realtime).await;
     assert_eq!(last_effort(&f).as_deref(), Some("none"));
     profile_turn(&f, TurnModelProfile::Default).await;
-    assert_eq!(last_effort(&f).as_deref(), Some("high"), "agent effort, realtime slot ignored");
+    assert_eq!(
+        last_effort(&f).as_deref(),
+        Some("high"),
+        "agent effort, realtime slot ignored"
+    );
 
     set(SessionEffortSlot::Default, Some("low"));
     profile_turn(&f, TurnModelProfile::Default).await;
@@ -609,5 +621,9 @@ async fn turn_requests_carry_the_session_effort_of_their_profile_slot() {
     profile_turn(&f, TurnModelProfile::Default).await;
     assert_eq!(last_effort(&f).as_deref(), Some("high"));
     profile_turn(&f, TurnModelProfile::Realtime).await;
-    assert_eq!(last_effort(&f), None, "realtime without a slot follows the provider");
+    assert_eq!(
+        last_effort(&f),
+        None,
+        "realtime without a slot follows the provider"
+    );
 }

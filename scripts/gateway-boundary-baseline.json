@@ -60,7 +60,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 63,
+      "line": 64,
       "snippet": "pub use session_watch_policy::{",
       "classification": "production-violation",
       "violation": "V11",
@@ -70,7 +70,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 64,
+      "line": 65,
       "snippet": "caller_policy_key, parse_session_watch_policy, watch_author_standing, ClassPolicy,",
       "classification": "production-violation",
       "violation": "V11",
@@ -80,7 +80,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 65,
+      "line": 66,
       "snippet": "SessionPolicyError, SessionWatchPolicy, WatchAllowSets, WatchAuthorStanding,",
       "classification": "production-violation",
       "violation": "V11",
@@ -310,7 +310,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 285,
+      "line": 289,
       "snippet": "CREATE TABLE IF NOT EXISTS channel_config (",
       "classification": "production-violation",
       "violation": "V06",
@@ -320,7 +320,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 299,
+      "line": 303,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_channel_guild ON channel_config(guild_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -330,7 +330,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 418,
+      "line": 422,
       "snippet": "CREATE TABLE IF NOT EXISTS trusted_users (",
       "classification": "production-violation",
       "violation": "V06",
@@ -340,7 +340,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 430,
+      "line": 434,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -350,7 +350,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 654,
+      "line": 658,
       "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
       "classification": "production-violation",
       "violation": "V06",
@@ -360,7 +360,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 663,
+      "line": 667,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -880,7 +880,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 286,
+      "line": 290,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -890,7 +890,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 288,
+      "line": 292,
       "snippet": "guild_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -900,7 +900,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 297,
+      "line": 301,
       "snippet": "PRIMARY KEY (channel_id, agent_id)",
       "classification": "production-violation",
       "violation": "V06",
@@ -910,7 +910,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 553,
+      "line": 557,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -1020,7 +1020,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/agent_runtime_impl.rs",
-      "line": 735,
+      "line": 768,
       "snippet": "channel_id = %c.channel_id,",
       "classification": "production-violation",
       "violation": "V11",
