@@ -7,8 +7,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::json::{parse_object_no_dup, JsonError};
 
 mod partial;
+mod provisional;
 mod turn_profile;
 pub use partial::{say_stream_id, Partial};
+pub use provisional::{
+    provisional_cancel_frame, provisional_frame, ProvisionalRequest, ProvisionalResult,
+};
 pub use turn_profile::TurnModelProfile;
 
 /// LF 込み上限。
@@ -245,6 +249,10 @@ pub struct SaidContext {
     /// Core records it as the agent's own line right after this said; it is not delivered back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_prelude: Option<String>,
+    /// D-1085: the provisional run this said may promote. Core answers with a
+    /// `provisional_result` before the turn's say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provisional_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -303,6 +311,9 @@ pub fn said_frame_with_context(
         }
         if let Some(prelude) = &context.agent_prelude {
             frame["agent_prelude"] = json!(prelude);
+        }
+        if let Some(provisional_id) = &context.provisional_id {
+            frame["provisional_id"] = json!(provisional_id);
         }
     }
     frame
@@ -435,6 +446,7 @@ pub enum CoreMsg {
     Activity(Activity),
     TurnFailed(TurnFailed),
     Partial(Partial),
+    ProvisionalResult(ProvisionalResult),
     Invoke(Invoke),
     Response(WireResponse),
     Reverse {
@@ -573,6 +585,14 @@ fn parse_core_msg(obj: &Value) -> CoreMsg {
         },
         "partial" => match partial::parse_partial(obj) {
             Ok(p) => CoreMsg::Partial(p),
+            Err(_) => CoreMsg::Invalid {
+                id: opt_id(obj),
+                code: "bad_request",
+                m,
+            },
+        },
+        "provisional_result" => match provisional::parse_provisional_result(obj) {
+            Ok(r) => CoreMsg::ProvisionalResult(r),
             Err(_) => CoreMsg::Invalid {
                 id: opt_id(obj),
                 code: "bad_request",

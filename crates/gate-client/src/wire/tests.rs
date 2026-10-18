@@ -34,6 +34,7 @@ fn said_model_profile_is_sent_only_when_not_default() {
         live_inbound_scope: LiveInboundScope::All,
         model_profile: TurnModelProfile::Default,
         agent_prelude: None,
+        provisional_id: None,
     };
     let frame = |context: &SaidContext| {
         said_frame_with_context("said:1", "b", "o", "a", None, Some(context), "hi", &[])
@@ -363,6 +364,7 @@ fn said_agent_prelude_is_sent_only_when_set() {
         live_inbound_scope: LiveInboundScope::All,
         model_profile: TurnModelProfile::Realtime,
         agent_prelude: None,
+        provisional_id: None,
     };
     let frame = |context: &SaidContext| {
         said_frame_with_context("said:1", "b", "o", "a", None, Some(context), "hi", &[])

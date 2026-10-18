@@ -90,6 +90,7 @@ async fn partial_is_queued_with_zero_writes_before_its_say() {
         Some(LiveEvent::Partial {
             stream_id: STREAM.into(),
             text: "一文目。".into(),
+            provisional_id: None,
         })
     );
     assert_eq!(

@@ -11,13 +11,21 @@ pub struct Partial {
     pub binding_id: String,
     pub stream_id: String,
     pub text: String,
+    /// D-1085: set when the partial comes from a provisional run (not a turn yet).
+    pub provisional_id: Option<String>,
 }
 
 pub(super) fn parse_partial(obj: &Value) -> Result<Partial, FrameError> {
+    let provisional_id = match obj.get("provisional_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(raw)) => Some(parse_uuid(raw)?),
+        Some(_) => return Err(FrameError::BadRequest),
+    };
     Ok(Partial {
         binding_id: parse_uuid(&require_str(obj, "binding_id")?)?,
         stream_id: nonempty_str(obj, "stream_id")?,
         text: nonempty_str(obj, "text")?,
+        provisional_id,
     })
 }
 
