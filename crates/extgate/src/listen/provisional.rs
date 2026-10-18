@@ -49,8 +49,9 @@ pub(super) async fn handle_provisional_cancel(
     cancel: &ProvisionalCancel,
 ) -> Result<(), ()> {
     let acknowledged = state.lock_registry().ok().is_some_and(|reg| {
-        reg.get(instance_id)
-            .is_some_and(|live| live.identity == identity && live.acknowledged.contains(&cancel.binding_id))
+        reg.get(instance_id).is_some_and(|live| {
+            live.identity == identity && live.acknowledged.contains(&cancel.binding_id)
+        })
     });
     if acknowledged {
         if let Some(task) = state

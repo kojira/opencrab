@@ -163,11 +163,7 @@ where
         system_prompt,
         "",
         |raw| raw.to_string(),
-        |conversation| {
-            build_run(conversation)
-                .as_provisional()
-                .without_turn_logs()
-        },
+        |conversation| build_run(conversation).as_provisional().without_turn_logs(),
     )
     .await
 }

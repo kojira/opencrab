@@ -400,7 +400,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 42,
+      "line": 49,
       "snippet": "SaidCaller::TrustedUser => CallerIdentity::TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -410,7 +410,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 240,
+      "line": 250,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -420,7 +420,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 569,
+      "line": 615,
       "snippet": "Some(\"trusted_user\") => Ok(SaidCaller::TrustedUser),",
       "classification": "production-violation",
       "violation": "V11",
@@ -430,7 +430,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/gate-client/src/wire.rs",
-      "line": 256,
+      "line": 265,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -920,7 +920,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 118,
+      "line": 127,
       "snippet": "channel_id: row.address.as_str(),",
       "classification": "production-violation",
       "violation": "V11",
@@ -930,7 +930,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 120,
+      "line": 129,
       "snippet": "guild_id: instance_id,",
       "classification": "production-violation",
       "violation": "V11",
@@ -940,7 +940,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 150,
+      "line": 159,
       "snippet": "let whitelist = |channel_id: &str, agent_id: &str| {",
       "classification": "production-violation",
       "violation": "V11",
@@ -950,7 +950,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 160,
+      "line": 169,
       "snippet": "channel_whitelisted(&tx, agent_id, instance_id, channel_id)",
       "classification": "production-violation",
       "violation": "V11",
@@ -961,7 +961,7 @@
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/record.rs",
       "line": 59,
-      "snippet": "\"channel_id\": row.address,",
+      "snippet": "\"channel_id\": address,",
       "classification": "production-violation",
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
@@ -970,7 +970,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/turn.rs",
-      "line": 155,
+      "line": 234,
       "snippet": "channel_id: Some(&address),",
       "classification": "production-violation",
       "violation": "V11",
@@ -1020,7 +1020,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/agent_runtime_impl.rs",
-      "line": 735,
+      "line": 749,
       "snippet": "channel_id = %c.channel_id,",
       "classification": "production-violation",
       "violation": "V11",

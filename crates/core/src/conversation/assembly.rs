@@ -145,7 +145,9 @@ pub fn build_provisional_conversation_string(
     let mut logs = if persisted == 0 {
         Vec::new()
     } else {
-        opencrab_db::queries::list_recent_speech_logs_until(conn, session_id, high_water, persisted)?
+        opencrab_db::queries::list_recent_speech_logs_until(
+            conn, session_id, high_water, persisted,
+        )?
     };
     logs.extend(pending.iter().cloned());
     render_speech_rows(conn, agent_id, &logs)

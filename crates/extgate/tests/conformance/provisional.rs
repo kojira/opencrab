@@ -70,8 +70,8 @@ async fn start_streaming_provisional(
         } else if frame["m"] == "partial" {
             partial = Some(frame);
         }
-        if ok && partial.is_some() {
-            return partial.unwrap();
+        if let (true, Some(partial)) = (ok, &partial) {
+            return partial.clone();
         }
     }
     panic!("provisional did not stream (ok={ok})");

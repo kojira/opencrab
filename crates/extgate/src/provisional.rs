@@ -164,7 +164,10 @@ impl ProvisionalRegistry {
     pub(crate) fn expire(&self, binding_id: &str, provisional_id: &str, serial: u64) {
         let mut entries = self.entries.lock().expect("provisional registry lock");
         let key = (binding_id.to_string(), provisional_id.to_string());
-        if entries.get(&key).is_some_and(|entry| entry.serial == serial) {
+        if entries
+            .get(&key)
+            .is_some_and(|entry| entry.serial == serial)
+        {
             if let Some(entry) = entries.remove(&key) {
                 entry.task.abort();
             }
@@ -173,7 +176,10 @@ impl ProvisionalRegistry {
 
     /// Number of registered runs (tests and diagnostics).
     pub fn len(&self) -> usize {
-        self.entries.lock().expect("provisional registry lock").len()
+        self.entries
+            .lock()
+            .expect("provisional registry lock")
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
