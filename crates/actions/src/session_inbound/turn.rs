@@ -3,6 +3,7 @@ use crate::agent_runtime::AgentRuntime;
 use crate::transcript::TranscriptSource;
 use crate::{RunRequest, TurnModelProfile};
 use opencrab_core::EngineResult;
+use opencrab_db::queries::SessionLogRow;
 
 /// 確保 + inbound 記録の失敗。順序は ensure → record（[`prepare_session_inbound`] と同一）。
 #[derive(Debug)]
@@ -78,12 +79,17 @@ where
     Build: FnOnce(String) -> RunRequest,
 {
     runtime.on_inbound_message(source, inbound.agent_id, &inbound.as_record());
+    let history = if profile == TurnModelProfile::Realtime {
+        TurnHistory::Recent
+    } else {
+        TurnHistory::Full
+    };
     run_turn(
         runtime,
         inbound.session_id,
         inbound.agent_id,
         profile,
-        profile == TurnModelProfile::Realtime,
+        history,
         system_prompt,
         runtime_context_text,
         wrap_conversation,
@@ -119,7 +125,7 @@ where
         session_id,
         agent_id,
         profile,
-        false,
+        TurnHistory::Full,
         system_prompt,
         runtime_context_text,
         wrap_conversation,
@@ -128,13 +134,64 @@ where
     .await
 }
 
+/// D-1085: a provisional (speculative) realtime run, outside the session lock. Its conversation
+/// is the session's speech rows up to `high_water` followed by `pending` (the not yet recorded
+/// user line and prelude). The run is lightweight and provisional and persists no turn logs; the
+/// caller decides later whether the result becomes the turn's result.
+pub async fn run_provisional_turn<R, Build>(
+    runtime: &R,
+    session_id: &str,
+    agent_id: &str,
+    system_prompt: &str,
+    high_water: i64,
+    pending: &[SessionLogRow],
+    build_run: Build,
+) -> Option<anyhow::Result<EngineResult>>
+where
+    R: AgentRuntime,
+    Build: FnOnce(String) -> RunRequest,
+{
+    run_turn(
+        runtime,
+        session_id,
+        agent_id,
+        TurnModelProfile::Realtime,
+        TurnHistory::Snapshot {
+            high_water,
+            pending,
+        },
+        system_prompt,
+        "",
+        |raw| raw.to_string(),
+        |conversation| {
+            build_run(conversation)
+                .as_provisional()
+                .without_turn_logs()
+        },
+    )
+    .await
+}
+
+/// Which history a turn's conversation is built from.
+enum TurnHistory<'a> {
+    /// The full, budgeted conversation.
+    Full,
+    /// D-1085: the last [`LIGHTWEIGHT_TURN_SPEECH_ROWS`] speech rows (lightweight run).
+    Recent,
+    /// D-1085: the speech rows up to `high_water` plus `pending` (lightweight run).
+    Snapshot {
+        high_water: i64,
+        pending: &'a [SessionLogRow],
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_turn<R, Wrap, Build>(
     runtime: &R,
     session_id: &str,
     agent_id: &str,
     profile: TurnModelProfile,
-    lightweight: bool,
+    history: TurnHistory<'_>,
     system_prompt: &str,
     runtime_context_text: &str,
     wrap_conversation: Wrap,
@@ -180,18 +237,33 @@ where
             return None;
         }
     };
-    let raw = if lightweight {
-        // D-1085: the budget check above stays as the fail-loud guard; nothing is compacted.
-        runtime.build_recent_conversation_string(session_id, agent_id, LIGHTWEIGHT_TURN_SPEECH_ROWS)
-    } else {
-        runtime.build_conversation_string(
+    let lightweight = !matches!(history, TurnHistory::Full);
+    // D-1085: for a lightweight run the budget check above stays as the fail-loud guard; nothing
+    // is compacted.
+    let raw = match history {
+        TurnHistory::Full => runtime.build_conversation_string(
             session_id,
             agent_id,
             &model,
             budget,
             system_prompt,
             runtime_context_text,
-        )
+        ),
+        TurnHistory::Recent => runtime.build_recent_conversation_string(
+            session_id,
+            agent_id,
+            LIGHTWEIGHT_TURN_SPEECH_ROWS,
+        ),
+        TurnHistory::Snapshot {
+            high_water,
+            pending,
+        } => runtime.build_provisional_conversation_string(
+            session_id,
+            agent_id,
+            LIGHTWEIGHT_TURN_SPEECH_ROWS,
+            high_water,
+            pending,
+        ),
     };
     let raw = match raw {
         Ok(s) => s,

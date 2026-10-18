@@ -11,13 +11,28 @@ use crate::completion::{v3_attach_dispatch, ExtgateCompletionSink};
 use crate::delivery::apply_delivery_effect;
 use crate::error::ErrorCode;
 use crate::listen::{emit_activity, emit_ended_activity};
-use crate::partial_stream::PartialStreamSlot;
 use crate::protocol::Said;
 use crate::registry::ExtgateState;
 
 use super::asserted_caller;
 use super::binding::OriginRow;
 use super::record::seq_for_origin;
+use crate::provisional::{promote, ProvisionalInputs};
+
+/// D-1085: a promoted provisional run had no read origin, so a silent result names the said's
+/// origin as silent, as the normal turn would.
+fn silent_if_no_reply(
+    mut result: opencrab_core::EngineResult,
+    origin: &str,
+) -> opencrab_core::EngineResult {
+    if result.explicit_termination.is_some()
+        && result.response.trim().is_empty()
+        && result.silent_origins.is_empty()
+    {
+        result.silent_origins.push(origin.to_string());
+    }
+    result
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_turn<R: AgentRuntime>(
@@ -32,6 +47,8 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     seq: Option<i64>,
     // Gatewayが指定した外部返信相関。coreは内容を解釈せずsayへ返す。
     reply_target: Option<&str>,
+    // D-1085: this said's own memory_sessions rows (inbound, agent prelude).
+    own_rows: Vec<i64>,
 ) {
     let locks = runtime.session_locks();
     let session_id = session_id.to_string();
@@ -49,12 +66,28 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     let caller = asserted_caller(&said.caller);
     let only_speaker = said.only_speaker;
     let model_profile = said.model_profile;
+    let provisional_id = said.provisional_id.clone();
+    // D-1085: the inputs a provisional run must have used to be promoted by this said. A said
+    // with attachments or another profile never promotes.
+    let provisional_inputs = (model_profile == TurnModelProfile::Realtime
+        && said.attachments.is_empty())
+    .then(|| ProvisionalInputs {
+        author_id: said.author_id.clone(),
+        author_label: said.author_label.clone(),
+        caller: said.caller.clone(),
+        system_context: system_context.to_string(),
+        agent_prelude: said.agent_prelude.clone(),
+        text: said.text.clone(),
+    });
     if !state.turn_queues.try_reserve(&session_id) {
         #[cfg(any(test, feature = "extgate-probe"))]
         state
             .probe
             .turn_queue_dropped
             .fetch_add(1, Ordering::SeqCst);
+        if let Some(provisional_id) = &provisional_id {
+            state.provisionals.discard(&binding_id, provisional_id);
+        }
         return;
     }
     let queues = Arc::clone(&state.turn_queues);
@@ -73,6 +106,10 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     let folded = state.is_folded(&session_id, seq);
                     state.prune_folded_below(&session_id, seq);
                     if folded {
+                        if let Some(provisional_id) = &provisional_id {
+                            promote::reject(&state, &instance_id, &binding_id, provisional_id)
+                                .await;
+                        }
                         tracing::info!(
                             session_id = %session_id,
                             origin = %origin,
@@ -108,18 +145,60 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                 };
                 let system = crate::completion::with_system_context(system, &system_context);
                 let last_continuation_say = Arc::new(std::sync::Mutex::new(None::<String>));
+                // D-1085: decided before delivery; `provisional_result` is written either way.
+                let promoted = match (&provisional_id, provisional_inputs) {
+                    (Some(provisional_id), Some(inputs)) => {
+                        promote::take_promotion(
+                            &state,
+                            promote::PromotionKey {
+                                instance_id: &instance_id,
+                                binding_id: &binding_id,
+                                provisional_id,
+                                session_id: &session_id,
+                                inputs,
+                                own_rows: &own_rows,
+                            },
+                        )
+                        .await
+                    }
+                    (Some(provisional_id), None) => {
+                        promote::reject(&state, &instance_id, &binding_id, provisional_id).await;
+                        None
+                    }
+                    (None, _) => None,
+                };
                 // D-1083: only a realtime-profile turn streams partial text; every say of the turn
-                // takes the slot.
-                let partial_stream = PartialStreamSlot::new();
+                // takes the slot. D-1085: a promoted turn delivers on the provisional run's stream.
+                let partial_stream = promoted
+                    .as_ref()
+                    .map(|taken| taken.stream.clone())
+                    .unwrap_or_default();
                 let partial_hook = (model_profile == TurnModelProfile::Realtime).then(|| {
                     crate::partial_stream::partial_text_hook(
                         Arc::clone(&state),
                         instance_id.clone(),
                         binding_id.clone(),
                         partial_stream.clone(),
+                        None,
                     )
                 });
-                let turn_res = {
+                let turn_res = if let Some(taken) = promoted {
+                    // D-1085: the promoted run is this turn's single generation; its said is now
+                    // read like a normal turn's origin.
+                    emit_activity(
+                        &state,
+                        &instance_id,
+                        &binding_id,
+                        &uuid::Uuid::new_v4().to_string(),
+                        "read",
+                        Some(origin.as_str()),
+                        None,
+                    )
+                    .await;
+                    taken.task.await.map(|turn| {
+                        turn.map(|result| result.map(|er| silent_if_no_reply(er, &origin)))
+                    })
+                } else {
                     let runtime = runtime.clone();
                     let session_id = session_id.clone();
                     let agent_id = agent_id.clone();

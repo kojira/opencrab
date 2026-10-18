@@ -144,6 +144,10 @@ pub struct RunRequest {
     /// D-1085: a lightweight turn. No tools, no web search, no per-agent reasoning effort (the
     /// provider default applies), and the first generation without tool calls ends the run.
     pub lightweight: bool,
+    /// D-1085: a provisional (speculative) run. It is not a turn yet: nothing is persisted, and
+    /// the depth-0 post-run block (snapshot, memory index build, skill usage) does not run.
+    /// LLM metrics carry purpose `provisional`. Set with [`RunRequest::as_provisional`].
+    pub provisional: bool,
 }
 
 impl RunRequest {
@@ -183,6 +187,7 @@ impl RunRequest {
             persist_turn_logs: true,
             pinned_model: None,
             lightweight: false,
+            provisional: false,
         }
     }
 
@@ -304,6 +309,12 @@ impl RunRequest {
     /// D-1085: marks this run as a lightweight turn (see [`RunRequest::lightweight`]).
     pub fn as_lightweight(mut self) -> Self {
         self.lightweight = true;
+        self
+    }
+
+    /// D-1085: marks this run as provisional (see [`RunRequest::provisional`]).
+    pub fn as_provisional(mut self) -> Self {
+        self.provisional = true;
         self
     }
 }

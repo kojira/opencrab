@@ -459,6 +459,20 @@ impl AgentRuntime for AppState {
         )
     }
 
+    fn build_provisional_conversation_string(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        limit: usize,
+        high_water: i64,
+        pending: &[opencrab_db::queries::SessionLogRow],
+    ) -> anyhow::Result<String> {
+        let conn = self.db.lock().unwrap();
+        opencrab_core::conversation::build_provisional_conversation_string(
+            &conn, session_id, agent_id, limit, high_water, pending,
+        )
+    }
+
     fn build_conversation_string(
         &self,
         session_id: &str,

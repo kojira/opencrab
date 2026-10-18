@@ -213,8 +213,11 @@ pub async fn run_agent_response(
     // depth >= 1 の再入実行は sub-engine（`spawn_subtask` が起動したサブタスク）。
     // メトリクスの purpose ラベルは旧 Discord 実装（`execute_spawn_subtask`）と同じく
     // "subtask" にする（#175 S4）。
+    // D-1085: a provisional run is labelled `provisional` so its cost stays visible.
     let current_purpose = Arc::new(std::sync::Mutex::new(
-        if depth == 0 {
+        if req.provisional {
+            "provisional"
+        } else if depth == 0 {
             "conversation"
         } else {
             "subtask"
@@ -659,7 +662,8 @@ pub async fn run_agent_response(
     // 記憶インデックスの背景ビルドとスキル利用回数は depth 0（メインターン）のみ。
     // sub-engine の内部 run では走らせない（旧 `execute_spawn_subtask` の sub-engine は
     // どちらも持たなかった。サブタスクごとに LLM 支出が増えるのを避ける）。
-    if depth == 0 {
+    // D-1085: a provisional run is not a turn yet and leaves no trace here.
+    if depth == 0 && !req.provisional {
         if let Some((high, low)) = last_waters {
             spawn_background_turn_end_snapshot(state, session_id, agent_id, high, low);
         }

@@ -221,6 +221,8 @@ pub struct ExtgateState {
     /// で正しく、非消費なので二重 take にも免疫。肥大は dequeue した seq より小さいエントリを prune
     /// （turn_queues は到着順 FIFO ＝ より小さい seq は既に dequeue 済みなので安全）。新 DB テーブルなし。
     folded_seqs: Mutex<HashMap<String, BTreeSet<i64>>>,
+    /// D-1085: provisional runs awaiting their said.
+    pub provisionals: crate::provisional::ProvisionalRegistry,
     #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
 }
@@ -242,6 +244,7 @@ impl ExtgateState {
             commands: CommandRegistry::with_builtins()
                 .expect("built-in command names must be unique"),
             folded_seqs: Mutex::new(HashMap::new()),
+            provisionals: crate::provisional::ProvisionalRegistry::new(),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
         }

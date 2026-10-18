@@ -104,10 +104,19 @@ pub fn build_recent_conversation_string(
     limit: usize,
 ) -> Result<String, anyhow::Error> {
     let logs = opencrab_db::queries::list_recent_speech_logs(conn, session_id, limit)?;
+    render_speech_rows(conn, agent_id, &logs)
+}
+
+/// The `<conversation_history>` rendering of speech rows shared by the lightweight builders.
+fn render_speech_rows(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    logs: &[opencrab_db::queries::SessionLogRow],
+) -> Result<String, anyhow::Error> {
     if logs.is_empty() {
         return Ok(NO_MESSAGES_MARKER.to_string());
     }
-    let mut refs = super::ConversationRefs::build(&logs, agent_id);
+    let mut refs = super::ConversationRefs::build(logs, agent_id);
     if let Some(agent) = opencrab_db::queries::get_agent(conn, agent_id)? {
         refs.set_agent_name(agent.name);
     }
@@ -119,6 +128,27 @@ pub fn build_recent_conversation_string(
     Ok(format!(
         "{CONVERSATION_HISTORY_START}\n{inner}\n{CONVERSATION_HISTORY_END}"
     ))
+}
+
+/// D-1085: the conversation of a provisional run: the speech rows with `id <= high_water`, then
+/// `pending` (rows that are not written yet, in order), together at most `limit` rows, in the
+/// same rendering as [`build_recent_conversation_string`]. Reads nothing newer than `high_water`.
+pub fn build_provisional_conversation_string(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    agent_id: &str,
+    limit: usize,
+    high_water: i64,
+    pending: &[opencrab_db::queries::SessionLogRow],
+) -> Result<String, anyhow::Error> {
+    let persisted = limit.saturating_sub(pending.len());
+    let mut logs = if persisted == 0 {
+        Vec::new()
+    } else {
+        opencrab_db::queries::list_recent_speech_logs_until(conn, session_id, high_water, persisted)?
+    };
+    logs.extend(pending.iter().cloned());
+    render_speech_rows(conn, agent_id, &logs)
 }
 
 /// 履歴本文（`<conversation_history>` の内側）に使える二水位。

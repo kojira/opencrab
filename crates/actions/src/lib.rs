@@ -52,8 +52,8 @@ pub use no_reply::{
 pub use run_request::{LiveInboundScope, RunRequest};
 pub use session_inbound::{
     accept_inbound, consecutive_trust_groups, delivery_effect, plan_record_only_flags,
-    prepare_session_inbound, prepare_session_inbound_write, run_session_turn, start_session_turn,
-    AdmittedInbound, DeliveryEffect, InboundAgentDrop, InboundDrop, InboundLookups,
+    prepare_session_inbound, prepare_session_inbound_write, run_provisional_turn, run_session_turn,
+    start_session_turn, AdmittedInbound, DeliveryEffect, InboundAgentDrop, InboundDrop, InboundLookups,
     InboundMessageDrop, InboundWork, NormalizedInbound, NormalizedInboundEvent,
     PrepareSessionInboundError, PrivilegeFire, WatchAccept,
 };

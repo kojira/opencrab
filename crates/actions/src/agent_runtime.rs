@@ -69,6 +69,18 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
         limit: usize,
     ) -> Result<String>;
 
+    /// D-1085: the conversation of a provisional run: the session's speech rows with
+    /// `id <= high_water`, then `pending` (rows not recorded yet), together at most `limit` rows,
+    /// rendered like [`AgentRuntime::build_recent_conversation_string`].
+    fn build_provisional_conversation_string(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        limit: usize,
+        high_water: i64,
+        pending: &[opencrab_db::queries::SessionLogRow],
+    ) -> Result<String>;
+
     /// セッションの会話履歴文字列（コンパクション込み）を組み立てる。
     ///
     /// 二重回答を防ぐ要: resume は完了本文を sink で運ばず、DB から会話を再構築する。

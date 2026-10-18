@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection};
 
 use crate::error::{ErrorCode, GateError};
 use crate::registry::ExtgateState;
@@ -6,13 +6,13 @@ use crate::registry::ExtgateState;
 use super::SaidOutcome;
 
 #[derive(Clone)]
-pub(super) struct OriginRow {
-    pub(super) instance_id: String,
-    pub(super) address: String,
-    pub(super) agent_id: String,
+pub(crate) struct OriginRow {
+    pub(crate) instance_id: String,
+    pub(crate) address: String,
+    pub(crate) agent_id: String,
 }
 
-pub(super) fn binding_said_error(
+pub(crate) fn binding_said_error(
     state: &ExtgateState,
     instance_id: &str,
     binding_id: &str,
@@ -59,8 +59,8 @@ fn binding_status(
     }
 }
 
-pub(super) fn load_origin_row(
-    tx: &Transaction<'_>,
+pub(crate) fn load_origin_row(
+    tx: &Connection,
     instance_id: &str,
     binding_id: &str,
 ) -> Result<Option<OriginRow>, GateError> {

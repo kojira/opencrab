@@ -19,3 +19,24 @@ async fn wait_not_live(h: &Harness, instance_id: &str) {
     }
     panic!("live entry が消えない: {instance_id}");
 }
+
+fn insert_named_session(h: &Harness, id: &str) {
+    let conn = h.state.db.lock().unwrap();
+    opencrab_db::queries::insert_session(
+        &conn,
+        &SessionRow {
+            id: id.into(),
+            mode: "solo".into(),
+            theme: id.into(),
+            phase: "convergent".into(),
+            turn_number: 0,
+            status: "active".into(),
+            participant_ids_json: r#"["agent-1"]"#.into(),
+            facilitator_id: None,
+            done_count: 0,
+            max_turns: None,
+            metadata_json: None,
+        },
+    )
+    .unwrap();
+}

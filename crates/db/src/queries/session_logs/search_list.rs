@@ -208,6 +208,63 @@ pub fn list_recent_speech_logs(
     Ok(rows)
 }
 
+/// D-1085: like [`list_recent_speech_logs`], limited to rows with `id <= max_id` (a snapshot of
+/// the session taken earlier). Oldest first.
+pub fn list_recent_speech_logs_until(
+    conn: &Connection,
+    session_id: &str,
+    max_id: i64,
+    limit: usize,
+) -> Result<Vec<SessionLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
+         FROM memory_sessions WHERE session_id = ?1 AND log_type = 'speech' AND id <= ?2
+         ORDER BY id DESC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![session_id, max_id, limit as i64], |row| {
+        Ok(SessionLogRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            session_id: row.get(2)?,
+            log_type: row.get(3)?,
+            content: row.get(4)?,
+            speaker_id: row.get(5)?,
+            turn_number: row.get(6)?,
+            metadata_json: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    })?;
+    let mut rows: Vec<SessionLogRow> = rows.collect::<std::result::Result<_, _>>()?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// D-1085: the largest `memory_sessions.id` of a session (0 when it has no rows).
+pub fn session_log_high_water(conn: &Connection, session_id: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(id), 0) FROM memory_sessions WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// D-1085: whether the session has a row with `id > high_water` other than `except`.
+pub fn session_has_rows_after(
+    conn: &Connection,
+    session_id: &str,
+    high_water: i64,
+    except: &[i64],
+) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT id FROM memory_sessions WHERE session_id = ?1 AND id > ?2")?;
+    let ids = stmt.query_map(params![session_id, high_water], |row| row.get::<_, i64>(0))?;
+    for id in ids {
+        if !except.contains(&id?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// List the most recent N **user** speech logs of a session (returned in id DESC order).
 ///
 /// 「ユーザーの発言」= `log_type='speech'` かつ発話者がエージェント自身でない行。

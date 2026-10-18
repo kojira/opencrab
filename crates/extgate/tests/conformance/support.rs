@@ -60,6 +60,8 @@ struct TestRuntime {
     turn_profiles: Arc<Mutex<Vec<TurnModelProfile>>>,
     /// D-1085: `RunRequest::lightweight` of every run, in run order.
     lightweight_runs: Arc<Mutex<Vec<bool>>>,
+    /// D-1085: `(RunRequest::provisional, persist_turn_logs)` of every run, in run order.
+    provisional_runs: Arc<Mutex<Vec<(bool, bool)>>>,
     last_sink: Arc<Mutex<Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>>>,
     partial_script: PartialScript,
 }
@@ -84,6 +86,7 @@ impl TestRuntime {
             turn_entered: Arc::new(Notify::new()),
             turn_profiles: Arc::new(Mutex::new(Vec::new())),
             lightweight_runs: Arc::new(Mutex::new(Vec::new())),
+            provisional_runs: Arc::new(Mutex::new(Vec::new())),
             last_sink: Arc::new(Mutex::new(None)),
             partial_script: PartialScript::default(),
         }
@@ -187,6 +190,7 @@ impl AgentRuntime for TestRuntime {
             .unwrap()
             .push(req.system_prompt.clone());
         self.lightweight_runs.lock().unwrap().push(req.lightweight);
+        self.provisional_runs.lock().unwrap().push((req.provisional, req.persist_turn_logs));
         self.reply_targets
             .lock()
             .unwrap()
@@ -270,6 +274,19 @@ impl AgentRuntime for TestRuntime {
         _limit: usize,
     ) -> anyhow::Result<String> {
         self.build_conversation_string(session_id, agent_id, "", 0, "", "")
+    }
+    fn build_provisional_conversation_string(
+        &self,
+        session_id: &str,
+        _agent_id: &str,
+        _limit: usize,
+        high_water: i64,
+        pending: &[opencrab_db::queries::SessionLogRow],
+    ) -> anyhow::Result<String> {
+        let conn = self.db.lock().unwrap();
+        let rows = opencrab_db::queries::list_session_logs_by_session(&conn, session_id)?;
+        let rows = rows.into_iter().filter(|r| r.id.is_some_and(|id| id <= high_water));
+        Ok(rows.chain(pending.iter().cloned()).map(|r| format!("{}:{}", r.log_type, r.content)).collect::<Vec<_>>().join("\n"))
     }
     fn build_conversation_string(
         &self,
@@ -768,25 +785,4 @@ async fn ready_pair(h: &Harness) -> (UnixStream, String, String) {
 fn err_code(body: &[u8]) -> String {
     let v: Value = serde_json::from_slice(body).unwrap();
     v["error"]["code"].as_str().unwrap().to_string()
-}
-
-fn insert_named_session(h: &Harness, id: &str) {
-    let conn = h.state.db.lock().unwrap();
-    opencrab_db::queries::insert_session(
-        &conn,
-        &SessionRow {
-            id: id.into(),
-            mode: "solo".into(),
-            theme: id.into(),
-            phase: "convergent".into(),
-            turn_number: 0,
-            status: "active".into(),
-            participant_ids_json: r#"["agent-1"]"#.into(),
-            facilitator_id: None,
-            done_count: 0,
-            max_turns: None,
-            metadata_json: None,
-        },
-    )
-    .unwrap();
 }
