@@ -34,6 +34,12 @@ fn silent_if_no_reply(
     result
 }
 
+/// D-1085 §12: the provisional run ended at a tool outside its read-only set without running it.
+fn stopped_at_gated_tool(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|cause| cause.downcast_ref::<opencrab_core::StoppedAtGatedTool>().is_some())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_turn<R: AgentRuntime>(
     state: Arc<ExtgateState>,
@@ -182,7 +188,8 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                         None,
                     )
                 });
-                let turn_res = if let Some(taken) = promoted {
+                let mut promoted_res = None;
+                if let Some(taken) = promoted {
                     // D-1085: the promoted run is this turn's single generation; its said is now
                     // read like a normal turn's origin.
                     emit_activity(
@@ -195,9 +202,23 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                         None,
                     )
                     .await;
-                    taken.task.await.map(|turn| {
-                        turn.map(|result| result.map(|er| silent_if_no_reply(er, &origin)))
-                    })
+                    let res = taken.task.await;
+                    // §12: the run reached a gated tool after its promotion and stopped without
+                    // running it; the normal turn below runs it (on the same partial stream).
+                    if matches!(&res, Ok(Some(Err(e))) if stopped_at_gated_tool(e)) {
+                        tracing::info!(
+                            session_id = %session_id,
+                            origin = %origin,
+                            "promoted provisional reran at gated tool"
+                        );
+                    } else {
+                        promoted_res = Some(res.map(|turn| {
+                            turn.map(|result| result.map(|er| silent_if_no_reply(er, &origin)))
+                        }));
+                    }
+                }
+                let turn_res = if let Some(res) = promoted_res {
+                    res
                 } else {
                     let runtime = runtime.clone();
                     let session_id = session_id.clone();

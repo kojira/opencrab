@@ -149,9 +149,9 @@ pub struct RunRequest {
     /// the depth-0 post-run block (snapshot, memory index build, skill usage) does not run.
     /// LLM metrics carry purpose `provisional`. Set with [`RunRequest::as_provisional`].
     pub provisional: bool,
-    /// D-1085 §12: the promotion gate of a provisional run. Tools outside
-    /// [`PROVISIONAL_READ_ONLY_TOOLS`] wait for it. From the promotion on, the run's turn logs
-    /// are recorded: the ones buffered before it first. Set with [`RunRequest::as_provisional`].
+    /// D-1085 §12: the promotion gate of a provisional run. At a tool outside
+    /// [`PROVISIONAL_READ_ONLY_TOOLS`] the run stops without running it and aborts the gate.
+    /// From the promotion on, the run's turn logs are recorded: the ones buffered before it first. Set with [`RunRequest::as_provisional`].
     pub promotion_gate: Option<opencrab_core::PromotionGate>,
 }
 

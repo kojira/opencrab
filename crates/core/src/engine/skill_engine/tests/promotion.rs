@@ -1,5 +1,5 @@
     // -----------------------------------------------------------------------
-    // D-1085 §12: a provisional run waits for its promotion before a gated tool.
+    // D-1085 §12: a provisional run stops at a gated tool without running it.
     // -----------------------------------------------------------------------
 
     fn gated_engine(
@@ -25,57 +25,37 @@
         ]
     }
 
-    async fn wait_for_calls(calls: &Arc<std::sync::Mutex<Vec<String>>>, n: usize) {
-        for _ in 0..200 {
-            if calls.lock().unwrap().len() >= n {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        panic!("expected {n} calls, got {:?}", calls.lock().unwrap());
+    fn stopped(result: &anyhow::Result<crate::EngineResult>) -> bool {
+        result.as_ref().is_err_and(|e| {
+            e.downcast_ref::<crate::engine::StoppedAtGatedTool>()
+                .is_some()
+        })
     }
 
     #[tokio::test]
-    async fn promoted_gate_runs_the_gated_tool_once_after_promotion() {
+    async fn pending_gate_stops_at_the_gated_tool_and_aborts() {
         let gate = crate::engine::PromotionGate::new();
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let engine = gated_engine(lookup_then_act(), calls.clone(), &gate);
-        let run = tokio::spawn(async move { engine.run("system", "go", "m").await });
-
-        wait_for_calls(&calls, 1).await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(*calls.lock().unwrap(), ["lookup"], "read-only runs, the gated tool waits");
-        assert!(!run.is_finished());
-
-        gate.promote();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), run)
-            .await
-            .expect("run ends after promotion")
-            .unwrap()
-            .unwrap();
-        assert_eq!(*calls.lock().unwrap(), ["lookup", "act"]);
-        assert_eq!(result.response, "済んだ。");
+        let result = engine.run("system", "go", "m").await;
+        assert!(stopped(&result), "{result:?}");
+        assert_eq!(*calls.lock().unwrap(), ["lookup"], "read-only runs, the gated tool does not");
+        assert!(!gate.promote(), "a run that stopped is never promoted");
     }
 
     #[tokio::test]
-    async fn aborted_gate_never_runs_the_gated_tool() {
+    async fn promoted_gate_still_stops_at_the_gated_tool() {
         let gate = crate::engine::PromotionGate::new();
+        assert!(gate.promote());
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let engine = gated_engine(lookup_then_act(), calls.clone(), &gate);
-        let run = tokio::spawn(async move { engine.run("system", "go", "m").await });
-
-        wait_for_calls(&calls, 1).await;
-        gate.abort();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), run)
-            .await
-            .expect("run ends after abort")
-            .unwrap();
-        assert!(result.is_err());
+        let result = engine.run("system", "go", "m").await;
+        assert!(stopped(&result), "{result:?}");
         assert_eq!(*calls.lock().unwrap(), ["lookup"]);
     }
 
     #[tokio::test]
-    async fn a_batch_with_a_gated_tool_runs_nothing_before_promotion() {
+    async fn a_batch_with_a_gated_tool_runs_nothing() {
         let gate = crate::engine::PromotionGate::new();
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let engine = gated_engine(
@@ -89,10 +69,25 @@
             calls.clone(),
             &gate,
         );
-        let run = tokio::spawn(async move { engine.run("system", "go", "m").await });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let result = engine.run("system", "go", "m").await;
+        assert!(stopped(&result), "{result:?}");
         assert!(calls.lock().unwrap().is_empty());
-        gate.abort();
-        assert!(run.await.unwrap().is_err());
-        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_only_tools_alone_run_to_the_final_text() {
+        let gate = crate::engine::PromotionGate::new();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine = gated_engine(
+            vec![
+                tool_call_response(vec![tc("c1", "lookup", serde_json::json!({}))]),
+                text_response("見つけた。"),
+            ],
+            calls.clone(),
+            &gate,
+        );
+        let result = engine.run("system", "go", "m").await.unwrap();
+        assert_eq!(result.response, "見つけた。");
+        assert_eq!(*calls.lock().unwrap(), ["lookup"]);
+        assert!(gate.promote(), "the gate is still open to promotion");
     }

@@ -322,7 +322,7 @@ impl SkillEngine {
                 // 照会/道具、またはpermission deniedの発話が1つでもあればproviderの
                 // tool_call/tool_result対を作る。許可済み発話だけでも明示終了が無ければ、
                 // 最小ackを積んで次のLLM呼び出しへ進む。
-                self.await_promotion_for(&tool_calls).await?; // D-1085 §12: provisional gate
+                self.stop_at_gated_tool(&tool_calls)?; // D-1085 §12: provisional gate
                 let next_llm_call_needed = tool_calls.iter().any(|tc| {
                     !self.is_utterance_tool(&tc.function.name)
                         || !self.is_action_allowed(&tc.function.name)

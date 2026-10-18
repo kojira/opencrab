@@ -49,7 +49,7 @@ pub use engine::{
     EngineResult, ExplicitTermination, FoldedInbound, FunctionDefinition, LiveInboundSource,
     LlmCallLog, LlmClient, LlmExchange, LlmExchangeLog, OutputTextEvent, OutputTextSink,
     PartialTextEvent, PartialTextGate, PartialTextHook, PromotionGate, ProviderToolHistory,
-    SkillEngine, ToolCall, ToolDispatcher, SYSTEM_SEGMENT_BREAK,
+    SkillEngine, StoppedAtGatedTool, ToolCall, ToolDispatcher, SYSTEM_SEGMENT_BREAK,
 };
 pub use heartbeat::HeartbeatConfig;
 pub use identity::Identity;

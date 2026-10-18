@@ -1,6 +1,6 @@
 // D-1085 §12: a lightweight turn keeps the normal tools. A provisional run runs the read-only
-// tools at once and waits for its promotion before any other tool; its rows are recorded only
-// when it is promoted, after the said's own rows.
+// tools at once and stops at any other tool without running it; its rows are recorded only when
+// it is promoted, after the said's own rows.
 
 /// A gateway that declares one inline operation `gw_act` and records its executions.
 struct RecordingOps {
@@ -118,45 +118,58 @@ async fn realtime_turn_executes_a_gateway_tool() {
     assert_eq!(f.requests.lock().unwrap().len(), 3);
 }
 
-/// §12: before the said the read-only search runs and the gateway tool waits; the promotion runs
-/// it once, and the held rows are recorded after the said's rows, in run order.
+fn stopped_at_gated_tool(result: &anyhow::Result<opencrab_core::EngineResult>) -> bool {
+    result.as_ref().is_err_and(|e| {
+        e.downcast_ref::<opencrab_core::StoppedAtGatedTool>()
+            .is_some()
+    })
+}
+
+/// Records the said's own rows (user line, prelude) as the external gate does before promotion.
+fn record_said_rows(f: &Fixture) {
+    let conn = f.state.db.lock().unwrap();
+    for row in [
+        log_row("speech", Some("u1"), "SAID-USER", None),
+        log_row("speech", Some("a1"), "SAID-PRELUDE", None),
+    ] {
+        opencrab_db::queries::insert_session_log(&conn, &row).unwrap();
+    }
+}
+
+/// §12 R1: before the said the read-only search runs, then the run stops at the gateway tool
+/// without running it. Its gate is aborted, so the said cannot promote it, and nothing is recorded.
 #[tokio::test]
-async fn promoted_provisional_runs_the_gated_tool_once_after_the_said() {
+async fn provisional_stops_at_a_gateway_tool_before_the_said() {
     let f = fixture();
     search_then_gateway_tool(&f);
     let (ops, calls) = recording_ops();
     let hw = high_water(&f);
     let gate = opencrab_core::PromotionGate::new();
     let pending = [log_row("speech", Some("u1"), "SAID-USER", None)];
-    let run = provisional_run_with(&f, hw, &pending, gate.clone(), Some(ops));
-    let said = async {
-        wait_for_requests(&f, 2).await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(calls.lock().unwrap().is_empty(), "the gateway tool waits");
-        assert_eq!(f.requests.lock().unwrap().len(), 2, "the search ran before the said");
-        assert!(rows_after(&f, hw).is_empty(), "nothing recorded before the said");
-        {
-            let conn = f.state.db.lock().unwrap();
-            opencrab_db::queries::insert_session_log(
-                &conn,
-                &log_row("speech", Some("u1"), "SAID-USER", None),
-            )
-            .unwrap();
-            opencrab_db::queries::insert_session_log(
-                &conn,
-                &log_row("speech", Some("a1"), "SAID-PRELUDE", None),
-            )
-            .unwrap();
-        }
-        gate.promote();
-    };
-    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        tokio::join!(run, said)
-    })
-    .await
-    .expect("run ends");
-    assert_eq!(result.unwrap().response, "じゃあね。");
-    assert_eq!(*calls.lock().unwrap(), ["gw_act"]);
+    let result = provisional_run_with(&f, hw, &pending, gate.clone(), Some(ops)).await;
+    assert!(stopped_at_gated_tool(&result), "{result:?}");
+    assert_eq!(f.requests.lock().unwrap().len(), 2, "the search ran, no third call");
+    assert!(calls.lock().unwrap().is_empty(), "the gateway tool did not run");
+    assert!(!gate.promote(), "not promotable");
+    assert!(rows_after(&f, hw).is_empty(), "{:?}", rows_after(&f, hw));
+}
+
+/// §12 R2: promoted while the run is still going, then the run reaches the gateway tool: it stops
+/// without running it. The search rows it held are recorded after the said's rows at the promotion.
+#[tokio::test]
+async fn promoted_provisional_stops_at_the_gated_tool_after_the_said() {
+    let f = fixture();
+    search_then_gateway_tool(&f);
+    let (ops, calls) = recording_ops();
+    let hw = high_water(&f);
+    let gate = opencrab_core::PromotionGate::new();
+    let pending = [log_row("speech", Some("u1"), "SAID-USER", None)];
+    // Promoted before the run starts: the said won the race with the whole generation.
+    record_said_rows(&f);
+    assert!(gate.promote());
+    let result = provisional_run_with(&f, hw, &pending, gate.clone(), Some(ops)).await;
+    assert!(stopped_at_gated_tool(&result), "{result:?}");
+    assert!(calls.lock().unwrap().is_empty(), "the gateway tool did not run");
     assert_eq!(
         rows_after(&f, hw),
         [
@@ -164,41 +177,53 @@ async fn promoted_provisional_runs_the_gated_tool_once_after_the_said() {
             "speech:SAID-PRELUDE",
             "call:search_memory_index",
             "result:search_memory_index",
-            "call:gw_act",
-            "result:gw_act",
         ]
     );
 }
 
-/// §12: a mismatched or cancelled provisional (gate aborted) never runs the gateway tool and
-/// records nothing.
+/// §12: a provisional with only read-only tools is promoted: the search runs before the said and
+/// its rows follow the said's rows, then the final text.
 #[tokio::test]
-async fn aborted_provisional_never_runs_the_gated_tool() {
+async fn promoted_read_only_provisional_records_its_rows_after_the_said() {
     let f = fixture();
-    search_then_gateway_tool(&f);
-    let (ops, calls) = recording_ops();
+    *f.script.lock().unwrap() = vec![tool_call_message(
+        "c1",
+        "search_memory_index",
+        serde_json::json!({"query": "x"}),
+    )];
+    *f.reply.lock().unwrap() = "覚えてるよ。".to_string();
     let hw = high_water(&f);
     let gate = opencrab_core::PromotionGate::new();
     let pending = [log_row("speech", Some("u1"), "SAID-USER", None)];
-    let run = provisional_run_with(&f, hw, &pending, gate.clone(), Some(ops));
-    let cancel = async {
+    let run = provisional_run_with(&f, hw, &pending, gate.clone(), None);
+    let said = async {
         wait_for_requests(&f, 2).await;
-        gate.abort();
+        assert!(rows_after(&f, hw).is_empty(), "nothing recorded before the said");
+        record_said_rows(&f);
+        assert!(gate.promote());
     };
     let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        tokio::join!(run, cancel)
+        tokio::join!(run, said)
     })
     .await
     .expect("run ends");
-    assert!(result.is_err());
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(calls.lock().unwrap().is_empty());
-    assert!(rows_after(&f, hw).is_empty(), "{:?}", rows_after(&f, hw));
+    assert_eq!(result.unwrap().response, "覚えてるよ。");
+    let rows = rows_after(&f, hw);
+    assert_eq!(
+        rows[..4],
+        [
+            "speech:SAID-USER",
+            "speech:SAID-PRELUDE",
+            "call:search_memory_index",
+            "result:search_memory_index",
+        ],
+        "{rows:?}"
+    );
 }
 
-/// §12: `spawn_subtask` is not read-only: the provisional run stops there until it is decided.
+/// §12: `spawn_subtask` is not read-only: the provisional run stops there and starts no subtask.
 #[tokio::test]
-async fn provisional_waits_at_spawn_subtask() {
+async fn provisional_stops_at_spawn_subtask() {
     let f = fixture();
     *f.script.lock().unwrap() = vec![tool_call_message(
         "c1",
@@ -208,27 +233,16 @@ async fn provisional_waits_at_spawn_subtask() {
     let hw = high_water(&f);
     let gate = opencrab_core::PromotionGate::new();
     let pending = [log_row("speech", Some("u1"), "SAID-USER", None)];
-    let run = provisional_run_with(&f, hw, &pending, gate.clone(), None);
-    let cancel = async {
-        wait_for_requests(&f, 1).await;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(f.requests.lock().unwrap().len(), 1, "no tool result, no next call");
-        let subtasks: i64 = f
-            .state
-            .db
-            .lock()
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM sessions WHERE id LIKE 'subtask-%'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(subtasks, 0, "no subtask started");
-        gate.abort();
-    };
-    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        tokio::join!(run, cancel)
-    })
-    .await
-    .expect("run ends");
-    assert!(result.is_err());
+    let result = provisional_run_with(&f, hw, &pending, gate.clone(), None).await;
+    assert!(stopped_at_gated_tool(&result), "{result:?}");
+    assert_eq!(f.requests.lock().unwrap().len(), 1, "no tool result, no next call");
+    let subtasks: i64 = f
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM sessions WHERE id LIKE 'subtask-%'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(subtasks, 0, "no subtask started");
+    assert!(!gate.promote());
 }

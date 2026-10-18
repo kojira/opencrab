@@ -5,7 +5,7 @@ pub mod skill_engine;
 pub mod types;
 pub mod xml_parser;
 
-pub use promotion_gate::PromotionGate;
+pub use promotion_gate::{PromotionGate, StoppedAtGatedTool};
 pub use skill_engine::{PartialTextEvent, PartialTextGate, PartialTextHook, SkillEngine};
 pub use types::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,

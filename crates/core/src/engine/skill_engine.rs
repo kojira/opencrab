@@ -196,7 +196,8 @@ impl SkillEngine {
         self.single_generation = enabled;
     }
 
-    /// D-1085 §12: a batch with a tool outside `read_only` waits for `gate` before it runs.
+    /// D-1085 §12: a batch with a tool outside `read_only` stops the run (see
+    /// [`SkillEngine::stop_at_gated_tool`]); `gate` is aborted then.
     pub fn set_promotion_gate(
         &mut self,
         gate: super::PromotionGate,
@@ -205,9 +206,10 @@ impl SkillEngine {
         self.promotion_gate = Some((gate, read_only));
     }
 
-    /// D-1085 §12: waits for the promotion before a batch with a gated tool. An aborted gate
-    /// fails the run, so none of the batch runs.
-    async fn await_promotion_for(&self, tool_calls: &[opencrab_llm_types::ToolCall]) -> Result<()> {
+    /// D-1085 §12: a provisional run never runs a tool outside its read-only set. At such a batch
+    /// it aborts its gate (a run not promoted yet never is) and ends with
+    /// [`super::promotion_gate::StoppedAtGatedTool`]; none of the batch runs.
+    fn stop_at_gated_tool(&self, tool_calls: &[opencrab_llm_types::ToolCall]) -> Result<()> {
         let Some((gate, read_only)) = &self.promotion_gate else {
             return Ok(());
         };
@@ -217,15 +219,12 @@ impl SkillEngine {
         {
             return Ok(());
         }
+        gate.abort();
         tracing::debug!(
             tools = tool_calls.len(),
-            "provisional run waits for promotion"
+            "provisional run stopped at a gated tool"
         );
-        if gate.promoted().await {
-            Ok(())
-        } else {
-            anyhow::bail!("provisional run aborted before a gated tool")
-        }
+        Err(super::promotion_gate::StoppedAtGatedTool.into())
     }
 
     /// Set the resolved assistant display identity used by canonical in-turn history rendering.

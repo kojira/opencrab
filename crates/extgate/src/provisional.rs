@@ -5,8 +5,8 @@
 //! recorded. When the committed said carries the same `provisional_id` and the same inputs, and
 //! the session gained no other row since the snapshot, the turn reuses the run's result
 //! ([`promote::take_promotion`]); otherwise the run is aborted and the normal turn runs.
-//! §12: the run waits on its promotion gate before any tool outside the read-only set; the
-//! promotion opens the gate and records the rows the run held.
+//! §12: at a tool outside the read-only set the run stops without running it and aborts its
+//! gate; a said then runs the normal turn. The promotion records the rows the run held.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

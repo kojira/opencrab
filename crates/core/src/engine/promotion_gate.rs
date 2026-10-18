@@ -1,9 +1,10 @@
 //! D-1085 §12: the promotion signal of a provisional (speculative) run.
 //!
-//! A provisional run may only run the tools the caller declares read-only. Before any other tool
-//! the engine waits on this gate ([`PromotionGate::promoted`]). The owner of the run promotes it
-//! (the committed input matched) or aborts it. Hooks registered with
-//! [`PromotionGate::on_promoted`] run once, at promotion, before any waiting run continues.
+//! A provisional run may only run the tools the caller declares read-only. At any other tool the
+//! engine stops the run without running it ([`StoppedAtGatedTool`]) and aborts this gate, so a
+//! run that has not been promoted yet never is. The owner of the run promotes it (the committed
+//! input matched) or aborts it. Hooks registered with [`PromotionGate::on_promoted`] run once, at
+//! promotion.
 
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +16,19 @@ enum GateState {
     Promoted,
     Aborted,
 }
+
+/// D-1085 §12: the error a provisional run ends with at a tool outside its read-only set. The
+/// tool did not run; the owner runs the turn normally instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoppedAtGatedTool;
+
+impl std::fmt::Display for StoppedAtGatedTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provisional run stopped at a gated tool")
+    }
+}
+
+impl std::error::Error for StoppedAtGatedTool {}
 
 type PromotedHook = Box<dyn FnOnce() + Send>;
 
@@ -54,22 +68,25 @@ impl PromotionGate {
         }
     }
 
-    /// Opens the gate: runs the registered hooks, then releases the waiting run. No effect once
-    /// promoted or aborted. The hooks run under the gate lock, so a concurrent
+    /// Opens the gate: runs the registered hooks, then marks it promoted. Returns whether the gate
+    /// is promoted: `false` when it was aborted first (the run stopped at a gated tool, or its
+    /// owner gave it up). The hooks run under the gate lock, so a concurrent
     /// [`PromotionGate::on_promoted`] runs after them. A hook must not use the gate.
-    pub fn promote(&self) {
+    pub fn promote(&self) -> bool {
         let mut hooks = self.inner.hooks.lock().expect("promotion gate lock");
-        if *self.inner.state.borrow() != GateState::Pending {
-            return;
+        match *self.inner.state.borrow() {
+            GateState::Promoted => return true,
+            GateState::Aborted => return false,
+            GateState::Pending => {}
         }
         for hook in std::mem::take(&mut *hooks) {
             hook();
         }
         self.inner.state.send_replace(GateState::Promoted);
+        true
     }
 
-    /// Closes the gate for good: drops the hooks and makes the waiting run fail. No effect once
-    /// promoted or aborted.
+    /// Closes the gate for good: drops the hooks. No effect once promoted or aborted.
     pub fn abort(&self) {
         let mut hooks = self.inner.hooks.lock().expect("promotion gate lock");
         if *self.inner.state.borrow() == GateState::Pending {
@@ -94,21 +111,6 @@ impl PromotionGate {
     pub fn is_promoted(&self) -> bool {
         *self.inner.state.borrow() == GateState::Promoted
     }
-
-    /// Waits until the gate is decided: `true` when promoted, `false` when aborted.
-    pub async fn promoted(&self) -> bool {
-        let mut rx = self.inner.state.subscribe();
-        loop {
-            match *rx.borrow_and_update() {
-                GateState::Promoted => return true,
-                GateState::Aborted => return false,
-                GateState::Pending => {}
-            }
-            if rx.changed().await.is_err() {
-                return false;
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -117,7 +119,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
-    async fn promote_runs_hooks_once_then_releases_waiters() {
+    async fn promote_runs_hooks_once() {
         let gate = PromotionGate::new();
         let ran = Arc::new(AtomicUsize::new(0));
         gate.on_promoted({
@@ -126,15 +128,10 @@ mod tests {
                 ran.fetch_add(1, Ordering::SeqCst);
             }
         });
-        let waiter = tokio::spawn({
-            let gate = gate.clone();
-            async move { gate.promoted().await }
-        });
-        tokio::task::yield_now().await;
-        assert!(!waiter.is_finished());
-        gate.promote();
-        gate.promote();
-        assert!(waiter.await.unwrap());
+        assert!(!gate.is_promoted());
+        assert!(gate.promote());
+        assert!(gate.promote());
+        assert!(gate.is_promoted());
         assert_eq!(ran.load(Ordering::SeqCst), 1);
         gate.on_promoted({
             let ran = ran.clone();
@@ -148,7 +145,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abort_drops_hooks_and_fails_waiters() {
+    async fn abort_drops_hooks() {
         let gate = PromotionGate::new();
         let ran = Arc::new(AtomicUsize::new(0));
         gate.on_promoted({
@@ -158,8 +155,7 @@ mod tests {
             }
         });
         gate.abort();
-        gate.promote();
-        assert!(!gate.promoted().await);
+        assert!(!gate.promote(), "an aborted gate is not promoted");
         assert_eq!(ran.load(Ordering::SeqCst), 0);
         assert!(!gate.is_promoted());
     }
