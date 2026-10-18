@@ -2,6 +2,7 @@ use super::normalize::NormalizedInbound;
 use crate::agent_runtime::AgentRuntime;
 use crate::transcript::TranscriptSource;
 use crate::{RunRequest, TurnModelProfile};
+use opencrab_core::conversation::RecentWindow;
 use opencrab_core::EngineResult;
 use opencrab_db::queries::SessionLogRow;
 
@@ -59,9 +60,9 @@ pub fn prepare_session_inbound_write(
 /// 会話構築に失敗したら `None`（現行どおり run しない）。`Some` は run の
 /// `Result` そのもの（成功も失敗もゲートの配送へ渡す）。
 /// `profile` は発端 said の宣言（D-1081）。ターンのモデルはここで 1 回だけ決まる。
-/// D-1085: a `Realtime` said starts a lightweight turn: the conversation is the last
-/// [`LIGHTWEIGHT_TURN_SPEECH_ROWS`] speech rows and the run is [`RunRequest::as_lightweight`].
-/// The caller passes the matching system prompt (`build_realtime_context`).
+/// D-1085: a `Realtime` said starts a lightweight turn: the conversation is the normal one cut to
+/// the last [`LIGHTWEIGHT_TURN_SPEECH_ROWS`] speech rows (§13) and the run is
+/// [`RunRequest::as_lightweight`]. The system prompt is the normal one.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_session_turn<R, Wrap, Build>(
     runtime: &R,
@@ -80,7 +81,7 @@ where
 {
     runtime.on_inbound_message(source, inbound.agent_id, &inbound.as_record());
     let history = if profile == TurnModelProfile::Realtime {
-        TurnHistory::Recent
+        TurnHistory::Recent(RecentWindow::Live)
     } else {
         TurnHistory::Full
     };
@@ -98,7 +99,8 @@ where
     .await
 }
 
-/// D-1085: how many recent speech rows a lightweight turn sees.
+/// D-1085: from how many speech rows back a lightweight turn's history starts (every retained
+/// row from there on is in it).
 pub const LIGHTWEIGHT_TURN_SPEECH_ROWS: usize = 20;
 
 /// resume / 継続ターン（直列ロック内）。会話構築 + `run_agent_response`。
@@ -135,8 +137,8 @@ where
 }
 
 /// D-1085: a provisional (speculative) realtime run, outside the session lock. Its conversation
-/// is the session's speech rows up to `high_water` followed by `pending` (the not yet recorded
-/// user line and prelude). The run is lightweight and provisional; `gate` holds its gated tools
+/// is the lightweight window (§13) of the session's rows up to `high_water` followed by `pending`
+/// (the not yet recorded user line and prelude). The run is lightweight and provisional; `gate` holds its gated tools
 /// and its turn logs until the caller promotes it (§12).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_provisional_turn<R, Build>(
@@ -158,10 +160,10 @@ where
         session_id,
         agent_id,
         TurnModelProfile::Realtime,
-        TurnHistory::Snapshot {
+        TurnHistory::Recent(RecentWindow::Snapshot {
             high_water,
             pending,
-        },
+        }),
         system_prompt,
         "",
         |raw| raw.to_string(),
@@ -174,13 +176,8 @@ where
 enum TurnHistory<'a> {
     /// The full, budgeted conversation.
     Full,
-    /// D-1085: the last [`LIGHTWEIGHT_TURN_SPEECH_ROWS`] speech rows (lightweight run).
-    Recent,
-    /// D-1085: the speech rows up to `high_water` plus `pending` (lightweight run).
-    Snapshot {
-        high_water: i64,
-        pending: &'a [SessionLogRow],
-    },
+    /// D-1085 §13: the lightweight window over the session now or over a provisional snapshot.
+    Recent(RecentWindow<'a>),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -247,20 +244,14 @@ where
             system_prompt,
             runtime_context_text,
         ),
-        TurnHistory::Recent => runtime.build_recent_conversation_string(
+        TurnHistory::Recent(window) => runtime.build_recent_window_conversation_string(
             session_id,
             agent_id,
+            &model,
+            system_prompt,
+            runtime_context_text,
             LIGHTWEIGHT_TURN_SPEECH_ROWS,
-        ),
-        TurnHistory::Snapshot {
-            high_water,
-            pending,
-        } => runtime.build_provisional_conversation_string(
-            session_id,
-            agent_id,
-            LIGHTWEIGHT_TURN_SPEECH_ROWS,
-            high_water,
-            pending,
+            window,
         ),
     };
     let raw = match raw {

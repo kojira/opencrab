@@ -80,7 +80,9 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
         text: provisional.text.clone(),
     };
     let pending = pending_rows(&row.agent_id, &session_id, &row.address, &inputs);
-    let (system, name) = runtime.build_realtime_context(&row.agent_id);
+    let caller = asserted_caller(&inputs.caller);
+    // §13: the said's normal turn builds this system prompt for the same agent and caller.
+    let (system, name) = runtime.build_agent_context(&row.agent_id, &caller);
     let system = crate::completion::with_system_context(system, &inputs.system_context);
     let stream = PartialStreamSlot::new();
     let hook = partial_text_hook(
@@ -90,7 +92,6 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
         stream.clone(),
         Some(provisional.provisional_id.clone()),
     );
-    let caller = asserted_caller(&inputs.caller);
     let gate = PromotionGate::new();
     let ops_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> =
         crate::ops_projection::ExtgateOpsGatewayActions::for_binding(

@@ -274,25 +274,20 @@ impl AgentRuntime for TestRuntime {
     fn build_agent_context(&self, agent_id: &str, _caller: &CallerIdentity) -> (String, String) {
         ("sys".into(), agent_id.to_string())
     }
-    fn build_realtime_context(&self, agent_id: &str) -> (String, String) {
-        ("realtime-sys".into(), agent_id.to_string())
-    }
-    fn build_recent_conversation_string(
+    fn build_recent_window_conversation_string(
         &self,
         session_id: &str,
         agent_id: &str,
-        _limit: usize,
+        _model: &str,
+        _system_prompt: &str,
+        _runtime_context_text: &str,
+        _speech_rows: usize,
+        window: opencrab_core::conversation::RecentWindow<'_>,
     ) -> anyhow::Result<String> {
-        self.build_conversation_string(session_id, agent_id, "", 0, "", "")
-    }
-    fn build_provisional_conversation_string(
-        &self,
-        session_id: &str,
-        _agent_id: &str,
-        _limit: usize,
-        high_water: i64,
-        pending: &[opencrab_db::queries::SessionLogRow],
-    ) -> anyhow::Result<String> {
+        let opencrab_core::conversation::RecentWindow::Snapshot { high_water, pending } = window
+        else {
+            return self.build_conversation_string(session_id, agent_id, "", 0, "", "");
+        };
         let conn = self.db.lock().unwrap();
         let rows = opencrab_db::queries::list_session_logs_by_session(&conn, session_id)?;
         let rows = rows.into_iter().filter(|r| r.id.is_some_and(|id| id <= high_water));

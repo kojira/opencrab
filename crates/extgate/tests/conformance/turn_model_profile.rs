@@ -38,10 +38,10 @@ async fn realtime_said_starts_a_realtime_turn_and_typed_said_a_default_turn() {
     );
 }
 
-/// D-1085: a realtime said runs a lightweight turn on the realtime system prompt (plus the
-/// gateway context); a typed said keeps the full agent context.
+/// D-1085: a realtime said runs a lightweight turn; §13: on the same agent context as a typed
+/// said (plus the gateway context).
 #[tokio::test]
-async fn realtime_said_runs_a_lightweight_turn_on_the_realtime_prompt() {
+async fn realtime_said_runs_a_lightweight_turn_on_the_agent_context() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
 
@@ -58,7 +58,7 @@ async fn realtime_said_runs_a_lightweight_turn_on_the_realtime_prompt() {
     assert_eq!(
         systems,
         [
-            format!("realtime-sys{}GATEWAY-CONTEXT", opencrab_core::SYSTEM_SEGMENT_BREAK),
+            format!("sys{}GATEWAY-CONTEXT", opencrab_core::SYSTEM_SEGMENT_BREAK),
             "sys".to_string(),
         ]
     );

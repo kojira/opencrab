@@ -28,6 +28,7 @@ pub use envelope::{
     DEFAULT_MEMORY_INDEX_TOKEN_CAP,
 };
 pub use error::{ContextBudgetError, CONTEXT_BUDGET_EXHAUSTED};
+pub(crate) use governor::render_conversation_rows;
 pub use governor::{
     assemble_from_snapshot, items_from_logs, take_governor_events, AssembledConversation,
     GovernorEvent, TurnGovernor,

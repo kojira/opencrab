@@ -442,34 +442,33 @@ impl AgentRuntime for AppState {
         process::build_agent_context(&conn, agent_id, caller)
     }
 
-    fn build_realtime_context(&self, agent_id: &str) -> (String, String) {
-        let conn = self.db.lock().unwrap();
-        process::build_realtime_context(&conn, agent_id)
-    }
-
-    fn build_recent_conversation_string(
+    fn build_recent_window_conversation_string(
         &self,
         session_id: &str,
         agent_id: &str,
-        limit: usize,
+        model: &str,
+        system_prompt: &str,
+        runtime_context_text: &str,
+        speech_rows: usize,
+        window: opencrab_core::conversation::RecentWindow<'_>,
     ) -> anyhow::Result<String> {
         let conn = self.db.lock().unwrap();
-        opencrab_core::conversation::build_recent_conversation_string(
-            &conn, session_id, agent_id, limit,
-        )
-    }
-
-    fn build_provisional_conversation_string(
-        &self,
-        session_id: &str,
-        agent_id: &str,
-        limit: usize,
-        high_water: i64,
-        pending: &[opencrab_db::queries::SessionLogRow],
-    ) -> anyhow::Result<String> {
-        let conn = self.db.lock().unwrap();
-        opencrab_core::conversation::build_provisional_conversation_string(
-            &conn, session_id, agent_id, limit, high_water, pending,
+        let env = resolve_runtime_envelope(
+            self,
+            &conn,
+            agent_id,
+            session_id,
+            model,
+            system_prompt,
+            runtime_context_text,
+        )?;
+        opencrab_core::conversation::build_recent_window_conversation_string(
+            &conn,
+            session_id,
+            agent_id,
+            process::include_memory_index(&env),
+            speech_rows,
+            window,
         )
     }
 

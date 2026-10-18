@@ -94,63 +94,66 @@ pub fn build_conversation_string_with_waters(
     Ok(parts.join("\n\n"))
 }
 
-/// D-1085: the conversation of a lightweight turn: the last `limit` speech rows of the session
-/// (all speakers, oldest first) in the same `<conversation_history>` rendering as a full turn.
-/// No ledger, memory index, impressions, snapshot, tool or system rows, and no compaction.
-pub fn build_recent_conversation_string(
+/// D-1085 §13: which rows a lightweight turn's history window is cut from.
+#[derive(Debug, Clone, Copy)]
+pub enum RecentWindow<'a> {
+    /// The session as it is now.
+    Live,
+    /// A provisional run's snapshot: the rows with `id <= high_water`, then `pending` (rows that
+    /// are not written yet, in order). Nothing newer than `high_water` is read.
+    Snapshot {
+        high_water: i64,
+        pending: &'a [opencrab_db::queries::SessionLogRow],
+    },
+}
+
+/// D-1085 §13: the conversation of a lightweight turn. The same prefix sections and the same row
+/// rendering as [`build_conversation_string_with_waters`]; only the history body differs: every
+/// retained row (speech, tool, system) from the `speech_rows`-th most recent speech row on, with
+/// no snapshot and no compaction.
+pub fn build_recent_window_conversation_string(
     conn: &rusqlite::Connection,
     session_id: &str,
     agent_id: &str,
-    limit: usize,
+    include_memory_index: bool,
+    speech_rows: usize,
+    window: RecentWindow<'_>,
 ) -> Result<String, anyhow::Error> {
-    let logs = opencrab_db::queries::list_recent_speech_logs(conn, session_id, limit)?;
-    render_speech_rows(conn, agent_id, &logs)
-}
-
-/// The `<conversation_history>` rendering of speech rows shared by the lightweight builders.
-fn render_speech_rows(
-    conn: &rusqlite::Connection,
-    agent_id: &str,
-    logs: &[opencrab_db::queries::SessionLogRow],
-) -> Result<String, anyhow::Error> {
-    if logs.is_empty() {
-        return Ok(NO_MESSAGES_MARKER.to_string());
+    let prefix = build_context_prefix_sections(conn, session_id, agent_id, include_memory_index);
+    let rows = opencrab_db::queries::list_session_logs_by_session(conn, session_id)?;
+    let mut all = super::retain_conversation_logs(match window {
+        RecentWindow::Live => rows,
+        RecentWindow::Snapshot { high_water, .. } => rows
+            .into_iter()
+            .filter(|row| row.id.is_some_and(|id| id <= high_water))
+            .collect(),
+    });
+    if let RecentWindow::Snapshot { pending, .. } = window {
+        all.extend(pending.iter().cloned());
     }
-    let mut refs = super::ConversationRefs::build(logs, agent_id);
-    if let Some(agent) = opencrab_db::queries::get_agent(conn, agent_id)? {
-        refs.set_agent_name(agent.name);
-    }
-    let inner = logs
+    let first = all
         .iter()
-        .map(|log| super::format_single_log_with_echo(log, None, Some(&refs)))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok(format!(
-        "{CONVERSATION_HISTORY_START}\n{inner}\n{CONVERSATION_HISTORY_END}"
-    ))
-}
-
-/// D-1085: the conversation of a provisional run: the speech rows with `id <= high_water`, then
-/// `pending` (rows that are not written yet, in order), together at most `limit` rows, in the
-/// same rendering as [`build_recent_conversation_string`]. Reads nothing newer than `high_water`.
-pub fn build_provisional_conversation_string(
-    conn: &rusqlite::Connection,
-    session_id: &str,
-    agent_id: &str,
-    limit: usize,
-    high_water: i64,
-    pending: &[opencrab_db::queries::SessionLogRow],
-) -> Result<String, anyhow::Error> {
-    let persisted = limit.saturating_sub(pending.len());
-    let mut logs = if persisted == 0 {
-        Vec::new()
+        .enumerate()
+        .rev()
+        .filter(|(_, row)| row.log_type == "speech")
+        .nth(speech_rows.saturating_sub(1))
+        .map_or(0, |(i, _)| i);
+    let inner = crate::context_budget::render_conversation_rows(
+        conn,
+        session_id,
+        agent_id,
+        &all,
+        &all[first..],
+    );
+    let mut parts = prefix.ordered();
+    if inner.is_empty() {
+        parts.push(NO_MESSAGES_MARKER.to_string());
     } else {
-        opencrab_db::queries::list_recent_speech_logs_until(
-            conn, session_id, high_water, persisted,
-        )?
-    };
-    logs.extend(pending.iter().cloned());
-    render_speech_rows(conn, agent_id, &logs)
+        parts.push(format!(
+            "{CONVERSATION_HISTORY_START}\n{inner}\n{CONVERSATION_HISTORY_END}"
+        ));
+    }
+    Ok(parts.join("\n\n"))
 }
 
 /// 履歴本文（`<conversation_history>` の内側）に使える二水位。

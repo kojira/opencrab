@@ -56,29 +56,21 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
         caller: &crate::CallerIdentity,
     ) -> (String, String);
 
-    /// D-1085: the system prompt and display name of a lightweight turn: the agent's name and
-    /// personality plus a short fixed block. No memory, rules, skills, tools or instructions.
-    fn build_realtime_context(&self, agent_id: &str) -> (String, String);
-
-    /// D-1085: the conversation of a lightweight turn: the last `limit` speech rows of the
-    /// session (both sides, oldest first). No tool, system, ledger or memory sections.
-    fn build_recent_conversation_string(
+    /// D-1085 §13: the conversation of a lightweight turn: the same prefix sections and row
+    /// rendering as [`AgentRuntime::build_conversation_string`] (same envelope decisions for
+    /// `model` / `system_prompt` / `runtime_context_text`), with the history body cut to every
+    /// retained row from the `speech_rows`-th most recent speech row of `window` on. No
+    /// compaction.
+    #[allow(clippy::too_many_arguments)]
+    fn build_recent_window_conversation_string(
         &self,
         session_id: &str,
         agent_id: &str,
-        limit: usize,
-    ) -> Result<String>;
-
-    /// D-1085: the conversation of a provisional run: the session's speech rows with
-    /// `id <= high_water`, then `pending` (rows not recorded yet), together at most `limit` rows,
-    /// rendered like [`AgentRuntime::build_recent_conversation_string`].
-    fn build_provisional_conversation_string(
-        &self,
-        session_id: &str,
-        agent_id: &str,
-        limit: usize,
-        high_water: i64,
-        pending: &[opencrab_db::queries::SessionLogRow],
+        model: &str,
+        system_prompt: &str,
+        runtime_context_text: &str,
+        speech_rows: usize,
+        window: opencrab_core::conversation::RecentWindow<'_>,
     ) -> Result<String>;
 
     /// セッションの会話履歴文字列（コンパクション込み）を組み立てる。

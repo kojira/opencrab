@@ -23,7 +23,7 @@ async fn provisional_run_with(
     gate: opencrab_core::PromotionGate,
     gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>>,
 ) -> anyhow::Result<opencrab_core::EngineResult> {
-    let (system, name) = f.state.build_realtime_context("a1");
+    let (system, name) = f.state.build_agent_context("a1", &CallerIdentity::Owner);
     run_provisional_turn(
         &f.state,
         "sess-a",

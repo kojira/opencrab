@@ -31,7 +31,7 @@ pub use budget::{
     RequestEnvelopeArgs, DEFAULT_MEMORY_INDEX_TOKEN_CAP,
 };
 pub use live_inbound::{prepend_runtime_context, prepend_runtime_context_with_message_id};
-pub use prompt::{build_agent_context, build_more_tools_index, build_realtime_context};
+pub use prompt::{build_agent_context, build_more_tools_index};
 #[allow(unused_imports)]
 pub(crate) use wiring::{
     build_turn_executor, effective_allowed_commands, resolve_run_tools_config, TurnExecutorWiring,

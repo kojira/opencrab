@@ -197,48 +197,6 @@ pub fn list_recent_session_logs_of_type(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
-/// D-1085: the most recent `limit` speech rows of a session (all speakers), oldest first.
-pub fn list_recent_speech_logs(
-    conn: &Connection,
-    session_id: &str,
-    limit: usize,
-) -> Result<Vec<SessionLogRow>> {
-    let mut rows = list_recent_session_logs_of_type(conn, session_id, "speech", limit)?;
-    rows.reverse();
-    Ok(rows)
-}
-
-/// D-1085: like [`list_recent_speech_logs`], limited to rows with `id <= max_id` (a snapshot of
-/// the session taken earlier). Oldest first.
-pub fn list_recent_speech_logs_until(
-    conn: &Connection,
-    session_id: &str,
-    max_id: i64,
-    limit: usize,
-) -> Result<Vec<SessionLogRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
-         FROM memory_sessions WHERE session_id = ?1 AND log_type = 'speech' AND id <= ?2
-         ORDER BY id DESC LIMIT ?3",
-    )?;
-    let rows = stmt.query_map(params![session_id, max_id, limit as i64], |row| {
-        Ok(SessionLogRow {
-            id: row.get(0)?,
-            agent_id: row.get(1)?,
-            session_id: row.get(2)?,
-            log_type: row.get(3)?,
-            content: row.get(4)?,
-            speaker_id: row.get(5)?,
-            turn_number: row.get(6)?,
-            metadata_json: row.get(7)?,
-            created_at: row.get(8)?,
-        })
-    })?;
-    let mut rows: Vec<SessionLogRow> = rows.collect::<std::result::Result<_, _>>()?;
-    rows.reverse();
-    Ok(rows)
-}
-
 /// D-1085: the largest `memory_sessions.id` of a session (0 when it has no rows).
 pub fn session_log_high_water(conn: &Connection, session_id: &str) -> Result<i64> {
     Ok(conn.query_row(

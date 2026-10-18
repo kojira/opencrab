@@ -245,10 +245,7 @@ async fn profile_turn_with(
     profile: TurnModelProfile,
     gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>>,
 ) -> opencrab_core::EngineResult {
-    let (system, name) = match profile {
-        TurnModelProfile::Realtime => f.state.build_realtime_context("a1"),
-        TurnModelProfile::Default => f.state.build_agent_context("a1", &CallerIdentity::Owner),
-    };
+    let (system, name) = f.state.build_agent_context("a1", &CallerIdentity::Owner);
     let system = format!(
         "{system}{}GATEWAY-CONTEXT",
         opencrab_llm_types::SYSTEM_SEGMENT_BREAK
