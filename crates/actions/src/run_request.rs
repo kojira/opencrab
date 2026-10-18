@@ -142,7 +142,7 @@ pub struct RunRequest {
     /// once at process entry with session > agent > server default.
     pub pinned_model: Option<String>,
     /// D-1085: a lightweight turn. No per-agent reasoning effort (the provider default
-    /// applies), and the first generation without tool calls ends the run. §13.1: its tools are
+    /// applies). §13.1: its tools are
     /// limited by [`RunRequest::as_lightweight`]; web search follows the agent setting.
     pub lightweight: bool,
     /// D-1085: a provisional (speculative) run. It is not a turn yet: nothing is persisted, and

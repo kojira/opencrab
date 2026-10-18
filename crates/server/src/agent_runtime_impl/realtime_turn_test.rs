@@ -1,5 +1,5 @@
 #![cfg(test)]
-//! D-1085 P1: a realtime-profile session turn is a lightweight single generation; a
+//! D-1085 P1: a realtime-profile session turn is a lightweight turn; a
 //! default-profile turn is unchanged.
 
 use std::sync::{Arc, Mutex};
@@ -364,18 +364,17 @@ fn more_tools_names(system: &str) -> Vec<String> {
 }
 
 /// §13.1 (a): a realtime turn sends one request whose system prompt is the default turn's (same
-/// builder, same agent and caller) apart from the More-tools index, without the agent effort; a
-/// text without the marker is the final response. Web search follows the agent setting.
+/// builder, same agent and caller) apart from the More-tools index, without the agent effort; the
+/// text before the marker is the final response. Web search follows the agent setting.
 #[tokio::test]
 async fn realtime_turn_has_the_system_prompt_of_a_default_turn() {
     let f = fixture();
     profile_turn(&f, TurnModelProfile::Default).await;
-    *f.reply.lock().unwrap() = "了解。".to_string();
+    *f.reply.lock().unwrap() = "了解。\nNO_REPLY".to_string();
     let result = profile_turn(&f, TurnModelProfile::Realtime).await;
     let requests = f.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 2, "one LLM call per turn");
     assert_eq!(result.response, "了解。");
-    assert!(result.explicit_termination.is_none());
 
     let (default, realtime) = (&requests[0], &requests[1]);
     assert_eq!(
@@ -578,6 +577,8 @@ async fn agent_prelude_is_the_agent_line_after_the_said_in_both_histories() {
 include!("provisional_turn_test.rs");
 // D-1085 §12: tools of lightweight and provisional runs.
 include!("provisional_gate_test.rs");
+// D-1085 §13.2: lightweight and provisional runs continue past text-only speech.
+include!("continuation_test.rs");
 
 /// D-1086: a turn request carries the session effort of its profile's slot. The realtime slot
 /// reaches realtime turns only; the default slot overrides the agent effort for default turns

@@ -698,8 +698,8 @@ impl SkillEngine {
                 continue;
             }
 
-            // tool call が無い本文も NO_REPLY が無ければ途中発話として次へ（D-1085: single は最終応答）。
-            if !termination_requested && !self.single_generation {
+            // tool call が無い本文も NO_REPLY が無ければ途中発話として次へ。
+            if !termination_requested {
                 if let Some(ref c) = content {
                     // #898 §12.2/§13.1 j: 剥がし後の途中発話を、次イテレーション前に**ループ中で
                     // 配送・保存する**（REST responses への追加 / extgate 途中発話配送 / memory_sessions
@@ -730,7 +730,6 @@ impl SkillEngine {
             // NO_REPLY生成中に新着が届いていたら、終了より新着を優先する。completion sinkは
             // 親が実行中なら別turnを起動しないため、ここが終了境界での最後の受け渡し点になる。
             let late_inbound = (self.live_inbound.as_ref())
-                .filter(|_| !self.single_generation)
                 .map(|source| source.poll_new_with_origin())
                 .unwrap_or_default();
             if !late_inbound.is_empty() {

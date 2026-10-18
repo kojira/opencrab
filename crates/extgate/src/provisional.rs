@@ -17,9 +17,11 @@ use tokio::task::JoinHandle;
 
 use crate::partial_stream::PartialStreamSlot;
 use crate::protocol::SaidCaller;
+use speech::HeldSpeech;
 
 pub(crate) mod promote;
 pub(crate) mod run;
+pub(crate) mod speech;
 
 /// How long an unpromoted provisional run is kept.
 pub const PROVISIONAL_TTL: Duration = Duration::from_secs(10);
@@ -46,6 +48,7 @@ struct Entry {
     high_water: i64,
     inputs: ProvisionalInputs,
     stream: PartialStreamSlot,
+    speech: HeldSpeech,
     gate: PromotionGate,
     task: ProvisionalTask,
 }
@@ -56,6 +59,8 @@ pub(crate) struct TakenProvisional {
     pub high_water: i64,
     pub inputs: ProvisionalInputs,
     pub stream: PartialStreamSlot,
+    /// §13.2: the run's continuation speech, held until the turn releases it.
+    pub speech: HeldSpeech,
     pub gate: PromotionGate,
     pub task: ProvisionalTask,
 }
@@ -84,6 +89,7 @@ impl ProvisionalRegistry {
         high_water: i64,
         inputs: ProvisionalInputs,
         stream: PartialStreamSlot,
+        speech: HeldSpeech,
         gate: PromotionGate,
         task: ProvisionalTask,
     ) -> u64 {
@@ -125,6 +131,7 @@ impl ProvisionalRegistry {
                 high_water,
                 inputs,
                 stream,
+                speech,
                 gate,
                 task,
             },
@@ -149,6 +156,7 @@ impl ProvisionalRegistry {
             high_water: entry.high_water,
             inputs: entry.inputs,
             stream: entry.stream,
+            speech: entry.speech,
             gate: entry.gate,
             task: entry.task,
         })

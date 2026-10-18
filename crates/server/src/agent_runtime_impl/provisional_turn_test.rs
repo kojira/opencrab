@@ -1,4 +1,4 @@
-// D-1085 P5: a provisional run is the realtime single generation on a session snapshot; it is
+// D-1085 P5: a provisional run is the realtime turn on a session snapshot; it is
 // labelled `provisional` and writes nothing to the session or the agent.
 
 use opencrab_actions::run_provisional_turn;
@@ -75,7 +75,7 @@ fn session_row_count(f: &Fixture) -> i64 {
 #[tokio::test]
 async fn provisional_conversation_is_the_snapshot_then_the_pending_lines() {
     let f = fixture();
-    *f.reply.lock().unwrap() = "はい。".to_string();
+    *f.reply.lock().unwrap() = "はい。\nNO_REPLY".to_string();
     let hw = high_water(&f);
     {
         let conn = f.state.db.lock().unwrap();
@@ -114,7 +114,7 @@ async fn provisional_conversation_is_the_snapshot_then_the_pending_lines() {
 #[tokio::test]
 async fn provisional_run_is_labelled_and_writes_nothing() {
     let f = fixture();
-    *f.reply.lock().unwrap() = "visible-skill で答えるね。".to_string();
+    *f.reply.lock().unwrap() = "visible-skill で答えるね。\nNO_REPLY".to_string();
     let rows_before = session_row_count(&f);
     let pending = [log_row("speech", Some("u1"), "PENDING-USER", None)];
     provisional_run(&f, high_water(&f), &pending).await;

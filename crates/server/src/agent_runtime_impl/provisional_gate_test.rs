@@ -65,7 +65,7 @@ fn search_then_gateway_tool(f: &Fixture) {
         tool_call_message("c1", "search_memory_index", serde_json::json!({"query": "x"})),
         tool_call_message("c2", "gw_act", serde_json::json!({})),
     ];
-    *f.reply.lock().unwrap() = "じゃあね。".to_string();
+    *f.reply.lock().unwrap() = "じゃあね。\nNO_REPLY".to_string();
 }
 
 /// Rows after `after`, labelled `speech:<content>`, `call:<tool>` or `result:<tool>`.
@@ -191,7 +191,7 @@ async fn promoted_read_only_provisional_records_its_rows_after_the_said() {
         "search_memory_index",
         serde_json::json!({"query": "x"}),
     )];
-    *f.reply.lock().unwrap() = "覚えてるよ。".to_string();
+    *f.reply.lock().unwrap() = "覚えてるよ。\nNO_REPLY".to_string();
     let hw = high_water(&f);
     let gate = opencrab_core::PromotionGate::new();
     let pending = [log_row("speech", Some("u1"), "SAID-USER", None)];
@@ -265,7 +265,7 @@ async fn r2_rerun_history_has_the_provisional_read_only_tool_rows() {
     let provisional_calls = f.requests.lock().unwrap().len();
 
     *f.script.lock().unwrap() = vec![tool_call_message("c3", "gw_act", serde_json::json!({}))];
-    *f.reply.lock().unwrap() = "じゃあね。".to_string();
+    *f.reply.lock().unwrap() = "じゃあね。\nNO_REPLY".to_string();
     profile_turn_with(&f, TurnModelProfile::Realtime, Some(ops)).await;
     let requests = f.requests.lock().unwrap().clone();
     let rerun = user_text(&requests[provisional_calls]);

@@ -188,7 +188,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                 });
                 let mut promoted_res = None;
                 if let Some(taken) = promoted {
-                    // D-1085: the promoted run is this turn's single generation; its said is now
+                    // D-1085: the promoted run is this turn's run; its said is now
                     // read like a normal turn's origin.
                     emit_activity(
                         &state,
@@ -200,6 +200,19 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                         None,
                     )
                     .await;
+                    // §13.2: the run's held continuation speech goes out first, in order.
+                    taken
+                        .speech
+                        .release(crate::provisional::speech::SayTarget {
+                            state: Arc::clone(&state),
+                            instance_id: instance_id.clone(),
+                            binding_id: binding_id.clone(),
+                            agent_id: agent_id.clone(),
+                            session_id: session_id.clone(),
+                            reply_target: reply_target.clone(),
+                            latest: Arc::clone(&last_continuation_say),
+                        })
+                        .await;
                     let res = taken.task.await;
                     // §12: the run reached a gated tool after its promotion and stopped without
                     // running it; the normal turn below runs it (on the same partial stream).

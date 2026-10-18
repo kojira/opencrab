@@ -358,7 +358,6 @@ pub async fn run_agent_response(
         max_iterations,
     );
     engine.set_assistant_history_name(agent_name.to_string());
-    engine.set_single_generation(req.lightweight);
     // D-1085 §12: a provisional run stops at any tool but the read-only set, without running it.
     if let Some(gate) = &req.promotion_gate {
         engine.set_promotion_gate(

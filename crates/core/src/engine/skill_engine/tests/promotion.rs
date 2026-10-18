@@ -12,7 +12,6 @@
             .add_result("act", successful_action_result())
             .with_call_log(calls);
         let mut engine = SkillEngine::new(Box::new(MockLlm::new(responses)), Box::new(executor), 30);
-        engine.set_single_generation(true);
         engine.set_promotion_gate(gate.clone(), ["lookup".to_string()].into_iter().collect());
         engine
     }
@@ -21,7 +20,7 @@
         vec![
             tool_call_response(vec![tc("c1", "lookup", serde_json::json!({}))]),
             tool_call_response(vec![tc("c2", "act", serde_json::json!({}))]),
-            text_response("済んだ。"),
+            final_text_response("済んだ。"),
         ]
     }
 
@@ -64,7 +63,7 @@
                     tc("c1", "lookup", serde_json::json!({})),
                     tc("c2", "act", serde_json::json!({})),
                 ]),
-                text_response("済んだ。"),
+                final_text_response("済んだ。"),
             ],
             calls.clone(),
             &gate,
@@ -81,7 +80,7 @@
         let engine = gated_engine(
             vec![
                 tool_call_response(vec![tc("c1", "lookup", serde_json::json!({}))]),
-                text_response("見つけた。"),
+                final_text_response("見つけた。"),
             ],
             calls.clone(),
             &gate,

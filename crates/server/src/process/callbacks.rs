@@ -225,51 +225,36 @@ pub(super) fn tool_result_progress_line(
 
 /// Where the turn-log callbacks write their rows.
 ///
-/// D-1085 §12: a provisional run holds its rows in memory until its promotion gate opens; the
-/// promotion writes them (after the said's own rows) and later rows go straight to the DB. An
-/// aborted run drops them with the engine.
+/// D-1085 §12: a provisional run holds its rows until its promotion gate opens. Each row waits
+/// as a hook of the gate, so the promotion writes them (after the said's own rows) in the order
+/// they were made, interleaved with the other hooks of the run (§13.2: its continuation speech);
+/// once promoted, rows go straight to the DB. An aborted gate drops them.
 #[derive(Clone)]
 pub(super) struct TurnLogWriter {
     db: opencrab_db::Db,
-    /// `Some` while the rows wait for the promotion.
-    held:
-        Option<std::sync::Arc<std::sync::Mutex<Option<Vec<opencrab_db::queries::SessionLogRow>>>>>,
+    gate: Option<opencrab_core::PromotionGate>,
 }
 
 impl TurnLogWriter {
     pub(super) fn direct(db: opencrab_db::Db) -> Self {
-        Self { db, held: None }
+        Self { db, gate: None }
     }
 
     pub(super) fn until_promoted(db: opencrab_db::Db, gate: &opencrab_core::PromotionGate) -> Self {
-        let held = std::sync::Arc::new(std::sync::Mutex::new(Some(Vec::new())));
-        let writer = Self {
+        Self {
             db,
-            held: Some(held),
-        };
-        let flush = writer.clone();
-        gate.on_promoted(move || flush.flush());
-        writer
+            gate: Some(gate.clone()),
+        }
     }
 
     pub(super) fn write(&self, row: opencrab_db::queries::SessionLogRow, what: &str) {
-        if let Some(held) = &self.held {
-            let mut held = held.lock().expect("turn log buffer lock");
-            if let Some(rows) = held.as_mut() {
-                rows.push(row);
-                return;
+        match &self.gate {
+            Some(gate) => {
+                let writer = self.clone();
+                let what = what.to_string();
+                gate.on_promoted(move || writer.insert(&row, &what));
             }
-        }
-        self.insert(&row, what);
-    }
-
-    fn flush(&self) {
-        let Some(held) = &self.held else {
-            return;
-        };
-        let mut held = held.lock().expect("turn log buffer lock");
-        for row in held.take().unwrap_or_default() {
-            self.insert(&row, "held turn log");
+            None => self.insert(&row, what),
         }
     }
 

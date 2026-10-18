@@ -487,3 +487,71 @@ async fn promoted_provisional_that_stops_at_a_gated_tool_reruns_as_the_normal_tu
     assert_eq!(say["payload"]["stream_id"], "stream-p");
     assert!(frames.iter().any(|f| f["m"] == "activity" && f["state"] == "ended"));
 }
+
+/// §13.2: sends a provisional whose run speaks 「探すね。」 as continuation speech, then waits until
+/// the run has returned.
+async fn start_speaking_provisional(h: &Harness, s: &mut UnixStream, binding_id: &str, text: &str) {
+    h.runtime.partial_script.set(vec![
+        PartialStep::Begin("stream-p"),
+        PartialStep::Text("stream-p", "探すね。"),
+        PartialStep::Say("探すね。"),
+    ]);
+    write_frame(s, &provisional_frame("p1", binding_id, PROVISIONAL_ID, text)).await;
+    wait_provisional_runs(h, 1).await;
+}
+
+fn agent_speech(h: &Harness, session_id: &str) -> Vec<String> {
+    session_rows(h, session_id)
+        .into_iter()
+        .filter(|(kind, speaker, _, _)| kind == "speech" && speaker.as_deref() == Some("agent-1"))
+        .map(|(_, _, content, _)| content)
+        .collect()
+}
+
+/// §13.2: the continuation speech of a provisional run is held: nothing is said or recorded
+/// before the said. At the promotion it is said (on the run's stream) and recorded, before the
+/// final answer.
+#[tokio::test]
+async fn promoted_provisional_says_its_held_continuation_speech_then_the_answer() {
+    let h = Harness::start().await;
+    *h.runtime.reply.lock().unwrap() = "見つけた。".into();
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    let session_id = session_id_for_binding(&binding_id);
+    start_speaking_provisional(&h, &mut s, &binding_id, "（音声）探して").await;
+    assert!(agent_speech(&h, &session_id).is_empty(), "nothing recorded before the said");
+
+    write_frame(&mut s, &committed_said("v1", &binding_id, PROVISIONAL_ID, "（音声）探して")).await;
+    assert_eq!(read_said_response(&mut s, "v1").await["m"], "ok");
+    let (result, frames) = commit_frames(&mut s, "v1").await;
+
+    assert_eq!(result["promoted"], true);
+    let says: Vec<_> = frames.iter().filter(|f| f["m"] == "say").collect();
+    assert_eq!(says.len(), 2, "{frames:?}");
+    assert_eq!(says[0]["payload"]["text"], "探すね。");
+    assert_eq!(says[0]["payload"]["stream_id"], "stream-p");
+    assert_eq!(says[1]["payload"]["text"], "見つけた。");
+    assert_eq!(agent_speech(&h, &session_id), ["探すね。", "見つけた。"]);
+}
+
+/// §13.2: a said that does not match drops the held continuation speech unsaid and unrecorded.
+#[tokio::test]
+async fn unpromoted_provisional_drops_its_held_continuation_speech() {
+    let h = Harness::start().await;
+    *h.runtime.reply.lock().unwrap() = "見つけた。".into();
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    let session_id = session_id_for_binding(&binding_id);
+    start_speaking_provisional(&h, &mut s, &binding_id, "（音声）探して").await;
+
+    write_frame(&mut s, &committed_said("v1", &binding_id, PROVISIONAL_ID, "（音声）別の話")).await;
+    assert_eq!(read_said_response(&mut s, "v1").await["m"], "ok");
+    let (result, frames) = commit_frames(&mut s, "v1").await;
+
+    assert_eq!(result["promoted"], false);
+    let says: Vec<_> = frames
+        .iter()
+        .filter(|f| f["m"] == "say")
+        .map(|f| f["payload"]["text"].clone())
+        .collect();
+    assert_eq!(says, [json!("見つけた。")], "{frames:?}");
+    assert_eq!(agent_speech(&h, &session_id), ["見つけた。"]);
+}

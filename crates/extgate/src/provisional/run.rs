@@ -93,6 +93,15 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
         Some(provisional.provisional_id.clone()),
     );
     let gate = PromotionGate::new();
+    // §13.2: continuation speech waits for the promotion like the run's other rows.
+    let speech = super::speech::HeldSpeech::new();
+    let speech_hook = speech.hook(
+        state.db.clone(),
+        gate.clone(),
+        stream.clone(),
+        row.agent_id.clone(),
+        session_id.clone(),
+    );
     let ops_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> =
         crate::ops_projection::ExtgateOpsGatewayActions::for_binding(
             Arc::clone(state),
@@ -140,7 +149,8 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
                         "extgate",
                         caller.clone(),
                     )
-                    .with_on_partial_text(hook);
+                    .with_on_partial_text(hook)
+                    .with_on_continuation_speech(speech_hook);
                     if let Some(ga) = ops_actions {
                         req = req.with_gateway_actions(ga);
                     }
@@ -157,6 +167,7 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
         high_water,
         inputs,
         stream,
+        speech,
         gate,
         task,
     );
