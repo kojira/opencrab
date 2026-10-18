@@ -699,7 +699,8 @@ impl SkillEngine {
             }
 
             // tool call が無い本文も、NO_REPLY が無ければ途中発話として積んで次へ進む。
-            if !termination_requested {
+            // D-1085: single generation ends here instead, with this text as the final response.
+            if !termination_requested && !self.single_generation {
                 if let Some(ref c) = content {
                     // #898 §12.2/§13.1 j: 剥がし後の途中発話を、次イテレーション前に**ループ中で
                     // 配送・保存する**（REST responses への追加 / extgate 途中発話配送 / memory_sessions
@@ -732,6 +733,7 @@ impl SkillEngine {
             let late_inbound = self
                 .live_inbound
                 .as_ref()
+                .filter(|_| !self.single_generation)
                 .map(|source| source.poll_new_with_origin())
                 .unwrap_or_default();
             if !late_inbound.is_empty() {
@@ -789,7 +791,8 @@ impl SkillEngine {
                 iterations,
                 tool_calls_made: total_tool_calls,
                 stopped_by_limit: false,
-                explicit_termination: Some(crate::engine::ExplicitTermination::NoReply),
+                explicit_termination: termination_requested
+                    .then_some(crate::engine::ExplicitTermination::NoReply),
                 silent_origins: silent_origins.into_silent(),
                 last_posting_utterance_id,
                 last_generation_had_continuation_speech,

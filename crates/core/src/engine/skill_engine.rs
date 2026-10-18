@@ -130,6 +130,9 @@ pub struct SkillEngine {
     /// 会話車線の二水位（#826-B）。未設定なら途中圧縮しない（テスト / sub-engine）。
     conversation_high: Option<usize>,
     conversation_low: Option<usize>,
+    /// D-1085: the first generation without tool calls ends the run. Its text (marker
+    /// stripped) is the final response; a bare `NO_REPLY` is a silent end. Off by default.
+    single_generation: bool,
 }
 
 /// LLM へ返す tool_result の退避先設定（#284）。
@@ -181,7 +184,13 @@ impl SkillEngine {
             assistant_history_name: None,
             conversation_high: None,
             conversation_low: None,
+            single_generation: false,
         }
+    }
+
+    /// D-1085: end the run at the first generation without tool calls (see the field).
+    pub fn set_single_generation(&mut self, enabled: bool) {
+        self.single_generation = enabled;
     }
 
     /// Set the resolved assistant display identity used by canonical in-turn history rendering.
