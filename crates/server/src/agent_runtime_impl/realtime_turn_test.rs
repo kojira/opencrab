@@ -474,3 +474,6 @@ async fn agent_prelude_is_the_agent_line_after_the_said_in_both_histories() {
         );
     }
 }
+
+// D-1085 P5: provisional runs share this fixture.
+include!("provisional_turn_test.rs");
