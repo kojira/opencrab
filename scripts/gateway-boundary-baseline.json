@@ -970,7 +970,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/turn.rs",
-      "line": 234,
+      "line": 258,
       "snippet": "channel_id: Some(&address),",
       "classification": "production-violation",
       "violation": "V11",

@@ -36,8 +36,11 @@ fn silent_if_no_reply(
 
 /// D-1085 §12: the provisional run ended at a tool outside its read-only set without running it.
 fn stopped_at_gated_tool(e: &anyhow::Error) -> bool {
-    e.chain()
-        .any(|cause| cause.downcast_ref::<opencrab_core::StoppedAtGatedTool>().is_some())
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<opencrab_core::StoppedAtGatedTool>()
+            .is_some()
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
