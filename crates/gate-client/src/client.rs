@@ -37,6 +37,11 @@ mod partial_tests {
 }
 
 #[cfg(test)]
+mod provisional_tests {
+    include!("client/provisional_tests.rs");
+}
+
+#[cfg(test)]
 mod transport_tests {
     include!("client/transport_tests.rs");
 }
