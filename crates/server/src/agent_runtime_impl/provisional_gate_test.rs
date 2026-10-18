@@ -246,3 +246,40 @@ async fn provisional_stops_at_spawn_subtask() {
     assert_eq!(subtasks, 0, "no subtask started");
     assert!(!gate.promote());
 }
+
+/// §13 (d): the R2 rerun (the said's normal realtime turn after the promoted provisional stopped
+/// at the gated tool) sees the provisional's read-only tool rows in its history and runs the
+/// gated tool once.
+#[tokio::test]
+async fn r2_rerun_history_has_the_provisional_read_only_tool_rows() {
+    let f = fixture();
+    search_then_gateway_tool(&f);
+    let (ops, calls) = recording_ops();
+    let hw = high_water(&f);
+    let gate = opencrab_core::PromotionGate::new();
+    let pending = [log_row("speech", Some("u1"), "SAID-USER", None)];
+    record_said_rows(&f);
+    assert!(gate.promote());
+    let result = provisional_run_with(&f, hw, &pending, gate, Some(ops.clone())).await;
+    assert!(stopped_at_gated_tool(&result), "{result:?}");
+    let provisional_calls = f.requests.lock().unwrap().len();
+
+    *f.script.lock().unwrap() = vec![tool_call_message("c3", "gw_act", serde_json::json!({}))];
+    *f.reply.lock().unwrap() = "じゃあね。".to_string();
+    profile_turn_with(&f, TurnModelProfile::Realtime, Some(ops)).await;
+    let requests = f.requests.lock().unwrap().clone();
+    let rerun = user_text(&requests[provisional_calls]);
+    let history = rerun
+        .split(opencrab_core::conversation::CONVERSATION_HISTORY_END)
+        .next()
+        .unwrap();
+    let said = history.find("SAID-PRELUDE").unwrap_or_else(|| panic!("said rows: {history}"));
+    let search = history[said..]
+        .find("search_memory_index")
+        .unwrap_or_else(|| panic!("the search rows follow the said rows: {history}"));
+    assert!(
+        history[said + search..].contains("[tool_result]"),
+        "the search result is in the history: {history}"
+    );
+    assert_eq!(*calls.lock().unwrap(), ["gw_act"], "the gated tool ran once");
+}

@@ -337,54 +337,26 @@ async fn default_profile_turn_keeps_the_full_request() {
     );
 }
 
-/// L1/L3/L4: a realtime turn sends one small request (persona, SOUL, the fixed block and the
-/// gateway context; no memory, rules, skills or instructions) without the agent effort, and a
-/// text without the marker is the final response. §12: tools and web search are the normal ones.
+/// §13 (a): a realtime turn sends one request whose system prompt is exactly the default turn's
+/// (same builder, same agent and caller), without the agent effort; a text without the marker is
+/// the final response. §12: tools and web search are the normal ones.
 #[tokio::test]
-async fn realtime_turn_is_one_small_request_with_the_normal_tools() {
+async fn realtime_turn_has_the_system_prompt_of_a_default_turn() {
     let f = fixture();
+    profile_turn(&f, TurnModelProfile::Default).await;
     *f.reply.lock().unwrap() = "了解。".to_string();
     let result = profile_turn(&f, TurnModelProfile::Realtime).await;
     let requests = f.requests.lock().unwrap().clone();
-    assert_eq!(requests.len(), 1, "one LLM call");
+    assert_eq!(requests.len(), 2, "one LLM call per turn");
     assert_eq!(result.response, "了解。");
     assert!(result.explicit_termination.is_none());
 
-    let request = &requests[0];
-    let system = system_text(request);
-    assert!(
-        system.starts_with("You are Kani (kani-persona)."),
-        "{system}"
-    );
-    assert!(system.contains("SOUL: cheerful and brief."));
-    assert!(system.contains("NO_REPLY"));
-    assert!(system.contains("<conversation_history>"));
-    assert!(system.contains("|owner"));
-    assert!(system.ends_with("GATEWAY-CONTEXT"), "{system}");
-    for absent in [
-        "## Long-term Memory",
-        "LONG-TERM-BODY",
-        "SKILL-DESCRIPTION",
-        "read_skill",
-        "INSTRUCTIONS-BODY",
-        "## Instructions",
-        "## Async Behavior",
-        "## Task Ledger",
-        "## Memory & Context",
-    ] {
-        assert!(
-            !system.contains(absent),
-            "realtime system has {absent:?}: {system}"
-        );
-    }
-    let more_tools = system.find("\n\n## More tools").expect("More tools index");
-    let fixed_len =
-        system[..more_tools].chars().count() - "SOUL: cheerful and brief.".chars().count();
-    assert!(fixed_len < 1_200, "fixed block is {fixed_len} chars");
-
-    assert!(request.reasoning_effort.is_none());
+    let (default, realtime) = (&requests[0], &requests[1]);
+    assert_eq!(system_text(realtime), system_text(default));
+    assert!(system_text(realtime).contains("INSTRUCTIONS-BODY"));
+    assert!(realtime.reasoning_effort.is_none());
     assert_eq!(
-        request.metadata.get("web_search"),
+        realtime.metadata.get("web_search"),
         Some(&serde_json::json!(true))
     );
 }
@@ -423,46 +395,53 @@ async fn realtime_turn_has_the_tools_of_a_default_turn() {
     assert_eq!(index(&requests[1]), index(&requests[0]));
 }
 
-/// L2: the realtime conversation is exactly the last 20 speech rows, oldest first, without tool
-/// or system rows.
+/// The text of the user message before `<conversation_history>` and the history body.
+fn split_history(user: &str) -> (&str, &str) {
+    let open = user
+        .find(opencrab_core::conversation::CONVERSATION_HISTORY_START)
+        .expect("history start");
+    let close = user
+        .find(opencrab_core::conversation::CONVERSATION_HISTORY_END)
+        .expect("history end");
+    let body = &user[open + opencrab_core::conversation::CONVERSATION_HISTORY_START.len()..close];
+    (&user[..open], body.trim_matches('\n'))
+}
+
+/// §13 (b): the realtime conversation is the normal builder's output (prefix sections and
+/// rendering) with the history body cut to every retained row (speech, tool and system) from the
+/// 20th most recent speech row on.
 #[tokio::test]
-async fn realtime_conversation_is_the_last_20_speech_rows() {
+async fn realtime_conversation_is_the_recent_window_of_the_normal_rendering() {
     let f = fixture();
+    // The same session through the normal builder, before the turn.
+    let normal = {
+        let conn = f.state.db.lock().unwrap();
+        opencrab_core::conversation::build_conversation_string(&conn, "sess-a", "a1", 200_000)
+            .unwrap()
+    };
     profile_turn(&f, TurnModelProfile::Realtime).await;
     let requests = f.requests.lock().unwrap().clone();
-    let user = user_text(&requests[0]);
-    let mut seen = Vec::new();
-    for i in 0..40 {
-        let label = if i % 2 == 0 {
-            format!("user-speech-{i:02}")
-        } else {
-            format!("agent-speech-{i:02}")
-        };
-        if let Some(at) = user.find(&label) {
-            seen.push((at, i));
-        }
+    let realtime_user = user_text(&requests[0]);
+    let (normal_prefix, normal_body) = split_history(&normal);
+    let (realtime_prefix, realtime_body) = split_history(&realtime_user);
+    assert_eq!(realtime_prefix, normal_prefix);
+
+    let first = normal_body
+        .find("user-speech-20")
+        .and_then(|at| normal_body[..at].rfind("\n[").map(|line| line + 1))
+        .expect("header of user-speech-20");
+    assert_eq!(realtime_body, &normal_body[first..]);
+    for present in ["tool-result-25", "tool-result-35", "system-row-35"] {
+        assert!(realtime_body.contains(present), "{present}: {realtime_body}");
     }
-    let indexes: Vec<usize> = seen.iter().map(|(_, i)| *i).collect();
-    assert_eq!(indexes, (20..40).collect::<Vec<_>>(), "{user}");
-    assert!(
-        seen.windows(2).all(|w| w[0].0 < w[1].0),
-        "oldest first: {user}"
-    );
-    for absent in [
-        "tool-call-",
-        "tool-result-",
-        "system-row-",
-        "[Memory Index]",
-    ] {
-        assert!(
-            !user.contains(absent),
-            "realtime conversation has {absent:?}: {user}"
-        );
+    for absent in ["agent-speech-19", "tool-result-15", "system-row-15"] {
+        assert!(!realtime_body.contains(absent), "{absent}: {realtime_body}");
     }
-    assert!(user.contains("<conversation_history>"));
-    assert!(
-        user.contains("[Kani]"),
-        "own rows use the agent name: {user}"
+    eprintln!(
+        "D-1085 §13 fixture sizes: system_chars={} user_chars={} history_chars={}",
+        system_text(&requests[0]).chars().count(),
+        realtime_user.chars().count(),
+        realtime_body.chars().count()
     );
 }
 
