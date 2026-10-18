@@ -425,15 +425,24 @@ async fn realtime_turn_tools_are_the_gateway_operations_and_the_lightweight_allo
     assert_eq!(offered(&requests[1]), expected);
     let default = offered(&requests[0]);
     assert!(default.len() > expected.len(), "{default:?}");
-    assert!(default.iter().any(|n| n == "create_my_skill"), "{default:?}");
+    assert!(
+        default.iter().any(|n| n == "create_my_skill"),
+        "{default:?}"
+    );
     assert!(expected.iter().all(|n| default.contains(n)), "{default:?}");
     eprintln!(
         "D-1085 §13.1 fixture tools: realtime_functions={} realtime_functions_json_chars={} \
          default_functions={} default_functions_json_chars={}",
         function_names(&requests[1]).len(),
-        serde_json::to_string(&requests[1].functions).unwrap().chars().count(),
+        serde_json::to_string(&requests[1].functions)
+            .unwrap()
+            .chars()
+            .count(),
         function_names(&requests[0]).len(),
-        serde_json::to_string(&requests[0].functions).unwrap().chars().count()
+        serde_json::to_string(&requests[0].functions)
+            .unwrap()
+            .chars()
+            .count()
     );
 }
 
@@ -481,7 +490,10 @@ async fn realtime_conversation_is_the_recent_window_without_prefix_sections() {
         .expect("header of user-speech-10");
     assert_eq!(realtime_body, &normal_body[first..]);
     for present in ["tool-result-15", "tool-result-35", "system-row-15"] {
-        assert!(realtime_body.contains(present), "{present}: {realtime_body}");
+        assert!(
+            realtime_body.contains(present),
+            "{present}: {realtime_body}"
+        );
     }
     for absent in ["agent-speech-09", "tool-result-05", "system-row-05"] {
         assert!(!realtime_body.contains(absent), "{absent}: {realtime_body}");
