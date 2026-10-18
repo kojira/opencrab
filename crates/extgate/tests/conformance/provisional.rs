@@ -1,6 +1,33 @@
 // D-1085 P5: a `provisional` frame runs the realtime said ahead of its commit without recording
 // anything; the said carrying the same `provisional_id` and inputs reuses that run.
 
+/// D-1085 §12: when armed, every run calls one gated tool. A provisional run stops there without
+/// running it (and aborts its gate) as the engine does; the normal turn runs it, counted here.
+#[derive(Clone, Default)]
+struct GatedToolScript {
+    armed: Arc<AtomicBool>,
+    executed: Arc<AtomicUsize>,
+}
+
+impl GatedToolScript {
+    fn run(
+        &self,
+        gate: Option<&opencrab_core::PromotionGate>,
+        turns: &AtomicUsize,
+    ) -> Option<anyhow::Result<EngineResult>> {
+        if !self.armed.load(Ordering::SeqCst) {
+            return None;
+        }
+        let Some(gate) = gate else {
+            self.executed.fetch_add(1, Ordering::SeqCst);
+            return None;
+        };
+        gate.abort();
+        turns.fetch_add(1, Ordering::SeqCst);
+        Some(Err(opencrab_core::StoppedAtGatedTool.into()))
+    }
+}
+
 const PROVISIONAL_ID: &str = "0b7f2c1e-4a6d-4c1b-9f3e-2d8a5b6c7e10";
 
 fn provisional_frame(id: &str, binding_id: &str, provisional_id: &str, text: &str) -> Value {
@@ -383,4 +410,80 @@ async fn provisional_run_has_the_normal_turn_tool_sources() {
     assert_eq!(sources.len(), 2, "provisional + normal turn: {sources:?}");
     assert_eq!(sources[0], (vec!["reply".to_string()], true));
     assert_eq!(sources[0], sources[1]);
+}
+
+/// §12 R1: the provisional stopped at a gated tool before the said: `promoted:false`, and the
+/// normal turn runs the tool once.
+#[tokio::test]
+async fn provisional_stopped_at_a_gated_tool_is_not_promoted() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    h.runtime.gated_tool.armed.store(true, Ordering::SeqCst);
+    start_streaming_provisional(&h, &mut s, &binding_id, "（音声）落ちて").await;
+    wait_provisional_runs(&h, 1).await;
+    assert_eq!(h.runtime.gated_tool.executed.load(Ordering::SeqCst), 0);
+
+    write_frame(&mut s, &committed_said("v1", &binding_id, PROVISIONAL_ID, "（音声）落ちて")).await;
+    assert_eq!(read_said_response(&mut s, "v1").await["m"], "ok");
+    let (result, frames) = commit_frames(&mut s, "v1").await;
+
+    assert_eq!(result["promoted"], false);
+    assert!(frames.iter().any(|f| f["m"] == "say"));
+    assert_eq!(
+        *h.runtime.provisional_runs.lock().unwrap(),
+        [(true, true), (false, false)],
+        "provisional + normal turn"
+    );
+    assert_eq!(h.runtime.gated_tool.executed.load(Ordering::SeqCst), 1);
+}
+
+/// §12 R2: promoted first, then the run reaches a gated tool and stops without running it; the
+/// said's normal turn runs it once and delivers on the provisional's stream.
+#[tokio::test]
+async fn promoted_provisional_that_stops_at_a_gated_tool_reruns_as_the_normal_turn() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    h.runtime.gated_tool.armed.store(true, Ordering::SeqCst);
+    let (release_tx, release_rx) = oneshot::channel();
+    *h.runtime.hold_rx.lock().unwrap() = Some(release_rx);
+    start_streaming_provisional(&h, &mut s, &binding_id, "（音声）落ちて").await;
+
+    write_frame(&mut s, &committed_said("v1", &binding_id, PROVISIONAL_ID, "（音声）落ちて")).await;
+    assert_eq!(read_said_response(&mut s, "v1").await["m"], "ok");
+    let mut result = None;
+    for _ in 0..40 {
+        if let Some(frame) = read_frame_opt(&mut s).await {
+            if frame["m"] == "provisional_result" {
+                result = Some(frame);
+                break;
+            }
+        }
+    }
+    assert_eq!(result.expect("provisional_result")["promoted"], true);
+    assert_eq!(h.runtime.gated_tool.executed.load(Ordering::SeqCst), 0, "not before the stop");
+    release_tx.send(()).unwrap();
+    let mut frames = Vec::new();
+    for _ in 0..60 {
+        let Some(frame) = read_frame_opt(&mut s).await else {
+            continue;
+        };
+        if frame["m"] == "say" {
+            write_frame(&mut s, &json!({"id": frame["id"], "m": "ok"})).await;
+        }
+        let ended = frame["m"] == "activity" && frame["state"] == "ended";
+        frames.push(frame);
+        if ended {
+            break;
+        }
+    }
+
+    assert_eq!(
+        *h.runtime.provisional_runs.lock().unwrap(),
+        [(true, true), (false, false)],
+        "provisional + the normal turn"
+    );
+    assert_eq!(h.runtime.gated_tool.executed.load(Ordering::SeqCst), 1);
+    let say = frames.iter().find(|f| f["m"] == "say").expect("say");
+    assert_eq!(say["payload"]["stream_id"], "stream-p");
+    assert!(frames.iter().any(|f| f["m"] == "activity" && f["state"] == "ended"));
 }

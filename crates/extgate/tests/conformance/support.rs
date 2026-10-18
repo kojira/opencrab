@@ -66,6 +66,7 @@ struct TestRuntime {
     tool_sources: Arc<Mutex<Vec<ToolSources>>>,
     last_sink: Arc<Mutex<Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>>>,
     partial_script: PartialScript,
+    gated_tool: GatedToolScript,
 }
 
 impl TestRuntime {
@@ -92,6 +93,7 @@ impl TestRuntime {
             tool_sources: Arc::new(Mutex::new(Vec::new())),
             last_sink: Arc::new(Mutex::new(None)),
             partial_script: PartialScript::default(),
+            gated_tool: GatedToolScript::default(),
         }
     }
 }
@@ -222,6 +224,7 @@ impl AgentRuntime for TestRuntime {
         if let Some(rx) = hold {
             let _ = rx.await;
         }
+        if let Some(stopped) = self.gated_tool.run(req.promotion_gate.as_ref(), &self.turns) { return stopped; }
         self.turns.fetch_add(1, Ordering::SeqCst);
         let reply = self.reply.lock().unwrap().clone();
         // R3(❌): "__FAIL__" 応答でエンジン失敗を模擬する（DeliveryEffect::Failed 経路）。
