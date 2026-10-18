@@ -124,6 +124,18 @@ pub(super) fn record_inbound(
     Ok(())
 }
 
+/// D-1085: records `said.agent_prelude` as the agent's own speech (same row shape as a
+/// delivered reply). Called right after [`record_inbound`] in the same transaction.
+pub fn record_agent_prelude(
+    conn: &Connection,
+    session_id: &str,
+    agent_id: &str,
+    prelude: &str,
+) -> Result<(), GateError> {
+    let _ = (conn, session_id, agent_id, prelude);
+    Ok(())
+}
+
 /// 当該 agent/instance/address の open binding exact 1 行だけ true。
 pub fn channel_whitelisted(
     conn: &Connection,

@@ -170,3 +170,50 @@ fn said_model_profile_is_strict_and_optional() {
         assert_eq!(profile(&frame), None, "{bad}");
     }
 }
+
+/// D-1085: `agent_prelude` is optional; a non-blank string of at most 64 chars is kept, anything
+/// else is `bad_request`.
+#[test]
+fn agent_prelude_is_optional_and_bounded() {
+    let frame = |prelude: Option<serde_json::Value>| {
+        let mut frame = serde_json::json!({
+            "id": "said-1", "m": "said",
+            "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "origin": "event-1", "author_id": "sender-1",
+            "text": "hello", "attachments": []
+        });
+        if let Some(prelude) = prelude {
+            frame["agent_prelude"] = prelude;
+        }
+        frame
+    };
+    let prelude_of = |frame: &serde_json::Value| match parse_inbound(frame) {
+        Ok(InboundMsg::Said(said)) => Ok(said.agent_prelude),
+        Ok(_) => panic!("expected said"),
+        Err(error) => Err(error.code),
+    };
+    assert_eq!(prelude_of(&frame(None)), Ok(None));
+    assert_eq!(prelude_of(&frame(Some(serde_json::Value::Null))), Ok(None));
+    assert_eq!(
+        prelude_of(&frame(Some(serde_json::json!("うん、")))),
+        Ok(Some("うん、".to_string()))
+    );
+    let longest = "あ".repeat(MAX_AGENT_PRELUDE_CHARS);
+    assert_eq!(
+        prelude_of(&frame(Some(serde_json::json!(longest)))),
+        Ok(Some(longest.clone()))
+    );
+    for bad in [
+        serde_json::json!("あ".repeat(MAX_AGENT_PRELUDE_CHARS + 1)),
+        serde_json::json!(""),
+        serde_json::json!("  "),
+        serde_json::json!(1),
+        serde_json::json!(["うん、"]),
+    ] {
+        assert_eq!(
+            prelude_of(&frame(Some(bad.clone()))),
+            Err(ErrorCode::BadRequest),
+            "{bad}"
+        );
+    }
+}

@@ -239,6 +239,10 @@ pub struct SaidContext {
     /// D-1081: kind of turn this said starts. Sent only when not `Default`.
     #[serde(skip_serializing_if = "TurnModelProfile::is_default")]
     pub model_profile: TurnModelProfile,
+    /// D-1085: text the agent already spoke to the user before this reply (at most 64 chars).
+    /// Core records it as the agent's own line right after this said; it is not delivered back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_prelude: Option<String>,
 }
 
 /// Which session model slot core uses for the turn this said starts. The gateway declares the

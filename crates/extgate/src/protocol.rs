@@ -278,6 +278,10 @@ pub struct Said {
     pub only_speaker: bool,
     /// D-1081: which session model slot a turn started by this said uses (`model_profile`).
     pub model_profile: opencrab_actions::TurnModelProfile,
+    /// D-1085: text the agent already spoke to the user before this reply (at most
+    /// [`MAX_AGENT_PRELUDE_CHARS`] chars). Core records it as the agent's own speech right after
+    /// this said and never delivers it back.
+    pub agent_prelude: Option<String>,
     pub text: String,
     pub attachments: Vec<SaidAttachment>,
 }
@@ -516,6 +520,7 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
         }
         _ => return Err(GateError::new(ErrorCode::BadRequest)),
     };
+    let agent_prelude = parse_agent_prelude(obj.get("agent_prelude"))?;
     let text = require_str(obj, "text")?;
     let attachments = parse_attachments(obj.get("attachments"))?;
     if text.is_empty() && attachments.is_empty() {
@@ -533,9 +538,18 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
         reply_target,
         only_speaker,
         model_profile,
+        agent_prelude,
         text,
         attachments,
     })
+}
+
+/// Upper bound of `said.agent_prelude`, in chars.
+pub const MAX_AGENT_PRELUDE_CHARS: usize = 64;
+
+fn parse_agent_prelude(value: Option<&Value>) -> Result<Option<String>, GateError> {
+    let _ = value;
+    Ok(None)
 }
 
 fn parse_said_caller(value: Option<&Value>) -> Result<SaidCaller, GateError> {

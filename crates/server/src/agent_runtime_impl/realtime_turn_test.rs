@@ -429,3 +429,49 @@ async fn realtime_bare_no_reply_is_silent_after_one_call() {
     );
     assert!(matches!(effect, opencrab_actions::DeliveryEffect::NoReply));
 }
+
+/// D-1085 §9: a said's agent prelude (recorded by the external gate) is the agent's own last
+/// line in both the realtime and the default conversation, right after the said, and nothing
+/// follows it.
+#[tokio::test]
+async fn agent_prelude_is_the_agent_line_after_the_said_in_both_histories() {
+    let f = fixture();
+    {
+        let conn = f.state.db.lock().unwrap();
+        opencrab_db::queries::insert_session_log_at(
+            &conn,
+            &log_row("speech", Some("u1"), "user-said-now", None),
+            "2026-10-18T11:00:00+00:00",
+        )
+        .unwrap();
+        opencrab_extgate::inbound::record_agent_prelude(&conn, "sess-a", "a1", "PRELUDE-UN")
+            .unwrap();
+    }
+    for profile in [TurnModelProfile::Realtime, TurnModelProfile::Default] {
+        f.requests.lock().unwrap().clear();
+        profile_turn(&f, profile).await;
+        let requests = f.requests.lock().unwrap().clone();
+        let user = user_text(&requests[0]);
+        let history = user
+            .split(opencrab_core::conversation::CONVERSATION_HISTORY_END)
+            .next()
+            .unwrap();
+        assert!(
+            history.contains("PRELUDE-UN"),
+            "{profile:?}: prelude in history: {history}"
+        );
+        let said = history.find("user-said-now").expect("said in history");
+        let prelude = history.find("PRELUDE-UN").unwrap();
+        assert!(said < prelude, "{profile:?}: {history}");
+        let header = history[..prelude].trim_end().lines().last().unwrap();
+        assert!(
+            header.starts_with("[Kani]"),
+            "{profile:?}: the prelude is the agent's line: {history}"
+        );
+        assert_eq!(
+            history[prelude..].trim_end(),
+            "PRELUDE-UN",
+            "{profile:?}: nothing after the prelude: {history}"
+        );
+    }
+}
