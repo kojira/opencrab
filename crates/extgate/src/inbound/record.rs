@@ -132,7 +132,26 @@ pub fn record_agent_prelude(
     agent_id: &str,
     prelude: &str,
 ) -> Result<(), GateError> {
-    let _ = (conn, session_id, agent_id, prelude);
+    insert_session_log(
+        conn,
+        &SessionLogRow {
+            id: None,
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            log_type: "speech".to_string(),
+            content: prelude.to_string(),
+            speaker_id: Some(agent_id.to_string()),
+            turn_number: None,
+            metadata_json: Some(
+                serde_json::json!({
+                    "source": TranscriptSource::new("external", "external_response").reply()
+                })
+                .to_string(),
+            ),
+            created_at: None,
+        },
+    )
+    .map_err(|e| GateError::store_logged("said.agent_prelude_insert", e))?;
     Ok(())
 }
 

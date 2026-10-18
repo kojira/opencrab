@@ -187,10 +187,10 @@ fn agent_prelude_is_optional_and_bounded() {
         }
         frame
     };
-    let prelude_of = |frame: &serde_json::Value| match parse_inbound(frame) {
-        Ok(InboundMsg::Said(said)) => Ok(said.agent_prelude),
-        Ok(_) => panic!("expected said"),
-        Err(error) => Err(error.code),
+    let prelude_of = |frame: &serde_json::Value| match parse_inbound(frame).unwrap() {
+        InboundMsg::Said(said) => Ok(said.agent_prelude),
+        InboundMsg::Invalid { code, .. } => Err(code),
+        _ => panic!("expected said"),
     };
     assert_eq!(prelude_of(&frame(None)), Ok(None));
     assert_eq!(prelude_of(&frame(Some(serde_json::Value::Null))), Ok(None));

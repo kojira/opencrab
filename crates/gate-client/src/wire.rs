@@ -316,6 +316,9 @@ pub fn said_frame_with_context(
             frame["model_profile"] =
                 serde_json::to_value(context.model_profile).expect("profile serializes");
         }
+        if let Some(prelude) = &context.agent_prelude {
+            frame["agent_prelude"] = json!(prelude);
+        }
     }
     frame
 }

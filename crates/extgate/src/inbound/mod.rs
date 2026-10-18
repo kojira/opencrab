@@ -175,7 +175,14 @@ pub fn process_said<R: AgentRuntime>(
         |_| (),
         |_, admitted| {
             if admitted.admitted_agent_ids.contains(&row.agent_id) {
-                match record_inbound(&tx, &session_id, &row, said, &said.text) {
+                let recorded_said = record_inbound(&tx, &session_id, &row, said, &said.text)
+                    .and_then(|()| match &said.agent_prelude {
+                        Some(prelude) => {
+                            record_agent_prelude(&tx, &session_id, &row.agent_id, prelude)
+                        }
+                        None => Ok(()),
+                    });
+                match recorded_said {
                     Ok(()) => recorded.set(true),
                     Err(_) => record_failed.set(true),
                 }

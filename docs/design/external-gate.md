@@ -57,6 +57,8 @@ ErrDetail  = string | null
 
 > 注: 受信の local file 添付は [DC-953](../design-generic-inbound-attachments.md) で追加された。送信側では、operation 宣言の `"format": "workspace-file"` field を core が outbox コピーの descriptor `{id,name,media_type,size,sha256,local_path}`（`local_path` は outbox root 相対）へ書き換えて invoke payload に載せる（[D-1079a](../design-generic-outbound-attachments.md)）。byte や base64 は frame に載せない。
 
+> 注: `said.agent_prelude`（任意、空白のみ不可、64 文字以下、超過は `bad_request`）は、この said への返事より前に agent がすでに相手へ発した短い言葉である（D-1085）。core は said の inbound 記録の直後に、同じ origin transaction 内で agent 自身の `speech` 行（返信と同じ形）として記録する。say としては送り返さない。無い場合の挙動は従来と同じ。
+
 ### 3.3 message の完全表
 
 表の field は全て必須である。追加 field は §3.1 の規則で無視する。

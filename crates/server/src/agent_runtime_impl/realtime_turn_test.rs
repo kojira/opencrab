@@ -435,20 +435,19 @@ async fn realtime_bare_no_reply_is_silent_after_one_call() {
 /// follows it.
 #[tokio::test]
 async fn agent_prelude_is_the_agent_line_after_the_said_in_both_histories() {
-    let f = fixture();
-    {
-        let conn = f.state.db.lock().unwrap();
-        opencrab_db::queries::insert_session_log_at(
-            &conn,
-            &log_row("speech", Some("u1"), "user-said-now", None),
-            "2026-10-18T11:00:00+00:00",
-        )
-        .unwrap();
-        opencrab_extgate::inbound::record_agent_prelude(&conn, "sess-a", "a1", "PRELUDE-UN")
-            .unwrap();
-    }
     for profile in [TurnModelProfile::Realtime, TurnModelProfile::Default] {
-        f.requests.lock().unwrap().clear();
+        let f = fixture();
+        {
+            let conn = f.state.db.lock().unwrap();
+            opencrab_db::queries::insert_session_log_at(
+                &conn,
+                &log_row("speech", Some("u1"), "user-said-now", None),
+                "2026-10-18T11:00:00+00:00",
+            )
+            .unwrap();
+            opencrab_extgate::inbound::record_agent_prelude(&conn, "sess-a", "a1", "PRELUDE-UN")
+                .unwrap();
+        }
         profile_turn(&f, profile).await;
         let requests = f.requests.lock().unwrap().clone();
         let user = user_text(&requests[0]);

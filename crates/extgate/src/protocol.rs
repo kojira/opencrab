@@ -548,8 +548,15 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
 pub const MAX_AGENT_PRELUDE_CHARS: usize = 64;
 
 fn parse_agent_prelude(value: Option<&Value>) -> Result<Option<String>, GateError> {
-    let _ = value;
-    Ok(None)
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text))
+            if !text.trim().is_empty() && text.chars().count() <= MAX_AGENT_PRELUDE_CHARS =>
+        {
+            Ok(Some(text.clone()))
+        }
+        _ => Err(GateError::new(ErrorCode::BadRequest)),
+    }
 }
 
 fn parse_said_caller(value: Option<&Value>) -> Result<SaidCaller, GateError> {
