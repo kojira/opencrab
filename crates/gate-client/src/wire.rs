@@ -7,7 +7,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::json::{parse_object_no_dup, JsonError};
 
 mod partial;
+mod turn_profile;
 pub use partial::{say_stream_id, Partial};
+pub use turn_profile::TurnModelProfile;
 
 /// LF 込み上限。
 pub const MAX_FRAME: usize = 1_048_576;
@@ -243,23 +245,6 @@ pub struct SaidContext {
     /// Core records it as the agent's own line right after this said; it is not delivered back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_prelude: Option<String>,
-}
-
-/// Which session model slot core uses for the turn this said starts. The gateway declares the
-/// interaction kind; core owns the model.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnModelProfile {
-    #[default]
-    Default,
-    /// Latency-sensitive conversational turn.
-    Realtime,
-}
-
-impl TurnModelProfile {
-    fn is_default(&self) -> bool {
-        *self == Self::Default
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

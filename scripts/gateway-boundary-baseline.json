@@ -420,7 +420,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 548,
+      "line": 569,
       "snippet": "Some(\"trusted_user\") => Ok(SaidCaller::TrustedUser),",
       "classification": "production-violation",
       "violation": "V11",
@@ -430,7 +430,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/gate-client/src/wire.rs",
-      "line": 267,
+      "line": 256,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
