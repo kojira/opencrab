@@ -9904,18 +9904,6 @@
           "error": "query is required",
           "success": false
         },
-        "tool": "search_memory_index"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "query"
-        ],
-        "result": {
-          "data": null,
-          "error": "query is required",
-          "success": false
-        },
         "tool": "search_my_history"
       },
       {
@@ -13609,6 +13597,8 @@
         "result": {
           "data": {
             "count": 5,
+            "date_from": null,
+            "date_to": null,
             "nodes": [
               {
                 "child_count": 0,
@@ -15135,6 +15125,12 @@
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
         "tool": "reflect_and_learn"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "search_memory_index"
       },
       {
         "facet": "missing_arguments",

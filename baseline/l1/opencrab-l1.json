@@ -2596,9 +2596,17 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "記憶インデックスをキーワードで検索する（タイトル・要約・キーワードの全文検索）。ヒットしたノードの short_id を retrieve_memory_nodes に渡すと当時の生ログまで遡れる。生ログ自体を直接検索したい場合は search_my_history を使う。",
+          "description": "記憶インデックスをキーワードで検索する（タイトル・要約・キーワードの全文検索）。date_from / date_to で期間を絞れる（例: 10月なら date_from=\"2026-10\", date_to=\"2026-10\"）。期間だけ指定すると、その期間のノードを新しい順に返す。ヒットしたノードの short_id を retrieve_memory_nodes に渡すと当時の生ログまで遡れる。生ログ自体を直接検索したい場合は search_my_history を使う。",
           "input_schema": {
             "properties": {
+              "date_from": {
+                "description": "この日以降（YYYY-MM-DD か YYYY-MM。その日・その月を含む）",
+                "type": "string"
+              },
+              "date_to": {
+                "description": "この日まで（YYYY-MM-DD か YYYY-MM。その日・その月を含む）",
+                "type": "string"
+              },
               "limit": {
                 "default": 10,
                 "description": "最大件数（デフォルト: 10、最大: 25）",
@@ -2609,13 +2617,10 @@
                 "type": "string"
               },
               "query": {
-                "description": "検索キーワード（空白区切りで複数可）",
+                "description": "検索キーワード（空白区切りで複数可）。date_from / date_to があれば省略できる",
                 "type": "string"
               }
             },
-            "required": [
-              "query"
-            ],
             "type": "object"
           },
           "name": "search_memory_index",

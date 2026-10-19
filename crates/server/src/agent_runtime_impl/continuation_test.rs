@@ -48,43 +48,7 @@ async fn turn_with_speech(
     profile: TurnModelProfile,
     hook: opencrab_actions::run_request::ContinuationSpeechHook,
 ) -> opencrab_core::EngineResult {
-    let (system, name) = f.state.build_agent_context("a1", &CallerIdentity::Owner);
-    let inbound = NormalizedInbound {
-        session_id: "sess-a",
-        agent_id: "a1",
-        sender_id: "u1",
-        sender_name: "",
-        avatar_url: None,
-        channel_id: None,
-        pubkey: None,
-        text: "hi",
-        image_urls: &[],
-        external_id: "origin-1",
-    };
-    start_session_turn(
-        &f.state,
-        TranscriptSource::new("external", "external_response"),
-        &inbound,
-        profile,
-        &system,
-        "",
-        |raw| raw.to_string(),
-        |conversation| {
-            RunRequest::new(
-                "a1",
-                name.clone(),
-                "sess-a",
-                system.clone(),
-                conversation,
-                "test",
-                CallerIdentity::Owner,
-            )
-            .with_on_continuation_speech(hook)
-        },
-    )
-    .await
-    .expect("turn ran")
-    .expect("turn succeeded")
+    profile_turn_built(f, profile, |req| req.with_on_continuation_speech(hook)).await
 }
 
 /// §13.2: a realtime turn speaks 「探すね。」, searches, and answers; the default profile does the

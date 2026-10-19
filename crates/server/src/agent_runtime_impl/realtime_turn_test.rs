@@ -245,6 +245,19 @@ async fn profile_turn_with(
     profile: TurnModelProfile,
     gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>>,
 ) -> opencrab_core::EngineResult {
+    profile_turn_built(f, profile, |req| match gateway_actions {
+        Some(ga) => req.with_gateway_actions(ga),
+        None => req,
+    })
+    .await
+}
+
+/// [`profile_turn`] with `extend` applied to the run request.
+async fn profile_turn_built(
+    f: &Fixture,
+    profile: TurnModelProfile,
+    extend: impl FnOnce(RunRequest) -> RunRequest,
+) -> opencrab_core::EngineResult {
     let (system, name) = f.state.build_agent_context("a1", &CallerIdentity::Owner);
     let system = format!(
         "{system}{}GATEWAY-CONTEXT",
@@ -271,7 +284,7 @@ async fn profile_turn_with(
         "",
         |raw| raw.to_string(),
         |conversation| {
-            let req = RunRequest::new(
+            extend(RunRequest::new(
                 "a1",
                 name.clone(),
                 "sess-a",
@@ -279,11 +292,7 @@ async fn profile_turn_with(
                 conversation,
                 "test",
                 CallerIdentity::Owner,
-            );
-            match gateway_actions {
-                Some(ga) => req.with_gateway_actions(ga),
-                None => req,
-            }
+            ))
         },
     )
     .await
