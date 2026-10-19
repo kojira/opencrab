@@ -57,17 +57,11 @@ mod window_builder_tests {
     #[test]
     fn window_none_is_the_default_conversation() {
         let conn = seed_short_session();
-        let default = build_conversation_string_with_waters(&conn, SESSION, AGENT, 45_000, 20_000,
-            false)
-        .unwrap();
+        let default =
+            build_conversation_string_with_waters(&conn, SESSION, AGENT, 45_000, 20_000, false)
+                .unwrap();
         let windowed = build_conversation_string_with_window(
-            &conn,
-            SESSION,
-            AGENT,
-            45_000,
-            20_000,
-            false,
-            None,
+            &conn, SESSION, AGENT, 45_000, 20_000, false, None,
         )
         .unwrap();
         assert_eq!(windowed, default);
@@ -77,9 +71,9 @@ mod window_builder_tests {
     #[test]
     fn a_window_longer_than_the_session_renders_every_retained_row() {
         let conn = seed_short_session();
-        let default = build_conversation_string_with_waters(&conn, SESSION, AGENT, 45_000, 20_000,
-            false)
-        .unwrap();
+        let default =
+            build_conversation_string_with_waters(&conn, SESSION, AGENT, 45_000, 20_000, false)
+                .unwrap();
         let windowed = build_conversation_string_with_window(
             &conn,
             SESSION,
