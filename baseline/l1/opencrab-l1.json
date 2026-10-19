@@ -2613,7 +2613,7 @@
                 "type": "integer"
               },
               "node_type": {
-                "description": "ノード種別で絞り込む（topic / period / session / daily など。省略時は全種別）",
+                "description": "ノード種別で絞り込む（topic / period / session / unit / category / meta / root。省略時は全種別）",
                 "type": "string"
               },
               "query": {

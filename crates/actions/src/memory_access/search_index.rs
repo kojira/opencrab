@@ -42,7 +42,7 @@ impl Action for SearchMemoryIndexAction {
                 },
                 "node_type": {
                     "type": "string",
-                    "description": "ノード種別で絞り込む（topic / period / session / daily など。省略時は全種別）"
+                    "description": "ノード種別で絞り込む（topic / period / session / unit / category / meta / root。省略時は全種別）"
                 }
             }
         })
@@ -169,6 +169,10 @@ mod tests {
     }
 
     fn seed(ctx: &ActionContext, id: &str, from: &str, to: &str) {
+        seed_dates(ctx, id, Some(from), Some(to));
+    }
+
+    fn seed_dates(ctx: &ActionContext, id: &str, from: Option<&str>, to: Option<&str>) {
         let conn = ctx.db.lock().unwrap();
         opencrab_db::queries::insert_index_node(
             &conn,
@@ -183,13 +187,13 @@ mod tests {
                 start_log_id: None,
                 end_log_id: None,
                 source_session_id: None,
-                date_from: Some(from.to_string()),
-                date_to: Some(to.to_string()),
+                date_from: from.map(str::to_string),
+                date_to: to.map(str::to_string),
                 depth: 3,
                 child_count: 0,
                 token_count: 0,
-                created_at: format!("{from}T00:00:00Z"),
-                updated_at: format!("{from}T00:00:00Z"),
+                created_at: "2026-11-01T00:00:00Z".to_string(),
+                updated_at: "2026-11-01T00:00:00Z".to_string(),
                 short_id: Some(id.to_string()),
                 keywords_json: "[]".to_string(),
                 summary_refreshed_at: None,
@@ -209,19 +213,37 @@ mod tests {
     }
 
     /// D-1085 §13.3: a month (`YYYY-MM`) or day range without a query lists the nodes in it
-    /// newest first; with a query it narrows the keyword hits.
+    /// newest first (a `YYYY-MM` date_to reaches the month's last day, a node with only
+    /// date_from is that day, an undated node is never in a range); with a query it narrows the
+    /// keyword hits.
     #[tokio::test]
     async fn search_memory_index_by_date_range() {
         let ctx = test_context();
         seed(&ctx, "sep", "2026-09-20", "2026-09-30");
         seed(&ctx, "oct-a", "2026-10-03", "2026-10-03");
         seed(&ctx, "oct-b", "2026-10-18", "2026-10-18");
+        seed(&ctx, "oct-end", "2026-10-31", "2026-10-31");
+        seed_dates(&ctx, "oct-open", Some("2026-10-25"), None);
+        seed(&ctx, "nov", "2026-11-01", "2026-11-01");
+        seed_dates(&ctx, "undated", None, None);
         let action = SearchMemoryIndexAction;
 
         let r = action
             .execute(&json!({"date_from": "2026-10", "date_to": "2026-10"}), &ctx)
             .await;
-        assert_eq!(ids(&r), ["oct-b", "oct-a"]);
+        assert_eq!(ids(&r), ["oct-end", "oct-open", "oct-b", "oct-a"]);
+
+        let r = action
+            .execute(
+                &json!({"date_from": "2026-10", "date_to": "2026-10", "limit": 2, "node_type": "topic"}),
+                &ctx,
+            )
+            .await;
+        assert_eq!(ids(&r), ["oct-end", "oct-open"]);
+        let r = action
+            .execute(&json!({"date_to": "2026-10", "node_type": "period"}), &ctx)
+            .await;
+        assert_eq!(ids(&r), Vec::<String>::new());
 
         let r = action
             .execute(&json!({"query": "カレー", "date_to": "2026-09-30"}), &ctx)
@@ -229,9 +251,11 @@ mod tests {
         assert_eq!(ids(&r), ["sep"]);
 
         let r = action
-            .execute(&json!({"date_from": "2026-10-10"}), &ctx)
+            .execute(&json!({"query": "カレー", "date_from": "2026-10-20"}), &ctx)
             .await;
-        assert_eq!(ids(&r), ["oct-b"]);
+        let mut hits = ids(&r);
+        hits.sort();
+        assert_eq!(hits, ["nov", "oct-end", "oct-open"]);
 
         assert!(
             !action.execute(&json!({}), &ctx).await.success,
