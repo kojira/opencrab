@@ -488,6 +488,13 @@ async fn realtime_conversation_is_the_recent_window_without_prefix_sections() {
     let realtime_user = user_text(&requests[0]);
     let (normal_prefix, normal_body) = split_history(&normal);
     let (realtime_prefix, realtime_body) = split_history(&realtime_user);
+    // Set `D1085_DUMP_RT` to write the conversations this turn was built from, as the default
+    // turn's `D1085_DUMP` does, for a byte comparison across a builder change.
+    if let Ok(dir) = std::env::var("D1085_DUMP_RT") {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(format!("{dir}/normal.txt"), &normal).unwrap();
+        std::fs::write(format!("{dir}/realtime_user.txt"), &realtime_user).unwrap();
+    }
     assert!(normal_prefix.contains("LEDGER-GOAL"), "{normal_prefix}");
     assert_eq!(realtime_prefix, "");
     assert!(!realtime_user.contains("LEDGER-GOAL"));

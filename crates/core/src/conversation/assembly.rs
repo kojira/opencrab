@@ -67,6 +67,9 @@ pub fn build_conversation_string_with_memory_index(
 }
 
 /// 二水位を明示して会話を組む（#826-B）。開始は組立と検査。高水位超過のときだけ刈る。
+///
+/// 既定プロフィールの履歴（前置・snapshot+差分・圧縮）。窓を使う軽量ターンは
+/// [`build_conversation_string_with_window`] に [`ConversationWindow`] を渡す。
 pub fn build_conversation_string_with_waters(
     conn: &rusqlite::Connection,
     session_id: &str,
@@ -75,6 +78,35 @@ pub fn build_conversation_string_with_waters(
     conversation_low: usize,
     include_memory_index: bool,
 ) -> Result<String, anyhow::Error> {
+    build_conversation_string_with_window(
+        conn,
+        session_id,
+        agent_id,
+        conversation_high,
+        conversation_low,
+        include_memory_index,
+        None,
+    )
+}
+
+/// 会話文字列の唯一の組立。`window` が履歴の取り方だけを選ぶ。
+///
+/// - `None`: 既定の履歴。前置（台帳・Memory Index・人物像）、snapshot+差分、圧縮。
+/// - `Some`: 窓の履歴（D-1085 §13.1）。前置なし・圧縮なしで、窓の行だけを同じ描画器で並べる。
+///
+/// 水位（`conversation_*`）と `include_memory_index` は `None` のときだけ使う。
+pub fn build_conversation_string_with_window(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    agent_id: &str,
+    conversation_high: usize,
+    conversation_low: usize,
+    include_memory_index: bool,
+    window: Option<ConversationWindow<'_>>,
+) -> Result<String, anyhow::Error> {
+    if let Some(window) = window {
+        return build_windowed_history(conn, session_id, agent_id, window);
+    }
     let prefix = build_context_prefix_sections(conn, session_id, agent_id, include_memory_index);
     let (inner_budget, inner_low) =
         history_waters_after_prefix(&prefix, conversation_high, conversation_low);
@@ -107,26 +139,36 @@ pub enum RecentWindow<'a> {
     },
 }
 
-/// D-1085 §13.1: the conversation of a lightweight turn: the row rendering of
-/// [`build_conversation_string_with_waters`] over every retained row (speech, tool, system) from
-/// the `speech_rows`-th most recent speech row on. No prefix sections (ledger, memory index,
-/// impressions), no snapshot and no compaction.
-pub fn build_recent_window_conversation_string(
+/// D-1085 §13.1: the history a lightweight turn renders — which rows, and from how many speech
+/// rows back.
+#[derive(Debug, Clone, Copy)]
+pub struct ConversationWindow<'a> {
+    /// Start at the `speech_rows`-th most recent speech row (a window always starts at a speech
+    /// row, so tool and system rows do not push a whole turn out of it).
+    pub speech_rows: usize,
+    /// The rows the window is cut from.
+    pub rows: RecentWindow<'a>,
+}
+
+/// D-1085 §13.1: the row rendering of [`build_conversation_string_with_waters`] over every
+/// retained row (speech, tool, system) from the window's speech row on. No prefix sections
+/// (ledger, memory index, impressions), no snapshot and no compaction.
+fn build_windowed_history(
     conn: &rusqlite::Connection,
     session_id: &str,
     agent_id: &str,
-    speech_rows: usize,
-    window: RecentWindow<'_>,
+    window: ConversationWindow<'_>,
 ) -> Result<String, anyhow::Error> {
+    let speech_rows = window.speech_rows;
     let rows = opencrab_db::queries::list_session_logs_by_session(conn, session_id)?;
-    let mut all = super::retain_conversation_logs(match window {
+    let mut all = super::retain_conversation_logs(match window.rows {
         RecentWindow::Live => rows,
         RecentWindow::Snapshot { high_water, .. } => rows
             .into_iter()
             .filter(|row| row.id.is_some_and(|id| id <= high_water))
             .collect(),
     });
-    if let RecentWindow::Snapshot { pending, .. } = window {
+    if let RecentWindow::Snapshot { pending, .. } = window.rows {
         all.extend(pending.iter().cloned());
     }
     let first = all

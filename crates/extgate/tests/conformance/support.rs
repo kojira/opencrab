@@ -192,22 +192,6 @@ impl AgentRuntime for TestRuntime {
     fn build_agent_context(&self, agent_id: &str, _caller: &CallerIdentity) -> (String, String) {
         ("sys".into(), agent_id.to_string())
     }
-    fn build_recent_window_conversation_string(
-        &self,
-        session_id: &str,
-        agent_id: &str,
-        _speech_rows: usize,
-        window: opencrab_core::conversation::RecentWindow<'_>,
-    ) -> anyhow::Result<String> {
-        let opencrab_core::conversation::RecentWindow::Snapshot { high_water, pending } = window
-        else {
-            return self.build_conversation_string(session_id, agent_id, "", 0, "", "");
-        };
-        let conn = self.db.lock().unwrap();
-        let rows = opencrab_db::queries::list_session_logs_by_session(&conn, session_id)?;
-        let rows = rows.into_iter().filter(|r| r.id.is_some_and(|id| id <= high_water));
-        Ok(rows.chain(pending.iter().cloned()).map(|r| format!("{}:{}", r.log_type, r.content)).collect::<Vec<_>>().join("\n"))
-    }
     fn build_conversation_string(
         &self,
         session_id: &str,
@@ -216,9 +200,19 @@ impl AgentRuntime for TestRuntime {
         _budget: usize,
         _system_prompt: &str,
         _runtime_context_text: &str,
+        window: Option<opencrab_core::conversation::ConversationWindow<'_>>,
     ) -> anyhow::Result<String> {
         let conn = self.db.lock().unwrap();
         let rows = opencrab_db::queries::list_session_logs_by_session(&conn, session_id)?;
+        let rows = match window.map(|window| window.rows) {
+            Some(opencrab_core::conversation::RecentWindow::Snapshot { high_water, pending }) => {
+                rows.into_iter()
+                    .filter(|r| r.id.is_some_and(|id| id <= high_water))
+                    .chain(pending.iter().cloned())
+                    .collect()
+            }
+            _ => rows,
+        };
         Ok(rows
             .into_iter()
             .map(|r| format!("{}:{}", r.log_type, r.content))

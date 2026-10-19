@@ -1020,7 +1020,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/agent_runtime_impl.rs",
-      "line": 768,
+      "line": 753,
       "snippet": "channel_id = %c.channel_id,",
       "classification": "production-violation",
       "violation": "V11",

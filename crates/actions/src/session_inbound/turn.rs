@@ -2,7 +2,7 @@ use super::normalize::NormalizedInbound;
 use crate::agent_runtime::AgentRuntime;
 use crate::transcript::TranscriptSource;
 use crate::{RunRequest, TurnModelProfile};
-use opencrab_core::conversation::RecentWindow;
+use opencrab_core::conversation::{ConversationWindow, RecentWindow};
 use opencrab_core::EngineResult;
 use opencrab_db::queries::SessionLogRow;
 
@@ -80,17 +80,16 @@ where
     Build: FnOnce(String) -> RunRequest,
 {
     runtime.on_inbound_message(source, inbound.agent_id, &inbound.as_record());
-    let history = if profile == TurnModelProfile::Realtime {
-        TurnHistory::Recent(RecentWindow::Live)
-    } else {
-        TurnHistory::Full
-    };
+    let window = (profile == TurnModelProfile::Realtime).then_some(ConversationWindow {
+        speech_rows: LIGHTWEIGHT_TURN_SPEECH_ROWS,
+        rows: RecentWindow::Live,
+    });
     run_turn(
         runtime,
         inbound.session_id,
         inbound.agent_id,
         profile,
-        history,
+        window,
         system_prompt,
         runtime_context_text,
         wrap_conversation,
@@ -127,7 +126,7 @@ where
         session_id,
         agent_id,
         profile,
-        TurnHistory::Full,
+        None,
         system_prompt,
         runtime_context_text,
         wrap_conversation,
@@ -160,9 +159,12 @@ where
         session_id,
         agent_id,
         TurnModelProfile::Realtime,
-        TurnHistory::Recent(RecentWindow::Snapshot {
-            high_water,
-            pending,
+        Some(ConversationWindow {
+            speech_rows: LIGHTWEIGHT_TURN_SPEECH_ROWS,
+            rows: RecentWindow::Snapshot {
+                high_water,
+                pending,
+            },
         }),
         system_prompt,
         "",
@@ -172,21 +174,13 @@ where
     .await
 }
 
-/// Which history a turn's conversation is built from.
-enum TurnHistory<'a> {
-    /// The full, budgeted conversation.
-    Full,
-    /// D-1085 §13: the lightweight window over the session now or over a provisional snapshot.
-    Recent(RecentWindow<'a>),
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn run_turn<R, Wrap, Build>(
     runtime: &R,
     session_id: &str,
     agent_id: &str,
     profile: TurnModelProfile,
-    history: TurnHistory<'_>,
+    window: Option<ConversationWindow<'_>>,
     system_prompt: &str,
     runtime_context_text: &str,
     wrap_conversation: Wrap,
@@ -232,25 +226,18 @@ where
             return None;
         }
     };
-    let lightweight = !matches!(history, TurnHistory::Full);
-    // D-1085: for a lightweight run the budget check above stays as the fail-loud guard; nothing
-    // is compacted.
-    let raw = match history {
-        TurnHistory::Full => runtime.build_conversation_string(
-            session_id,
-            agent_id,
-            &model,
-            budget,
-            system_prompt,
-            runtime_context_text,
-        ),
-        TurnHistory::Recent(window) => runtime.build_recent_window_conversation_string(
-            session_id,
-            agent_id,
-            LIGHTWEIGHT_TURN_SPEECH_ROWS,
-            window,
-        ),
-    };
+    // D-1085: a windowed history is the lightweight turn. For it the budget check above stays as
+    // the fail-loud guard; nothing is compacted (the window itself bounds the history).
+    let lightweight = window.is_some();
+    let raw = runtime.build_conversation_string(
+        session_id,
+        agent_id,
+        &model,
+        budget,
+        system_prompt,
+        runtime_context_text,
+        window,
+    );
     let raw = match raw {
         Ok(s) => s,
         Err(e) => {

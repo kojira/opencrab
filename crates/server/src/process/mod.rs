@@ -21,8 +21,9 @@ mod wiring;
 
 pub use budget::{
     build_conversation_string, build_conversation_string_with_memory_index,
-    build_conversation_string_with_waters, check_agent_model_change, compute_context_budget,
-    core_functions_tokens, ensure_functions_within_cap, ensure_model_context_window_registered,
+    build_conversation_string_with_waters, build_conversation_string_with_window,
+    check_agent_model_change, compute_context_budget, core_functions_tokens,
+    ensure_functions_within_cap, ensure_model_context_window_registered,
     ensure_model_max_output_tokens_registered, ensure_request_functions_budget,
     ensure_startup_budget_inputs, include_memory_index, measure_functions_tokens,
     model_context_window_missing_message, normalize_model_spec, resolve_agent_request_envelope,
