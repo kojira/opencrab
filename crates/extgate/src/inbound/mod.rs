@@ -21,10 +21,10 @@ mod record;
 mod turn;
 
 use attachments::{materialize, promote_local_files, remove_local_files, remove_promoted_files};
-use binding::{binding_said_error, load_origin_row};
+pub(crate) use binding::{binding_said_error, load_origin_row};
 pub(crate) use binding::{resolve_binding_context, BindingContext};
-pub use record::channel_whitelisted;
-pub(crate) use record::seq_for_origin;
+pub(crate) use record::{agent_prelude_row, inbound_speech_metadata, seq_for_origin};
+pub use record::{channel_whitelisted, record_agent_prelude};
 use record::{existing_seq, next_seq, record_inbound};
 use turn::enqueue_turn;
 
@@ -32,7 +32,14 @@ pub struct SaidOutcome {
     pub seq: Option<i64>,
 }
 
-fn asserted_caller(caller: &SaidCaller) -> CallerIdentity {
+/// D-1085: a said that starts no turn never promotes its provisional run.
+fn discard_provisional(state: &ExtgateState, said: &Said) {
+    if let Some(provisional_id) = &said.provisional_id {
+        state.provisionals.discard(&said.binding_id, provisional_id);
+    }
+}
+
+pub(crate) fn asserted_caller(caller: &SaidCaller) -> CallerIdentity {
     match caller {
         SaidCaller::Owner => CallerIdentity::Owner,
         SaidCaller::Agent => CallerIdentity::Agent,
@@ -112,6 +119,8 @@ pub fn process_said<R: AgentRuntime>(
     let recorded = Cell::new(false);
     let record_failed = Cell::new(false);
     let run_after = Cell::new(false);
+    // D-1085: the memory_sessions ids of this said's own rows (inbound, agent prelude).
+    let recorded_rows = Cell::new(None::<(i64, Option<i64>)>);
     let agent_ids = [row.agent_id.clone()];
     let event = NormalizedInboundEvent {
         sender_id: said.author_id.as_str(),
@@ -175,8 +184,19 @@ pub fn process_said<R: AgentRuntime>(
         |_| (),
         |_, admitted| {
             if admitted.admitted_agent_ids.contains(&row.agent_id) {
-                match record_inbound(&tx, &session_id, &row, said, &said.text) {
-                    Ok(()) => recorded.set(true),
+                let recorded_said = record_inbound(&tx, &session_id, &row, said, &said.text)
+                    .and_then(|said_row| match &said.agent_prelude {
+                        Some(prelude) => {
+                            record_agent_prelude(&tx, &session_id, &row.agent_id, prelude)
+                                .map(|prelude_row| (said_row, Some(prelude_row)))
+                        }
+                        None => Ok((said_row, None)),
+                    });
+                match recorded_said {
+                    Ok(ids) => {
+                        recorded.set(true);
+                        recorded_rows.set(Some(ids));
+                    }
                     Err(_) => record_failed.set(true),
                 }
             }
@@ -198,6 +218,7 @@ pub fn process_said<R: AgentRuntime>(
     if accepted.is_err() || !recorded.get() {
         let _ = tx.rollback();
         remove_local_files(state, said);
+        discard_provisional(state, said);
         return Ok(SaidOutcome { seq: None });
     }
 
@@ -221,6 +242,7 @@ pub fn process_said<R: AgentRuntime>(
             dropped_total = dropped,
             "extgate turn queue full"
         );
+        discard_provisional(state, said);
         return Ok(SaidOutcome { seq: None });
     }
     let promoted = match promote_local_files(state, said) {
@@ -237,6 +259,10 @@ pub fn process_said<R: AgentRuntime>(
     drop(conn);
 
     if enqueue {
+        let own_rows = recorded_rows
+            .get()
+            .map(|(said_row, prelude_row)| std::iter::once(said_row).chain(prelude_row).collect())
+            .unwrap_or_default();
         enqueue_turn(
             Arc::clone(state),
             runtime.clone(),
@@ -248,7 +274,10 @@ pub fn process_said<R: AgentRuntime>(
             // D-1067: 既定返信先はターンの起点（受信発言そのもの）。said.reply_target は
             // 受信発言が指す先（会話表示用メタ）なので返信先に使わない。
             Some(said.origin.as_str()),
+            own_rows,
         );
+    } else {
+        discard_provisional(state, said);
     }
     Ok(SaidOutcome { seq: Some(seq) })
 }

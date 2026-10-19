@@ -24,6 +24,20 @@ pub struct IndexNodeSearchResult {
     pub score: f64,
 }
 
+/// D-1085 §13.3: inclusive `YYYY-MM-DD` bounds on a node's own `date_from`..`date_to`. A node
+/// matches when its range overlaps them; a node without dates never matches a bound.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexDateRange {
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+impl IndexDateRange {
+    fn is_open(&self) -> bool {
+        self.from.is_none() && self.to.is_none()
+    }
+}
+
 /// キーワード/タイトル/要約でインデックスノードを BM25 検索する（逆引き）。
 ///
 /// トークンは引用符でエスケープして AND 結合。0 件なら OR 結合で再検索して
@@ -38,31 +52,64 @@ pub fn search_index_nodes(
     limit: usize,
     node_type: Option<&str>,
 ) -> Result<Vec<IndexNodeSearchResult>> {
-    let raw_tokens: Vec<&str> = query.split_whitespace().collect();
+    search_index_nodes_in_range(
+        conn,
+        agent_id,
+        Some(query),
+        limit,
+        node_type,
+        &IndexDateRange::default(),
+    )
+}
+
+/// [`search_index_nodes`] within `range`. D-1085 §13.3: without a query (and with a bound) the
+/// nodes in the range come newest first.
+pub fn search_index_nodes_in_range(
+    conn: &Connection,
+    agent_id: &str,
+    query: Option<&str>,
+    limit: usize,
+    node_type: Option<&str>,
+    range: &IndexDateRange,
+) -> Result<Vec<IndexNodeSearchResult>> {
+    let raw_tokens: Vec<&str> = query.unwrap_or("").split_whitespace().collect();
     if raw_tokens.is_empty() {
-        return Ok(Vec::new());
+        if range.is_open() {
+            return Ok(Vec::new());
+        }
+        return search_index_nodes_like(conn, agent_id, &[], limit, node_type, range);
     }
     let tokens: Vec<String> = raw_tokens
         .iter()
         .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
         .collect();
     let and_query = tokens.join(" AND ");
-    let results = search_index_nodes_fts(conn, agent_id, &and_query, limit, node_type)?;
+    let results = search_index_nodes_fts(conn, agent_id, &and_query, limit, node_type, range)?;
     if !results.is_empty() {
         return Ok(results);
     }
     if tokens.len() > 1 {
         let or_query = tokens.join(" OR ");
-        let results = search_index_nodes_fts(conn, agent_id, &or_query, limit, node_type)?;
+        let results = search_index_nodes_fts(conn, agent_id, &or_query, limit, node_type, range)?;
         if !results.is_empty() {
             return Ok(results);
         }
     }
     // trigram は 3 文字未満の語に当たらない。短い語を含む場合のみ LIKE で救済。
     if raw_tokens.iter().any(|t| t.chars().count() < 3) {
-        return search_index_nodes_like(conn, agent_id, &raw_tokens, limit, node_type);
+        return search_index_nodes_like(conn, agent_id, &raw_tokens, limit, node_type, range);
     }
     Ok(Vec::new())
+}
+
+/// The SQL condition of a [`IndexDateRange`] on the nodes aliased `n`; `?{from_idx}` and the
+/// next parameter bind its bounds.
+fn range_condition(from_idx: usize) -> String {
+    let to_idx = from_idx + 1;
+    format!(
+        "(?{from_idx} IS NULL OR COALESCE(n.date_to, n.date_from) >= ?{from_idx})
+           AND (?{to_idx} IS NULL OR n.date_from <= ?{to_idx})"
+    )
 }
 
 fn search_index_nodes_like(
@@ -71,6 +118,7 @@ fn search_index_nodes_like(
     tokens: &[&str],
     limit: usize,
     node_type: Option<&str>,
+    range: &IndexDateRange,
 ) -> Result<Vec<IndexNodeSearchResult>> {
     // いずれかの語が title/summary/keywords に部分一致すれば拾う（OR 相当）。
     // LIKE のメタ文字はエスケープする。
@@ -91,17 +139,31 @@ fn search_index_nodes_like(
     }
     let type_idx = params_vec.len() + 1;
     params_vec.push(Box::new(node_type.map(|s| s.to_string())));
+    let range_idx = params_vec.len() + 1;
+    params_vec.push(Box::new(range.from.clone()));
+    params_vec.push(Box::new(range.to.clone()));
     let limit_idx = params_vec.len() + 1;
     params_vec.push(Box::new(limit as i64));
-
+    let words = if conditions.is_empty() {
+        "1".to_string()
+    } else {
+        conditions.join(" OR ")
+    };
+    // D-1085 §13.3: a range search without words lists the range newest first.
+    let order = if tokens.is_empty() {
+        "n.date_from DESC, n.created_at DESC"
+    } else {
+        "n.created_at DESC"
+    };
     let sql = format!(
         "SELECT id, short_id, node_type, source_type, title, summary,
                 keywords_json, date_from, date_to, child_count, 0.0 as score
-         FROM memory_index_nodes
-         WHERE agent_id = ?1 AND ({})
+         FROM memory_index_nodes n
+         WHERE agent_id = ?1 AND ({words})
            AND (?{type_idx} IS NULL OR node_type = ?{type_idx})
-         ORDER BY created_at DESC LIMIT ?{limit_idx}",
-        conditions.join(" OR ")
+           AND {}
+         ORDER BY {order} LIMIT ?{limit_idx}",
+        range_condition(range_idx)
     );
     let mut stmt = conn.prepare(&sql)?;
     let params_ref: Vec<&dyn rusqlite::types::ToSql> =
@@ -130,8 +192,9 @@ fn search_index_nodes_fts(
     fts_query: &str,
     limit: usize,
     node_type: Option<&str>,
+    range: &IndexDateRange,
 ) -> Result<Vec<IndexNodeSearchResult>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT n.id, n.short_id, n.node_type, n.source_type, n.title, n.summary,
                 n.keywords_json, n.date_from, n.date_to, n.child_count,
                 bm25(memory_index_fts) as score
@@ -139,11 +202,20 @@ fn search_index_nodes_fts(
          JOIN memory_index_nodes n ON fts.node_id = n.id
          WHERE fts.agent_id = ?1 AND memory_index_fts MATCH ?2
            AND (?4 IS NULL OR n.node_type = ?4)
+           AND {}
          ORDER BY score
          LIMIT ?3",
-    )?;
+        range_condition(5)
+    ))?;
     let rows = stmt.query_map(
-        params![agent_id, fts_query, limit as i64, node_type],
+        params![
+            agent_id,
+            fts_query,
+            limit as i64,
+            node_type,
+            range.from,
+            range.to
+        ],
         |row| {
             Ok(IndexNodeSearchResult {
                 node_id: row.get(0)?,

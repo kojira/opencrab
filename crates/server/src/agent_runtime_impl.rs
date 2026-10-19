@@ -10,9 +10,11 @@
 use async_trait::async_trait;
 
 use opencrab_actions::{
-    AgentRuntime, ModelAdminError, ModelAdministration, ModelSnapshot, SessionModelList,
-    TurnModelProfile,
+    AgentRuntime, EffortSnapshot, ModelAdminError, ModelAdministration, ModelSnapshot,
+    SessionEffortList, SessionModelList, TurnModelProfile,
 };
+
+mod session_effort;
 
 use crate::process;
 use crate::AppState;
@@ -318,6 +320,33 @@ impl ModelAdministration for AppState {
         }
         Ok(session_snapshot(Vec::new(), None, agent_model))
     }
+
+    async fn list_session_reasoning_efforts(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<SessionEffortList, ModelAdminError> {
+        session_effort::list(self, agent_id, session_id)
+    }
+
+    async fn set_session_reasoning_effort(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        profile: TurnModelProfile,
+        effort: &str,
+    ) -> Result<EffortSnapshot, ModelAdminError> {
+        session_effort::write(self, agent_id, session_id, profile, Some(effort))
+    }
+
+    async fn reset_session_reasoning_effort(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        profile: TurnModelProfile,
+    ) -> Result<EffortSnapshot, ModelAdminError> {
+        session_effort::write(self, agent_id, session_id, profile, None)
+    }
 }
 
 impl AppState {
@@ -450,6 +479,7 @@ impl AgentRuntime for AppState {
         _context_budget_tokens: usize,
         system_prompt: &str,
         runtime_context_text: &str,
+        window: Option<opencrab_core::conversation::ConversationWindow<'_>>,
     ) -> anyhow::Result<String> {
         let conn = self.db.lock().unwrap();
         let env = resolve_runtime_envelope(
@@ -461,13 +491,14 @@ impl AgentRuntime for AppState {
             system_prompt,
             runtime_context_text,
         )?;
-        process::build_conversation_string_with_waters(
+        process::build_conversation_string_with_window(
             &conn,
             session_id,
             agent_id,
             env.conversation_high,
             env.conversation_low,
             process::include_memory_index(&env),
+            window,
         )
     }
 
@@ -697,6 +728,14 @@ mod peer_review_removal_test;
 #[cfg(test)]
 #[path = "agent_runtime_impl/session_model_test.rs"]
 mod session_model_test;
+
+#[cfg(test)]
+#[path = "agent_runtime_impl/realtime_turn_test.rs"]
+mod realtime_turn_test;
+
+#[cfg(test)]
+#[path = "agent_runtime_impl/session_effort_test.rs"]
+mod session_effort_test;
 
 fn log_closed_interactions(
     closed: &[opencrab_db::queries::ClosedInteraction],

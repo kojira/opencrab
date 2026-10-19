@@ -17,7 +17,8 @@ mod tool_result_fold;
 
 pub use assembly::{
     build_conversation_string, build_conversation_string_with_memory_index,
-    build_conversation_string_with_waters, conversation_history_waters, CONVERSATION_HISTORY_END,
+    build_conversation_string_with_waters, build_conversation_string_with_window,
+    conversation_history_waters, ConversationWindow, RecentWindow, CONVERSATION_HISTORY_END,
     CONVERSATION_HISTORY_START, NO_MESSAGES_MARKER, RECENT_MIN_USER_SPEECHES,
 };
 pub use format::{format_single_log, format_single_log_with_echo, format_speech_entry};
@@ -70,6 +71,8 @@ include!("tests/impression_section_injection_tests.rs");
 include!("tests/response_only_directive_tests.rs");
 #[cfg(test)]
 include!("tests/result_reference_tests.rs");
+#[cfg(test)]
+include!("tests/window_builder_tests.rs");
 #[cfg(test)]
 include!("tests/subtask_completed_folding_tests.rs");
 #[cfg(test)]

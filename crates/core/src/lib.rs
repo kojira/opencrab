@@ -48,8 +48,8 @@ pub use engine::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
     EngineResult, ExplicitTermination, FoldedInbound, FunctionDefinition, LiveInboundSource,
     LlmCallLog, LlmClient, LlmExchange, LlmExchangeLog, OutputTextEvent, OutputTextSink,
-    PartialTextEvent, PartialTextGate, PartialTextHook, ProviderToolHistory, SkillEngine, ToolCall,
-    ToolDispatcher, SYSTEM_SEGMENT_BREAK,
+    PartialTextEvent, PartialTextGate, PartialTextHook, PromotionGate, ProviderToolHistory,
+    SkillEngine, StoppedAtGatedTool, ToolCall, ToolDispatcher, SYSTEM_SEGMENT_BREAK,
 };
 pub use heartbeat::HeartbeatConfig;
 pub use identity::Identity;

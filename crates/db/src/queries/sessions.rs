@@ -190,6 +190,98 @@ pub fn effective_realtime_model_for_session(
     }
 }
 
+/// D-1086: which stored reasoning effort slot of a session is meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEffortSlot {
+    /// `sessions.reasoning_effort`, for default-profile turns.
+    Default,
+    /// `sessions.realtime_reasoning_effort`, for lightweight (realtime-profile) turns.
+    Realtime,
+}
+
+impl SessionEffortSlot {
+    fn column(self) -> &'static str {
+        match self {
+            Self::Default => "reasoning_effort",
+            Self::Realtime => "realtime_reasoning_effort",
+        }
+    }
+}
+
+/// D-1086: the session's reasoning effort override in `slot`. `Ok(None)` = no override.
+/// A missing session is an error, not "unset".
+pub fn get_session_reasoning_effort(
+    conn: &Connection,
+    session_id: &str,
+    slot: SessionEffortSlot,
+) -> Result<Option<String>> {
+    conn.query_row(
+        &format!("SELECT {} FROM sessions WHERE id = ?1", slot.column()),
+        params![session_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()?
+    .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))
+}
+
+/// D-1086: writes the session's reasoning effort override in `slot` (`None` clears it).
+/// Returns `false` if no such session.
+pub fn set_session_reasoning_effort(
+    conn: &Connection,
+    session_id: &str,
+    slot: SessionEffortSlot,
+    effort: Option<&str>,
+) -> Result<bool> {
+    let changed = conn.execute(
+        &format!(
+            "UPDATE sessions SET {} = ?2, updated_at = ?3 WHERE id = ?1",
+            slot.column()
+        ),
+        params![session_id, effort, Utc::now().to_rfc3339()],
+    )?;
+    Ok(changed == 1)
+}
+
+/// D-1086: where the reasoning effort of a turn comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningEffortSource {
+    Session,
+    Agent,
+    /// No session or agent override: the provider configuration (or the model default) applies.
+    Provider,
+}
+
+/// D-1086: the reasoning effort override of a turn of `session_id` in `slot`, and its source.
+/// `Default`: session > `agents.reasoning_effort`; `Realtime`: session only (the agent effort is
+/// meant for default-profile turns). `(None, Provider)` = the provider configuration applies.
+/// A run without a session row (maintenance runs) has no session override; a failed lookup is
+/// an error.
+pub fn effective_reasoning_effort_for_session(
+    conn: &Connection,
+    agent_id: &str,
+    session_id: &str,
+    slot: SessionEffortSlot,
+) -> Result<(Option<String>, ReasoningEffortSource)> {
+    let session = conn
+        .query_row(
+            &format!("SELECT {} FROM sessions WHERE id = ?1", slot.column()),
+            params![session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .filter(|effort| !effort.trim().is_empty());
+    if let Some(effort) = session {
+        return Ok((Some(effort), ReasoningEffortSource::Session));
+    }
+    if slot == SessionEffortSlot::Default {
+        if let Some(effort) = effective_reasoning_effort_for_agent(conn, agent_id)? {
+            return Ok((Some(effort), ReasoningEffortSource::Agent));
+        }
+    }
+    Ok((None, ReasoningEffortSource::Provider))
+}
+
 /// セッションポリシー（`sessions.policy_json`）。`SessionRow` / 外形 API には載せない。
 ///
 /// 行が無ければ `None`。DEFAULT `'{}'` は「未設定」＝現行挙動（RULINGS Q2）。

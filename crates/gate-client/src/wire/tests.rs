@@ -33,6 +33,8 @@ fn said_model_profile_is_sent_only_when_not_default() {
         reply_target: None,
         live_inbound_scope: LiveInboundScope::All,
         model_profile: TurnModelProfile::Default,
+        agent_prelude: None,
+        provisional_id: None,
     };
     let frame = |context: &SaidContext| {
         said_frame_with_context("said:1", "b", "o", "a", None, Some(context), "hi", &[])
@@ -349,4 +351,25 @@ fn command_frame_round_trips_all_contract_fields() {
         serde_json::from_slice(&encoded).expect("serialized command frame parses");
 
     assert_eq!(round_tripped, expected);
+}
+
+/// D-1085: `agent_prelude` is emitted only when set.
+#[test]
+fn said_agent_prelude_is_sent_only_when_set() {
+    let mut context = SaidContext {
+        caller: SaidCaller::Owner,
+        start_turn: true,
+        system_context: None,
+        reply_target: None,
+        live_inbound_scope: LiveInboundScope::All,
+        model_profile: TurnModelProfile::Realtime,
+        agent_prelude: None,
+        provisional_id: None,
+    };
+    let frame = |context: &SaidContext| {
+        said_frame_with_context("said:1", "b", "o", "a", None, Some(context), "hi", &[])
+    };
+    assert!(frame(&context).get("agent_prelude").is_none());
+    context.agent_prelude = Some("うん、".to_string());
+    assert_eq!(frame(&context)["agent_prelude"], "うん、");
 }
