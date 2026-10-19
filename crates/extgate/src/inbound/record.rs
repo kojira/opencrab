@@ -46,18 +46,36 @@ pub(crate) fn seq_for_origin(state: &ExtgateState, binding_id: &str, origin: &st
     .ok()
 }
 
+/// The metadata every inbound speech row starts with. Shared with the provisional run's
+/// not-yet-recorded user line (D-1085).
+pub(crate) fn inbound_speech_metadata(
+    address: &str,
+    author_label: Option<&str>,
+    caller: &SaidCaller,
+) -> serde_json::Value {
+    let mut meta = serde_json::json!({
+        "source": TranscriptSource::new("external", "external_response").inbound(),
+        "user_name": author_label.unwrap_or(""),
+        "channel_id": address,
+    });
+    // D-1056: オーナーの発言は会話履歴の話者表示（`uN|name|owner`）で示す。記録時点の caller で
+    // 固定し、過去行の表示が後から変わらないようにする（プロンプトキャッシュの prefix 安定）。
+    if matches!(caller, SaidCaller::Owner) {
+        meta[OWNER_SPEAKER_METADATA] = serde_json::json!(true);
+    }
+    meta
+}
+
+/// Records the said as inbound speech and returns the row id.
 pub(super) fn record_inbound(
     tx: &Transaction<'_>,
     session_id: &str,
     row: &OriginRow,
     said: &Said,
     content: &str,
-) -> Result<(), GateError> {
-    let mut meta = serde_json::json!({
-        "source": TranscriptSource::new("external", "external_response").inbound(),
-        "user_name": said.author_label.as_deref().unwrap_or(""),
-        "channel_id": row.address,
-    });
+) -> Result<i64, GateError> {
+    let mut meta =
+        inbound_speech_metadata(&row.address, said.author_label.as_deref(), &said.caller);
     let image_urls: Vec<String> = said
         .image_urls()
         .into_iter()
@@ -101,11 +119,6 @@ pub(super) fn record_inbound(
     if let Some(reply_target) = &said.reply_target {
         meta["reply_target"] = serde_json::json!(reply_target);
     }
-    // D-1056: オーナーの発言は会話履歴の話者表示（`uN|name|owner`）で示す。記録時点の caller で
-    // 固定し、過去行の表示が後から変わらないようにする（プロンプトキャッシュの prefix 安定）。
-    if matches!(said.caller, SaidCaller::Owner) {
-        meta[OWNER_SPEAKER_METADATA] = serde_json::json!(true);
-    }
     insert_session_log(
         tx,
         &SessionLogRow {
@@ -120,39 +133,39 @@ pub(super) fn record_inbound(
             created_at: None,
         },
     )
-    .map_err(|e| GateError::store_logged("said.session_log_insert", e))?;
-    Ok(())
+    .map_err(|e| GateError::store_logged("said.session_log_insert", e))
 }
 
-/// D-1085: records `said.agent_prelude` as the agent's own speech (same row shape as a
-/// delivered reply). Called right after [`record_inbound`] in the same transaction.
+/// D-1085: the agent's own speech row of an agent prelude (same shape as a delivered reply).
+pub(crate) fn agent_prelude_row(session_id: &str, agent_id: &str, prelude: &str) -> SessionLogRow {
+    SessionLogRow {
+        id: None,
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        log_type: "speech".to_string(),
+        content: prelude.to_string(),
+        speaker_id: Some(agent_id.to_string()),
+        turn_number: None,
+        metadata_json: Some(
+            serde_json::json!({
+                "source": TranscriptSource::new("external", "external_response").reply()
+            })
+            .to_string(),
+        ),
+        created_at: None,
+    }
+}
+
+/// D-1085: records `said.agent_prelude` as the agent's own speech and returns the row id.
+/// Called right after [`record_inbound`] in the same transaction.
 pub fn record_agent_prelude(
     conn: &Connection,
     session_id: &str,
     agent_id: &str,
     prelude: &str,
-) -> Result<(), GateError> {
-    insert_session_log(
-        conn,
-        &SessionLogRow {
-            id: None,
-            agent_id: agent_id.to_string(),
-            session_id: session_id.to_string(),
-            log_type: "speech".to_string(),
-            content: prelude.to_string(),
-            speaker_id: Some(agent_id.to_string()),
-            turn_number: None,
-            metadata_json: Some(
-                serde_json::json!({
-                    "source": TranscriptSource::new("external", "external_response").reply()
-                })
-                .to_string(),
-            ),
-            created_at: None,
-        },
-    )
-    .map_err(|e| GateError::store_logged("said.agent_prelude_insert", e))?;
-    Ok(())
+) -> Result<i64, GateError> {
+    insert_session_log(conn, &agent_prelude_row(session_id, agent_id, prelude))
+        .map_err(|e| GateError::store_logged("said.agent_prelude_insert", e))
 }
 
 /// 当該 agent/instance/address の open binding exact 1 行だけ true。

@@ -55,11 +55,13 @@ impl PartialStreamSlot {
 }
 
 /// The engine hook of a realtime-profile turn. Write errors are logged and never fail the turn.
+/// D-1085: the partials of a provisional run carry its `provisional_id`.
 pub fn partial_text_hook(
     state: Arc<ExtgateState>,
     instance_id: String,
     binding_id: String,
     slot: PartialStreamSlot,
+    provisional_id: Option<String>,
 ) -> opencrab_core::PartialTextHook {
     let turn_started = std::time::Instant::now();
     Arc::new(move |event| {
@@ -67,12 +69,21 @@ pub fn partial_text_hook(
         let instance_id = instance_id.clone();
         let binding_id = binding_id.clone();
         let slot = slot.clone();
+        let provisional_id = provisional_id.clone();
         Box::pin(async move {
             match event {
                 opencrab_core::PartialTextEvent::Begin { stream_id } => slot.begin(stream_id),
                 opencrab_core::PartialTextEvent::Text { stream_id, text } => {
                     slot.mark_released(&stream_id);
-                    write_partial(&state, &instance_id, &binding_id, &stream_id, &text).await;
+                    write_partial(
+                        &state,
+                        &instance_id,
+                        &binding_id,
+                        &stream_id,
+                        &text,
+                        provisional_id.as_deref(),
+                    )
+                    .await;
                     tracing::debug!(
                         binding_id = %binding_id,
                         stream_id = %stream_id,
@@ -92,6 +103,7 @@ async fn write_partial(
     binding_id: &str,
     stream_id: &str,
     text: &str,
+    provisional_id: Option<&str>,
 ) {
     let writer = {
         let Ok(reg) = state.lock_registry() else {
@@ -105,10 +117,24 @@ async fn write_partial(
         }
         live.writer.clone()
     };
-    if let Err(e) = write_json(&writer, &partial_frame(binding_id, stream_id, text)).await {
+    let frame = partial_frame(binding_id, stream_id, text, provisional_id);
+    if let Err(e) = write_json(&writer, &frame).await {
         tracing::warn!(
             code = e.code.as_str(),
             "partial frame write failed; ignored"
         );
     }
+}
+
+/// D-1085: the writer of a live instance, when it acknowledged `binding_id`.
+pub(crate) fn acknowledged_writer(
+    state: &ExtgateState,
+    instance_id: &str,
+    binding_id: &str,
+) -> Option<Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>> {
+    let reg = state.lock_registry().ok()?;
+    let live = reg.get(instance_id)?;
+    live.acknowledged
+        .contains(binding_id)
+        .then(|| live.writer.clone())
 }

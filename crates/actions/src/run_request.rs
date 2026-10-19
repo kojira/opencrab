@@ -141,10 +141,43 @@ pub struct RunRequest {
     /// D-1080: the model this whole turn uses (envelopes, output cap, engine). `None` = resolve
     /// once at process entry with session > agent > server default.
     pub pinned_model: Option<String>,
-    /// D-1085: a lightweight turn. No tools, no web search, no per-agent reasoning effort (the
-    /// provider default applies), and the first generation without tool calls ends the run.
+    /// D-1085: a lightweight turn. No per-agent reasoning effort (the provider default
+    /// applies). §13.1: its tools are
+    /// limited by [`RunRequest::as_lightweight`]; web search follows the agent setting.
     pub lightweight: bool,
+    /// D-1085: a provisional (speculative) run. It is not a turn yet: nothing is persisted, and
+    /// the depth-0 post-run block (snapshot, memory index build, skill usage) does not run.
+    /// LLM metrics carry purpose `provisional`. Set with [`RunRequest::as_provisional`].
+    pub provisional: bool,
+    /// D-1085 §12: the promotion gate of a provisional run. At a tool outside
+    /// [`PROVISIONAL_READ_ONLY_TOOLS`] the run stops without running it and aborts the gate.
+    /// From the promotion on, the run's turn logs are recorded: the ones buffered before it first. Set with [`RunRequest::as_provisional`].
+    pub promotion_gate: Option<opencrab_core::PromotionGate>,
 }
+
+/// D-1085 §12: the tools a provisional run may run before its promotion: memory reads and
+/// loading tool schemas. Web search is a provider option, not a tool call, and is not gated.
+pub const PROVISIONAL_READ_ONLY_TOOLS: &[&str] = &[
+    "search_memory_index",
+    "retrieve_memory_nodes",
+    "browse_memory_index",
+    "search_my_history",
+    "describe_tools",
+];
+
+/// D-1085 §13.1: the tools of a lightweight turn besides the operations its gateway declares
+/// (see [`RunRequest::as_lightweight`]): memory reads, subtasks and loading tool schemas. Web
+/// search is a provider option and follows the agent setting.
+pub const LIGHTWEIGHT_TURN_TOOLS: &[&str] = &[
+    "search_memory_index",
+    "retrieve_memory_nodes",
+    "browse_memory_index",
+    "search_my_history",
+    "spawn_subtask",
+    "cancel_subtask",
+    "steer_subtask",
+    "describe_tools",
+];
 
 impl RunRequest {
     #[allow(clippy::too_many_arguments)]
@@ -183,6 +216,8 @@ impl RunRequest {
             persist_turn_logs: true,
             pinned_model: None,
             lightweight: false,
+            provisional: false,
+            promotion_gate: None,
         }
     }
 
@@ -302,8 +337,30 @@ impl RunRequest {
     }
 
     /// D-1085: marks this run as a lightweight turn (see [`RunRequest::lightweight`]).
+    /// §13.1: its tool allowlist becomes [`LIGHTWEIGHT_TURN_TOOLS`] plus every operation the
+    /// run's own gateway ([`RunRequest::gateway_actions`]) declares, within any allowlist the
+    /// run already has.
     pub fn as_lightweight(mut self) -> Self {
         self.lightweight = true;
+        let mut tools: Vec<String> = LIGHTWEIGHT_TURN_TOOLS
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        if let Some(gateway) = &self.gateway_actions {
+            tools.extend(gateway.definitions().into_iter().map(|def| def.name));
+        }
+        if let Some(existing) = &self.tool_allowlist {
+            tools.retain(|name| existing.contains(name));
+        }
+        self.tool_allowlist = Some(tools);
+        self
+    }
+
+    /// D-1085: marks this run as provisional (see [`RunRequest::provisional`]); `gate` decides
+    /// its promotion (see [`RunRequest::promotion_gate`]).
+    pub fn as_provisional(mut self, gate: opencrab_core::PromotionGate) -> Self {
+        self.provisional = true;
+        self.promotion_gate = Some(gate);
         self
     }
 }

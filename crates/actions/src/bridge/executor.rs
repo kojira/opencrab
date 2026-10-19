@@ -693,10 +693,6 @@ impl ActionExecutor for BridgedExecutor {
                     || is_utterance(&t.name)
             });
             // describe_tools 自体を常時投影（合成定義・新登録簿なし）。
-            // D-1085: an empty allowlist (lightweight turn) has nothing to load, so no tools at all.
-            if matches!(&self.tool_allowlist, Some(allowed) if allowed.is_empty()) {
-                return tools;
-            }
             tools.push(FunctionDefinition {
                 name: "describe_tools".to_string(),
                 description: Some(

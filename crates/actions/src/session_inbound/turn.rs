@@ -2,7 +2,9 @@ use super::normalize::NormalizedInbound;
 use crate::agent_runtime::AgentRuntime;
 use crate::transcript::TranscriptSource;
 use crate::{RunRequest, TurnModelProfile};
+use opencrab_core::conversation::{ConversationWindow, RecentWindow};
 use opencrab_core::EngineResult;
+use opencrab_db::queries::SessionLogRow;
 
 /// 確保 + inbound 記録の失敗。順序は ensure → record（[`prepare_session_inbound`] と同一）。
 #[derive(Debug)]
@@ -58,9 +60,9 @@ pub fn prepare_session_inbound_write(
 /// 会話構築に失敗したら `None`（現行どおり run しない）。`Some` は run の
 /// `Result` そのもの（成功も失敗もゲートの配送へ渡す）。
 /// `profile` は発端 said の宣言（D-1081）。ターンのモデルはここで 1 回だけ決まる。
-/// D-1085: a `Realtime` said starts a lightweight turn: the conversation is the last
-/// [`LIGHTWEIGHT_TURN_SPEECH_ROWS`] speech rows and the run is [`RunRequest::as_lightweight`].
-/// The caller passes the matching system prompt (`build_realtime_context`).
+/// D-1085: a `Realtime` said starts a lightweight turn: the conversation is the normal rendering
+/// of the rows from the [`LIGHTWEIGHT_TURN_SPEECH_ROWS`]-th most recent speech row on (§13.1) and
+/// the run is [`RunRequest::as_lightweight`]. The system prompt is the normal one.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_session_turn<R, Wrap, Build>(
     runtime: &R,
@@ -78,12 +80,16 @@ where
     Build: FnOnce(String) -> RunRequest,
 {
     runtime.on_inbound_message(source, inbound.agent_id, &inbound.as_record());
+    let window = (profile == TurnModelProfile::Realtime).then_some(ConversationWindow {
+        speech_rows: LIGHTWEIGHT_TURN_SPEECH_ROWS,
+        rows: RecentWindow::Live,
+    });
     run_turn(
         runtime,
         inbound.session_id,
         inbound.agent_id,
         profile,
-        profile == TurnModelProfile::Realtime,
+        window,
         system_prompt,
         runtime_context_text,
         wrap_conversation,
@@ -92,8 +98,9 @@ where
     .await
 }
 
-/// D-1085: how many recent speech rows a lightweight turn sees.
-pub const LIGHTWEIGHT_TURN_SPEECH_ROWS: usize = 20;
+/// D-1085: from how many speech rows back a lightweight turn's history starts (every retained
+/// row from there on is in it).
+pub const LIGHTWEIGHT_TURN_SPEECH_ROWS: usize = 30;
 
 /// resume / 継続ターン（直列ロック内）。会話構築 + `run_agent_response`。
 ///
@@ -119,11 +126,50 @@ where
         session_id,
         agent_id,
         profile,
-        false,
+        None,
         system_prompt,
         runtime_context_text,
         wrap_conversation,
         build_run,
+    )
+    .await
+}
+
+/// D-1085: a provisional (speculative) realtime run, outside the session lock. Its conversation
+/// is the lightweight window (§13) of the session's rows up to `high_water` followed by `pending`
+/// (the not yet recorded user line and prelude). The run is lightweight and provisional; `gate` holds its gated tools
+/// and its turn logs until the caller promotes it (§12).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_provisional_turn<R, Build>(
+    runtime: &R,
+    session_id: &str,
+    agent_id: &str,
+    system_prompt: &str,
+    high_water: i64,
+    pending: &[SessionLogRow],
+    gate: opencrab_core::PromotionGate,
+    build_run: Build,
+) -> Option<anyhow::Result<EngineResult>>
+where
+    R: AgentRuntime,
+    Build: FnOnce(String) -> RunRequest,
+{
+    run_turn(
+        runtime,
+        session_id,
+        agent_id,
+        TurnModelProfile::Realtime,
+        Some(ConversationWindow {
+            speech_rows: LIGHTWEIGHT_TURN_SPEECH_ROWS,
+            rows: RecentWindow::Snapshot {
+                high_water,
+                pending,
+            },
+        }),
+        system_prompt,
+        "",
+        |raw| raw.to_string(),
+        |conversation| build_run(conversation).as_provisional(gate),
     )
     .await
 }
@@ -134,7 +180,7 @@ async fn run_turn<R, Wrap, Build>(
     session_id: &str,
     agent_id: &str,
     profile: TurnModelProfile,
-    lightweight: bool,
+    window: Option<ConversationWindow<'_>>,
     system_prompt: &str,
     runtime_context_text: &str,
     wrap_conversation: Wrap,
@@ -180,19 +226,18 @@ where
             return None;
         }
     };
-    let raw = if lightweight {
-        // D-1085: the budget check above stays as the fail-loud guard; nothing is compacted.
-        runtime.build_recent_conversation_string(session_id, agent_id, LIGHTWEIGHT_TURN_SPEECH_ROWS)
-    } else {
-        runtime.build_conversation_string(
-            session_id,
-            agent_id,
-            &model,
-            budget,
-            system_prompt,
-            runtime_context_text,
-        )
-    };
+    // D-1085: a windowed history is the lightweight turn. For it the budget check above stays as
+    // the fail-loud guard; nothing is compacted (the window itself bounds the history).
+    let lightweight = window.is_some();
+    let raw = runtime.build_conversation_string(
+        session_id,
+        agent_id,
+        &model,
+        budget,
+        system_prompt,
+        runtime_context_text,
+        window,
+    );
     let raw = match raw {
         Ok(s) => s,
         Err(e) => {

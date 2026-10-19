@@ -121,6 +121,51 @@ pub async fn deliver_intermediate_say(
     .await
 }
 
+/// The memory_sessions speech row a say records.
+pub(crate) fn say_speech_row(agent_id: &str, session_id: &str, body: &str) -> SessionLogRow {
+    SessionLogRow {
+        id: None,
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        log_type: "speech".to_string(),
+        content: body.to_string(),
+        speaker_id: Some(agent_id.to_string()),
+        turn_number: None,
+        metadata_json: Some(
+            serde_json::json!({"source": TranscriptSource::new("external", "external_response").reply()})
+                .to_string(),
+        ),
+        created_at: None,
+    }
+}
+
+/// D-1085 §13.2: delivers a say whose speech row was already recorded (the held continuation
+/// speech of a promoted provisional run).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn deliver_recorded_say(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    agent_id: &str,
+    session_id: &str,
+    body: &str,
+    reply_target: Option<&str>,
+    stream_id: Option<&str>,
+) -> Result<String, GateError> {
+    send_say(
+        state,
+        instance_id,
+        binding_id,
+        agent_id,
+        session_id,
+        body,
+        reply_target,
+        stream_id,
+        false,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn send_text(
     state: &Arc<ExtgateState>,
@@ -131,6 +176,32 @@ async fn send_text(
     body: &str,
     reply_target: Option<&str>,
     stream_id: Option<&str>,
+) -> Result<String, GateError> {
+    send_say(
+        state,
+        instance_id,
+        binding_id,
+        agent_id,
+        session_id,
+        body,
+        reply_target,
+        stream_id,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_say(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    agent_id: &str,
+    session_id: &str,
+    body: &str,
+    reply_target: Option<&str>,
+    stream_id: Option<&str>,
+    record_speech: bool,
 ) -> Result<String, GateError> {
     let writer = {
         let reg = state.lock_registry()?;
@@ -172,23 +243,10 @@ async fn send_text(
             let _ = tx.rollback();
             return Err(GateError::store());
         }
-        insert_session_log(
-            &tx,
-            &SessionLogRow {
-                id: None,
-                agent_id: agent_id.to_string(),
-                session_id: session_id.to_string(),
-                log_type: "speech".to_string(),
-                content: body.to_string(),
-                speaker_id: Some(agent_id.to_string()),
-                turn_number: None,
-                metadata_json: Some(
-                    serde_json::json!({"source": TranscriptSource::new("external", "external_response").reply()}).to_string(),
-                ),
-                created_at: None,
-            },
-        )
-        .map_err(|_| GateError::store())?;
+        if record_speech {
+            insert_session_log(&tx, &say_speech_row(agent_id, session_id, body))
+                .map_err(|_| GateError::store())?;
+        }
         #[cfg(any(test, feature = "extgate-probe"))]
         if state.probe.fail_delivery_insert.load(Ordering::SeqCst) {
             let _ = tx.rollback();

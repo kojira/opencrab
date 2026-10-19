@@ -3,8 +3,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use opencrab_actions::{
-    ModelAdminError, ModelAdministration, ModelSnapshot, SessionModelList, TurnModelProfile,
+    EffortSnapshot, ModelAdminError, ModelAdministration, ModelSnapshot, SessionEffortList,
+    SessionModelList, TurnModelProfile, REASONING_EFFORTS,
 };
+use opencrab_db::queries::ReasoningEffortSource;
 use serde_json::{json, Map, Value};
 
 use crate::protocol::SaidCaller;
@@ -91,6 +93,18 @@ impl CommandRegistry {
         registry.register("list_session_models", Arc::new(ListSessionModels))?;
         registry.register("set_session_model", Arc::new(SetSessionModel))?;
         registry.register("reset_session_model", Arc::new(ResetSessionModel))?;
+        registry.register(
+            "list_session_reasoning_efforts",
+            Arc::new(ListSessionReasoningEfforts),
+        )?;
+        registry.register(
+            "set_session_reasoning_effort",
+            Arc::new(SetSessionReasoningEffort),
+        )?;
+        registry.register(
+            "reset_session_reasoning_effort",
+            Arc::new(ResetSessionReasoningEffort),
+        )?;
         Ok(registry)
     }
 
@@ -310,6 +324,103 @@ impl CommandHandler for ResetSessionModel {
             .reset_session_model(context.agent_id, context.session_id, profile)
             .await
             .map(|snapshot| session_mutation_result(profile, snapshot))
+            .map_err(CommandError::from_model)
+    }
+}
+
+fn effort_source(source: ReasoningEffortSource) -> &'static str {
+    match source {
+        ReasoningEffortSource::Session => "session",
+        ReasoningEffortSource::Agent => "agent",
+        ReasoningEffortSource::Provider => "provider",
+    }
+}
+
+fn effort_list_result(list: SessionEffortList) -> Value {
+    json!({
+        "scope": "session",
+        "efforts": REASONING_EFFORTS,
+        "configured_effort": list.default.configured_effort,
+        "current_effort": list.default.current_effort,
+        "source": effort_source(list.default.source),
+        "realtime_configured_effort": list.realtime.configured_effort,
+        "realtime_current_effort": list.realtime.current_effort,
+        "realtime_source": effort_source(list.realtime.source),
+    })
+}
+
+fn effort_mutation_result(profile: TurnModelProfile, snapshot: EffortSnapshot) -> Value {
+    let mut result = json!({
+        "scope": "session",
+        "configured_effort": snapshot.configured_effort,
+        "current_effort": snapshot.current_effort,
+        "source": effort_source(snapshot.source),
+        "applies": "next_turn",
+    });
+    if profile == TurnModelProfile::Realtime {
+        result["profile"] = json!("realtime");
+    }
+    result
+}
+
+struct ListSessionReasoningEfforts;
+
+#[async_trait]
+impl CommandHandler for ListSessionReasoningEfforts {
+    async fn handle(
+        &self,
+        context: CommandContext<'_>,
+        args: &Map<String, Value>,
+    ) -> Result<Value, CommandError> {
+        if !args.is_empty() {
+            return Err(CommandError::invalid_args());
+        }
+        context
+            .models
+            .list_session_reasoning_efforts(context.agent_id, context.session_id)
+            .await
+            .map(effort_list_result)
+            .map_err(CommandError::from_model)
+    }
+}
+
+struct SetSessionReasoningEffort;
+
+#[async_trait]
+impl CommandHandler for SetSessionReasoningEffort {
+    async fn handle(
+        &self,
+        context: CommandContext<'_>,
+        args: &Map<String, Value>,
+    ) -> Result<Value, CommandError> {
+        let profile = session_profile_arg(args, &["effort"])?;
+        let Some(effort) = args.get("effort").and_then(Value::as_str) else {
+            return Err(CommandError::invalid_args());
+        };
+        context
+            .models
+            .set_session_reasoning_effort(context.agent_id, context.session_id, profile, effort)
+            .await
+            .map(|snapshot| effort_mutation_result(profile, snapshot))
+            .map_err(CommandError::from_model)
+    }
+}
+
+struct ResetSessionReasoningEffort;
+
+#[async_trait]
+impl CommandHandler for ResetSessionReasoningEffort {
+    async fn handle(
+        &self,
+        context: CommandContext<'_>,
+        args: &Map<String, Value>,
+    ) -> Result<Value, CommandError> {
+        let profile = session_profile_arg(args, &[])?;
+        context
+            .models
+            .reset_session_reasoning_effort(context.agent_id, context.session_id, profile)
+            .await
+            .map(|snapshot| effort_mutation_result(profile, snapshot))
             .map_err(CommandError::from_model)
     }
 }

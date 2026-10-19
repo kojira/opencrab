@@ -54,8 +54,19 @@ pub enum LiveEvent {
     },
     /// D-1083: cumulative released text of a realtime-profile turn's stream, sent before the say
     /// carrying the same `stream_id`. Best effort: dropped silently when the live queue is full.
-    /// Consumers that do not preview text ignore it.
-    Partial { stream_id: String, text: String },
+    /// Consumers that do not preview text ignore it. D-1085: `provisional_id` is set when the
+    /// partial comes from a provisional run, which is not a turn until a said promotes it.
+    Partial {
+        stream_id: String,
+        text: String,
+        provisional_id: Option<String>,
+    },
+    /// D-1085: whether the said carrying `provisional_id` reuses that provisional run. Sent
+    /// before the turn's say.
+    ProvisionalResult {
+        provisional_id: String,
+        promoted: bool,
+    },
     Activity {
         activity_id: String,
         state: String,

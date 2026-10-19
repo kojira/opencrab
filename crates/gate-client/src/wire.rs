@@ -7,8 +7,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::json::{parse_object_no_dup, JsonError};
 
 mod partial;
+mod provisional;
+mod response;
 mod turn_profile;
 pub use partial::{say_stream_id, Partial};
+pub use provisional::{
+    provisional_cancel_frame, provisional_frame, ProvisionalRequest, ProvisionalResult,
+};
 pub use turn_profile::TurnModelProfile;
 
 /// LF 込み上限。
@@ -245,6 +250,10 @@ pub struct SaidContext {
     /// Core records it as the agent's own line right after this said; it is not delivered back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_prelude: Option<String>,
+    /// D-1085: the provisional run this said may promote. Core answers with a
+    /// `provisional_result` before the turn's say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provisional_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -303,6 +312,9 @@ pub fn said_frame_with_context(
         }
         if let Some(prelude) = &context.agent_prelude {
             frame["agent_prelude"] = json!(prelude);
+        }
+        if let Some(provisional_id) = &context.provisional_id {
+            frame["provisional_id"] = json!(provisional_id);
         }
     }
     frame
@@ -435,6 +447,7 @@ pub enum CoreMsg {
     Activity(Activity),
     TurnFailed(TurnFailed),
     Partial(Partial),
+    ProvisionalResult(ProvisionalResult),
     Invoke(Invoke),
     Response(WireResponse),
     Reverse {
@@ -579,6 +592,14 @@ fn parse_core_msg(obj: &Value) -> CoreMsg {
                 m,
             },
         },
+        "provisional_result" => match provisional::parse_provisional_result(obj) {
+            Ok(r) => CoreMsg::ProvisionalResult(r),
+            Err(_) => CoreMsg::Invalid {
+                id: opt_id(obj),
+                code: "bad_request",
+                m,
+            },
+        },
         "invoke" => match parse_invoke(obj) {
             Ok(i) => CoreMsg::Invoke(i),
             Err(_) => CoreMsg::Invalid {
@@ -587,7 +608,7 @@ fn parse_core_msg(obj: &Value) -> CoreMsg {
                 m,
             },
         },
-        "ok" | "err" => match parse_response(obj, &m) {
+        "ok" | "err" => match response::parse_response(obj, &m) {
             Ok(resp) => CoreMsg::Response(resp),
             Err(_) => CoreMsg::Invalid {
                 id: opt_id(obj),
@@ -713,57 +734,6 @@ fn parse_turn_failed(obj: &Value) -> Result<TurnFailed, FrameError> {
     let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
     let origin = nonempty_str(obj, "origin")?;
     Ok(TurnFailed { binding_id, origin })
-}
-
-fn parse_response(obj: &Value, m: &str) -> Result<WireResponse, FrameError> {
-    let id = parse_request_id(&require_str(obj, "id")?)?;
-    if m == "ok" {
-        let seq = match obj.get("seq") {
-            None => None,
-            Some(Value::Null) => Some(None),
-            Some(Value::Number(n)) => {
-                let v = n.as_i64().ok_or(FrameError::BadRequest)?;
-                if v <= 0 {
-                    return Err(FrameError::BadRequest);
-                }
-                Some(Some(v))
-            }
-            Some(_) => return Err(FrameError::BadRequest),
-        };
-        Ok(WireResponse {
-            id,
-            ok: true,
-            seq,
-            result: obj.get("result").cloned(),
-            code: None,
-            detail: None,
-            message: None,
-        })
-    } else {
-        let code = require_str(obj, "code")?;
-        let detail = match obj.get("detail") {
-            Some(Value::Null) | None => None,
-            Some(Value::String(s)) => Some(s.clone()),
-            Some(_) => return Err(FrameError::BadRequest),
-        };
-        let message = match obj.get("message") {
-            None => None,
-            Some(Value::String(message)) => Some(message.clone()),
-            Some(_) => return Err(FrameError::BadRequest),
-        };
-        if obj.get("detail").is_none() && message.is_none() {
-            return Err(FrameError::BadRequest);
-        }
-        Ok(WireResponse {
-            id,
-            ok: false,
-            seq: None,
-            result: None,
-            code: Some(code),
-            detail,
-            message,
-        })
-    }
 }
 
 /// say payload の text。欠落・非 string・空は None（V3: external_rejected、外部 I/O 0）。

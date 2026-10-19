@@ -10,6 +10,6 @@ include!("budget.rs");
 include!("request_and_callbacks.rs");
 include!("utterance.rs");
 include!("continuation.rs");
-include!("single_generation.rs");
+include!("promotion.rs");
 include!("tool_results_dispatch.rs");
 include!("dispatch_ordering.rs");

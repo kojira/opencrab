@@ -56,23 +56,14 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
         caller: &crate::CallerIdentity,
     ) -> (String, String);
 
-    /// D-1085: the system prompt and display name of a lightweight turn: the agent's name and
-    /// personality plus a short fixed block. No memory, rules, skills, tools or instructions.
-    fn build_realtime_context(&self, agent_id: &str) -> (String, String);
-
-    /// D-1085: the conversation of a lightweight turn: the last `limit` speech rows of the
-    /// session (both sides, oldest first). No tool, system, ledger or memory sections.
-    fn build_recent_conversation_string(
-        &self,
-        session_id: &str,
-        agent_id: &str,
-        limit: usize,
-    ) -> Result<String>;
-
-    /// セッションの会話履歴文字列（コンパクション込み）を組み立てる。
+    /// セッションの会話履歴文字列を組み立てる。
+    ///
+    /// `window` は履歴の取り方だけを選ぶ（D-1085 §13.1）。`None` は既定の履歴
+    /// （前置・snapshot+差分・圧縮）、`Some` は窓の行だけを同じ描画器で並べる（前置・圧縮なし）。
     ///
     /// 二重回答を防ぐ要: resume は完了本文を sink で運ばず、DB から会話を再構築する。
     /// `system_prompt` / `runtime_context_text` はこのターンの実 request と一致させる。
+    #[allow(clippy::too_many_arguments)]
     fn build_conversation_string(
         &self,
         session_id: &str,
@@ -81,6 +72,7 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
         context_budget_tokens: usize,
         system_prompt: &str,
         runtime_context_text: &str,
+        window: Option<opencrab_core::conversation::ConversationWindow<'_>>,
     ) -> Result<String>;
 
     /// 会話車線のトークン予算（`apply_line_items` の `conversation_high`）。

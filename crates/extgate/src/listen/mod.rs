@@ -4,6 +4,7 @@ mod activity;
 mod bind;
 mod create_binding;
 mod hello;
+mod provisional;
 mod response;
 
 pub use activity::{emit_activity, emit_ended_activity, emit_turn_failed};
@@ -301,6 +302,30 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
             .await;
             Err(())
         }
+        (ConnState::PreHello, InboundMsg::Provisional(provisional)) => {
+            close_live(
+                state,
+                None,
+                Some(identity),
+                ErrorCode::ProtocolOrder,
+                Some(&provisional.id),
+                Some(writer),
+            )
+            .await;
+            Err(())
+        }
+        (ConnState::PreHello, InboundMsg::ProvisionalCancel(cancel)) => {
+            close_live(
+                state,
+                None,
+                Some(identity),
+                ErrorCode::ProtocolOrder,
+                Some(&cancel.id),
+                Some(writer),
+            )
+            .await;
+            Err(())
+        }
         (ConnState::PreHello, InboundMsg::Said(said)) => {
             close_live(
                 state,
@@ -385,6 +410,15 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
         (ConnState::Running, InboundMsg::Command(command)) => {
             let inst = instance_id.as_deref().expect("running has instance");
             handle_command(state, runtime, writer, inst, identity, command).await
+        }
+        (ConnState::Running, InboundMsg::Provisional(provisional)) => {
+            let inst = instance_id.as_deref().expect("running has instance");
+            provisional::handle_provisional(state, runtime, writer, inst, identity, &provisional)
+                .await
+        }
+        (ConnState::Running, InboundMsg::ProvisionalCancel(cancel)) => {
+            let inst = instance_id.as_deref().expect("running has instance");
+            provisional::handle_provisional_cancel(state, writer, inst, identity, &cancel).await
         }
         (ConnState::Running, InboundMsg::Said(said)) => {
             let inst = instance_id.as_deref().expect("running has instance");

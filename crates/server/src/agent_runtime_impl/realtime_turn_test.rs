@@ -1,5 +1,5 @@
 #![cfg(test)]
-//! D-1085 P1: a realtime-profile session turn is a lightweight single generation; a
+//! D-1085 P1: a realtime-profile session turn is a lightweight turn; a
 //! default-profile turn is unchanged.
 
 use std::sync::{Arc, Mutex};
@@ -14,10 +14,12 @@ use opencrab_llm::traits::{LlmProvider, ModelInfo};
 
 type Requests = Arc<Mutex<Vec<ChatRequest>>>;
 
-/// Provider `pa` with model `small`; records every request and answers with `reply`.
+/// Provider `pa` with model `small`; records every request and answers with the next scripted
+/// message, else with `reply`.
 struct CapturingProvider {
     requests: Requests,
     reply: Arc<Mutex<String>>,
+    script: Arc<Mutex<Vec<Message>>>,
 }
 
 #[async_trait]
@@ -38,13 +40,18 @@ impl LlmProvider for CapturingProvider {
 
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         self.requests.lock().unwrap().push(request.clone());
-        let reply = self.reply.lock().unwrap().clone();
+        let scripted = {
+            let mut script = self.script.lock().unwrap();
+            (!script.is_empty()).then(|| script.remove(0))
+        };
+        let message =
+            scripted.unwrap_or_else(|| Message::assistant(self.reply.lock().unwrap().clone()));
         Ok(ChatResponse {
             id: "r".to_string(),
             model: request.model,
             choices: vec![Choice {
                 index: 0,
-                message: Message::assistant(reply),
+                message,
                 finish_reason: Some(FinishReason::Stop),
             }],
             usage: Default::default(),
@@ -57,6 +64,7 @@ struct Fixture {
     state: crate::AppState,
     requests: Requests,
     reply: Arc<Mutex<String>>,
+    script: Arc<Mutex<Vec<Message>>>,
 }
 
 fn log_row(
@@ -209,26 +217,48 @@ fn fixture() -> Fixture {
     }
     let requests: Requests = Arc::new(Mutex::new(Vec::new()));
     let reply = Arc::new(Mutex::new("ok\nNO_REPLY".to_string()));
+    let script = Arc::new(Mutex::new(Vec::new()));
     let mut router = opencrab_llm::router::LlmRouter::new();
     router.add_provider(Arc::new(CapturingProvider {
         requests: requests.clone(),
         reply: reply.clone(),
+        script: script.clone(),
     }));
     state.llm_router.swap(router);
     Fixture {
         state,
         requests,
         reply,
+        script,
     }
 }
 
 /// The inbound session turn as the external gate drives it for `profile`: a realtime said takes the
 /// realtime system prompt, any other the full agent context; the gateway context is appended.
 async fn profile_turn(f: &Fixture, profile: TurnModelProfile) -> opencrab_core::EngineResult {
-    let (system, name) = match profile {
-        TurnModelProfile::Realtime => f.state.build_realtime_context("a1"),
-        TurnModelProfile::Default => f.state.build_agent_context("a1", &CallerIdentity::Owner),
-    };
+    profile_turn_with(f, profile, None).await
+}
+
+/// [`profile_turn`] with the gateway's declared operations.
+async fn profile_turn_with(
+    f: &Fixture,
+    profile: TurnModelProfile,
+    gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>>,
+) -> opencrab_core::EngineResult {
+    profile_turn_built(f, profile, |req| match gateway_actions {
+        Some(ga) => req.with_gateway_actions(ga),
+        None => req,
+    })
+    .await
+}
+
+/// [`profile_turn`] with `extend` applied to the run request.
+async fn profile_turn_built(
+    f: &Fixture,
+    profile: TurnModelProfile,
+    extend: impl FnOnce(RunRequest) -> RunRequest,
+) -> opencrab_core::EngineResult {
+    let (system, name) = f.state.build_agent_context("a1", &CallerIdentity::Owner);
     let system = format!(
         "{system}{}GATEWAY-CONTEXT",
         opencrab_llm_types::SYSTEM_SEGMENT_BREAK
@@ -254,7 +284,7 @@ async fn profile_turn(f: &Fixture, profile: TurnModelProfile) -> opencrab_core::
         "",
         |raw| raw.to_string(),
         |conversation| {
-            RunRequest::new(
+            extend(RunRequest::new(
                 "a1",
                 name.clone(),
                 "sess-a",
@@ -262,7 +292,7 @@ async fn profile_turn(f: &Fixture, profile: TurnModelProfile) -> opencrab_core::
                 conversation,
                 "test",
                 CallerIdentity::Owner,
-            )
+            ))
         },
     )
     .await
@@ -313,97 +343,181 @@ async fn default_profile_turn_keeps_the_full_request() {
     );
 }
 
-/// L1/L3/L4: a realtime turn sends one small request (persona, SOUL, the fixed block and the
-/// gateway context; no memory, rules, skills, tools or instructions), with no tools, no web
-/// search and no agent effort, and a text without the marker is the final response.
-#[tokio::test]
-async fn realtime_turn_is_one_small_request_without_tools() {
-    let f = fixture();
-    *f.reply.lock().unwrap() = "了解。".to_string();
-    let result = profile_turn(&f, TurnModelProfile::Realtime).await;
-    let requests = f.requests.lock().unwrap().clone();
-    assert_eq!(requests.len(), 1, "one LLM call");
-    assert_eq!(result.response, "了解。");
-    assert!(result.explicit_termination.is_none());
-
-    let request = &requests[0];
-    let system = system_text(request);
-    assert!(
-        system.starts_with("You are Kani (kani-persona)."),
-        "{system}"
-    );
-    assert!(system.contains("SOUL: cheerful and brief."));
-    assert!(system.contains("NO_REPLY"));
-    assert!(system.contains("<conversation_history>"));
-    assert!(system.contains("|owner"));
-    assert!(system.ends_with("GATEWAY-CONTEXT"), "{system}");
-    for absent in [
-        "## Long-term Memory",
-        "LONG-TERM-BODY",
-        "SKILL-DESCRIPTION",
-        "read_skill",
-        "## More tools",
-        "INSTRUCTIONS-BODY",
-        "## Instructions",
-        "## Async Behavior",
-        "## Task Ledger",
-        "## Memory & Context",
-    ] {
-        assert!(
-            !system.contains(absent),
-            "realtime system has {absent:?}: {system}"
-        );
-    }
-    let fixed_len = system.chars().count()
-        - "SOUL: cheerful and brief.".chars().count()
-        - "GATEWAY-CONTEXT".chars().count();
-    assert!(fixed_len < 1_200, "fixed block is {fixed_len} chars");
-
-    assert!(request.functions.is_none(), "{:?}", request.functions);
-    assert!(request.reasoning_effort.is_none());
-    assert!(!request.metadata.contains_key("web_search"));
+/// The system prompt without its More-tools index (the index ends at the next segment break).
+fn without_more_tools(system: &str) -> String {
+    let Some(at) = system.find("\n\n## More tools") else {
+        return system.to_string();
+    };
+    let end = system[at..]
+        .find(opencrab_llm_types::SYSTEM_SEGMENT_BREAK)
+        .map_or(system.len(), |e| at + e);
+    format!("{}{}", &system[..at], &system[end..])
 }
 
-/// L2: the realtime conversation is exactly the last 20 speech rows, oldest first, without tool
-/// or system rows.
+/// The tool names of the More-tools index lines (`- <category>: a, b`).
+fn more_tools_names(system: &str) -> Vec<String> {
+    let Some(at) = system.find("\n\n## More tools") else {
+        return Vec::new();
+    };
+    let end = system[at..]
+        .find(opencrab_llm_types::SYSTEM_SEGMENT_BREAK)
+        .map_or(system.len(), |e| at + e);
+    let mut names: Vec<String> = system[at..end]
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .filter_map(|line| line.split_once(": "))
+        .flat_map(|(_, names)| names.split(", ").map(str::to_string))
+        .collect();
+    names.sort();
+    names
+}
+
+/// §13.1 (a): a realtime turn sends one request whose system prompt is the default turn's (same
+/// builder, same agent and caller) apart from the More-tools index, without the agent effort; the
+/// text before the marker is the final response. Web search follows the agent setting.
 #[tokio::test]
-async fn realtime_conversation_is_the_last_20_speech_rows() {
+async fn realtime_turn_has_the_system_prompt_of_a_default_turn() {
     let f = fixture();
+    profile_turn(&f, TurnModelProfile::Default).await;
+    *f.reply.lock().unwrap() = "了解。\nNO_REPLY".to_string();
+    let result = profile_turn(&f, TurnModelProfile::Realtime).await;
+    let requests = f.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "one LLM call per turn");
+    assert_eq!(result.response, "了解。");
+
+    let (default, realtime) = (&requests[0], &requests[1]);
+    assert_eq!(
+        without_more_tools(&system_text(realtime)),
+        without_more_tools(&system_text(default))
+    );
+    assert!(system_text(realtime).contains("INSTRUCTIONS-BODY"));
+    assert!(realtime.reasoning_effort.is_none());
+    assert_eq!(
+        realtime.metadata.get("web_search"),
+        Some(&serde_json::json!(true))
+    );
+}
+
+fn function_names(request: &ChatRequest) -> Vec<String> {
+    request
+        .functions
+        .iter()
+        .flatten()
+        .map(|f| f.name.clone())
+        .collect()
+}
+
+/// §13.1 (b): a realtime turn offers exactly the lightweight allowlist plus the operations its
+/// gateway declares: projected or listed in its More-tools index, and nothing else; describe_tools
+/// loads only those. A default turn is not limited.
+#[tokio::test]
+async fn realtime_turn_tools_are_the_gateway_operations_and_the_lightweight_allowlist() {
+    let f = fixture();
+    let (ops, _) = recording_ops();
+    profile_turn_with(&f, TurnModelProfile::Default, Some(ops.clone())).await;
+    profile_turn_with(&f, TurnModelProfile::Realtime, Some(ops)).await;
+    let requests = f.requests.lock().unwrap().clone();
+    let offered = |r: &ChatRequest| {
+        let mut names = function_names(r);
+        names.extend(more_tools_names(&system_text(r)));
+        names.sort();
+        names.dedup();
+        names
+    };
+    let mut expected: Vec<String> = opencrab_actions::LIGHTWEIGHT_TURN_TOOLS
+        .iter()
+        .map(|n| n.to_string())
+        .chain(["gw_act".to_string()])
+        .collect();
+    expected.sort();
+    assert_eq!(offered(&requests[1]), expected);
+    let default = offered(&requests[0]);
+    assert!(default.len() > expected.len(), "{default:?}");
+    assert!(
+        default.iter().any(|n| n == "create_my_skill"),
+        "{default:?}"
+    );
+    assert!(expected.iter().all(|n| default.contains(n)), "{default:?}");
+    eprintln!(
+        "D-1085 §13.1 fixture tools: realtime_functions={} realtime_functions_json_chars={} \
+         default_functions={} default_functions_json_chars={}",
+        function_names(&requests[1]).len(),
+        serde_json::to_string(&requests[1].functions)
+            .unwrap()
+            .chars()
+            .count(),
+        function_names(&requests[0]).len(),
+        serde_json::to_string(&requests[0].functions)
+            .unwrap()
+            .chars()
+            .count()
+    );
+}
+
+/// The text of the user message before `<conversation_history>` and the history body.
+fn split_history(user: &str) -> (&str, &str) {
+    let open = user
+        .find(opencrab_core::conversation::CONVERSATION_HISTORY_START)
+        .expect("history start");
+    let close = user
+        .find(opencrab_core::conversation::CONVERSATION_HISTORY_END)
+        .expect("history end");
+    let body = &user[open + opencrab_core::conversation::CONVERSATION_HISTORY_START.len()..close];
+    (&user[..open], body.trim_matches('\n'))
+}
+
+/// §13.1 (c): the realtime conversation is the normal rendering of every retained row (speech,
+/// tool and system) from the 30th most recent speech row on, and nothing before the history:
+/// no task ledger, memory index or impressions.
+#[tokio::test]
+async fn realtime_conversation_is_the_recent_window_without_prefix_sections() {
+    let f = fixture();
+    {
+        let conn = f.state.db.lock().unwrap();
+        opencrab_db::queries::insert_task_ledger(&conn, "a1", "sess-a", "LEDGER-GOAL", None)
+            .unwrap();
+    }
+    // The same session through the normal builder, before the turn.
+    let normal = {
+        let conn = f.state.db.lock().unwrap();
+        opencrab_core::conversation::build_conversation_string(&conn, "sess-a", "a1", 200_000)
+            .unwrap()
+    };
     profile_turn(&f, TurnModelProfile::Realtime).await;
     let requests = f.requests.lock().unwrap().clone();
-    let user = user_text(&requests[0]);
-    let mut seen = Vec::new();
-    for i in 0..40 {
-        let label = if i % 2 == 0 {
-            format!("user-speech-{i:02}")
-        } else {
-            format!("agent-speech-{i:02}")
-        };
-        if let Some(at) = user.find(&label) {
-            seen.push((at, i));
-        }
+    let realtime_user = user_text(&requests[0]);
+    let (normal_prefix, normal_body) = split_history(&normal);
+    let (realtime_prefix, realtime_body) = split_history(&realtime_user);
+    // Set `D1085_DUMP_RT` to write the conversations this turn was built from, as the default
+    // turn's `D1085_DUMP` does, for a byte comparison across a builder change.
+    if let Ok(dir) = std::env::var("D1085_DUMP_RT") {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(format!("{dir}/normal.txt"), &normal).unwrap();
+        std::fs::write(format!("{dir}/realtime_user.txt"), &realtime_user).unwrap();
     }
-    let indexes: Vec<usize> = seen.iter().map(|(_, i)| *i).collect();
-    assert_eq!(indexes, (20..40).collect::<Vec<_>>(), "{user}");
-    assert!(
-        seen.windows(2).all(|w| w[0].0 < w[1].0),
-        "oldest first: {user}"
-    );
-    for absent in [
-        "tool-call-",
-        "tool-result-",
-        "system-row-",
-        "[Memory Index]",
-    ] {
+    assert!(normal_prefix.contains("LEDGER-GOAL"), "{normal_prefix}");
+    assert_eq!(realtime_prefix, "");
+    assert!(!realtime_user.contains("LEDGER-GOAL"));
+
+    let first = normal_body
+        .find("user-speech-10")
+        .and_then(|at| normal_body[..at].rfind("\n[").map(|line| line + 1))
+        .expect("header of user-speech-10");
+    assert_eq!(realtime_body, &normal_body[first..]);
+    for present in ["tool-result-15", "tool-result-35", "system-row-15"] {
         assert!(
-            !user.contains(absent),
-            "realtime conversation has {absent:?}: {user}"
+            realtime_body.contains(present),
+            "{present}: {realtime_body}"
         );
     }
-    assert!(user.contains("<conversation_history>"));
-    assert!(
-        user.contains("[Kani]"),
-        "own rows use the agent name: {user}"
+    for absent in ["agent-speech-09", "tool-result-05", "system-row-05"] {
+        assert!(!realtime_body.contains(absent), "{absent}: {realtime_body}");
+    }
+    eprintln!(
+        "D-1085 §13.1 fixture sizes: system_chars={} user_chars={} history_chars={}",
+        system_text(&requests[0]).chars().count(),
+        realtime_user.chars().count(),
+        realtime_body.chars().count()
     );
 }
 
@@ -473,4 +587,60 @@ async fn agent_prelude_is_the_agent_line_after_the_said_in_both_histories() {
             "{profile:?}: nothing after the prelude: {history}"
         );
     }
+}
+
+// D-1085 P5: provisional runs share this fixture.
+include!("provisional_turn_test.rs");
+// D-1085 §12: tools of lightweight and provisional runs.
+include!("provisional_gate_test.rs");
+// D-1085 §13.2: lightweight and provisional runs continue past text-only speech.
+include!("continuation_test.rs");
+
+/// D-1086: a turn request carries the session effort of its profile's slot. The realtime slot
+/// reaches realtime turns only; the default slot overrides the agent effort for default turns
+/// only; with both slots reset the requests are back to agent `high` / provider (none sent).
+#[tokio::test]
+async fn turn_requests_carry_the_session_effort_of_their_profile_slot() {
+    use opencrab_db::queries::{set_session_reasoning_effort, SessionEffortSlot};
+    let f = fixture();
+    let set = |slot, effort: Option<&str>| {
+        let conn = f.state.db.lock().unwrap();
+        assert!(set_session_reasoning_effort(&conn, "sess-a", slot, effort).unwrap());
+    };
+    let last_effort = |f: &Fixture| {
+        f.requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .reasoning_effort
+            .clone()
+    };
+
+    set(SessionEffortSlot::Realtime, Some("none"));
+    profile_turn(&f, TurnModelProfile::Realtime).await;
+    assert_eq!(last_effort(&f).as_deref(), Some("none"));
+    profile_turn(&f, TurnModelProfile::Default).await;
+    assert_eq!(
+        last_effort(&f).as_deref(),
+        Some("high"),
+        "agent effort, realtime slot ignored"
+    );
+
+    set(SessionEffortSlot::Default, Some("low"));
+    profile_turn(&f, TurnModelProfile::Default).await;
+    assert_eq!(last_effort(&f).as_deref(), Some("low"));
+    profile_turn(&f, TurnModelProfile::Realtime).await;
+    assert_eq!(last_effort(&f).as_deref(), Some("none"));
+
+    set(SessionEffortSlot::Default, None);
+    set(SessionEffortSlot::Realtime, None);
+    profile_turn(&f, TurnModelProfile::Default).await;
+    assert_eq!(last_effort(&f).as_deref(), Some("high"));
+    profile_turn(&f, TurnModelProfile::Realtime).await;
+    assert_eq!(
+        last_effort(&f),
+        None,
+        "realtime without a slot follows the provider"
+    );
 }

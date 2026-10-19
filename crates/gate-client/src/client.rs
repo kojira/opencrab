@@ -15,14 +15,16 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use super::wire::{
     command_frame, create_binding_frame, err_frame, hello_frame_with_capabilities, invoke_ok_frame,
-    ok_frame, parse_frame_bytes, read_frame, said_frame_with_context, say_reply_target,
-    say_stream_id, say_text, write_json, Activity, Attachment, Bind, CoreMsg, FrameError, Invoke,
-    Partial, SaidCaller, SaidContext, Say, TurnFailed, WireResponse,
+    ok_frame, parse_frame_bytes, provisional_cancel_frame, provisional_frame, read_frame,
+    said_frame_with_context, say_reply_target, say_stream_id, say_text, write_json, Activity,
+    Attachment, Bind, CoreMsg, FrameError, Invoke, Partial, ProvisionalRequest, ProvisionalResult,
+    SaidCaller, SaidContext, Say, TurnFailed, WireResponse,
 };
 
 include!("client/state_api.rs");
 include!("client/transport.rs");
 include!("client/handlers.rs");
+include!("client/provisional.rs");
 
 #[cfg(test)]
 mod completed_tests {
@@ -32,6 +34,11 @@ mod completed_tests {
 #[cfg(test)]
 mod partial_tests {
     include!("client/partial_tests.rs");
+}
+
+#[cfg(test)]
+mod provisional_tests {
+    include!("client/provisional_tests.rs");
 }
 
 #[cfg(test)]

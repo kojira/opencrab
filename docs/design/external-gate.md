@@ -59,6 +59,8 @@ ErrDetail  = string | null
 
 > 注: `said.agent_prelude`（任意、空白のみ不可、64 文字以下、超過は `bad_request`）は、この said への返事より前に agent がすでに相手へ発した短い言葉である（D-1085）。core は said の inbound 記録の直後に、同じ origin transaction 内で agent 自身の `speech` 行（返信と同じ形）として記録する。say としては送り返さない。無い場合の挙動は従来と同じ。
 
+> 注: 先行生成（D-1085 P5）。gateway は確定前の realtime 発話について `provisional` を送れる。core は session lock を取らずに、送信時点の session 高水位までの行と仮の発話行・`agent_prelude` 行のうち、新しい方から 30 番目の speech 行以降のすべての行を履歴として realtime の単発生成を始める。DB には何も書かない。生成の途中経過は `partial` に `provisional_id` を付けて送る。同じ binding・同じ author の新しい `provisional` は古いものを中止する。binding あたり 4 件、10 秒を超えたものは中止する。`said` が同じ `provisional_id` を持ち、`author_id`・`author_label`・`caller`・`system_context`・`agent_prelude`・`text` が完全一致し、profile が realtime で添付が無く、高水位より後に said 自身の行以外が増えていなければ、ターンはその生成結果を使う（`promoted:true`）。それ以外は中止して通常ターンを行う。どちらの場合も core はターンの say より前に `provisional_result` を送る。
+
 ### 3.3 message の完全表
 
 表の field は全て必須である。追加 field は §3.1 の規則で無視する。
@@ -70,6 +72,10 @@ ErrDetail  = string | null
 | core→gate `bind` | `id,m,binding_id,address` | `m="bind"`; `id="bind:"+binding_id` | gate→core `ok`。受理不能は `err(code="bind_failed")`。 |
 | core→gate `say` | `id,m,binding_id,payload` | `m="say"`; `id=delivery_id`; payload は §3.4 | gate→core `ok`。外部 API が非受理と確定した場合だけ `err(code="external_rejected")`。 |
 | core→gate `activity` | `m,binding_id,activity_id,state` | `m="activity"`; `state="started"|"ended"` | 応答なし。 |
+| gate→core `provisional` | `id,m,binding_id,provisional_id,author_id,caller,model_profile,text` | `m="provisional"`; `provisional_id` は UUID; `model_profile="realtime"` 以外は `bad_request`; 任意 `author_label,system_context,agent_prelude` は said と同じ規則 | core→gate `ok`。記録 0。 |
+| gate→core `provisional_cancel` | `id,m,binding_id,provisional_id` | `m="provisional_cancel"` | core→gate `ok`（冪等）。`ok` の後にその生成の `partial` は来ない。 |
+| core→gate `partial` | `m,binding_id,stream_id,text` | 先行生成のものは `provisional_id` を持つ | 応答なし。 |
+| core→gate `provisional_result` | `m,binding_id,provisional_id,promoted` | `promoted` は bool; `provisional_id` 付き said のターンで say より前に 1 回 | 応答なし。 |
 | response `ok` | `id,m` または `id,m,seq` | `m="ok"`; hello/bind/say は前者、said は `seq:positive-i64|null` を持つ | pending request 1 件を消費。 |
 | response `err` | `id,m,code,detail` | `m="err"`; `code` は §5.4; `detail` は `ErrDetail` | pending request 1 件を消費。 |
 

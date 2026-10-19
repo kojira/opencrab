@@ -16,7 +16,7 @@ pub use opencrab_core::context_budget::{
 };
 pub use opencrab_core::conversation::{
     build_conversation_string, build_conversation_string_with_memory_index,
-    build_conversation_string_with_waters,
+    build_conversation_string_with_waters, build_conversation_string_with_window,
 };
 
 /// 入口共通: コア dispatcher の tool schema を 1 回測る。gateway / MCP は

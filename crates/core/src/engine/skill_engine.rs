@@ -130,9 +130,8 @@ pub struct SkillEngine {
     /// 会話車線の二水位（#826-B）。未設定なら途中圧縮しない（テスト / sub-engine）。
     conversation_high: Option<usize>,
     conversation_low: Option<usize>,
-    /// D-1085: the first generation without tool calls ends the run. Its text (marker
-    /// stripped) is the final response; a bare `NO_REPLY` is a silent end. Off by default.
-    single_generation: bool,
+    /// D-1085 §12: a provisional run's promotion gate and the tool names that run without it.
+    promotion_gate: Option<(super::PromotionGate, std::collections::HashSet<String>)>,
 }
 
 /// LLM へ返す tool_result の退避先設定（#284）。
@@ -184,13 +183,39 @@ impl SkillEngine {
             assistant_history_name: None,
             conversation_high: None,
             conversation_low: None,
-            single_generation: false,
+            promotion_gate: None,
         }
     }
 
-    /// D-1085: end the run at the first generation without tool calls (see the field).
-    pub fn set_single_generation(&mut self, enabled: bool) {
-        self.single_generation = enabled;
+    /// D-1085 §12: a batch with a tool outside `read_only` stops the run (see
+    /// [`SkillEngine::stop_at_gated_tool`]); `gate` is aborted then.
+    pub fn set_promotion_gate(
+        &mut self,
+        gate: super::PromotionGate,
+        read_only: std::collections::HashSet<String>,
+    ) {
+        self.promotion_gate = Some((gate, read_only));
+    }
+
+    /// D-1085 §12: a provisional run never runs a tool outside its read-only set. At such a batch
+    /// it aborts its gate (a run not promoted yet never is) and ends with
+    /// [`super::promotion_gate::StoppedAtGatedTool`]; none of the batch runs.
+    fn stop_at_gated_tool(&self, tool_calls: &[opencrab_llm_types::ToolCall]) -> Result<()> {
+        let Some((gate, read_only)) = &self.promotion_gate else {
+            return Ok(());
+        };
+        if tool_calls
+            .iter()
+            .all(|tc| read_only.contains(&tc.function.name))
+        {
+            return Ok(());
+        }
+        gate.abort();
+        tracing::debug!(
+            tools = tool_calls.len(),
+            "provisional run stopped at a gated tool"
+        );
+        Err(super::promotion_gate::StoppedAtGatedTool.into())
     }
 
     /// Set the resolved assistant display identity used by canonical in-turn history rendering.

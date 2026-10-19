@@ -14,6 +14,10 @@ async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> b
             handle_partial(client, partial).await;
             false
         }
+        CoreMsg::ProvisionalResult(result) => {
+            handle_provisional_result(client, result).await;
+            false
+        }
         CoreMsg::Invoke(inv) => handle_invoke(client, inv, generation).await,
         CoreMsg::Response(resp) => {
             handle_response(client, resp, generation).await;
@@ -324,6 +328,29 @@ async fn handle_partial(client: &InstanceClient, partial: Partial) {
     let _ = q.try_push(LiveEvent::Partial {
         stream_id: partial.stream_id,
         text: partial.text,
+        provisional_id: partial.provisional_id,
+    });
+}
+
+/// D-1085: core→gate provisional result. Id-less like a partial; dropped for an unacknowledged
+/// binding.
+async fn handle_provisional_result(client: &InstanceClient, result: ProvisionalResult) {
+    let mut inner = client.inner.lock().await;
+    if inner.closed {
+        return;
+    }
+    let Some(address) = inner
+        .acknowledged
+        .iter()
+        .find(|(_, bid)| *bid == &result.binding_id)
+        .map(|(a, _)| a.clone())
+    else {
+        return;
+    };
+    let q = inner.live.entry(address).or_insert_with(LiveQueue::new);
+    let _ = q.try_push(LiveEvent::ProvisionalResult {
+        provisional_id: result.provisional_id,
+        promoted: result.promoted,
     });
 }
 

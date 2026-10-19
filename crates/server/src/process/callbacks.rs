@@ -223,11 +223,55 @@ pub(super) fn tool_result_progress_line(
     format!("tool `{tool_name}` {status}\n{preview}")
 }
 
+/// Where the turn-log callbacks write their rows.
+///
+/// D-1085 §12: a provisional run holds its rows until its promotion gate opens. Each row waits
+/// as a hook of the gate, so the promotion writes them (after the said's own rows) in the order
+/// they were made, interleaved with the other hooks of the run (§13.2: its continuation speech);
+/// once promoted, rows go straight to the DB. An aborted gate drops them.
+#[derive(Clone)]
+pub(super) struct TurnLogWriter {
+    db: opencrab_db::Db,
+    gate: Option<opencrab_core::PromotionGate>,
+}
+
+impl TurnLogWriter {
+    pub(super) fn direct(db: opencrab_db::Db) -> Self {
+        Self { db, gate: None }
+    }
+
+    pub(super) fn until_promoted(db: opencrab_db::Db, gate: &opencrab_core::PromotionGate) -> Self {
+        Self {
+            db,
+            gate: Some(gate.clone()),
+        }
+    }
+
+    pub(super) fn write(&self, row: opencrab_db::queries::SessionLogRow, what: &str) {
+        match &self.gate {
+            Some(gate) => {
+                let writer = self.clone();
+                let what = what.to_string();
+                gate.on_promoted(move || writer.insert(&row, &what));
+            }
+            None => self.insert(&row, what),
+        }
+    }
+
+    fn insert(&self, row: &opencrab_db::queries::SessionLogRow, what: &str) {
+        if let Ok(conn) = self.db.lock() {
+            if let Err(e) = opencrab_db::queries::insert_session_log(&conn, row) {
+                tracing::error!(agent_id = %row.agent_id, session_id = %row.session_id, "Failed to insert {what}: {e}");
+            }
+        }
+    }
+}
+
 /// ターンの tool_call / tool_result を session_logs に記録するコールバックの配線
 /// （#33: 段の分解。tool_result はサイズ上限超過時にワークスペースへ退避）。
 pub(super) fn set_turn_log_callbacks(
     engine: &mut opencrab_core::SkillEngine,
-    db: opencrab_db::Db,
+    writer: TurnLogWriter,
     agent_id: String,
     session_id: String,
     tool_result_workspace: std::path::PathBuf,
@@ -237,11 +281,11 @@ pub(super) fn set_turn_log_callbacks(
     di_op_names: std::collections::HashSet<String>,
 ) {
     {
-        let tc_db = db.clone();
+        let tc_writer = writer.clone();
         let tc_agent = agent_id.clone();
         let tc_session = session_id.clone();
         engine.add_on_tool_call(move |content: String, tool_calls_json: String| {
-            if let Ok(conn) = tc_db.lock() {
+            {
                 // LLMがtext+tool_callsを同時に返した場合、textをspeechとして記録する。
                 // #899 §12.6: 保存前に NO_REPLY 終端解釈（単一実装 visible_speech_after_markers）を
                 // typed 履歴へ assistant 'NO_REPLY' として再注入する）。
@@ -268,19 +312,16 @@ pub(super) fn set_turn_log_callbacks(
                         metadata_json: None,
                         created_at: None,
                     };
-                    if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &speech_log) {
-                        tracing::error!(agent_id = %tc_agent, session_id = %tc_session, "Failed to insert speech log (with tool_call): {e}");
-                    }
+                    tc_writer.write(speech_log, "speech log (with tool_call)");
                 }
                 // 発話クラス（reply/reaction/repost・§3.3.1 C6）は engine が tool_calls_json から
                 // 除外して渡す。除外の結果ツールが 1 つも残らない（空配列）ターンは、機械行
                 // （空の tool_call ログ）を残さない。発話本文は配送経路が speech として永続する。
-                let has_persistable_calls = serde_json::from_str::<serde_json::Value>(
-                    &tool_calls_json,
-                )
-                .ok()
-                .and_then(|v| v.as_array().map(|a| !a.is_empty()))
-                .unwrap_or(!tool_calls_json.trim().is_empty());
+                let has_persistable_calls =
+                    serde_json::from_str::<serde_json::Value>(&tool_calls_json)
+                        .ok()
+                        .and_then(|v| v.as_array().map(|a| !a.is_empty()))
+                        .unwrap_or(!tool_calls_json.trim().is_empty());
                 if !has_persistable_calls {
                     return;
                 }
@@ -299,9 +340,7 @@ pub(super) fn set_turn_log_callbacks(
                                             .and_then(|f| f.get("name"))
                                             .or_else(|| it.get("name"))
                                             .and_then(|n| n.as_str())?;
-                                        di_op_names
-                                            .contains(name)
-                                            .then(|| id.to_string())
+                                        di_op_names.contains(name).then(|| id.to_string())
                                     })
                                     .collect()
                             })
@@ -326,16 +365,14 @@ pub(super) fn set_turn_log_callbacks(
                     metadata_json: Some(metadata.to_string()),
                     created_at: None,
                 };
-                if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-                    tracing::error!(agent_id = %tc_agent, session_id = %tc_session, "Failed to insert tool_call log: {e}");
-                }
+                tc_writer.write(log, "tool_call log");
             }
         });
     }
 
     // on_tool_result callback: save tool_result to DB.
     {
-        let tr_db = db;
+        let tr_writer = writer;
         let tr_agent = agent_id;
         let tr_session = session_id;
         let tr_workspace = tool_result_workspace;
@@ -354,7 +391,7 @@ pub(super) fn set_turn_log_callbacks(
                     Some(tr_workspace.as_path()),
                 );
 
-                if let Ok(conn) = tr_db.lock() {
+                {
                     let log = opencrab_db::queries::SessionLogRow {
                         id: None,
                         agent_id: tr_agent.clone(),
@@ -373,9 +410,7 @@ pub(super) fn set_turn_log_callbacks(
                         ),
                         created_at: None,
                     };
-                    if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-                        tracing::error!(agent_id = %tr_agent, session_id = %tr_session, "Failed to insert tool_result log: {e}");
-                    }
+                    tr_writer.write(log, "tool_result log");
                 }
             },
         );
