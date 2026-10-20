@@ -623,3 +623,150 @@ async fn test_permission_ladder_matrix() {
         }
     }
 }
+
+/// D-1089: `PATH` is process-global, so the tests below that need a command on `PATH`
+/// serialize through this lock and restore the value afterwards. They prepend instead of
+/// replacing, so a concurrently spawning test keeps resolving its own commands.
+fn path_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn prepend_to_parent_path(dir: &std::path::Path) -> Option<std::ffi::OsString> {
+    let previous = std::env::var_os("PATH");
+    let mut value = dir.as_os_str().to_os_string();
+    if let Some(prev) = &previous {
+        value.push(":");
+        value.push(prev);
+    }
+    std::env::set_var("PATH", &value);
+    previous
+}
+
+fn restore_parent_path(previous: Option<std::ffi::OsString>) {
+    match previous {
+        Some(value) => std::env::set_var("PATH", value),
+        None => std::env::remove_var("PATH"),
+    }
+}
+
+fn stdout_of(result: &ActionResult) -> String {
+    result
+        .data
+        .as_ref()
+        .and_then(|d| d.get("stdout"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// D-1089 RED: in restrictive mode (`inherit_env = false`) the child used to receive no
+/// `PATH` at all when the configured allow list omitted it, so every allowed command outside
+/// the platform default (`/bin:/usr/bin`) failed to spawn with "No such file or directory"
+/// while the command allow-list check had already passed.
+#[tokio::test]
+async fn test_restrictive_allowlist_always_passes_path() {
+    let config = ShellToolConfig {
+        inherit_env: false,
+        // Deliberately omits PATH: the tool must still give the child a PATH.
+        allowed_env_vars: Vec::new(),
+        commands: vec![CommandConfig {
+            name: "printenv".to_string(),
+            permission: CommandPermission::Agent,
+            timeout_secs: None,
+            description: None,
+        }],
+        ..ShellToolConfig::default()
+    };
+    let action = ShellToolAction::new(config);
+    let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+    let args = serde_json::json!({"command": "printenv", "args": ["PATH"]});
+    let result = action.execute(&args, &ctx).await;
+    assert!(
+        result.success,
+        "printenv should succeed: {:?}",
+        result.error
+    );
+    let expected = std::env::var("PATH").unwrap_or_default();
+    assert_eq!(
+        stdout_of(&result).trim(),
+        expected,
+        "the child must receive the parent PATH even when the allow list omits it"
+    );
+}
+
+/// D-1089 RED (the reported symptom): an allowed command that exists only on `PATH`
+/// (not under `/bin` or `/usr/bin`) runs successfully when invoked by bare name.
+#[tokio::test]
+async fn test_restrictive_allowlist_runs_a_command_found_only_on_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = path_lock().lock().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let script = dir.path().join("opencrab-d1089-probe");
+    std::fs::write(&script, "#!/bin/sh\necho d1089-probe-ok\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let previous = prepend_to_parent_path(dir.path());
+
+    let config = ShellToolConfig {
+        inherit_env: false,
+        // PATH omitted on purpose: the command is only reachable through PATH.
+        allowed_env_vars: Vec::new(),
+        commands: vec![CommandConfig {
+            name: "opencrab-d1089-probe".to_string(),
+            permission: CommandPermission::Agent,
+            timeout_secs: None,
+            description: None,
+        }],
+        ..ShellToolConfig::default()
+    };
+    let action = ShellToolAction::new(config);
+    let (_ws, ctx) = make_ctx(CallerIdentity::Agent);
+    let args = serde_json::json!({"command": "opencrab-d1089-probe"});
+    let result = action.execute(&args, &ctx).await;
+
+    restore_parent_path(previous);
+
+    assert!(
+        result.success,
+        "an allowed command on PATH must run by bare name: {:?}",
+        result.error
+    );
+    assert!(
+        stdout_of(&result).contains("d1089-probe-ok"),
+        "unexpected stdout: {:?}",
+        stdout_of(&result)
+    );
+}
+
+/// D-1089 guard: adding PATH must not turn the restrictive mode into inherit-mode —
+/// a variable that is neither `PATH` nor allow-listed still never reaches the child.
+#[tokio::test]
+async fn test_restrictive_allowlist_still_hides_unlisted_vars_when_path_is_added() {
+    std::env::set_var("OPENCRAB_TEST_D1089_HIDDEN", "must-not-leak");
+    let config = ShellToolConfig {
+        inherit_env: false,
+        allowed_env_vars: Vec::new(),
+        commands: vec![CommandConfig {
+            name: "env".to_string(),
+            permission: CommandPermission::Agent,
+            timeout_secs: None,
+            description: None,
+        }],
+        ..ShellToolConfig::default()
+    };
+    let action = ShellToolAction::new(config);
+    let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+    let args = serde_json::json!({"command": "env"});
+    let result = action.execute(&args, &ctx).await;
+    assert!(result.success, "env should succeed: {:?}", result.error);
+    let stdout = stdout_of(&result);
+    assert!(
+        !stdout.contains("OPENCRAB_TEST_D1089_HIDDEN"),
+        "an unlisted var must not leak to the child, got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("PATH="),
+        "PATH must be present in the child env, got: {stdout:?}"
+    );
+}

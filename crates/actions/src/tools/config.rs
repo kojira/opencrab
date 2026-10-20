@@ -43,6 +43,9 @@ pub struct ShellToolConfig {
     pub working_dir: Option<String>,
     #[serde(default)]
     pub inherit_env: bool,
+    /// `inherit_env = false` のときに子へ渡す環境変数。`PATH` は設定に無くても必ず渡す
+    /// （[`ShellToolConfig::effective_env_vars`]）。許可コマンドを裸の名前で起動するには
+    /// 子の `PATH` が要り、無いと許可済みでも `No such file or directory` になるため。
     #[serde(default = "default_allowed_env_vars")]
     pub allowed_env_vars: Vec<String>,
     /// Deprecated / no longer enforced: execute_shell no longer truncates stdout/stderr
@@ -56,6 +59,17 @@ pub struct ShellToolConfig {
 }
 
 impl ShellToolConfig {
+    /// `inherit_env = false` のときに子へ実際に渡す環境変数名。`allowed_env_vars` に
+    /// `PATH` が無ければ先頭へ足す（D-1089）。他の変数は設定どおりに限定したまま
+    /// （`env_clear()` 後にこれだけを渡す）。
+    pub fn effective_env_vars(&self) -> Vec<String> {
+        let mut vars = self.allowed_env_vars.clone();
+        if !vars.iter().any(|name| name == "PATH") {
+            vars.insert(0, "PATH".to_string());
+        }
+        vars
+    }
+
     /// Returns all effective commands (merging allowed_commands as Agent-level)
     pub fn effective_commands(&self) -> Vec<CommandConfig> {
         let mut cmds: Vec<CommandConfig> = self.commands.clone();

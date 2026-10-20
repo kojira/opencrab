@@ -147,8 +147,11 @@ impl Action for ShellToolAction {
             cmd.envs(std::env::vars());
         } else {
             // inherit_env=false: allowlist のみ。それ以外の親環境は子に渡さない。
+            // ただし `PATH` は常に渡す（D-1089）。許可コマンドを裸の名前で起動するときの
+            // 解決に子の `PATH` が使われるため、無いと allowlist 済みでも
+            // `Failed to spawn command: No such file or directory` になる。
             cmd.env_clear();
-            for var in &self.config.allowed_env_vars {
+            for var in &self.config.effective_env_vars() {
                 if let Ok(val) = std::env::var(var) {
                     cmd.env(var, val);
                 }
