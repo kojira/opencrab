@@ -32,14 +32,37 @@ webhook は gateway の概念なので、実装・宛先解決・配送は gatew
 - `crates/nostr` は gateway リポジトリの `crates/nostr-gateway` が既に担っており、core 側の
   コピーは残す理由が無い（参照元 0 件）ため、移動せず削除した。
 
-## 3. 残したもの（phase 2 で扱う）
+## 3. phase 2 で消したもの（この節は削除後の状態を記す）
 
-- `crates/actions/src/webhook_target/*`（宛先解決・URL 検証・秘匿・整形）は **core に残す**。
-  唯一の利用元が 6 つの webhook 管理ツール（`set_default_webhook` など）とその設定
-  フォールバック（`AppState.default_subtask_webhook`）で、これらの削除は phase 2 の
-  スラッシュコマンド一本化と同じ変更になる。phase 1 で先に動かすと、残す側の呼び出しが
-  コンパイルできなくなる。
-- `opencrab-actions::subtask_notify` と `ToolEventSink` は中立の抽象として core に残す。
+phase 2 で core から撤去した（gateway 側が持つ）:
+
+- `crates/actions/src/webhook_target/*`（宛先解決・URL 検証・秘匿・整形、1581 行）と
+  `crates/actions/src/lib.rs` の re-export。
+- 6 つの webhook 管理ツール（`get_default_webhook` / `set_default_webhook` / `list_webhooks` /
+  `get_default_subtask_webhook` / `set_default_subtask_webhook` / `list_subtask_webhooks`）と、
+  その定義・dispatch・権限表・More tools 分類・spawn_subtask の `webhook` 引数。
+- `AppState.default_subtask_webhook` と `config::AppConfig::default_subtask_webhook`、
+  `SubtaskConfig.default_webhook`（`[subtask] default_webhook` の TOML 設定）。
+- webhook のためだけに存在した通知配線: `AppState.subtask_notifiers` /
+  `AppState.subtask_lifecycle_notifier`、`RunRequest::run_notifier`、
+  `process::callbacks::set_run_notifier_callbacks` / `tool_result_progress_line`、
+  spawn / cancel / report_progress の通知呼び出し。
+- core の tool 結果と親ログから `webhook_source` / `webhook_status` / `webhook_redacted_url` /
+  `webhook_error` を外した（宛先メタは gateway のもの）。
+- 権限拒否の tracing target `webhook_audit` → `action_rejection_audit`。
+
+core に残した中立の抽象: `opencrab-actions::subtask_notify`（`SubtaskLifecycleNotifier` /
+`SubtaskRunNotifier` / `SubtaskRunInfo` / `SubtaskNotifySession` / `NotifyTarget` /
+`NotifyTargetError` / Noop 実装）と `ToolEventSink`。gateway がこの契約を実装して使う。
+
+残る webhook 語彙（この変更の範囲外・要フォロー）:
+- `crates/db/src/queries/webhook_config.rs` と `agent_webhook_configs` の DDL
+  （`schema/sql/full.rs`, `schema/migrations/v32_v36.rs`）。gateway の宛先行の保存先で、
+  gateway の解決コードが `opencrab_db` 経由で参照している。gateway 自身の DB へ移すのは
+  gateway 側フェーズ。
+- 外部イベント**受信**（`POST /api/hooks/{source}`、`intake` / `api/hooks.rs` の
+  `webhook_dedup_key`）。配送ではなく受信の概念で、core の HTTP API 面。
+- テストの fixture 名（`webhook-user` 等）と、語彙混入を検査する static audit の denylist。
 
 ## 4. ゲート（この記録の後に実行）
 

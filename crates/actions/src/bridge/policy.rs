@@ -202,17 +202,6 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // ダッシュボード / オーナー会話 / 信頼済みユーザー会話）は全て caller!=Agent なので
     // 従来どおり通る。#351/#353 と同じ手口＝既存の caller ゲートへの追加のみで、新しい
     // 概念・列・設定は足していない。
-    //
-    // 通知転送先（webhook）の設定・読み取り。一番危険なのは `set_default_*` — 外部経路で
-    // 話しかけた第三者にエージェントの通知先 URL を自分のサーバへ向け替えられると、以後の
-    // 通知内容がそこへ流れる。読み取り側（`get_*` / `list_*`）も設定済み URL を露出する。
-    // これら 6 個は `SystemGatewayActions`（server 側 own ツール / #157 S5）の実装。
-    "set_default_webhook",
-    "set_default_subtask_webhook",
-    "get_default_webhook",
-    "get_default_subtask_webhook",
-    "list_webhooks",
-    "list_subtask_webhooks",
     // 記憶インデックス設定の書き込み。他の `configure_*` は全て OWNER_ONLY なのにこれだけ
     // 素通しだった漏れの是正。owner_only ではなく trusted_only に揃える（#356 のオーナー
     // 決定）。`SystemGatewayActions`（server 側 own ツール / #157 S1）の実装。

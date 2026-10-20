@@ -1508,80 +1508,6 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "spawn_subtask が webhook 未指定時に実際に使うデフォルト subtask webhook を解決して返す。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。",
-          "input_schema": {
-            "properties": {
-              "agent_id": {
-                "description": "対象エージェントID（省略時は自分）。",
-                "type": "string"
-              },
-              "scope": {
-                "description": "参考情報（解決は固定順序: tool>agent>global>env）。",
-                "type": "string"
-              },
-              "tool_name": {
-                "description": "tool scope を解決する際のツール名（省略可）。",
-                "type": "string"
-              }
-            },
-            "required": [],
-            "type": "object"
-          },
-          "name": "get_default_subtask_webhook",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": true
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "実際に使われるデフォルト webhook を解決して返す（既定 family='activity'＝一般ツール/コマンド活動）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。",
-          "input_schema": {
-            "properties": {
-              "agent_id": {
-                "description": "対象エージェントID（省略時は自分）。",
-                "type": "string"
-              },
-              "family": {
-                "description": "解決するファミリ（省略時 'activity'）。",
-                "enum": [
-                  "activity",
-                  "subtask"
-                ],
-                "type": "string"
-              },
-              "tool_name": {
-                "description": "tool scope を解決する際のツール名（省略可）。",
-                "type": "string"
-              }
-            },
-            "required": [],
-            "type": "object"
-          },
-          "name": "get_default_webhook",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": true
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
           "description": "自分（呼び出し元エージェント）の定時実行スケジュールを、いま話しているセッションについて一覧で読み出す。各要素: id、cron_expr（cron 式または @every 形式）、timezone、message（発火時に自分へ渡される指示文）、enabled、next_fire_at（次に発火する予定時刻。照会時に anchor と最終発火時刻から算出する UTC の RFC3339 文字列。無効・式が不正などでは null）、gated / gated_reason（enabled なのに発火しない状態とその理由）、anchor_at / last_fired_at。他のエージェントや別セッションのスケジュールは読めない。「毎朝 7 時」のような定時実行も「30 分ごと」のような定期（間隔）実行も同じスケジュールで表す（@every 形式が定期実行）。",
           "input_schema": {
             "properties": {},
@@ -1760,80 +1686,6 @@
             "type": "object"
           },
           "name": "list_allowed_commands",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": true
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "登録されている subtask webhook 設定を一覧する。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。",
-          "input_schema": {
-            "properties": {
-              "agent_id": {
-                "description": "対象エージェントID（省略時は自分。globalも併せて返る）。",
-                "type": "string"
-              },
-              "include_disabled": {
-                "description": "無効化済みも含めるか（省略時 false）。",
-                "type": "boolean"
-              },
-              "scope": {
-                "description": "scopeで絞り込み（省略可）。",
-                "type": "string"
-              }
-            },
-            "required": [],
-            "type": "object"
-          },
-          "name": "list_subtask_webhooks",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": true
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "登録されている webhook 設定を一覧する。`family`/`scope` で絞り込み可（省略時は全件）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。",
-          "input_schema": {
-            "properties": {
-              "agent_id": {
-                "description": "対象エージェントID（省略時は自分。globalも併せて返る）。",
-                "type": "string"
-              },
-              "family": {
-                "description": "family（kind）で絞り込み（省略可）。例: 'activity' / 'subtask'。",
-                "type": "string"
-              },
-              "include_disabled": {
-                "description": "無効化済みも含めるか（省略時 false）。",
-                "type": "boolean"
-              },
-              "scope": {
-                "description": "scopeで絞り込み（省略可）。",
-                "type": "string"
-              }
-            },
-            "required": [],
-            "type": "object"
-          },
-          "name": "list_webhooks",
           "origin": "gateway",
           "visibility": {
             "depth_capped": false,
@@ -2382,7 +2234,7 @@
           "visibility": {
             "depth_capped": false,
             "owner_only": false,
-            "trusted_only": false
+            "trusted_only": true
           }
         },
         {
@@ -2411,7 +2263,7 @@
           "visibility": {
             "depth_capped": false,
             "owner_only": false,
-            "trusted_only": false
+            "trusted_only": true
           }
         },
         {
@@ -2719,148 +2571,6 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "scope（agent/tool/global）ごとのデフォルト subtask webhook を設定する。urlを空/省略にするとそのscopeを無効化（enabled=false）する。owner限定。応答にrawトークンは含まれない。",
-          "input_schema": {
-            "properties": {
-              "agent_id": {
-                "description": "対象エージェントID（省略時は自分。global では '*' に強制）。",
-                "type": "string"
-              },
-              "enabled": {
-                "description": "有効/無効（url指定時のデフォルトtrue）。",
-                "type": "boolean"
-              },
-              "events": {
-                "description": "通知イベント（省略時は全て）。",
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "kind": {
-                "description": "種別（省略時 'subtask'）。",
-                "type": "string"
-              },
-              "max_chars": {
-                "description": "最大文字数（省略時 1500）。",
-                "type": "integer"
-              },
-              "output_mode": {
-                "description": "出力モード（省略時 'summary'）。",
-                "type": "string"
-              },
-              "scope": {
-                "description": "agent=エージェント既定、tool=spawn_subtaskツール既定、global=全体既定。",
-                "enum": [
-                  "agent",
-                  "tool",
-                  "global"
-                ],
-                "type": "string"
-              },
-              "tool_name": {
-                "description": "scope=tool のとき省略時 'spawn_subtask'。",
-                "type": "string"
-              },
-              "url": {
-                "description": "Discord webhook URL。空/省略でそのscopeを無効化する。",
-                "type": "string"
-              }
-            },
-            "required": [
-              "scope"
-            ],
-            "type": "object"
-          },
-          "name": "set_default_subtask_webhook",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": true
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "scope（agent/tool/global）ごとのデフォルト webhook を設定する（既定 family='activity'）。urlを空/省略にするとそのscopeを無効化（enabled=false）する。owner は全 scope、agent は自分の agent-scope のみ設定/無効化できる。応答にrawトークンは含まれない。",
-          "input_schema": {
-            "properties": {
-              "agent_id": {
-                "description": "対象エージェントID（省略時は自分。global では '*' に強制）。",
-                "type": "string"
-              },
-              "enabled": {
-                "description": "有効/無効（url指定時のデフォルトtrue）。",
-                "type": "boolean"
-              },
-              "events": {
-                "description": "通知イベント（省略時は全て）。",
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "family": {
-                "description": "設定するファミリ（省略時 'activity'）。",
-                "enum": [
-                  "activity",
-                  "subtask"
-                ],
-                "type": "string"
-              },
-              "max_chars": {
-                "description": "最大文字数（省略時 1500）。",
-                "type": "integer"
-              },
-              "output_mode": {
-                "description": "出力モード（省略時 'summary'）。",
-                "type": "string"
-              },
-              "scope": {
-                "description": "agent=エージェント既定、tool=ツール既定、global=全体既定。",
-                "enum": [
-                  "agent",
-                  "tool",
-                  "global"
-                ],
-                "type": "string"
-              },
-              "tool_name": {
-                "description": "scope=tool のとき省略時 'spawn_subtask'。activity の特定ツール宛先はツール名を指定する。",
-                "type": "string"
-              },
-              "url": {
-                "description": "Discord webhook URL。空/省略でそのscopeを無効化する。",
-                "type": "string"
-              }
-            },
-            "required": [
-              "scope"
-            ],
-            "type": "object"
-          },
-          "name": "set_default_webhook",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": true
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
           "description": "自分（呼び出し元エージェント）の定時実行スケジュールを、いま話しているセッションに対して登録する。定時実行も定期（間隔）実行もこのツールで登録する。同じセッションに複数登録でき、スケジュールごとに message を持つ。対象は常にこのセッションで、配送経路を選ぶ必要はない。cron_expr は「標準 5 フィールド cron」（例: `0 7 * * *` = 毎朝 7 時、`0 */3 * * *` = 3 時間ごとの 0 分）か「@every 形式」（例: `@every 30m`、`@every 3h`、`@every 1h30m`）で指定する。間隔実行は `@every 30m` のように書く。timezone は cron の評価に使う IANA 名で、省略時は Asia/Tokyo。message は発火時に自分へ渡される指示文（例: ニュースを巡回して要約を書く）。cron 式が不正なら登録は拒否され、その場でエラーが返る（実行時に黙って発火しないことはない）ので、エラーが出たら直して呼び直すこと。enabled は省略時 true（登録するとそのまま定期実行が始まる）。登録直後から次回発火時刻が算出され、再起動を待たず即時に反映される。登録直後に即発火はしない（最初の発火は次のスロット）。今すぐ試したいなら run_my_schedule を使う（オーナー / co_agent のみ）。",
           "input_schema": {
             "properties": {
@@ -2917,26 +2627,6 @@
               "timeout_secs": {
                 "description": "タイムアウト秒数（省略時1800秒）",
                 "type": "integer"
-              },
-              "webhook": {
-                "description": "subtask lifecycle の通知先（省略時はエージェント既定 / グローバル既定を使用）。",
-                "properties": {
-                  "events": {
-                    "description": "通知するイベント（省略時は全て）。started/progress/completed/failed/timed_out/aborted",
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "url": {
-                    "description": "通知先の webhook URL",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "url"
-                ],
-                "type": "object"
               }
             },
             "required": [

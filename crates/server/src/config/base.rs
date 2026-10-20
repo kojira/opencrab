@@ -329,37 +329,13 @@ pub struct SubtaskConfig {
     /// TOML より優先する（`.env` だけで切り戻せるように）。
     #[serde(default = "default_subtask_auto_dispatch")]
     pub auto_dispatch: bool,
-
-    /// 設定ファイル由来の**通知先フォールバック**（#157 S5）。
-    ///
-    /// 通知先の解決順は「明示指定 → DB の scope 別既定（tool>agent>global）→ ここ」。
-    /// DB 行が 1 つも無いときだけ効く最後の砦（`WebhookSource::EnvConfig`）。
-    ///
-    /// transport非依存の`[subtask]`名前空間だけを使用する。
-    #[serde(default)]
-    pub default_webhook: Option<SubtaskWebhookConfig>,
 }
 
 impl Default for SubtaskConfig {
     fn default() -> Self {
         Self {
             auto_dispatch: default_subtask_auto_dispatch(),
-            default_webhook: None,
         }
-    }
-}
-
-impl AppConfig {
-    /// Resolve the transport-neutral configured notification destination.
-    pub fn default_subtask_webhook(
-        &self,
-    ) -> Option<opencrab_actions::webhook_target::WebhookConfig> {
-        self.subtask.default_webhook.as_ref().and_then(|config| {
-            opencrab_actions::webhook_target::WebhookConfig::from_parts(
-                config.url.clone(),
-                config.events.clone(),
-            )
-        })
     }
 }
 

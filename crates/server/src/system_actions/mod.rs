@@ -127,7 +127,6 @@ include!("definitions/configuration.rs");
 include!("definitions/subtasks_progress.rs");
 include!("definitions/memory_commands_skill.rs");
 include!("definitions/heartbeat_schedules.rs");
-include!("definitions/webhooks.rs");
 include!("definitions.rs");
 
 include!("execution/subtasks_memory.rs");

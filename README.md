@@ -289,17 +289,16 @@ only exist on that transport's turns.
 | **Nostr messaging** | `nostr_post`, `nostr_reply`, `nostr_zap`, `nostr_upload` | Nostr turns only (`crates/nostr`) — the reply path used while handling an inbound Nostr event; `nostr_zap` carried a trusted-only gate until #306 dropped it. **`nostr_dm` was removed by #514** (DM is not handled at all — receive discarded, send forbidden; see [Nostr](#nostr)) |
 | **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file`, `discord_create_channel` | Discord turns only (`crates/discord`) |
 | **Delivery** | `send_ui`, `request_peer_review` | all turns whose transport can render UI (`send_ui`) or send text (`request_peer_review`) — implementations in `crates/actions/src/a2ui.rs` and `crates/server/src/peer_review.rs`; the transport only supplies the surface (`GatewayActions::a2ui_surface` / `text_delivery`) |
-| **Webhook targets** | `list_webhooks`, `get_default_webhook`, `set_default_webhook`, `list_subtask_webhooks`, `get_default_subtask_webhook`, `set_default_subtask_webhook` | all turns (`crates/server/src/webhook_targets.rs`) |
-| **Webhook creation** | `discord_create_webhook`, `ensure_webhook`, `ensure_subtask_webhook` | Discord turns only (`crates/discord`) — the `ensure_*` pair creates a webhook through serenity when no default exists |
 | **Voice** | `join_voice_channel`, `leave_voice_channel` | Discord turns only (`crates/discord`) |
 | **Skills** | `create_skill` | all turns (`crates/server/src/agent_management.rs`) |
 
 The rows above name every action in `SystemGatewayActions::own_definitions()` (the "all turns"
 rows) and every action in `DiscordGatewayActions::definitions()`. Each action is defined in
-exactly one place: `cancel_subtask`, the six
-webhook-target actions, `create_skill` and `request_peer_review` used to be defined by Discord
-as well, but #157 S2/S3/S5/S6/S7 removed those definitions so the transport-independent
-implementation is the only one. The three Nostr bootstrap tools are the reverse case: they are
+exactly one place: `cancel_subtask`, `create_skill` and `request_peer_review` used to be defined
+by Discord as well, but #157 S2/S3/S5/S6/S7 removed those definitions so the
+transport-independent implementation is the only one. Notification destinations (webhooks) are
+a gateway concept and are no longer part of the core tool surface at all: the gateway owns the
+destination setting, so core resolves none of it (D-1087). The three Nostr bootstrap tools are the reverse case: they are
 defined by both `SystemGatewayActions` and `crates/nostr`, and `definitions()` de-duplicates by
 name so the transport-independent one wins — which is what makes them usable on turns where no
 Nostr gateway is running yet. Drift is caught by tests rather than by

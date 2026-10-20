@@ -71,13 +71,16 @@ class GatewayBoundaryMutationTests(unittest.TestCase):
             )
             self.assertEqual(AUDIT._metadata_for(moved)[0], "production-violation")
 
-    def test_s10_reviewed_boundary_burn_down_has_exactly_115_findings(self):
+    def test_s10_reviewed_boundary_burn_down_has_exactly_105_findings(self):
         root = pathlib.Path(__file__).parents[2]
         baseline = json.loads((root / "scripts/gateway-boundary-baseline.json").read_text())
         findings = AUDIT.audit_texts(AUDIT.repository_texts(root))
-        self.assertEqual(len(findings), 115)
-        self.assertEqual(len(baseline["entries"]), 115)
-        self.assertEqual(baseline["review"]["finding_count"], 115)
+        # D-1087: the six webhook management tools and their core resolution layer were
+        # removed, which retired ten findings (115 -> 105). The pin tracks the reviewed
+        # burn-down; a change here must come from removing or reclassifying findings.
+        self.assertEqual(len(findings), 105)
+        self.assertEqual(len(baseline["entries"]), 105)
+        self.assertEqual(baseline["review"]["finding_count"], 105)
         self.assertFalse(
             [finding for finding in findings if finding.rule == "public-gate-admin-reachable"]
         )

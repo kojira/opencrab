@@ -28,7 +28,7 @@
       "4xx": 32,
       "5xx": 4
     },
-    "tool_effects_observed": 43,
+    "tool_effects_observed": 41,
     "tool_success_uncollected_count": 7
   },
   "http": {
@@ -8724,8 +8724,7 @@
       "real provider endpoint tests and LLM-backed message runs",
       "operator-configured MCP subprocess startup semantics",
       "imports from a real operator workspace",
-      "voice provider I/O",
-      "network delivery to configured webhooks"
+      "voice provider I/O"
     ],
     "mcp": {
       "selected_flow": [
@@ -8778,8 +8777,6 @@
         "add_allowed_command",
         "remove_allowed_command",
         "create_skill",
-        "set_default_subtask_webhook",
-        "set_default_webhook",
         "spawn_subtask",
         "cancel_subtask",
         "steer_subtask",
@@ -8958,14 +8955,6 @@
           "arguments": null,
           "db_query": "executor_runtime"
         },
-        "set_default_subtask_webhook": {
-          "arguments": null,
-          "db_query": "webhook_configs"
-        },
-        "set_default_webhook": {
-          "arguments": null,
-          "db_query": "webhook_configs"
-        },
         "summarize_and_save": {
           "arguments": {
             "path": "captured/summary.txt"
@@ -9039,13 +9028,9 @@
         "configure_mcp_server",
         "declare_done",
         "execute_shell",
-        "get_default_subtask_webhook",
-        "get_default_webhook",
         "get_system_info",
         "get_task",
         "list_allowed_commands",
-        "list_subtask_webhooks",
-        "list_webhooks",
         "manage_allowed_commands",
         "mcp__public_local__echo",
         "mcp__trusted_local__echo",
@@ -9126,8 +9111,6 @@
         "generate_inner_voice": {
           "thought": "baseline thought"
         },
-        "get_default_subtask_webhook": {},
-        "get_default_webhook": {},
         "get_system_info": {},
         "get_task": {},
         "learn_from_experience": {
@@ -9143,14 +9126,6 @@
           "skill_name": "Peer Skill"
         },
         "list_allowed_commands": {},
-        "list_subtask_webhooks": {
-          "include_disabled": true,
-          "scope": "all"
-        },
-        "list_webhooks": {
-          "include_disabled": true,
-          "scope": "all"
-        },
         "manage_allowed_commands": {
           "action": "list"
         },
@@ -9256,18 +9231,6 @@
           "model_alias": "baseline:model",
           "purpose": "baseline",
           "reason": "compatibility capture"
-        },
-        "set_default_subtask_webhook": {
-          "enabled": true,
-          "kind": "subtask",
-          "scope": "agent",
-          "url": "https://hooks.example.test/api/1/baseline"
-        },
-        "set_default_webhook": {
-          "enabled": true,
-          "family": "tool",
-          "scope": "agent",
-          "url": "https://hooks.example.test/api/1/baseline"
         },
         "spawn_subtask": {
           "label": "baseline subtask",
@@ -9928,30 +9891,6 @@
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "scope"
-        ],
-        "result": {
-          "data": null,
-          "error": "scope is required: 'agent' | 'tool' | 'global'",
-          "success": false
-        },
-        "tool": "set_default_subtask_webhook"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "scope"
-        ],
-        "result": {
-          "data": null,
-          "error": "scope is required: 'agent' | 'tool' | 'global'",
-          "success": false
-        },
-        "tool": "set_default_webhook"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
           "cron_expr",
           "message"
         ],
@@ -10277,34 +10216,6 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'get_default_subtask_webhook' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "get_default_subtask_webhook"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'get_default_webhook' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "get_default_webhook"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
           "error": "rejected: action 'get_my_schedules' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
@@ -10365,34 +10276,6 @@
           "success": false
         },
         "tool": "list_allowed_commands"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'list_subtask_webhooks' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "list_subtask_webhooks"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'list_webhooks' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "list_webhooks"
       },
       {
         "caller": "agent",
@@ -10589,34 +10472,6 @@
           "success": false
         },
         "tool": "run_my_schedule"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'set_default_subtask_webhook' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "set_default_subtask_webhook"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'set_default_webhook' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "set_default_webhook"
       },
       {
         "caller": "agent",
@@ -11841,42 +11696,6 @@
         "postcondition": null,
         "result": {
           "data": {
-            "enabled": false,
-            "events": null,
-            "family": "subtask",
-            "redacted_url": null,
-            "scope": null,
-            "source": null,
-            "status": "none"
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "get_default_subtask_webhook"
-      },
-      {
-        "arguments": {},
-        "postcondition": null,
-        "result": {
-          "data": {
-            "enabled": false,
-            "events": null,
-            "family": "activity",
-            "redacted_url": null,
-            "scope": null,
-            "source": null,
-            "status": "none"
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "get_default_webhook"
-      },
-      {
-        "arguments": {},
-        "postcondition": null,
-        "result": {
-          "data": {
             "active_model": "baseline:model",
             "agent_id": "baseline-agent",
             "agent_name": "Baseline Agent",
@@ -12019,36 +11838,6 @@
           "success": true
         },
         "tool": "list_allowed_commands"
-      },
-      {
-        "arguments": {
-          "include_disabled": true,
-          "scope": "all"
-        },
-        "postcondition": null,
-        "result": {
-          "data": {
-            "webhooks": []
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "list_subtask_webhooks"
-      },
-      {
-        "arguments": {
-          "include_disabled": true,
-          "scope": "all"
-        },
-        "postcondition": null,
-        "result": {
-          "data": {
-            "webhooks": []
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "list_webhooks"
       },
       {
         "arguments": {
@@ -13757,110 +13546,6 @@
       },
       {
         "arguments": {
-          "enabled": true,
-          "kind": "subtask",
-          "scope": "agent",
-          "url": "https://hooks.example.test/api/1/baseline"
-        },
-        "postcondition": {
-          "arguments": null,
-          "before": {
-            "db_query": "webhook_configs",
-            "value": []
-          },
-          "db_query": "webhook_configs",
-          "expect_success": false,
-          "method": null,
-          "observed": {
-            "db_query": "webhook_configs",
-            "value": [
-              {
-                "agent_id": "baseline-agent",
-                "created_by": "owner",
-                "enabled": true,
-                "events_json": null,
-                "kind": "subtask",
-                "max_chars": 1500,
-                "name": null,
-                "output_mode": "summary",
-                "scope": "agent",
-                "tool_name": "",
-                "updated_at": "<timestamp>",
-                "url": "https://hooks.example.test/api/1/baseline"
-              }
-            ]
-          },
-          "tool": null,
-          "uri": null
-        },
-        "result": {
-          "data": {
-            "agent_id": "baseline-agent",
-            "enabled": true,
-            "family": "subtask",
-            "redacted_url": "https://hooks.example.test/api/1/[redacted]",
-            "scope": "agent",
-            "tool_name": ""
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "set_default_subtask_webhook"
-      },
-      {
-        "arguments": {
-          "enabled": true,
-          "family": "tool",
-          "scope": "agent",
-          "url": "https://hooks.example.test/api/1/baseline"
-        },
-        "postcondition": {
-          "arguments": null,
-          "before": {
-            "db_query": "webhook_configs",
-            "value": []
-          },
-          "db_query": "webhook_configs",
-          "expect_success": false,
-          "method": null,
-          "observed": {
-            "db_query": "webhook_configs",
-            "value": [
-              {
-                "agent_id": "baseline-agent",
-                "created_by": "owner",
-                "enabled": true,
-                "events_json": null,
-                "kind": "tool",
-                "max_chars": 1500,
-                "name": null,
-                "output_mode": "summary",
-                "scope": "agent",
-                "tool_name": "",
-                "updated_at": "<timestamp>",
-                "url": "https://hooks.example.test/api/1/baseline"
-              }
-            ]
-          },
-          "tool": null,
-          "uri": null
-        },
-        "result": {
-          "data": {
-            "agent_id": "baseline-agent",
-            "enabled": true,
-            "family": "tool",
-            "redacted_url": "https://hooks.example.test/api/1/[redacted]",
-            "scope": "agent",
-            "tool_name": ""
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "set_default_webhook"
-      },
-      {
-        "arguments": {
           "content": "baseline summary",
           "filename": "captured/summary.txt",
           "summary_type": "note"
@@ -14990,11 +14675,7 @@
             "session_id": "subtask-<uuid>",
             "spawned_at": "<timestamp>",
             "status": "spawned",
-            "subtask_id": "<uuid>",
-            "webhook_error": null,
-            "webhook_redacted_url": null,
-            "webhook_source": null,
-            "webhook_status": "none"
+            "subtask_id": "<uuid>"
           },
           "error": null,
           "success": true
@@ -15052,18 +14733,6 @@
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "get_default_subtask_webhook"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "get_default_webhook"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
         "tool": "get_my_schedules"
       },
       {
@@ -15083,18 +14752,6 @@
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
         "tool": "list_allowed_commands"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "list_subtask_webhooks"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "list_webhooks"
       },
       {
         "facet": "missing_arguments",
@@ -15236,16 +14893,12 @@
           "execute_shell",
           "generate_image",
           "generate_inner_voice",
-          "get_default_subtask_webhook",
-          "get_default_webhook",
           "get_my_schedules",
           "get_system_info",
           "get_task",
           "learn_from_experience",
           "learn_from_peer",
           "list_allowed_commands",
-          "list_subtask_webhooks",
-          "list_webhooks",
           "manage_allowed_commands",
           "mcp__public_local__echo",
           "mcp__trusted_local__echo",
@@ -15272,8 +14925,6 @@
           "search_memory_index",
           "search_my_history",
           "select_llm",
-          "set_default_subtask_webhook",
-          "set_default_webhook",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -15323,16 +14974,12 @@
           "execute_shell",
           "generate_image",
           "generate_inner_voice",
-          "get_default_subtask_webhook",
-          "get_default_webhook",
           "get_my_schedules",
           "get_system_info",
           "get_task",
           "learn_from_experience",
           "learn_from_peer",
           "list_allowed_commands",
-          "list_subtask_webhooks",
-          "list_webhooks",
           "manage_allowed_commands",
           "mcp__public_local__echo",
           "mcp__trusted_local__echo",
@@ -15359,8 +15006,6 @@
           "search_memory_index",
           "search_my_history",
           "select_llm",
-          "set_default_subtask_webhook",
-          "set_default_webhook",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -15410,16 +15055,12 @@
           "execute_shell",
           "generate_image",
           "generate_inner_voice",
-          "get_default_subtask_webhook",
-          "get_default_webhook",
           "get_my_schedules",
           "get_system_info",
           "get_task",
           "learn_from_experience",
           "learn_from_peer",
           "list_allowed_commands",
-          "list_subtask_webhooks",
-          "list_webhooks",
           "manage_allowed_commands",
           "mcp__public_local__echo",
           "mcp__trusted_local__echo",
@@ -15446,8 +15087,6 @@
           "search_memory_index",
           "search_my_history",
           "select_llm",
-          "set_default_subtask_webhook",
-          "set_default_webhook",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -15497,16 +15136,12 @@
           "execute_shell",
           "generate_image",
           "generate_inner_voice",
-          "get_default_subtask_webhook",
-          "get_default_webhook",
           "get_my_schedules",
           "get_system_info",
           "get_task",
           "learn_from_experience",
           "learn_from_peer",
           "list_allowed_commands",
-          "list_subtask_webhooks",
-          "list_webhooks",
           "manage_allowed_commands",
           "mcp__public_local__echo",
           "merge_tags",
@@ -15532,8 +15167,6 @@
           "search_memory_index",
           "search_my_history",
           "select_llm",
-          "set_default_subtask_webhook",
-          "set_default_webhook",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -15704,16 +15337,12 @@
           "evaluate_response",
           "generate_image",
           "generate_inner_voice",
-          "get_default_subtask_webhook",
-          "get_default_webhook",
           "get_my_schedules",
           "get_system_info",
           "get_task",
           "learn_from_experience",
           "learn_from_peer",
           "list_allowed_commands",
-          "list_subtask_webhooks",
-          "list_webhooks",
           "manage_allowed_commands",
           "mcp__public_local__echo",
           "mcp__trusted_local__echo",
@@ -15740,8 +15369,6 @@
           "search_memory_index",
           "search_my_history",
           "select_llm",
-          "set_default_subtask_webhook",
-          "set_default_webhook",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -15810,16 +15437,12 @@
           "evaluate_response",
           "generate_image",
           "generate_inner_voice",
-          "get_default_subtask_webhook",
-          "get_default_webhook",
           "get_my_schedules",
           "get_system_info",
           "get_task",
           "learn_from_experience",
           "learn_from_peer",
           "list_allowed_commands",
-          "list_subtask_webhooks",
-          "list_webhooks",
           "manage_allowed_commands",
           "mcp__public_local__echo",
           "merge_tags",
@@ -15845,8 +15468,6 @@
           "search_memory_index",
           "search_my_history",
           "select_llm",
-          "set_default_subtask_webhook",
-          "set_default_webhook",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",

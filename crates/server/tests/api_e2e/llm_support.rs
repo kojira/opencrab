@@ -204,9 +204,6 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
         session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
-        subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
-        subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        default_subtask_webhook: None,
         scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         timed_fire_router: std::sync::Arc::new(opencrab_actions::TimedFireRouter::new()),
         progress_debounce: std::sync::Arc::new(

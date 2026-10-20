@@ -1,37 +1,5 @@
 use super::*;
 
-/// sub-engine のツール呼び出しを進捗テキストへ要約する（#175 S4）。
-///
-/// 旧 Discord 実装（`execute_spawn_subtask`）から移設。`{function:{name}}`（正準）と
-/// `{name}`（旧形状）の両方に対応し、assistant 本文は先頭 500 文字だけ添える。
-fn summarize_tool_calls(assistant_content: &str, tool_calls_json: &str) -> String {
-    let mut names = Vec::new();
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(tool_calls_json) {
-        if let Some(calls) = value.as_array() {
-            for call in calls {
-                let name = call
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|v| v.as_str())
-                    .or_else(|| call.get("name").and_then(|v| v.as_str()));
-                if let Some(name) = name {
-                    names.push(format!("`{name}`"));
-                }
-            }
-        }
-    }
-    let tools = if names.is_empty() {
-        "tool call".to_string()
-    } else {
-        names.join(", ")
-    };
-    let preview: String = assistant_content.trim().chars().take(500).collect();
-    if preview.is_empty() {
-        format!("calling {tools}")
-    } else {
-        format!("calling {tools}\n{preview}")
-    }
-}
 /// 失敗行の `error_body` に、`llm_logs.prompt` 列と**同じ全体シリアライズ**のサイズ
 /// （文字数）を一様に付ける（#706）。空応答など「なぜ答えられなかったか」の行を見た人が、
 /// 別列 `prompt` を辿らずに **1 クエリで「長さが原因か」の当たり**を付けられるようにする。
@@ -159,68 +127,6 @@ pub(super) fn set_llm_log_callback(
             }
         }
     });
-}
-
-/// サブタスク走行の実況（#175 S4）の配線。ツール呼び出しと結果を進捗として通知口へ流す。
-///
-/// 購読していない（`wants_progress()` が false）ならフック自体を挿さず、要約の計算も
-/// 省く（旧 `execute_spawn_subtask` と同じ判定）。
-///
-/// #397: ここと [`set_turn_log_callbacks`] は**同じ engine の同じフック**に載る。engine
-/// 側が代入だった頃は、後から呼ばれる `set_turn_log_callbacks`（`persist_turn_logs` が
-/// true のとき）がこの実況を丸ごと上書きして消していた。今は `add_on_tool_*` で足すので
-/// 両方生き、配線の順序にも依存しない。
-pub(super) fn set_run_notifier_callbacks(
-    engine: &mut opencrab_core::SkillEngine,
-    notifier: &std::sync::Arc<dyn opencrab_actions::SubtaskRunNotifier>,
-    session_id: String,
-) {
-    if !notifier.wants_progress() {
-        return;
-    }
-    let on_call = notifier.clone();
-    engine.add_on_tool_call(move |assistant_content, tool_calls_json| {
-        on_call.on_progress(&summarize_tool_calls(&assistant_content, &tool_calls_json));
-    });
-    let on_result = notifier.clone();
-    engine.add_on_tool_result(move |tool_call_id, tool_name, result_json, is_error| {
-        on_result.on_progress(&tool_result_progress_line(
-            &tool_name,
-            &result_json,
-            is_error,
-            &session_id,
-            &tool_call_id,
-        ));
-    });
-}
-
-/// 実況として通知口へ流す 1 行を組む（ツール名・成否・結果のプレビュー）。
-///
-/// **無害化してからプレビューを切る**。実況は webhook で系の外へ出る経路なので、
-/// 永続化側（[`set_turn_log_callbacks`]）と同じ `sanitize_tool_result_for_log` を通し、
-/// nsec が生のまま 500 文字に混ざらないようにする。秘密が結果のどこに現れるかは
-/// ツール次第で、先頭 500 文字を見て安全と判断はできないため、**切る前に**通す。
-///
-/// `workspace_root` は `None` を渡す。engine は callback より手前で `cap_tool_result` を
-/// かけており、ここへ来る本文は上限内なので退避は起きない。仮に起きても実況が
-/// ワークスペースへ書く必要はない（永続化側と二重に書くことになる）。
-pub(super) fn tool_result_progress_line(
-    tool_name: &str,
-    result_json: &str,
-    is_error: bool,
-    session_id: &str,
-    tool_call_id: &str,
-) -> String {
-    let status = if is_error { "failed" } else { "completed" };
-    let safe = opencrab_actions::sanitize_tool_result_for_log(
-        tool_name,
-        result_json,
-        session_id,
-        tool_call_id,
-        None,
-    );
-    let preview: String = safe.chars().take(500).collect();
-    format!("tool `{tool_name}` {status}\n{preview}")
 }
 
 /// Where the turn-log callbacks write their rows.

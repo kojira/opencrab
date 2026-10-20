@@ -272,43 +272,26 @@ async fn skill_and_learning_actions_gated_from_agent_caller() {
     }
 }
 
-/// #356 で trusted ゲートへ載せる、caller=Agent に素通しだった 9 個。
-const PASSTHROUGH_9_TRUSTED_ONLY: &[&str] = &[
-    "set_default_webhook",
-    "set_default_subtask_webhook",
-    "get_default_webhook",
-    "get_default_subtask_webhook",
-    "list_webhooks",
-    "list_subtask_webhooks",
+/// #356 で trusted ゲートへ載せる、caller=Agent に素通しだった棚卸し分。
+///
+/// D-1087: 通知先（webhook）の 6 個は gateway の概念なので core のツール面から撤去した。
+/// 残る 3 個で同じ性質（trusted_only・caller=Agent から 3 経路すべてで落ちる）を保つ。
+const PASSTHROUGH_TRUSTED_ONLY: &[&str] = &[
     "update_memory_index_config",
     "get_system_info",
     "list_allowed_commands",
 ];
 
-/// #356 の 9 個のうち、`SystemGatewayActions`（server 側 own ツール）で定義される 8 個。
+/// 上のうち、`SystemGatewayActions`（server 側 own ツール）で定義される 2 個。
 /// 残る 1 個 `get_system_info` は core dispatcher（`ActionDispatcher::new`）側。
-const PASSTHROUGH_9_SERVER_SLOT: &[&str] = &[
-    "set_default_webhook",
-    "set_default_subtask_webhook",
-    "get_default_webhook",
-    "get_default_subtask_webhook",
-    "list_webhooks",
-    "list_subtask_webhooks",
-    "update_memory_index_config",
-    "list_allowed_commands",
-];
+const PASSTHROUGH_SERVER_SLOT: &[&str] = &["update_memory_index_config", "list_allowed_commands"];
 
-/// #356: 素通しだった 9 個はいずれも trusted_only（owner_only ではない）。owner_only に
-/// すると CoAgent / TrustedUser も塞がれてしまう（オーナー決定は「9 個すべて
-/// trusted_only」）。ポリシー表の権威で固定する。
+/// #356: 素通しだった 3 個はいずれも trusted_only（owner_only ではない）。owner_only に
+/// すると CoAgent / TrustedUser も塞がれてしまう（オーナー決定は trusted_only）。
+/// ポリシー表の権威で固定する。
 #[test]
 fn passthrough_actions_are_trusted_only_in_policy_table() {
-    assert_eq!(
-        PASSTHROUGH_9_TRUSTED_ONLY.len(),
-        9,
-        "#356 の対象は 9 個（棚卸しで見つかった素通し分）"
-    );
-    for name in PASSTHROUGH_9_TRUSTED_ONLY {
+    for name in PASSTHROUGH_TRUSTED_ONLY {
         let p = tool_policy(name);
         assert!(p.trusted_only, "{name} must be trusted_only (#356)");
         assert!(
@@ -320,13 +303,13 @@ fn passthrough_actions_are_trusted_only_in_policy_table() {
 }
 
 /// #356: caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）からは、素通し
-/// だった 9 個が **3 経路すべて**（`policy_allows` / `list_tools` / `dispatch_inner`）で
+/// だった 3 個が **3 経路すべて**（`policy_allows` / `list_tools` / `dispatch_inner`）で
 /// 落ちること。名前がリストから消えただけでは別の場所に caller ゲートが足された場合を
 /// 捕まえられないので `skill_and_learning_actions_gated_from_agent_caller`（#351）と同じ
 /// 3 経路を通す。
 ///
 /// 実行時強制の確認は「拒否された（`!success`）」だけでなく **policy 由来の拒否である
-/// こと**（`is_rejection` = REJECTION_CODE_PREFIX 付き）まで見る。8 個は
+/// こと**（`is_rejection` = REJECTION_CODE_PREFIX 付き）まで見る。2 個は
 /// `SystemGatewayActions` 由来で、`BridgedExecutor::new` は gateway を注入しないため、
 /// もし policy が拒否しなければ「Unknown action」で `!success` になってしまい、ゲートの
 /// 有無を区別できない。policy 拒否まで確認して初めて「trusted ゲートが効いている」と
@@ -337,12 +320,12 @@ fn passthrough_actions_are_trusted_only_in_policy_table() {
 /// gateway を注入した list_tools に出る）。
 #[tokio::test]
 async fn passthrough_actions_gated_from_agent_caller() {
-    // gateway 源（8 個の server ツール）を注入した executor で list_tools を実測する。
+    // gateway 源（2 個の server ツール）を注入した executor で list_tools を実測する。
     // get_system_info は dispatcher 側にあるので gateway には入れない。
     let build_exec = |caller: CallerIdentity| {
         let (dir, ctx) = test_context_with_caller(caller);
         let exec = BridgedExecutor::new(ActionDispatcher::new(), ctx)
-            .with_gateway_actions(Arc::new(MockGatewayServerSlot8));
+            .with_gateway_actions(Arc::new(MockGatewayServerSlot));
         (dir, exec)
     };
 
@@ -350,7 +333,7 @@ async fn passthrough_actions_gated_from_agent_caller() {
     let (_d, agent_exec) = build_exec(CallerIdentity::Agent);
     // #923: agent gating の可視性は narrowing 前の policy 層で検証する。
     let agent_listed: Vec<String> = policy_visible_names(&agent_exec);
-    for name in PASSTHROUGH_9_TRUSTED_ONLY {
+    for name in PASSTHROUGH_TRUSTED_ONLY {
         // 1. ポリシー述語（list_tools と dispatch_inner が共有する単一の判定）。
         assert!(
             !agent_exec.policy_allows(name),
@@ -387,7 +370,7 @@ async fn passthrough_actions_gated_from_agent_caller() {
         let (_d, exec) = build_exec(caller.clone());
         // #923: owner/trusted 可視性は narrowing 前の policy 層で検証する。
         let listed: Vec<String> = policy_visible_names(&exec);
-        for name in PASSTHROUGH_9_TRUSTED_ONLY {
+        for name in PASSTHROUGH_TRUSTED_ONLY {
             assert!(
                 exec.policy_allows(name),
                 "caller={caller:?} で {name} が policy_allows を通らない（#356 は \
@@ -575,18 +558,18 @@ async fn memory_unit_actions_gated_from_agent_caller() {
     }
 }
 
-/// #356: server 側 own ツール（webhook 6 個 + `update_memory_index_config` +
-/// `list_allowed_commands`）を露出するモック。これらは本番では `SystemGatewayActions`
+/// #356: server 側 own ツール（`update_memory_index_config` + `list_allowed_commands`）
+/// を露出するモック。これらは本番では `SystemGatewayActions`
 /// が定義するが、`BridgedExecutor::new` は `gateway_actions: None` なので、list_tools の
 /// 可視性フィルタ（`policy_allows` による gateway merge の絞り込み）を実測するには
 /// gateway 源を注入する必要がある。`get_system_info` は core dispatcher 側にあるので
 /// ここには入れない（二重登録を避ける）。
-struct MockGatewayServerSlot8;
+struct MockGatewayServerSlot;
 
 #[async_trait]
-impl GatewayActions for MockGatewayServerSlot8 {
+impl GatewayActions for MockGatewayServerSlot {
     fn definitions(&self) -> Vec<GatewayActionDef> {
-        PASSTHROUGH_9_SERVER_SLOT
+        PASSTHROUGH_SERVER_SLOT
             .iter()
             .map(|name| GatewayActionDef {
                 name: name.to_string(),

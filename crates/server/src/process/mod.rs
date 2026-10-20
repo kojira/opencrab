@@ -40,8 +40,8 @@ pub(crate) use wiring::{
 
 use budget::spawn_background_turn_end_snapshot;
 use callbacks::{
-    merge_image_urls, normalize_image_urls, set_llm_log_callback, set_run_notifier_callbacks,
-    set_turn_log_callbacks, TurnLogWriter,
+    merge_image_urls, normalize_image_urls, set_llm_log_callback, set_turn_log_callbacks,
+    TurnLogWriter,
 };
 use live_inbound::SubtaskSteerInbound;
 use loop_restart::prepare_loop_restart;
@@ -80,9 +80,6 @@ mod skill_mentioned_tests;
 #[cfg(test)]
 #[path = "tests/steer_inbound.rs"]
 mod steer_inbound_tests;
-#[cfg(test)]
-#[path = "tests/tool_result_progress_line.rs"]
-mod tool_result_progress_line_tests;
 /// 実行対象の agent 行が `agents` に存在しないときのエラー（#632）。
 ///
 /// `run_agent_response` は**サーバ側の全ターン実行が通る唯一のチョークポイント**
@@ -289,23 +286,6 @@ pub async fn run_agent_response(
             })
         },
     );
-    // ツール/コマンド活動を webhook へ実況する sink を挿す。
-    //
-    // - サブタスク走行（`run_notifier` あり）は、その run 専用の配送ワーカーを共有する
-    //   sink を通知実装から受け取る（lifecycle と tool_call_* の順序が 1 本の worker で
-    //   保たれる）。
-    // - それ以外（depth0 / メインターン）は activity family のデフォルト宛先から
-    //   factory で組む。activity 行が無ければ factory は None を返し、配送 worker も
-    //   起動しない（best-effort）。無効/不正なデフォルトは sink 側で診断を残し、黙って
-    //   fall through しない。
-    let run_notifier = req.run_notifier.clone();
-    let notifier_tool_sink = run_notifier.as_ref().and_then(|n| n.tool_event_sink());
-    let tool_event_sink = notifier_tool_sink;
-    let executor = match tool_event_sink {
-        Some(sink) => executor.with_tool_event_sink(sink),
-        None => executor,
-    };
-
     // §2.7 案B: 「## More tools」静的 index を effective − 投影 から導出し system prompt へ後付け。
     // executor が具体型（`BridgedExecutor`）のうちに計算する（この直後に Arc<dyn> へ包む）。
     // lane・owner-only は effective に現れるかで自動的に出し分け、build_agent_context の
@@ -442,10 +422,6 @@ pub async fn run_agent_response(
             .with_workspace_root(Some(tool_result_workspace.clone()));
             engine.set_tool_dispatcher(std::sync::Arc::new(dispatcher));
         }
-    }
-
-    if let Some(notifier) = run_notifier {
-        set_run_notifier_callbacks(&mut engine, &notifier, session_id.to_string());
     }
 
     // per-agent の thinking 強度を各 ChatRequest に付与（プロバイダーが per-request で優先）。

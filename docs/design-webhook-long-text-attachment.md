@@ -29,7 +29,8 @@
 
 ## 1. 決定したパラメータ
 
-ポリシーは全経路で共有する。実体は `crates/actions/src/webhook_target.rs`（gateway 非依存層）。
+ポリシーは全経路で共有する。実体は gateway リポジトリの `crates/discord-gateway/src/webhook`
+（D-1087 で core の `crates/actions/src/webhook_target.rs` から移した。core には無い）。
 
 | 項目 | 値 | 根拠 |
 |---|---|---|

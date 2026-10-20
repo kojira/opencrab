@@ -244,36 +244,6 @@ async fn cancel_subtask_falls_back_on_empty_theme() {
     );
 }
 
-/// 旧 Discord 実装の固有の後始末その 1: **中断を lifecycle 通知口へ伝え、随伴マップ
-/// から外す**。落とすと lifecycle webhook の `aborted` が黙って消える。
-#[tokio::test]
-async fn cancel_subtask_notifies_the_run_notifier() {
-    #[derive(Default)]
-    struct Recorder(std::sync::Mutex<Vec<String>>);
-    impl opencrab_actions::subtask_notify::SubtaskRunNotifier for Recorder {
-        fn on_cancelled(&self, _duration_ms: u64) {
-            self.0.lock().unwrap().push("cancelled".to_string());
-        }
-    }
-
-    let state = crate::test_app_state();
-    let recorder = Arc::new(Recorder::default());
-    state
-        .subtask_notifiers
-        .insert("st-1".to_string(), recorder.clone());
-    let parent = "web-agent-x-c1";
-    let registry = registry_with("st-1", "subtask-st-1", parent);
-    let actions = SystemGatewayActions::new(state.clone(), None, Some(registry), None);
-
-    let r = cancel(&actions, "st-1", &parent_ctx(parent)).await;
-    assert!(r.success, "{:?}", r.error);
-    assert_eq!(recorder.0.lock().unwrap().clone(), vec!["cancelled"]);
-    assert!(
-        !state.subtask_notifiers.contains_key("st-1"),
-        "通知口は registry と対で除去する"
-    );
-}
-
 /// **停止も完了 sink（`on_subtask_cancelled`）へ通知する**（#184 / REST の永久 active
 /// バグ）。委譲していた頃の Discord 経路はこれを落としていた。
 #[tokio::test]

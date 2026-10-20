@@ -468,7 +468,7 @@ fn spawn_subtask_is_exposed_in_own_definitions() {
     let required = d.parameters["required"].as_array().unwrap();
     assert!(required.iter().any(|v| v == "task"));
     let props = d.parameters["properties"].as_object().unwrap();
-    for key in ["task", "timeout_secs", "label", "webhook"] {
+    for key in ["task", "timeout_secs", "label"] {
         assert!(props.contains_key(key), "missing property: {key}");
     }
     assert_eq!(defs.iter().filter(|d| d.name == "spawn_subtask").count(), 1);
@@ -533,37 +533,6 @@ async fn sub_engine_execution_of_spawn_subtask_is_rejected() {
     );
 }
 
-/// `report_progress` は随伴マップの通知口へ進捗を渡す（#175 S4 で Discord 実装から
-/// 引き継いだ配線）。落とすと lifecycle webhook から進捗が黙って消える。
-#[tokio::test]
-async fn report_progress_notifies_the_run_notifier() {
-    #[derive(Default)]
-    struct Recorder(std::sync::Mutex<Vec<String>>);
-    impl opencrab_actions::subtask_notify::SubtaskRunNotifier for Recorder {
-        fn on_progress(&self, detail: &str) {
-            self.0.lock().unwrap().push(detail.to_string());
-        }
-    }
-
-    let state = crate::test_app_state();
-    let recorder = Arc::new(Recorder::default());
-    state
-        .subtask_notifiers
-        .insert("st-1".to_string(), recorder.clone());
-    let registry = registry_with("st-1", "subtask-st-1", "web-parent-1");
-    let actions = SystemGatewayActions::new(state.clone(), None, Some(registry), None);
-
-    let r = actions
-        .execute(
-            "report_progress",
-            &json!({ "message": "halfway there" }),
-            &sub_ctx("subtask-st-1"),
-        )
-        .await;
-    assert!(r.success, "{:?}", r.error);
-    assert_eq!(recorder.0.lock().unwrap().clone(), vec!["halfway there"]);
-}
-
 /// Discord のような inner が report_progress を定義しても、merge 後は own の
 /// 1 件だけが残る（provider は同名重複を拒否しうる）。
 #[test]
@@ -623,5 +592,47 @@ fn unified_trigger_catalog_has_no_heartbeat_tools_and_run_my_schedule_is_owner_o
     ] {
         assert!(!opencrab_actions::OWNER_ONLY_ACTIONS.contains(&removed));
         assert!(!opencrab_actions::TRUSTED_ONLY_ACTIONS.contains(&removed));
+    }
+}
+
+/// D-1087: 通知先（webhook）の管理ツール 6 個は撤去した。
+///
+/// 通知先は gateway の概念で、設定面は gateway のスラッシュコマンド 1 本に集約する。
+/// core の own 定義（＝常時露出の源）と effective（＝More tools index の源）の
+/// どちらにも現れないことを固定する。index は effective − 投影 から作られるので、
+/// effective から消えれば index にも載らない。最終的な LLM 入力は
+/// `tests/api_e2e/system_prompt_tool_index.rs` の
+/// `system_prompt_has_no_webhook_tool_vocabulary` が実 prompt で固定する。
+const REMOVED_WEBHOOK_TOOLS: &[&str] = &[
+    "get_default_webhook",
+    "set_default_webhook",
+    "list_webhooks",
+    "get_default_subtask_webhook",
+    "set_default_subtask_webhook",
+    "list_subtask_webhooks",
+];
+
+#[test]
+fn removed_webhook_tools_are_absent_from_the_production_action_catalog() {
+    let own: Vec<String> = SystemGatewayActions::own_definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    let state = crate::test_app_state();
+    let actions = SystemGatewayActions::new(state, None, None, None);
+    let effective: Vec<String> = actions
+        .definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    for name in REMOVED_WEBHOOK_TOOLS {
+        assert!(
+            !own.iter().any(|catalogued| catalogued == name),
+            "{name} が own 定義に残っている（D-1087 で撤去）: {own:?}"
+        );
+        assert!(
+            !effective.iter().any(|catalogued| catalogued == name),
+            "{name} が effective に残っている（More tools index に載る）: {effective:?}"
+        );
     }
 }

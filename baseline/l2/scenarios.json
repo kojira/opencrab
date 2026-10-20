@@ -710,28 +710,6 @@
         "guidance": "preserve",
         "name": "Gateway Skill"
       },
-      "get_default_webhook": {},
-      "get_default_subtask_webhook": {},
-      "set_default_subtask_webhook": {
-        "enabled": true,
-        "kind": "subtask",
-        "scope": "agent",
-        "url": "https://hooks.example.test/api/1/baseline"
-      },
-      "list_subtask_webhooks": {
-        "include_disabled": true,
-        "scope": "all"
-      },
-      "set_default_webhook": {
-        "enabled": true,
-        "family": "tool",
-        "scope": "agent",
-        "url": "https://hooks.example.test/api/1/baseline"
-      },
-      "list_webhooks": {
-        "include_disabled": true,
-        "scope": "all"
-      },
       "mcp__public_local__echo": {
         "value": "baseline"
       },
@@ -822,8 +800,6 @@
       "add_allowed_command",
       "remove_allowed_command",
       "create_skill",
-      "set_default_subtask_webhook",
-      "set_default_webhook",
       "spawn_subtask",
       "cancel_subtask",
       "steer_subtask",
@@ -835,13 +811,9 @@
       "configure_mcp_server",
       "declare_done",
       "execute_shell",
-      "get_default_subtask_webhook",
-      "get_default_webhook",
       "get_system_info",
       "get_task",
       "list_allowed_commands",
-      "list_subtask_webhooks",
-      "list_webhooks",
       "manage_allowed_commands",
       "mcp__public_local__echo",
       "mcp__trusted_local__echo",
@@ -1056,14 +1028,6 @@
           "name": "Gateway Skill"
         },
         "expect_success": true
-      },
-      "set_default_subtask_webhook": {
-        "db_query": "webhook_configs",
-        "arguments": null
-      },
-      "set_default_webhook": {
-        "db_query": "webhook_configs",
-        "arguments": null
       }
     },
     "forwarding": {
@@ -1099,7 +1063,6 @@
     "real provider endpoint tests and LLM-backed message runs",
     "operator-configured MCP subprocess startup semantics",
     "imports from a real operator workspace",
-    "voice provider I/O",
-    "network delivery to configured webhooks"
+    "voice provider I/O"
   ]
 }

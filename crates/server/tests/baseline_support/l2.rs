@@ -161,11 +161,7 @@ mod tests {
                     name.starts_with("discord_")
                         || matches!(
                             name.as_str(),
-                            "ensure_subtask_webhook"
-                                | "ensure_webhook"
-                                | "join_voice_channel"
-                                | "leave_voice_channel"
-                                | "send_ui"
+                            "join_voice_channel" | "leave_voice_channel" | "send_ui"
                         )
                 })
                 .count(),

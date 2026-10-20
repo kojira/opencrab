@@ -346,7 +346,6 @@
             &registry,
             &db,
             Some(sink.as_ref()),
-            None,
             &outcome.subtask_id,
             CallerIdentity::Owner,
             None,

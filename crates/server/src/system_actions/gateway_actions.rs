@@ -85,29 +85,6 @@ impl GatewayActions for SystemGatewayActions {
             }
             // #612 D2: 時間を待たずに手動発火（オーナー / co_agent 限定・OWNER_ONLY_ACTIONS）。
             "run_my_schedule" => crate::agent_schedule::run_my_schedule(&self.state, args, ctx),
-            // 通知先（webhook）の管理ツール（#157 S5）。Discord 側の実装は撤去済みなので
-            // inner へは委譲しない（委譲パターンにすると二重定義を招く）。設定ファイル
-            // 由来のフォールバックは `AppState::default_subtask_webhook` から読むので、
-            // Discord 機能の有無に関わらず同じ既定へ到達する。
-            //
-            // `ensure_webhook` / `ensure_subtask_webhook` はここに**無い**（Discord に
-            // 残した webhook 新規作成つきのツール）。既定の `_ =>` で inner へ委譲される。
-            "get_default_subtask_webhook" => {
-                crate::webhook_targets::get_default_subtask_webhook(&self.state, args, ctx)
-            }
-            "set_default_subtask_webhook" => {
-                crate::webhook_targets::set_default_subtask_webhook(&self.state, args, ctx)
-            }
-            "list_subtask_webhooks" => {
-                crate::webhook_targets::list_subtask_webhooks(&self.state, args, ctx)
-            }
-            "get_default_webhook" => {
-                crate::webhook_targets::get_default_webhook(&self.state, args, ctx)
-            }
-            "set_default_webhook" => {
-                crate::webhook_targets::set_default_webhook(&self.state, args, ctx)
-            }
-            "list_webhooks" => crate::webhook_targets::list_webhooks(&self.state, args, ctx),
             // subtask 起動（#175 S4）。transport 非依存の唯一の実装（Discord 側の実装は
             // 撤去済み）。inner へは委譲しない。
             "spawn_subtask" => {
@@ -151,9 +128,8 @@ impl GatewayActions for SystemGatewayActions {
             // subtask 進捗報告（#175 S1）。**唯一残る委譲パターン**（cancel_subtask は
             // #157 S2 で委譲を撤去した）。
             // transport 固有 gateway（Discord）が report_progress を実装しているなら、
-            // その固有の後処理（lifecycle webhook への progress 送出）を保つため inner
-            // へ委譲する＝ Discord 経路は挙動不変。実装していない transport
-            // （web/Nostr/REST/heartbeat）では own が処理する。
+            // その固有の後処理を保つため inner へ委譲する＝ gateway 経路は挙動不変。
+            // 実装していない transport（web/Nostr/REST/heartbeat）では own が処理する。
             "report_progress" => {
                 let inner_handles = self.inner.as_ref().is_some_and(|inner| {
                     inner

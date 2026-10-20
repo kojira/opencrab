@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use opencrab_actions::subtask::{
     SettleKind, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
 };
-use opencrab_actions::subtask_notify::SubtaskRunInfo;
 use opencrab_gateway::{
     GatewayActionResult, GatewayActions as _, GatewayCallContext, GatewayCaller,
 };

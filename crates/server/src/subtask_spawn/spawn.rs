@@ -4,7 +4,6 @@ use chrono::Utc;
 use opencrab_actions::subtask::{
     settle_completed, SettleContext, SpawnedSubtask, SubtaskCompletionSink, SubtaskRegistry,
 };
-use opencrab_actions::subtask_notify::SubtaskRunInfo;
 use opencrab_gateway::{GatewayActionResult, GatewayCallContext};
 use serde_json::json;
 use uuid::Uuid;
@@ -83,41 +82,6 @@ pub async fn spawn_subtask(
         .map(|s| s.to_string())
         .unwrap_or_else(|| task.chars().take(50).collect::<String>());
 
-    // lifecycle 通知は抽象境界（`SubtaskLifecycleNotifier`）越しに扱う（#175 S3）。
-    // 宛先の解決・配送ワーカーの起動・整形はすべて実装側に閉じており、ここは
-    // 「起きた事実」を渡すだけ。解決に失敗したら spawn しない（fail-closed）。
-    // raw url はどこにも出さない。
-    let notify = match state
-        .subtask_lifecycle_notifier()
-        .begin_run(&SubtaskRunInfo {
-            agent_id: &agent_id,
-            subtask_id: &subtask_id,
-            sub_session_id: &sub_session_id,
-            parent_session_id: &parent_session_id,
-            label: &label,
-            tool_args: args,
-        }) {
-        Ok(session) => session,
-        Err(e) => {
-            return GatewayActionResult {
-                success: false,
-                error: Some(format!("{}: {}", e.code, e.message)),
-                data: Some(json!({
-                    "webhook_source": e.source,
-                    "webhook_status": "error",
-                    "webhook_error": e.message,
-                })),
-            };
-        }
-    };
-    let notifier = notify.notifier;
-    let webhook_source = notify.target.source;
-    let webhook_status = notify.target.status;
-    let webhook_redacted_url = notify.target.redacted_url;
-
-    // 開始を通知する。
-    notifier.on_started(&task);
-
     // sub-session の行と、親セッションログへの subtask_spawned を記録する。
     let system_prompt = {
         let Ok(conn) = state.db.lock() else {
@@ -153,9 +117,6 @@ pub async fn spawn_subtask(
                 "subtask_id": subtask_id,
                 "session_id": sub_session_id,
                 "spawned_at": spawned_at,
-                "webhook_source": webhook_source,
-                "webhook_status": webhook_status,
-                "webhook_redacted_url": webhook_redacted_url,
             })
             .to_string(),
             speaker_id: None,
@@ -190,11 +151,9 @@ pub async fn spawn_subtask(
     let run_parent_session_id = parent_session_id.clone();
     let run_subtask_id = subtask_id.clone();
     let run_registry = registry.clone();
-    let run_notifier = notifier.clone();
     let run_lifecycle = lifecycle.clone();
     let run_sink: Arc<dyn SubtaskCompletionSink> =
         sink.unwrap_or_else(|| Arc::new(opencrab_actions::NoopCompletionSink));
-    let run_notifiers = state.subtask_notifiers.clone();
     // sub-run（クロージャ）へ渡す実行 caller。登録簿 insert 用に `parent_caller` は
     // クロージャ外へ残す（同一値のクローン）。
     let run_caller = parent_caller.clone();
@@ -203,7 +162,7 @@ pub async fn spawn_subtask(
         // insert 完了を待つ（送信側が drop された場合も先へ進む）。
         let _ = start_rx.await;
 
-        let mut req = opencrab_actions::RunRequest::new(
+        let req = opencrab_actions::RunRequest::new(
             run_agent_id.clone(),
             run_agent_id.clone(),
             run_sub_session_id.clone(),
@@ -222,11 +181,10 @@ pub async fn spawn_subtask(
             // `from` は親より強い identity を生まないので昇格経路にはならない。
             run_caller,
         )
-        .with_depth(depth)
-        .with_run_notifier(run_notifier.clone());
+        .with_depth(depth);
         // 親と同一の登録簿・完了受け口を渡す。sub-engine の `report_progress` は
         // ここから自分自身のエントリを引き、進捗を親セッションへ再注入する。
-        req = req.with_dispatch(Some(run_registry.clone()), run_sink.clone());
+        let mut req = req.with_dispatch(Some(run_registry.clone()), run_sink.clone());
         if let Some(root) = root_gateway {
             req = req.with_gateway_actions(root);
         }
@@ -259,25 +217,11 @@ pub async fn spawn_subtask(
             ),
         };
 
-        // --- gateway 固有の後始末（DB 永続化 / sink 発火の前に済ませる。これらは
-        //     DB 永続化とも sink 発火とも順序依存が無い＝webhook は非同期配送・別マップ）。---
-
-        // 終了（正常 / 異常 / タイムアウト）を通知する。表示状態への写像と購読フィルタは
-        // 通知実装側の責務。
-        run_notifier.on_finished(
-            &exit_reason,
-            started_instant.elapsed().as_millis() as u64,
-            &result_text,
-        );
-
         // 保留中の progress デバウンスを無効化する。エントリが消えると、まだ sleep 中の
         // デバウンスタスクは「最新ではない」扱いになり発火しない。これが無いと、終了
         // イベントの後に遅延 progress（0〜3秒窓）が届いて完了返信の直後に余計な推論・
         // 重複返信が走ることがある。
         run_state.progress_debounce.clear(&run_parent_session_id);
-
-        // 通知口を登録簿と対で除去する。
-        run_notifiers.remove(&run_subtask_id);
 
         // --- 中核（gateway 非依存）: DB へ subtask_completed を永続化 → 登録簿から除去
         //     → sink 発火。順序契約は settle_completed が 1 箇所で保証する。---
@@ -323,10 +267,6 @@ pub async fn spawn_subtask(
             steerable: true,
         },
     );
-    // 通知口は登録簿と対の随伴マップへ分離する（RFC §1.5）。cancel / report_progress は
-    // ここから引く。
-    state.subtask_notifiers.insert(subtask_id.clone(), notifier);
-
     // insert が完了したのでタスク本体の実行を許可する。
     let _ = start_tx.send(());
 
@@ -337,10 +277,6 @@ pub async fn spawn_subtask(
             "subtask_id": subtask_id,
             "session_id": sub_session_id,
             "spawned_at": spawned_at,
-            "webhook_source": webhook_source,
-            "webhook_redacted_url": webhook_redacted_url,
-            "webhook_status": webhook_status,
-            "webhook_error": serde_json::Value::Null,
         })),
         error: None,
     }

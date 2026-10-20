@@ -31,22 +31,6 @@ fn spawn_subtask_definition() -> GatewayActionDef {
                             "type": "string",
                             "description": "サブタスクのラベル（通知の表示用。省略時はtask先頭を使用）"
                         },
-                        "webhook": {
-                            "type": "object",
-                            "description": "subtask lifecycle の通知先（省略時はエージェント既定 / グローバル既定を使用）。",
-                            "properties": {
-                                "url": {
-                                    "type": "string",
-                                    "description": "通知先の webhook URL"
-                                },
-                                "events": {
-                                    "type": "array",
-                                    "description": "通知するイベント（省略時は全て）。started/progress/completed/failed/timed_out/aborted",
-                                    "items": { "type": "string" }
-                                }
-                            },
-                            "required": ["url"]
-                        }
                     },
                     "required": ["task"]
                 }),

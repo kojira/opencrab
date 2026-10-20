@@ -149,9 +149,6 @@ pub(crate) fn app_state_with_agent(provider: Arc<dyn LlmProvider>, agent_id: &st
         session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
         timed_fire_router: Arc::new(timed_fire_router),
         progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
-        subtask_notifiers: Arc::new(dashmap::DashMap::new()),
-        subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),
-        default_subtask_webhook: None,
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
     }
 }

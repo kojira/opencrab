@@ -21,12 +21,6 @@ impl SystemGatewayActions {
             update_my_schedule_definition(),
             delete_my_schedule_definition(),
             run_my_schedule_definition(),
-            get_default_subtask_webhook_definition(),
-            set_default_subtask_webhook_definition(),
-            list_subtask_webhooks_definition(),
-            get_default_webhook_definition(),
-            set_default_webhook_definition(),
-            list_webhooks_definition(),
         ]
     }
 }

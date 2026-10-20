@@ -1,25 +1,23 @@
-//! サブタスク lifecycle 通知の抽象境界（#175 S3）。
+//! サブタスク lifecycle 通知の抽象境界（#175 S3 / D-1087）。
 //!
-//! サブタスクの開始 / 進捗 / 終了 / 中断、および走行中のツールイベントは、これまで
-//! Discord の webhook 実装を `execute_spawn_subtask` などから直接呼ぶ形で埋め込まれて
-//! いた。サブタスク生成ツールを gateway 非依存層へ移す（S4）には、この直接依存が
-//! 邪魔になる。
+//! サブタスクの開始 / 進捗 / 終了 / 中断、および走行中のツールイベントを「外部へ実況する」
+//! 側の契約だけを置く。整形・配送・リトライ・宛先の解決順序は実装側（gateway）が持ち、
+//! core は宛先も URL も解釈しない。
 //!
-//! ここで切るのは**境界だけ**で、整形・配送・リトライ・宛先の解決順序はすべて
-//! 実装側（Discord なら gateway リポジトリの `opencrab-discord-gateway` の webhook 実装。
-//! D-1087 で core の `crates/discord` から移した）に残る。`SubtaskCompletionSink`
-//! （完了を親会話へ再注入する口）とは役割が別で、あちらは「決着をエンジンへ戻す」、
-//! こちらは「外部へ実況を出す」。両者は独立に配線できる。
+//! **D-1087 以降、core はこの境界を呼ばない。** 通知先は gateway の概念で、実装
+//! （`opencrab-discord-gateway` の webhook 実装）が自分の出来事から駆動する。ここに
+//! 残るのは、その実装が共有する型と、依存を満たすためだけの Noop だけ。
+//! `SubtaskCompletionSink`（完了を親会話へ再注入する口）とは役割が別で、あちらは
+//! 「決着をエンジンへ戻す」＝ core の責務のまま。
 //!
-//! # 使い方
+//! # 契約
 //!
 //! 1. 走行の開始時に [`SubtaskLifecycleNotifier::begin_run`] を 1 回だけ呼ぶ。実装は
 //!    ここで宛先を解決し、配送ワーカーを起動する。解決に失敗したら
-//!    [`NotifyTargetError`] を返し、呼び出し側は subtask を起動しない（fail-closed）。
-//! 2. 返ってきた [`SubtaskRunNotifier`] を registry と対で保持し、開始 / 進捗 / 終了 /
-//!    中断で呼ぶ。
-//! 3. 通知が不要な経路（Discord 以外のゲートウェイなど）は [`NoopLifecycleNotifier`]
-//!    を渡す。`NoopCompletionSink` と同じ流儀で、依存を満たすためだけの実装。
+//!    [`NotifyTargetError`] を返す（fail-closed にするかは実装の判断）。
+//! 2. 返ってきた [`SubtaskRunNotifier`] を走行と対で保持し、開始 / 進捗 / 終了 / 中断で呼ぶ。
+//! 3. 通知が不要な経路は [`NoopLifecycleNotifier`] を渡す。`NoopCompletionSink` と
+//!    同じ流儀で、依存を満たすためだけの実装。
 
 use std::sync::Arc;
 
@@ -30,7 +28,7 @@ use crate::bridge::ToolEventSink;
 /// 1 回分のサブタスク走行を識別する情報。
 ///
 /// 引数は既存の呼び出し箇所が実際に必要としているものだけに絞ってある:
-/// - `agent_id` / `tool_args`: 宛先の解決（エージェント既定・ツール引数での明示指定）。
+/// - `agent_id` / `tool_args`: 実装が宛先を解決するための材料（解釈は実装側）。
 /// - `subtask_id` / `sub_session_id` / `label`: 通知本文に載る識別子。
 /// - `parent_session_id`: 配送を諦めたときに親セッションログへ 1 件残すため。
 pub struct SubtaskRunInfo<'a> {

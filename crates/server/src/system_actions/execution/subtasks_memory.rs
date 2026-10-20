@@ -85,9 +85,6 @@ impl SystemGatewayActions {
             registry,
             &self.state.db,
             self.completion_sink.as_deref(),
-            // 中断の lifecycle 通知（旧 Discord 実装の後始末）はこのマップ経由で行う。
-            // `spawn_subtask` が insert したものと同一 Arc（`AppState` 共有）。
-            Some(&self.state.subtask_notifiers),
             subtask_id,
             caller,
             ctx.session_id.as_deref(),
@@ -164,7 +161,7 @@ impl SystemGatewayActions {
     }
 
     /// サブタスクの進捗報告（#175 S1）。Discord 実装（`execute_report_progress`）の
-    /// transport 非依存な部分を移植したもの。Discord 固有の webhook 送出は Discord 側に
+    /// transport 非依存な部分を移植したもの。通知の送出は gateway 側に
     /// 残る実装が担当する（この own 実装は inner が未実装の経路でのみ走る）。
     ///
     /// 手順は Discord と同一:
@@ -284,15 +281,6 @@ impl SystemGatewayActions {
                     created_at: None,
                 };
                 opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-            }
-        }
-
-        // 進捗を lifecycle 通知口へ流す（#175 S4）。通知口は登録簿と対の随伴マップ
-        // （`AppState.subtask_notifiers`）から引く。旧 Discord 実装が webhook へ
-        // progress を出していた経路の置き換えで、宛先の解決も整形も実装側に閉じている。
-        if let Some(entry) = &subtask_entry {
-            if let Some(notifier) = self.state.subtask_notifiers.get(&entry.subtask_id) {
-                notifier.on_progress(&message);
             }
         }
 

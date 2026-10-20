@@ -41,9 +41,8 @@ pub struct SettleContext {
 /// この後に親セッションを resume し、`build_conversation_string` が DB から会話を
 /// 再構築するため、完了ログが先に着地している必要がある。
 ///
-/// gateway 固有の後始末（webhook terminal 送出・progress debounce 除去・随伴構造の
-/// 掃除など）は本関数の呼び出し**前**に呼び出し側で行う。それらは DB 永続化とも
-/// sink 発火とも順序依存が無い（webhook は非同期配送・別マップ）ため、載せ替えても
+/// 周辺の後始末（progress debounce 除去など）は本関数の呼び出し**前**に呼び出し側で
+/// 行う。それらは DB 永続化とも sink 発火とも順序依存が無いため、載せ替えても
 /// 観測可能な挙動は変わらない。
 pub fn settle_completed(
     registry: &SubtaskRegistry,

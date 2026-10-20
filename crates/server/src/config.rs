@@ -22,6 +22,5 @@ mod tests {
 
     include!("config/tests/support_loading.rs");
     include!("config/tests/overrides.rs");
-    include!("config/tests/parsing_defaults_webhooks.rs");
     include!("config/tests/router_providers.rs");
 }
