@@ -105,13 +105,17 @@ where
             state.llm_router.get().image_generator(),
         ),
     ));
-    let system_actions: Arc<dyn opencrab_gateway::GatewayActions> =
-        Arc::new(crate::system_actions::SystemGatewayActions::new(
+    // D-1091: `spawn_subtask` が起こす sub-run は同じ binding の作業なので、この run の
+    // 宣言を渡す（サブタスクの `execute_shell` だけ別アカウントの環境にならない）。
+    let system_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
+        crate::system_actions::SystemGatewayActions::new(
             state.clone(),
             wiring.gateway_actions,
             Some(wiring.subtask_registry),
             wiring.completion_sink,
-        ));
+        )
+        .with_run_env(wiring.run_env.clone()),
+    );
     let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = if wiring.depth == 0 {
         system_actions
     } else {

@@ -213,7 +213,7 @@ pub fn turn_failed_frame(binding_id: &str, origin: &str) -> Value {
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Hello {
     pub id: String,
     pub protocol: u64,
@@ -769,6 +769,8 @@ pub use activity_frames::{subtask_lifecycle_frame, tool_activity_frame};
 
 mod run_env;
 pub(crate) use run_env::parse_run_env;
+
+mod hello_debug;
 
 mod provisional;
 pub use provisional::{provisional_result_frame, Provisional, ProvisionalCancel};

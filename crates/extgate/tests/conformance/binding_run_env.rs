@@ -71,6 +71,10 @@ async fn a_malformed_run_env_is_refused() {
         json!({"": "value"}),
         json!(["NAME=value"]),
         json!({"OPENCRAB_TEST_BINDING_ACCOUNT": "x".repeat(9000)}),
+        // A control character (NUL, newline, ...) makes the child spawn itself fail, so the
+        // declaration must be refused here instead of erroring on every `execute_shell`.
+        json!({"OPENCRAB_TEST_BINDING_ACCOUNT": "account\u{0}name"}),
+        json!({"OPENCRAB_TEST_BINDING_ACCOUNT": "account\nname"}),
     ] {
         let h = Harness::start().await;
         let instance_id = uuid();
@@ -105,6 +109,41 @@ async fn a_malformed_run_env_is_refused() {
                 .get(&instance_id)
                 .is_none(),
             "a refused hello must not register the instance"
+        );
+    }
+}
+
+/// A declared environment is a secret (the account key). Formatting a `Hello` must never print
+/// the values, however the type is logged later; the names stay visible because operators need to
+/// know what was declared.
+///
+/// This assertion lives outside the `Debug` implementation on purpose: if someone replaces the
+/// masking impl with `#[derive(Debug)]`, this test still compiles and goes red.
+#[test]
+fn formatting_a_hello_never_prints_a_declared_value() {
+    let mut hello = opencrab_extgate::protocol::Hello {
+        id: "h1".to_string(),
+        protocol: 3,
+        instance_id: "instance-1".to_string(),
+        revision: 1,
+        config_digest: config_digest(),
+        operation_protocol: 1,
+        final_delivery: "automatic".to_string(),
+        operations: json!([]),
+        run_env: Default::default(),
+    };
+    hello.run_env.insert(
+        "OPENCRAB_TEST_BINDING_ACCOUNT".to_string(),
+        "binding-account-1".to_string(),
+    );
+    for rendered in [format!("{hello:?}"), format!("{hello:#?}")] {
+        assert!(
+            rendered.contains("OPENCRAB_TEST_BINDING_ACCOUNT"),
+            "the declared name should stay visible: {rendered}"
+        );
+        assert!(
+            !rendered.contains("binding-account-1"),
+            "a declared value must never be formatted: {rendered}"
         );
     }
 }

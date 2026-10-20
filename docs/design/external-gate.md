@@ -87,6 +87,8 @@ response は request と同じ `id` を返す。pending の request 種に合わ
 
 hello 成功後、core は当該 instance の open binding 全件へ `binding_id ASC` で bind を書き、各 ID を独立 pending として先に登録する。応答順序は問わない。matching `ok` 後だけ当該 binding を acknowledged set に加える。bind `err`、write failure、60 秒経過は `bind_failed` として接続を close する。hello を 10 秒以内に受理できなければ `protocol_order` で close する。
 
+> 注: binding の環境（D-1091）。gateway は `hello` に任意 field `run_env`（名前→値の string map。最大 64 件、名前 128 文字、値 8192 文字）を載せ、その instance の binding のターンで `execute_shell` の子へ渡す環境変数を宣言できる。core は名前も値も解釈せず、`spawn_subtask` が起こす同じ binding の sub-run へも引き継ぐ。形が不正な宣言（非文字列、空名、上限超過、**制御文字を含む値**）は `bad_request` で拒否し、宣言が効かなかったことを gateway に返す。空・省略は従来と同一の frame（`run_env` field ごと送らない）。**値は秘密情報（アカウントの署名鍵など）でありうる**ので、宣言を書く gateway 側の配置（placement）は 0600 で保管し、値をログ・エラー・`Debug` 出力へ出さない（core は `Hello` の `Debug` で名前だけを出し、値は固定の伏字にする）。
+
 ### 3.4 say payload と activity
 
 - core が生成する payload は exact `{"text": body}`。`body` は 1 byte 以上の UTF-8 string。

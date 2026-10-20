@@ -29,11 +29,14 @@ fn err(msg: String) -> GatewayActionResult {
 /// `cancel_subtask` / `report_progress` が引くのと同一 Arc）。`sink` はサブタスクの
 /// 決着を親会話へ再注入する口（未配線なら DB 永続化のみ）。`root_gateway` は
 /// `BridgedExecutor` が注入した合成 gateway のハンドルで、sub-engine の inner になる。
+/// `run_env` は親ターンの binding が宣言した環境（D-1091）。サブタスクは同じ binding の
+/// 作業なので、宣言をそのまま引き継ぐ（空なら従来どおり何もしない）。
 pub async fn spawn_subtask(
     state: &AppState,
     registry: Option<&SubtaskRegistry>,
     sink: Option<Arc<dyn SubtaskCompletionSink>>,
     root_gateway: Option<Arc<dyn opencrab_gateway::GatewayActions>>,
+    run_env: &std::collections::BTreeMap<String, String>,
     args: &serde_json::Value,
     ctx: &GatewayCallContext,
 ) -> GatewayActionResult {
@@ -159,6 +162,8 @@ pub async fn spawn_subtask(
     // sub-run（クロージャ）へ渡す実行 caller。登録簿 insert 用に `parent_caller` は
     // クロージャ外へ残す（同一値のクローン）。
     let run_caller = parent_caller.clone();
+    // D-1091: 親ターンの binding 宣言を sub-run へ持ち越す（`sink` と同じ運び方）。
+    let run_env = run_env.clone();
     // D-1087: 開始イベントは走行前に本体スレッドから出す（closure は `run_sink` を所有する）。
     let start_sink = run_sink.clone();
 
@@ -188,7 +193,9 @@ pub async fn spawn_subtask(
         .with_depth(depth);
         // 親と同一の登録簿・完了受け口を渡す。sub-engine の `report_progress` は
         // ここから自分自身のエントリを引き、進捗を親セッションへ再注入する。
-        let mut req = req.with_dispatch(Some(run_registry.clone()), run_sink.clone());
+        let mut req = req
+            .with_dispatch(Some(run_registry.clone()), run_sink.clone())
+            .with_run_env(run_env);
         // D-1087: 副実行のツール実行も同じ活動の観測者に載せる（旧実装で run_notifier を
         // 子へ引き継いでいたのと同じ範囲）。購読が無ければ `None` で、executor は素通りする。
         if let Some(sink) = run_sink.tool_event_sink() {

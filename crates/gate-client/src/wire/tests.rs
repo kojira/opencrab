@@ -455,3 +455,39 @@ fn said_agent_prelude_is_sent_only_when_set() {
     context.agent_prelude = Some("うん、".to_string());
     assert_eq!(frame(&context)["agent_prelude"], "うん、");
 }
+
+/// D-1091: a gateway that declares no environment must send byte-for-byte the frame it sent
+/// before `run_env` existed. A gateway on the old release and a core on the new one therefore
+/// keep interoperating, and a new gateway's hello is unchanged unless it declares something.
+#[test]
+fn an_empty_run_env_sends_exactly_the_previous_hello_frame() {
+    use std::collections::BTreeMap;
+
+    let digest = "a".repeat(64);
+    let ops = json!([{"name": "say"}]);
+    for operations in [None, Some(&ops)] {
+        let previous = hello_frame_with_operations("h", "iid", 1, &digest, operations);
+        let with_empty_env = crate::wire::hello_env::hello_frame_with_capabilities_and_env(
+            "h",
+            "iid",
+            1,
+            &digest,
+            operations,
+            crate::wire::RuntimeCapabilities::default(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            with_empty_env, previous,
+            "the frame object must be identical"
+        );
+        assert_eq!(
+            serde_json::to_vec(&with_empty_env).unwrap(),
+            serde_json::to_vec(&previous).unwrap(),
+            "the serialized bytes must be identical"
+        );
+        assert!(
+            with_empty_env.get("run_env").is_none(),
+            "an empty declaration must not add the field at all: {with_empty_env}"
+        );
+    }
+}

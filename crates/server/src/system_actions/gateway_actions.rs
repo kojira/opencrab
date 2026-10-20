@@ -96,6 +96,8 @@ impl GatewayActions for SystemGatewayActions {
                     // が注入したハンドルを辿ることで、許可リスト内の server ツール
                     // （`report_progress` / `nostr_generate_key`）へ到達できる。
                     ctx.root_gateway.clone(),
+                    // D-1091: 親ターンの binding 宣言を sub-run へ引き継ぐ。
+                    &self.run_env,
                     args,
                     ctx,
                 )

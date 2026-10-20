@@ -40,6 +40,9 @@ pub(crate) fn parse_run_env(
         if name.trim().is_empty()
             || name.len() > MAX_RUN_ENV_NAME_LEN
             || value.len() > MAX_RUN_ENV_VALUE_LEN
+            // 制御文字（NUL など）を含む値は子プロセスの起動自体を失敗させる。宣言時に
+            // 断らないと、その binding の `execute_shell` が毎回失敗する（原因が遠い）。
+            || value.chars().any(char::is_control)
         {
             return Err(GateError::new(ErrorCode::BadRequest));
         }
