@@ -32,7 +32,7 @@ pub use settle::{settle_completed, SettleContext};
 pub use sink::{dispatch_settled, NoopCompletionSink, SubtaskCompletionSink, SubtaskSettled};
 
 /// dispatch した subtask の既定タイムアウト（秒）。`spawn_subtask` の既定と揃える
-/// （`crates/discord/src/gateway_actions/subtask_engine.rs` の `timeout_secs`）。
+/// （旧 `crates/discord` の `subtask_engine.rs` の `timeout_secs`。現行は gateway リポジトリ）。
 ///
 /// これが無いと、ハングするツール（応答しないネットワーク・終わらないコマンド）が
 /// registry に永久滞留し、`exit_reason="timeout"` が到達不能になる（REST は

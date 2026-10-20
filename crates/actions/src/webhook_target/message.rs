@@ -111,7 +111,7 @@ pub fn build_part_messages(content: &str, limit: usize) -> Vec<String> {
 //
 // この module は **ポリシー（どこで切るか・何を添えるか）だけ**を持ち、HTTP は持たない
 // （module doc の依存方針どおり）。実際の multipart POST は transport 側
-// （`crates/discord/src/gateway_actions/webhook.rs` と Nostr 転記の送信箇所）にある。
+// （gateway リポジトリの `opencrab-discord-gateway` の webhook 配送と Nostr 転記の送信箇所）にある。
 
 /// これを **超えたら**添付方式へ切り替える文字数。
 ///

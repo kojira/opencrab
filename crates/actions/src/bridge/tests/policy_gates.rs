@@ -87,7 +87,7 @@ async fn describe_tools_does_not_bypass_owner_gate_for_nonowner() {
 /// ターン（heartbeat / ダッシュボード / オーナー会話）でだけ自分の意思で採用できる。
 /// #303: `nostr_run` は caller=Agent のターンで**実際にゲートを通る**。
 ///
-/// caller=Agent が指すのは **Nostr 受信ターン**（`crates/nostr/src/sink.rs`）と
+/// caller=Agent が指すのは **Nostr 受信ターン**（gateway リポジトリの `opencrab-nostr-gateway`）と
 /// 非オーナー相手の会話ターン。ここで塞がると「Nostr 上で自律的に活動する」という
 /// 目的そのものが成立しない。
 ///
@@ -178,7 +178,7 @@ async fn nostr_run_passes_the_gate_for_agent_caller() {
 ///
 /// **#514 で `nostr_dm` は撤去した**（DM 送信禁止・定義から削除＋`nostr_run dm` も deny）
 /// ので、#306 の対象から外れ、ここでの検証は `nostr_zap` に絞る。DM のブロックは bridge の
-/// caller ゲート層ではなく定義層と passthrough 層で行う（`crates/nostr`）。
+/// caller ゲート層ではなく定義層と passthrough 層で行う（gateway リポジトリの `opencrab-nostr-gateway`）。
 ///
 /// `nostr_run` 側（`nostr_run_passes_the_gate_for_agent_caller`）と同じく、リストに
 /// 無いことだけを見ても**別の場所に新しいゲートが足された**場合を捕まえられないので、

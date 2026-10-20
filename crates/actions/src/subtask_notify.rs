@@ -6,7 +6,8 @@
 //! 邪魔になる。
 //!
 //! ここで切るのは**境界だけ**で、整形・配送・リトライ・宛先の解決順序はすべて
-//! 実装側（Discord なら `crates/discord` の webhook 実装）に残る。`SubtaskCompletionSink`
+//! 実装側（Discord なら gateway リポジトリの `opencrab-discord-gateway` の webhook 実装。
+//! D-1087 で core の `crates/discord` から移した）に残る。`SubtaskCompletionSink`
 //! （完了を親会話へ再注入する口）とは役割が別で、あちらは「決着をエンジンへ戻す」、
 //! こちらは「外部へ実況を出す」。両者は独立に配線できる。
 //!
