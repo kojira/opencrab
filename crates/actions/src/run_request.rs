@@ -5,6 +5,7 @@
 //! 検出できない）。必須項目をコンストラクタ、省略可能項目を builder で受ける
 //! 構造体に置き換える。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use opencrab_gateway::GatewayActions;
@@ -152,6 +153,12 @@ pub struct RunRequest {
     /// follow what the agent is doing. `None` = nobody observes; the run behaves and records
     /// exactly as before.
     pub tool_event_sink: Option<Arc<dyn ToolEventSink>>,
+    /// D-1091: the environment this run's gateway declares for its own binding (name → value).
+    /// `execute_shell` passes it to the child verbatim, after the inherited/allow-listed
+    /// variables, so an explicit declaration wins. Core interprets neither the names nor the
+    /// values; a gateway declares them because only it knows which account the binding is for.
+    /// Empty (the default) keeps today's behaviour exactly. Set with [`RunRequest::with_run_env`].
+    pub run_env: BTreeMap<String, String>,
 }
 
 /// D-1085 §12: the tools a provisional run may run before its promotion: memory reads and
@@ -217,6 +224,7 @@ impl RunRequest {
             provisional: false,
             promotion_gate: None,
             tool_event_sink: None,
+            run_env: BTreeMap::new(),
         }
     }
 
@@ -224,6 +232,12 @@ impl RunRequest {
     /// [`RunRequest::tool_event_sink`]).
     pub fn with_tool_event_sink(mut self, sink: Arc<dyn ToolEventSink>) -> Self {
         self.tool_event_sink = Some(sink);
+        self
+    }
+
+    /// D-1091: declare this run's per-binding environment (see [`RunRequest::run_env`]).
+    pub fn with_run_env(mut self, run_env: BTreeMap<String, String>) -> Self {
+        self.run_env = run_env;
         self
     }
 

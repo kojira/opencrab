@@ -66,6 +66,9 @@ pub(crate) struct TurnExecutorWiring {
     /// D-1087: observer of this run's tool executions (the extgate turn installs one so a
     /// connected gateway can follow the run). `None` keeps the executor unobserved.
     pub tool_event_sink: Option<Arc<dyn opencrab_actions::ToolEventSink>>,
+    /// D-1091: the environment this run's gateway declared for its binding. Applied to
+    /// `execute_shell` children only; empty keeps today's behaviour.
+    pub run_env: std::collections::BTreeMap<String, String>,
 }
 
 /// Production と外形採取が共有する turn executor の唯一の組立口。
@@ -81,7 +84,13 @@ where
     F: FnOnce(bool) -> Option<Arc<dyn opencrab_gateway::GatewayActions>>,
 {
     let mut dispatcher = opencrab_actions::ActionDispatcher::new();
-    let tools_config = resolve_run_tools_config(state, &wiring.context.agent_id);
+    let mut tools_config = resolve_run_tools_config(state, &wiring.context.agent_id);
+    // D-1091: the gateway's declaration for this binding reaches `execute_shell` only. Setting it
+    // on the per-turn shell config (rebuilt for every run) keeps it out of the process-wide
+    // config, so one binding's environment can never leak into another run's children.
+    if let Some(shell) = tools_config.shell.as_mut() {
+        shell.run_env = wiring.run_env.clone();
+    }
     opencrab_actions::register_tools_from_config(&tools_config, &mut dispatcher);
 
     let caller_is_trusted = matches!(

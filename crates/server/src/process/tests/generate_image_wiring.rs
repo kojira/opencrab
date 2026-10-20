@@ -121,6 +121,7 @@ fn turn_executor(
             reply_target: None,
             tool_allowlist: None,
             tool_event_sink: None,
+            run_env: std::collections::BTreeMap::new(),
         },
         |_| None,
     )

@@ -225,6 +225,7 @@ mod tests {
                 declarations: Arc::new(Vec::new()),
                 declaration_digest: String::new(),
                 final_delivery: FinalDelivery::Automatic,
+                run_env: Default::default(),
             },
         );
         (state, writer, observer_read, observer_write)

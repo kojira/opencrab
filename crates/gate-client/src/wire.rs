@@ -7,6 +7,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::json::{parse_object_no_dup, JsonError};
 
 mod activity;
+mod hello_env;
+pub use hello_env::hello_frame_with_capabilities_and_env;
 mod partial;
 mod provisional;
 mod response;
@@ -129,17 +131,15 @@ pub fn hello_frame_with_capabilities(
     operations: Option<&Value>,
     capabilities: RuntimeCapabilities,
 ) -> Value {
-    json!({
-        "id": id,
-        "m": "hello",
-        "protocol": 3,
-        "instance_id": instance_id,
-        "revision": revision,
-        "config_digest": config_digest,
-        "operation_protocol": 1,
-        "final_delivery": capabilities.final_delivery.as_str(),
-        "operations": operations.cloned().unwrap_or_else(|| json!([])),
-    })
+    hello_env::hello_frame_with_capabilities_and_env(
+        id,
+        instance_id,
+        revision,
+        config_digest,
+        operations,
+        capabilities,
+        &std::collections::BTreeMap::new(),
+    )
 }
 
 /// Rebuild the canonical runtime snapshot digest from the hello data retained by this client.

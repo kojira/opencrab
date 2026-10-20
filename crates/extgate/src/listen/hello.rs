@@ -83,6 +83,7 @@ pub(crate) async fn handle_hello(
                                         declarations: Arc::new(declarations),
                                         declaration_digest,
                                         final_delivery,
+                                        run_env: hello.run_env.clone(),
                                     },
                                 );
                                 Ok(bindings)

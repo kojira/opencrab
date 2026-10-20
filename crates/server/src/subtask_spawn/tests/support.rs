@@ -367,6 +367,7 @@ pub(super) fn state_with_shell_and_capture(seen: Arc<Mutex<Vec<Vec<String>>>>) -
             allowed_env_vars: Vec::new(),
             max_output_bytes: 1024,
             commands: Vec::new(),
+            run_env: std::collections::BTreeMap::new(),
         });
     }
     let mut router = opencrab_llm::router::LlmRouter::new();

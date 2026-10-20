@@ -39,13 +39,14 @@ async fn attach(
     let hello_id = format!("hello:{}", client.instance_id);
     if !send_frame(
         client,
-        hello_frame_with_capabilities(
+        hello_frame_with_capabilities_and_env(
             &hello_id,
             &client.instance_id,
             revision,
             config_digest,
             client.operations.as_ref(),
             client.runtime_capabilities,
+            &client.run_env,
         ),
     )
     .await

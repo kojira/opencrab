@@ -224,6 +224,9 @@ pub struct Hello {
     pub operation_protocol: u64,
     pub final_delivery: String,
     pub operations: Value,
+    /// D-1091: the environment this gateway declares for its own instance (name → value).
+    /// Absent or empty means "no declaration" and changes nothing. Core never interprets it.
+    pub run_env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -471,6 +474,7 @@ fn parse_hello(obj: &Value) -> Result<Hello, GateError> {
         operation_protocol,
         final_delivery,
         operations,
+        run_env: parse_run_env(obj)?,
     })
 }
 
@@ -762,6 +766,9 @@ fn parse_response(obj: &Value, m: &str) -> Result<WireResponse, GateError> {
 
 mod activity_frames;
 pub use activity_frames::{subtask_lifecycle_frame, tool_activity_frame};
+
+mod run_env;
+pub(crate) use run_env::parse_run_env;
 
 mod provisional;
 pub use provisional::{provisional_result_frame, Provisional, ProvisionalCancel};

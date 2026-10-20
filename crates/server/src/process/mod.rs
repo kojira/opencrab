@@ -51,6 +51,9 @@ use skills::{record_used_skills, spawn_background_index_build};
 #[path = "tests/agent_visible_skill_index.rs"]
 mod agent_visible_skill_index_tests;
 #[cfg(test)]
+#[path = "tests/binding_run_env.rs"]
+mod binding_run_env_tests;
+#[cfg(test)]
 #[path = "tests/curated_long_term_injection.rs"]
 mod curated_long_term_injection_tests;
 #[cfg(test)]
@@ -279,6 +282,7 @@ pub async fn run_agent_response(
             reply_target: req.reply_target.clone(),
             tool_allowlist: req.tool_allowlist.clone(),
             tool_event_sink: req.tool_event_sink.clone(),
+            run_env: req.run_env.clone(),
         },
         |caller_is_trusted| {
             state.mcp_manager.as_ref().map(|manager| {

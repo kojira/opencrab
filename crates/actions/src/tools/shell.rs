@@ -210,6 +210,29 @@ impl Action for ShellToolAction {
             }
         }
 
+        // D-1091: この binding の gateway が宣言した環境変数。明示された値が勝つ（親の継承分・
+        // 許可リスト分より後に入れる）。core は名前も値も解釈しない。core 自身の資格情報
+        // （[`crate::tools::config::CORE_OWNED_ENV_NAMES`]）だけは宣言でも上書きさせない。
+        let (declared, refused) = self.config.declared_env_split();
+        for name in &declared {
+            if let Some(value) = self.config.run_env.get(name) {
+                cmd.env(name, value);
+            }
+        }
+        if !declared.is_empty() {
+            // 名前だけを出す（値は絶対に出さない。payload の源は `declared_env_log_names`）。
+            tracing::debug!(
+                applied = ?self.config.declared_env_log_names(),
+                "binding env applied to the child"
+            );
+        }
+        if !refused.is_empty() {
+            tracing::warn!(
+                refused = ?refused,
+                "binding env declaration ignored: core-owned credentials are not overridable"
+            );
+        }
+
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return ActionResult::error(&format!("Failed to spawn command: {}", e)),

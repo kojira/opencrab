@@ -172,6 +172,9 @@ pub struct InstanceClient {
     /// DI 拡張 §3.1: hello に載せる能力宣言配列（None は従来の hello＝能力ゼロ）。
     operations: Option<Value>,
     runtime_capabilities: super::wire::RuntimeCapabilities,
+    /// D-1091: hello に載せる、この instance の binding 用の環境変数（名前→値）。core は解釈せず
+    /// `execute_shell` の子へ渡すだけ。空なら従来と同じ frame。
+    run_env: std::collections::BTreeMap<String, String>,
     /// DI 拡張 §5: invoke の実行 handler（None は operation_unknown を返す）。
     invoke_handler: Option<Arc<dyn InvokeHandler>>,
     inner: Mutex<Inner>,
@@ -190,6 +193,27 @@ impl InstanceClient {
         runtime_capabilities: super::wire::RuntimeCapabilities,
         invoke_handler: Option<Arc<dyn InvokeHandler>>,
     ) -> Self {
+        Self::blank_with_env(
+            instance_id,
+            author_id,
+            say_policy,
+            operations,
+            runtime_capabilities,
+            std::collections::BTreeMap::new(),
+            invoke_handler,
+        )
+    }
+
+    /// D-1091: [`Self::blank`] plus the environment the gateway declares for this instance.
+    fn blank_with_env(
+        instance_id: String,
+        author_id: String,
+        say_policy: SayPolicy,
+        operations: Option<Value>,
+        runtime_capabilities: super::wire::RuntimeCapabilities,
+        run_env: std::collections::BTreeMap<String, String>,
+        invoke_handler: Option<Arc<dyn InvokeHandler>>,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
         Self {
@@ -198,6 +222,7 @@ impl InstanceClient {
             say_policy,
             operations,
             runtime_capabilities,
+            run_env,
             invoke_handler,
             inner: Mutex::new(Inner {
                 acknowledged: HashMap::new(),
@@ -301,6 +326,39 @@ impl InstanceClient {
             say_policy,
             operations,
             runtime_capabilities,
+            Some(invoke_handler),
+        ));
+        tokio::spawn(reconnect_loop(
+            client.clone(),
+            socket,
+            revision,
+            config_digest,
+        ));
+        client
+    }
+
+    /// D-1091: `spawn_with_operations` plus the environment this gateway declares for the
+    /// instance's bindings. Core hands it to `execute_shell` children of that instance's turns.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_operations_and_env(
+        socket: PathBuf,
+        instance_id: String,
+        revision: u64,
+        author_id: String,
+        config_digest: String,
+        say_policy: SayPolicy,
+        operations: Option<Value>,
+        runtime_capabilities: super::wire::RuntimeCapabilities,
+        invoke_handler: Arc<dyn InvokeHandler>,
+        run_env: std::collections::BTreeMap<String, String>,
+    ) -> Arc<Self> {
+        let client = Arc::new(Self::blank_with_env(
+            instance_id,
+            author_id,
+            say_policy,
+            operations,
+            runtime_capabilities,
+            run_env,
             Some(invoke_handler),
         ));
         tokio::spawn(reconnect_loop(

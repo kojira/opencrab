@@ -27,6 +27,7 @@ pub(crate) fn state_with_shell(initial: &[&str]) -> AppState {
             allowed_env_vars: Vec::new(),
             max_output_bytes: 1024,
             commands: Vec::new(),
+            run_env: std::collections::BTreeMap::new(),
         });
     }
     state
