@@ -4,7 +4,7 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tracing;
 
-use super::config::{CommandPermission, ShellToolConfig};
+use super::config::{CommandConfig, CommandPermission, ShellToolConfig};
 use crate::traits::{Action, ActionContext, ActionResult, CallerIdentity};
 
 pub struct ShellToolAction {
@@ -15,6 +15,50 @@ impl ShellToolAction {
     pub fn new(config: ShellToolConfig) -> Self {
         Self { config }
     }
+}
+
+/// `args[0]` がプログラム名（許可済みコマンド名かパス）に見えるとき、その値を返す。
+///
+/// 案内文に使うだけで、実行はしない（`args` の値を勝手にプログラムとして走らせない）。
+fn program_left_in_args<'a>(
+    args: &'a serde_json::Value,
+    effective: &[CommandConfig],
+) -> Option<&'a str> {
+    let first = args.get("args")?.as_array()?.first()?.as_str()?.trim();
+    if first.is_empty() {
+        return None;
+    }
+    let looks_like_program = first.contains('/') || effective.iter().any(|c| c.name == first);
+    looks_like_program.then_some(first)
+}
+
+/// `command` 欠落・空のときの診断文。呼び方（`command` にプログラム、`args` に引数）と、
+/// `args` にプログラム名が残っている場合の修正例を返す。
+fn command_required_error(args: &serde_json::Value, effective: &[CommandConfig]) -> String {
+    let mut message = String::from(
+        "execute_shell requires `command` (the program to run) and `args` (its arguments); \
+         a program name placed in `args` is not executed.",
+    );
+    match program_left_in_args(args, effective) {
+        Some(program) => {
+            let rest: Vec<&str> = args
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|list| list.iter().skip(1).filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            let example = serde_json::to_string(&if rest.is_empty() {
+                vec!["--help"]
+            } else {
+                rest
+            })
+            .unwrap_or_else(|_| "[\"--help\"]".to_string());
+            message.push_str(&format!(
+                " `args[0]` looks like the program `{program}`; call command=\"{program}\" with args={example}."
+            ));
+        }
+        None => message.push_str(" Example: command=\"ls\", args=[\"-la\"]."),
+    }
+    message
 }
 
 #[async_trait]
@@ -66,13 +110,21 @@ impl Action for ShellToolAction {
     }
 
     async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
-        let command = match args.get("command").and_then(|v| v.as_str()) {
-            Some(c) => c.to_string(),
-            None => return ActionResult::error("Missing required field: command"),
-        };
+        let effective = self.config.effective_commands();
+        // `command` は実行ファイル名そのもの。空のまま spawn すると
+        // `Command::new("")` が `os error 2` で落ち、「許可が無い」のか
+        // 「実行ファイルが無い」のか分からない文面だけが返る（QC 2026-10-20）。
+        let command = args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim();
+        if command.is_empty() {
+            return ActionResult::error(&command_required_error(args, &effective));
+        }
+        let command = command.to_string();
 
         // Permission-based check
-        let effective = self.config.effective_commands();
         let cmd_config = match effective.iter().find(|c| c.name == command) {
             Some(c) => c,
             None => {

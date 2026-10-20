@@ -9566,7 +9566,7 @@
         ],
         "result": {
           "data": null,
-          "error": "Missing required field: command",
+          "error": "execute_shell requires `command` (the program to run) and `args` (its arguments); a program name placed in `args` is not executed. Example: command=\"ls\", args=[\"-la\"].",
           "success": false
         },
         "tool": "execute_shell"

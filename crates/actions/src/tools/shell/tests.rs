@@ -770,3 +770,5 @@ async fn test_restrictive_allowlist_still_hides_unlisted_vars_when_path_is_added
         "PATH must be present in the child env, got: {stdout:?}"
     );
 }
+
+mod missing_command;
