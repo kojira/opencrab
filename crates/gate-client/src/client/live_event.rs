@@ -66,6 +66,9 @@ pub enum LiveEvent {
         /// 同じターンの `activity` frame と同じ値。
         activity_id: String,
         call_id: String,
+        /// 入れ子の走行（`depth > 0`）で起きたツール実行だけが持つ run の相関キー。
+        /// `SubtaskLifecycle` の `sub_session_id` と突き合わせる。frame が省くことがある。
+        sub_session_id: Option<String>,
         tool: String,
         /// `started` / `completed` / `failed` / `rejected`。
         status: String,

@@ -310,6 +310,7 @@ async fn handle_tool_activity(client: &InstanceClient, activity: ToolActivity) {
         LiveEvent::ToolActivity {
             activity_id: activity.activity_id,
             call_id: activity.call_id,
+            sub_session_id: activity.sub_session_id,
             tool: activity.tool,
             status: activity.status,
             depth: activity.depth,

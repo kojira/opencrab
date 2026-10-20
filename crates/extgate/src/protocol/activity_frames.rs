@@ -13,12 +13,17 @@ use serde_json::{json, Value};
 /// `activity_id` は同じターンの `activity` フレームと同じ値。`args` / `result` は core が
 /// 既に持っている値をそのまま載せ、要約・整形・宛先は gateway が決める。終端状態だけが
 /// `duration_ms` / `result` / `error` を持つ。
+///
+/// `sub_session_id` は入れ子の走行（`depth > 0`）で起きたツール実行だけが運ぶ run の
+/// 相関キーで、`subtask_lifecycle` フレームの同じ名前の field と突き合わせられる。親ターン
+/// （`depth == 0`）では field ごと省く（分からない項目は省く、の同じ規則）。
 /// frame の field と 1:1 に対応するので、引数をまとめない（形がそのまま契約）。
 #[allow(clippy::too_many_arguments)]
 pub fn tool_activity_frame(
     binding_id: &str,
     activity_id: &str,
     call_id: &str,
+    sub_session_id: Option<&str>,
     tool: &str,
     status: &str,
     depth: u32,
@@ -39,6 +44,9 @@ pub fn tool_activity_frame(
         "started_at": started_at,
         "args": args,
     });
+    if let Some(sub_session_id) = sub_session_id.filter(|id| !id.is_empty()) {
+        frame["sub_session_id"] = json!(sub_session_id);
+    }
     if let Some(duration_ms) = duration_ms {
         frame["duration_ms"] = json!(duration_ms);
     }

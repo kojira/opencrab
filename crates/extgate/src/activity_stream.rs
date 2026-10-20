@@ -119,6 +119,8 @@ impl ToolEventSink for ActivityEmitter {
             &self.binding_id,
             &self.activity_id(),
             event.tool_call_id,
+            // 入れ子の走行だけが run の相関キーを運ぶ（親ターンの session は run のキーではない）。
+            event.session_id.filter(|_| event.depth > 0),
             event.tool_name,
             status_str(event.status),
             event.depth,
@@ -286,6 +288,58 @@ mod tests {
         let frame: Value = serde_json::from_str(line.trim_end()).expect("json line");
         assert_eq!(frame["m"], "subtask_lifecycle");
         assert_eq!(frame["run_id"], "run-1");
+    }
+
+    /// D-1087: 入れ子の走行（depth > 0）で起きたツール実行の frame は、ライフサイクル frame と
+    /// 同じ `sub_session_id`（run の相関キー）を運ぶ。親ターン（depth 0）では field ごと省く。
+    #[tokio::test]
+    async fn tool_activity_carries_the_run_session_key_only_for_nested_runs() {
+        let (state, _writer, mut observer, _live) = state_with_writer(true).await;
+        let emitter = ActivityEmitter::spawn(
+            Arc::clone(&state),
+            "instance-1".into(),
+            BINDING.into(),
+            "activity-1".into(),
+        );
+        for (tool, depth, session) in [
+            ("nested_tool", 1u32, "subtask-s1"),
+            ("parent_tool", 0, "sess-1"),
+        ] {
+            emitter.on_event(&ToolEvent {
+                tool_name: tool,
+                tool_call_id: "call-1",
+                agent_id: "agent-1",
+                session_id: Some(session),
+                depth,
+                status: ToolEventStatus::Started,
+                started_at: "2026-10-20T00:00:00Z",
+                duration_ms: None,
+                args: &serde_json::json!({}),
+                result: None,
+                error: None,
+            });
+        }
+        tokio::time::timeout(Duration::from_secs(5), emitter.flush())
+            .await
+            .expect("flush");
+
+        let first = read_line(&mut observer).await.expect("nested frame");
+        let first: Value = serde_json::from_str(first.trim_end()).expect("json line");
+        assert_eq!(first["tool"], "nested_tool");
+        assert_eq!(first["depth"], 1);
+        assert_eq!(
+            first["sub_session_id"], "subtask-s1",
+            "nested run key: {first}"
+        );
+
+        let second = read_line(&mut observer).await.expect("parent frame");
+        let second: Value = serde_json::from_str(second.trim_end()).expect("json line");
+        assert_eq!(second["tool"], "parent_tool");
+        assert_eq!(second["depth"], 0);
+        assert!(
+            second.get("sub_session_id").is_none(),
+            "親ターンは run key を運ばない: {second}"
+        );
     }
 
     /// No acknowledged binding: frames are dropped and nothing blocks or panics.

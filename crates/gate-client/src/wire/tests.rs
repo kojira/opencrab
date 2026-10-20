@@ -289,6 +289,25 @@ fn tool_activity_frame_parses_started_and_terminal_fields() {
     }
 }
 
+/// D-1087: 入れ子の走行で起きたツール実行は、ライフサイクル frame と同じ
+/// `sub_session_id`（run の相関キー）を運ぶ。depth 0（親ターン）は field ごと省く。
+#[test]
+fn tool_activity_carries_the_run_session_key_for_nested_runs() {
+    let nested = br#"{"m":"tool_activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"act-1","call_id":"call-1","tool":"execute_shell","status":"started","depth":1,"sub_session_id":"subtask-s1","started_at":"2026-10-20T00:00:00Z","args":{}}"#;
+    match parse_frame_bytes(nested).unwrap() {
+        CoreMsg::ToolActivity(a) => {
+            assert_eq!(a.depth, 1);
+            assert_eq!(a.sub_session_id.as_deref(), Some("subtask-s1"));
+        }
+        other => panic!("{other:?}"),
+    }
+    let parent = br#"{"m":"tool_activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"act-1","call_id":"call-1","tool":"execute_shell","status":"started","depth":0,"started_at":"2026-10-20T00:00:00Z","args":{}}"#;
+    match parse_frame_bytes(parent).unwrap() {
+        CoreMsg::ToolActivity(a) => assert_eq!(a.sub_session_id, None),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn subtask_lifecycle_frame_parses_optional_fields() {
     let raw = br#"{"m":"subtask_lifecycle","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","run_id":"run-1","status":"progress","detail":"half"}"#;

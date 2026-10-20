@@ -229,6 +229,7 @@ fn tool_activity_started_frame_carries_no_id_and_no_terminal_fields() {
         "binding",
         "activity",
         "call-1",
+        None,
         "execute_shell",
         "started",
         2,
@@ -263,6 +264,7 @@ fn tool_activity_terminal_frame_adds_duration_result_and_error_only_when_present
         "binding",
         "activity",
         "call-1",
+        None,
         "execute_shell",
         "completed",
         0,
@@ -280,6 +282,7 @@ fn tool_activity_terminal_frame_adds_duration_result_and_error_only_when_present
         "binding",
         "activity",
         "call-2",
+        None,
         "execute_shell",
         "rejected",
         0,
@@ -292,6 +295,60 @@ fn tool_activity_terminal_frame_adds_duration_result_and_error_only_when_present
     assert_eq!(rejected["error"], "rejected: owner");
     assert!(rejected.get("result").is_none());
     assert!(rejected.get("id").is_none());
+}
+
+/// D-1087: 入れ子の走行のツール実行だけが run の相関キー（`sub_session_id`）を運ぶ。
+/// 親ターン（省略）と空文字は field ごと省く。
+#[test]
+fn tool_activity_carries_the_run_key_only_when_given() {
+    let args = serde_json::json!({});
+    let nested = tool_activity_frame(
+        "binding",
+        "activity",
+        "call-1",
+        Some("subtask-s1"),
+        "execute_shell",
+        "started",
+        1,
+        "2026-10-20T00:00:00Z",
+        None,
+        &args,
+        None,
+        None,
+    );
+    assert_eq!(nested["sub_session_id"], "subtask-s1");
+
+    let parent = tool_activity_frame(
+        "binding",
+        "activity",
+        "call-1",
+        None,
+        "execute_shell",
+        "started",
+        0,
+        "2026-10-20T00:00:00Z",
+        None,
+        &args,
+        None,
+        None,
+    );
+    assert!(parent.get("sub_session_id").is_none());
+
+    let empty = tool_activity_frame(
+        "binding",
+        "activity",
+        "call-1",
+        Some(""),
+        "execute_shell",
+        "started",
+        1,
+        "2026-10-20T00:00:00Z",
+        None,
+        &args,
+        None,
+        None,
+    );
+    assert!(empty.get("sub_session_id").is_none());
 }
 
 #[test]

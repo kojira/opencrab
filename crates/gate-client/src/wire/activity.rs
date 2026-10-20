@@ -15,6 +15,9 @@ pub struct ToolActivity {
     /// 同じターンの `activity` frame と同じ値。
     pub activity_id: String,
     pub call_id: String,
+    /// 入れ子の走行（`depth > 0`）で起きたツール実行だけが持つ run の相関キー。
+    /// `subtask_lifecycle` の同じ名前の field と突き合わせる。frame が省くことがある。
+    pub sub_session_id: Option<String>,
     pub tool: String,
     /// `started` / `completed` / `failed` / `rejected`。
     pub status: String,
@@ -89,6 +92,7 @@ pub(super) fn parse_tool_activity(obj: &Value) -> Result<ToolActivity, FrameErro
         binding_id: parse_uuid(&require_str(obj, "binding_id")?)?,
         activity_id: nonempty_str(obj, "activity_id")?,
         call_id: nonempty_str(obj, "call_id")?,
+        sub_session_id: opt_str(obj, "sub_session_id")?,
         tool: nonempty_str(obj, "tool")?,
         status: nonempty_str(obj, "status")?,
         depth,
