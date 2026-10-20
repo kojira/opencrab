@@ -77,3 +77,27 @@ core は活動を frame（`tool_activity` / `subtask_lifecycle`）として流�
 - `bash scripts/check-deps.sh`
 - `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`
+
+## 5. 追記: サブタスクの中の活動（depth ≥ 1）
+
+移設直後は、観測に載るのが**親ターン**のツール実行だけで、サブタスクの中で起きたことが
+見えなかった。原因は 2 つで、どちらも core 側の欠落だった。
+
+- **自動 dispatch の背景バッチ**（`SubtaskToolDispatcher`）は走行を作りながら
+  `on_subtask_lifecycle` を 1 度も呼んでおらず、中のツール実行は親ターンの文脈
+  （depth 0・親セッション）で観測されていた。
+- `tool_activity` frame に run の相関キーが無く、`spawn_subtask` の副実行（こちらは
+  sink が子へ引き継がれている）のツール実行も、どの走行のものか突き合わせられなかった。
+
+対応（core・`eccb9590`）:
+
+- `ActionExecutor::execute_in_run(ExecutorRun { session_id, depth }, …)` を既定実装付きで
+  追加。`BridgedExecutor` だけが override し、**観測イベント**の `session_id` / `depth` を
+  走行の値にする。`tool_logs` の所属は従来どおり（記録は移さない）。
+- `SubtaskToolDispatcher` が `started`（走行を許す前）と終端（`settle_completed` の前）を
+  報告し、中のツールを `execute_in_run`（run key = `subtask-<uuid>`、depth = 親 + 1）で走らせる。
+- `tool_activity` frame に任意 `sub_session_id`（`depth > 0` のときだけ）を追加。
+  `subtask_lifecycle` の同名 field と同じ値で、gateway が両者を突き合わせられる。
+
+gateway（`b28cf48`）は受け取った `sub_session_id` を `run: \`…\`` として行に出す
+（親ターンの文面はバイト単位で不変）。知らない gateway は field を無視してよい。
