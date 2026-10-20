@@ -196,6 +196,8 @@ pub struct SubtaskToolDispatcher {
     /// （inline 経路 `process.rs` の `tool_result_workspace` と同じもの）。
     /// `None` なら退避せず切り詰める。
     workspace_root: Option<std::path::PathBuf>,
+    /// 親ターンの深さ（D-1087）。背景バッチはこの 1 つ下の走行として観測に載る。
+    depth: u32,
 }
 
 impl SubtaskToolDispatcher {
@@ -225,6 +227,7 @@ impl SubtaskToolDispatcher {
             caller: CallerIdentity::Agent,
             timeout: std::time::Duration::from_secs(DEFAULT_DISPATCH_TIMEOUT_SECS),
             workspace_root: None,
+            depth: 0,
         }
     }
 
@@ -255,6 +258,13 @@ impl SubtaskToolDispatcher {
     /// へ載せるため、sink は session_id に依らず返信先を得られる。
     pub fn with_reply_target(mut self, reply_target: Option<String>) -> Self {
         self.reply_target = reply_target;
+        self
+    }
+
+    /// 親ターンの深さを設定する（D-1087）。背景バッチのツール実行は「親の 1 つ下」の
+    /// 走行として観測に載るので、親の深さが分からないと depth を正しく名乗れない。
+    pub fn with_depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
         self
     }
 
@@ -385,6 +395,10 @@ impl ToolDispatcher for SubtaskToolDispatcher {
         let sub_session_id_task = sub_session_id.clone();
         let timeout = self.timeout;
         let workspace_root = self.workspace_root.clone();
+        let parent_depth = self.depth;
+        // D-1087: 終端イベント用のラベル写し（`label` は親スレッドがまだ使う）。
+        let task_label = label.clone();
+        let started_instant = std::time::Instant::now();
         // 停止/決着の排他ラッチ。registry のエントリ（cancel 側）とタスク本体
         // （settle 側）が同じラッチを共有する。
         let lifecycle = SubtaskLifecycle::new();
@@ -407,7 +421,16 @@ impl ToolDispatcher for SubtaskToolDispatcher {
             for call in &calls_owned {
                 // panic を settle へ変換する（catch しないと task が unwind して
                 // settle を通らず、registry に死骸が残り REST は永久 active になる）。
-                let fut = std::panic::AssertUnwindSafe(executor.execute_with_id(
+                // D-1087: 観測イベントは「このバッチの走行」の相関キー（run のセッション ID と
+                // 親より 1 つ深い depth）で載せる。開始 / 終端のライフサイクル通知と同じ値なので、
+                // consumer は入れ子の走行で起きたツール実行を走行へ突き合わせられる。
+                // 記録（tool_logs）の所属は従来どおり executor の文脈のまま。
+                let run = opencrab_core::ExecutorRun {
+                    session_id: &sub_session_id_task,
+                    depth: parent_depth + 1,
+                };
+                let fut = std::panic::AssertUnwindSafe(executor.execute_in_run(
+                    run,
                     &call.tool_name,
                     &call.args,
                     &call.tool_call_id,
@@ -538,6 +561,24 @@ impl ToolDispatcher for SubtaskToolDispatcher {
                 workspace_root.as_deref(),
             );
 
+            // D-1087: 終端を活動の観測者へ伝える。状態の語彙・所要時間・結果本文は
+            // `spawn_subtask` の走行と同じ（`from_exit_reason` が timeout/error を写像する）。
+            // `settle_completed` の前に出すのは、決着の記録より先に終端を通知する順序を
+            // 既存の走行と揃えるため。
+            sink.on_subtask_lifecycle(&crate::subtask::SubtaskLifecycleEvent {
+                subtask_id: &subtask_id_task,
+                sub_session_id: &sub_session_id_task,
+                parent_session_id: &parent_session_id,
+                agent_id: &agent_id,
+                status: crate::subtask::SubtaskLifecycleStatus::from_exit_reason(exit_reason),
+                label: &task_label,
+                // 依頼本文は `started` が運ぶ（終端では実装が開始時に保持している）。
+                task: "",
+                detail: None,
+                duration_ms: Some(started_instant.elapsed().as_millis() as u64),
+                result_text: Some(&result_text),
+            });
+
             // 中核（gateway 非依存）: DB 永続化 → registry 除去 → sink 発火。
             // 順序契約（DB 記録 → 通知）は settle_completed が 1 箇所で保証する。
             settle_completed(
@@ -561,7 +602,7 @@ impl ToolDispatcher for SubtaskToolDispatcher {
             subtask_id.clone(),
             SpawnedSubtask {
                 abort_handle: join.abort_handle(),
-                session_id: sub_session_id,
+                session_id: sub_session_id.clone(),
                 parent_session_id: self.parent_session_id.clone(),
                 agent_id: self.agent_id.clone(),
                 label: label.clone(),
@@ -576,6 +617,25 @@ impl ToolDispatcher for SubtaskToolDispatcher {
                 steerable: false,
             },
         );
+        // D-1087: 開始を活動の観測者へ伝える。走行を許す前に 1 回だけ発火するので、
+        // このバッチの他のイベント（ツール実行・終端）より必ず先に届く。購読が無いときの
+        // `NoopCompletionSink` は既定実装で何もしない（走行は一切変わらない）。
+        self.sink
+            .on_subtask_lifecycle(&crate::subtask::SubtaskLifecycleEvent {
+                subtask_id: &subtask_id,
+                sub_session_id: &sub_session_id,
+                parent_session_id: &self.parent_session_id,
+                agent_id: &self.agent_id,
+                status: crate::subtask::SubtaskLifecycleStatus::Started,
+                label: &label,
+                // 依頼本文は無い（自動 dispatch は LLM の呼び出しそのもの）。何を走らせたかは
+                // label（`tool(args), tool(args)`）が運ぶ。
+                task: "",
+                detail: None,
+                duration_ms: None,
+                result_text: None,
+            });
+
         // insert 完了 → タスク本体の実行を許可する。
         let _ = start_tx.send(());
 

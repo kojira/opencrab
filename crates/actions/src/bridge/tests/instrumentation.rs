@@ -450,3 +450,62 @@ async fn tool_logs_writes_when_sink_is_present() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].outcome, "done");
 }
+
+// ---- D-1087: 背景 run の観測文脈 ----
+
+/// 観測イベントの `(session_id, depth)` を記録する sink。
+struct RunScopeSink {
+    scopes: Mutex<Vec<(Option<String>, u32)>>,
+}
+impl ToolEventSink for RunScopeSink {
+    fn on_event(&self, ev: &ToolEvent<'_>) {
+        self.scopes
+            .lock()
+            .unwrap()
+            .push((ev.session_id.map(str::to_string), ev.depth));
+    }
+}
+
+/// D-1087: `execute_in_run` で実行したツールの観測イベントは、**その run の**
+/// セッション ID と深さを運ぶ（入れ子の走行で起きたツール実行を、どの走行のものか
+/// 取り違えないため）。記録（tool_logs）の所属は従来どおり executor の文脈のまま。
+#[tokio::test]
+async fn execute_in_run_scopes_the_tool_event_to_the_run() {
+    let (_dir, ctx) = test_context();
+    let sink = Arc::new(RunScopeSink {
+        scopes: Mutex::new(Vec::new()),
+    });
+    let own_session = ctx.session_id.clone();
+    let executor =
+        BridgedExecutor::new(ActionDispatcher::new(), ctx).with_tool_event_sink(sink.clone());
+
+    // 文脈なしの実行は従来どおり（executor 自身の session / depth）。
+    let _ = executor.execute("generate_inner_voice", &json!({"thought": "a"})).await;
+    // 背景 run としての実行は、その run の文脈になる。
+    let _ = executor
+        .execute_in_run(
+            opencrab_core::ExecutorRun {
+                session_id: "subtask-run-1",
+                depth: 3,
+            },
+            "generate_inner_voice",
+            &json!({"thought": "b"}),
+            "tc-run-1",
+        )
+        .await;
+
+    let scopes = sink.scopes.lock().unwrap().clone();
+    assert_eq!(scopes.len(), 4, "2 実行 × (started, terminal)");
+    assert_eq!(scopes[0], (own_session.clone(), 0), "文脈なしは従来どおり");
+    assert_eq!(scopes[1], (own_session, 0));
+    assert_eq!(
+        scopes[2],
+        (Some("subtask-run-1".to_string()), 3),
+        "背景 run の started は run の文脈"
+    );
+    assert_eq!(
+        scopes[3],
+        (Some("subtask-run-1".to_string()), 3),
+        "同じ run の終端も同じ文脈"
+    );
+}

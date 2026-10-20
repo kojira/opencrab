@@ -414,6 +414,8 @@ pub async fn run_agent_response(
                 session_id.to_string(),
             )
             .with_reply_target(req.reply_target.clone())
+            // 背景バッチの観測（D-1087）: ツール実行は親ターンの 1 つ下の走行として載る。
+            .with_depth(depth)
             // このターンの呼び出し元を dispatch した subtask へ引き継ぐ（#298）。
             // 決着で親会話を resume する sink が、元の権限のまま再開できる
             // （落とすと owner/trusted のツールが resume 後に丸ごと消える）。

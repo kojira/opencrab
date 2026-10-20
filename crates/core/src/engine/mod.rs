@@ -9,8 +9,8 @@ pub use promotion_gate::{PromotionGate, StoppedAtGatedTool};
 pub use skill_engine::{PartialTextEvent, PartialTextGate, PartialTextHook, SkillEngine};
 pub use types::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
-    EngineResult, ExplicitTermination, FoldedInbound, FunctionDefinition, LiveInboundSource,
-    LlmCallLog, LlmClient, LlmExchange, LlmExchangeLog, OutputTextEvent, OutputTextSink,
-    ProviderToolHistory, ToolCall, ToolDispatcher, SYSTEM_SEGMENT_BREAK,
+    EngineResult, ExecutorRun, ExplicitTermination, FoldedInbound, FunctionDefinition,
+    LiveInboundSource, LlmCallLog, LlmClient, LlmExchange, LlmExchangeLog, OutputTextEvent,
+    OutputTextSink, ProviderToolHistory, ToolCall, ToolDispatcher, SYSTEM_SEGMENT_BREAK,
 };
 pub use xml_parser::parse_xml_tool_calls;

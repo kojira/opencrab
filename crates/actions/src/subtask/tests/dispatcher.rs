@@ -509,3 +509,164 @@
             "abort された subtask は settle_completed を通らず sink を発火しない"
         );
     }
+
+    /// D-1087: 背景 run の観測文脈。executor が受け取った `(session_id, depth)` を記録する。
+    struct RunRecordingExecutor {
+        seen: Arc<Mutex<Vec<(String, u32, String)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ActionExecutor for RunRecordingExecutor {
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ActionResult {
+            ActionResult {
+                success: true,
+                data: serde_json::json!({"ok": true}),
+                error: None,
+                ..Default::default()
+            }
+        }
+        async fn execute_with_id(
+            &self,
+            name: &str,
+            args: &serde_json::Value,
+            tool_call_id: &str,
+        ) -> ActionResult {
+            let _ = (name, args, tool_call_id);
+            panic!("背景 run は execute_in_run を通ること（文脈なしで実行しない）");
+        }
+        async fn execute_in_run(
+            &self,
+            run: opencrab_core::ExecutorRun<'_>,
+            name: &str,
+            _args: &serde_json::Value,
+            tool_call_id: &str,
+        ) -> ActionResult {
+            self.seen.lock().unwrap().push((
+                run.session_id.to_string(),
+                run.depth,
+                tool_call_id.to_string(),
+            ));
+            let _ = name;
+            ActionResult {
+                success: true,
+                data: serde_json::json!({"ok": true}),
+                error: None,
+                ..Default::default()
+            }
+        }
+        fn list_tools(&self) -> Vec<FunctionDefinition> {
+            Vec::new()
+        }
+    }
+
+    /// D-1087: 自動 dispatch された**背景バッチ**も、サブタスクと同じライフサイクル通知を
+    /// 出す（開始 → 終端）。run の相関キーは、そのバッチのツール実行が観測に載る
+    /// `ExecutorRun.session_id` と同じ値でなければならない（gateway が両者を突き合わせる）。
+    #[tokio::test]
+    async fn dispatched_batch_emits_lifecycle_with_the_run_key_of_its_tools() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let executor: Arc<dyn ActionExecutor> = Arc::new(RunRecordingExecutor {
+            seen: seen.clone(),
+        });
+
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-a",
+            "web-agent-a-conv1",
+        )
+        .with_depth(2);
+
+        let outcome = dispatcher.dispatch_batch(&[
+            DispatchCall {
+                tool_name: "slow_tool".to_string(),
+                args: serde_json::json!({"path": "x"}),
+                tool_call_id: "tc-1".to_string(),
+            },
+            DispatchCall {
+                tool_name: "fast_tool".to_string(),
+                args: serde_json::json!({"cmd": "build"}),
+                tool_call_id: "tc-2".to_string(),
+            },
+        ]);
+        wait_until_settled(&registry).await;
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        // ツール実行は「このバッチの run」の文脈で走る（親は depth 2 なので 3）。
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0].0, format!("subtask-{}", outcome.subtask_id));
+        assert_eq!(seen[0].1, 3);
+        assert_eq!(seen[0].2, "tc-1");
+        assert_eq!(seen[1].2, "tc-2");
+
+        // ライフサイクル: 開始 → 終端（この順で 1 回ずつ）。
+        let statuses: Vec<(SubtaskLifecycleStatus, String)> = sink
+            .lifecycle
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(status, id, _)| (*status, id.clone()))
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                (SubtaskLifecycleStatus::Started, outcome.subtask_id.clone()),
+                (SubtaskLifecycleStatus::Completed, outcome.subtask_id.clone()),
+            ],
+            "{statuses:?}"
+        );
+        // 開始も終端も、ツール実行と同じ run のセッション ID を運ぶ。
+        let sessions: Vec<String> = sink
+            .lifecycle_session
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(session, _)| session.clone())
+            .collect();
+        assert_eq!(
+            sessions,
+            vec![format!("subtask-{}", outcome.subtask_id); 2],
+            "{sessions:?}"
+        );
+        // 終端は所要時間を持つ。
+        assert!(
+            sink.lifecycle.lock().unwrap()[1].2.is_some(),
+            "completed carries the elapsed time"
+        );
+        // 終端は結果本文を持つ（従来の決着本文と同じ）。
+        assert!(sink.lifecycle_session.lock().unwrap()[1].1.is_some());
+    }
+
+    /// D-1087: 観測を購読していない（`NoopCompletionSink`）ときは、背景バッチの決着も
+    /// 実行結果も従来どおり（ライフサイクル通知は捨てられるだけで、走行は変わらない）。
+    #[tokio::test]
+    async fn dispatched_batch_without_an_observer_settles_unchanged() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(NoopCompletionSink);
+        let executor: Arc<dyn ActionExecutor> = Arc::new(FakeExecutor { pending: false });
+
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink,
+            "agent-a",
+            "web-agent-a-conv1",
+        );
+        let outcome = dispatch_one(&dispatcher, "some_tool", serde_json::json!({}), "tc-1");
+        wait_until_settled(&registry).await;
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        let body = completed_log_body(&db, "web-agent-a-conv1");
+        assert!(body.contains("ok"), "{body}");
+        assert!(outcome.subtask_id.len() > 8);
+    }
