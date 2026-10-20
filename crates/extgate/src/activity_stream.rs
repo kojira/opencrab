@@ -26,10 +26,16 @@ use tokio::sync::mpsc;
 use crate::protocol::{subtask_lifecycle_frame, tool_activity_frame, write_json};
 use crate::registry::ExtgateState;
 
+/// キューに載るもの。`Barrier` はそれまでの frame を書き終えたら知らせる（順序の同期）。
+enum Queued {
+    Frame(Value),
+    Barrier(tokio::sync::oneshot::Sender<()>),
+}
+
 /// 1 ターン分の活動 stream。clone しても同じキューを指す。
 #[derive(Clone)]
 pub struct ActivityEmitter {
-    tx: mpsc::UnboundedSender<Value>,
+    tx: mpsc::UnboundedSender<Queued>,
     /// いま流れているターンの activity id（`activity` フレームと同じ値）。
     activity_id: Arc<Mutex<String>>,
     binding_id: Arc<str>,
@@ -85,10 +91,23 @@ impl ActivityEmitter {
         self.push(frame);
     }
 
+    /// それまでに積んだ frame を書き終えるまで待つ。
+    ///
+    /// ターンの終端（`activity` の `ended`）は別経路で書かれるので、待たないと
+    /// 「ended が先、最後のツール活動が後」という順序になりうる。書けなかった場合も
+    /// 待ち続けない（観測は best-effort で、走行を止めない）。
+    pub async fn flush(&self) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self.tx.send(Queued::Barrier(tx)).is_err() {
+            return;
+        }
+        let _ = rx.await;
+    }
+
     /// キューへ積む。受信側が居ない（writer task が終了している）ときは捨てるだけで、
     /// 走行には影響しない。
     fn push(&self, frame: Value) {
-        let _ = self.tx.send(frame);
+        let _ = self.tx.send(Queued::Frame(frame));
     }
 }
 
@@ -125,9 +144,16 @@ fn status_str(status: ToolEventStatus) -> &'static str {
 async fn write_frames(
     state: Arc<ExtgateState>,
     instance_id: String,
-    mut rx: mpsc::UnboundedReceiver<Value>,
+    mut rx: mpsc::UnboundedReceiver<Queued>,
 ) {
-    while let Some(frame) = rx.recv().await {
+    while let Some(queued) = rx.recv().await {
+        let frame = match queued {
+            Queued::Barrier(done) => {
+                let _ = done.send(());
+                continue;
+            }
+            Queued::Frame(frame) => frame,
+        };
         let writer = {
             let Ok(reg) = state.lock_registry() else {
                 continue;
@@ -149,5 +175,147 @@ async fn write_frames(
                 "activity frame write failed; ignored"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::time::Duration;
+
+    use crate::operations::FinalDelivery;
+    use crate::registry::LiveEntry;
+    use tokio::io::AsyncReadExt;
+
+    const BINDING: &str = "binding-1";
+
+    /// A state whose live registry holds one binding, plus the read half that sees what the
+    /// emitter writes. `_live` keeps the peer open so writes do not fail with EOF.
+    async fn state_with_writer(
+        acknowledged: bool,
+    ) -> (
+        Arc<ExtgateState>,
+        Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
+        tokio::net::unix::OwnedReadHalf,
+        tokio::net::unix::OwnedWriteHalf,
+    ) {
+        let (lane, observer) = tokio::net::UnixStream::pair().unwrap();
+        let (_lane_read, lane_write) = lane.into_split();
+        let (observer_read, observer_write) = observer.into_split();
+        let writer = Arc::new(tokio::sync::Mutex::new(lane_write));
+        let state = Arc::new(ExtgateState::new_protected(
+            opencrab_db::Db::memory().unwrap(),
+        ));
+        state.lock_registry().unwrap().insert(
+            "instance-1".to_string(),
+            LiveEntry {
+                identity: 1,
+                revision: 1,
+                writer: Arc::clone(&writer),
+                acknowledged: if acknowledged {
+                    HashSet::from([BINDING.to_string()])
+                } else {
+                    HashSet::new()
+                },
+                pending: Default::default(),
+                declarations: Arc::new(Vec::new()),
+                declaration_digest: String::new(),
+                final_delivery: FinalDelivery::Automatic,
+            },
+        );
+        (state, writer, observer_read, observer_write)
+    }
+
+    fn lifecycle_frame(run_id: &str) -> Value {
+        subtask_lifecycle_frame(
+            BINDING, run_id, "started", "label", "task", None, None, None,
+        )
+    }
+
+    async fn read_line(reader: &mut tokio::net::unix::OwnedReadHalf) -> Option<String> {
+        let mut buf = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            match reader.read_exact(&mut byte).await {
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+            buf.push(byte[0]);
+            if byte[0] == b'\n' {
+                return Some(String::from_utf8(buf).ok()?);
+            }
+        }
+    }
+
+    /// A frame written by the queue arrives as one LF-terminated JSON line, after `flush`.
+    #[tokio::test]
+    async fn flush_completes_after_the_frames_ahead_are_written() {
+        let (state, writer, mut observer, _live) = state_with_writer(true).await;
+        let emitter = ActivityEmitter::spawn(
+            Arc::clone(&state),
+            "instance-1".into(),
+            BINDING.into(),
+            "activity-1".into(),
+        );
+
+        // Hold the wire so the consumer is stuck on the frame ahead of the barrier …
+        let held = writer.lock().await;
+        emitter.push(lifecycle_frame("run-1"));
+        let early = tokio::time::timeout(Duration::from_millis(50), emitter.flush()).await;
+        assert!(early.is_err(), "flush must wait for the frame it follows");
+        drop(held);
+
+        // … and the barrier completes only once that frame is on the wire.
+        tokio::time::timeout(Duration::from_secs(5), emitter.flush())
+            .await
+            .expect("flush after the wire is free");
+        let line = tokio::time::timeout(Duration::from_secs(5), read_line(&mut observer))
+            .await
+            .expect("frame on the wire")
+            .expect("json line");
+        let frame: Value = serde_json::from_str(line.trim_end()).expect("json line");
+        assert_eq!(frame["m"], "subtask_lifecycle");
+        assert_eq!(frame["run_id"], "run-1");
+    }
+
+    /// No acknowledged binding: frames are dropped and nothing blocks or panics.
+    #[tokio::test]
+    async fn frames_without_an_acknowledged_binding_are_inert() {
+        let (state, _writer, mut observer, _live) = state_with_writer(false).await;
+        let emitter = ActivityEmitter::spawn(
+            Arc::clone(&state),
+            "instance-1".into(),
+            BINDING.into(),
+            "activity-1".into(),
+        );
+        emitter.push(lifecycle_frame("run-1"));
+        tokio::time::timeout(Duration::from_secs(5), emitter.flush())
+            .await
+            .expect("flush with an unreachable gateway");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), read_line(&mut observer))
+                .await
+                .is_err(),
+            "nothing is written for an unacknowledged binding"
+        );
+    }
+
+    /// No live instance at all: the same, for a gateway that never connected.
+    #[tokio::test]
+    async fn frames_without_a_live_instance_are_inert() {
+        let state = Arc::new(ExtgateState::new_protected(
+            opencrab_db::Db::memory().unwrap(),
+        ));
+        let emitter = ActivityEmitter::spawn(
+            Arc::clone(&state),
+            "missing-instance".into(),
+            BINDING.into(),
+            "activity-1".into(),
+        );
+        emitter.push(lifecycle_frame("run-1"));
+        tokio::time::timeout(Duration::from_secs(5), emitter.flush())
+            .await
+            .expect("flush without a listener");
     }
 }

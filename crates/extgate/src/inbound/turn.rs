@@ -237,6 +237,8 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                         }));
                     }
                 }
+                // D-1087: ターン終端でキューを書き終えるために手元にも 1 本残す。
+                let turn_activity = Arc::clone(&activity_stream);
                 let turn_res = if let Some(res) = promoted_res {
                     res
                 } else {
@@ -496,6 +498,8 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                         );
                         // 成功したexecutionだけauthoritative ended outcomeを送る。engine errorは
                         // turn_failed経路が正本であり、empty silenceへ偽装しない。
+                        // D-1087: 活動の frame はキュー越しなので、`ended` の前に書き終える。
+                        turn_activity.flush().await;
                         if engine_succeeded {
                             emit_ended_activity(
                                 &state,

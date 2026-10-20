@@ -152,9 +152,8 @@ pub async fn spawn_subtask(
     let run_subtask_id = subtask_id.clone();
     let run_registry = registry.clone();
     let run_lifecycle = lifecycle.clone();
-    // D-1087: 終端イベント用の写し（`label` は登録簿、`task` は sub-run がそれぞれ所有する）。
+    // D-1087: 終端イベント用のラベル写し（`label` は登録簿が所有する）。
     let run_label = label.clone();
-    let run_task_text = task.clone();
     let run_sink: Arc<dyn SubtaskCompletionSink> =
         sink.unwrap_or_else(|| Arc::new(opencrab_actions::NoopCompletionSink));
     // sub-run（クロージャ）へ渡す実行 caller。登録簿 insert 用に `parent_caller` は
@@ -236,7 +235,8 @@ pub async fn spawn_subtask(
             agent_id: &run_agent_id,
             status: opencrab_actions::SubtaskLifecycleStatus::from_exit_reason(&exit_reason),
             label: &run_label,
-            task: &run_task_text,
+            // 依頼本文は `started` が運ぶ（終端では実装が開始時に保持している）。
+            task: "",
             detail: None,
             duration_ms: Some(started_instant.elapsed().as_millis() as u64),
             result_text: Some(&result_text),

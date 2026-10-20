@@ -399,6 +399,10 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                     .expect("continuation say id lock")
                     .clone(),
             );
+            // D-1087: 活動の frame はキュー越しなので、`ended` の前に書き終える。
+            if let Some(activity) = &sink.activity {
+                activity.flush().await;
+            }
             if engine_succeeded {
                 emit_ended_activity(
                     &sink.state,

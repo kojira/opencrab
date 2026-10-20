@@ -217,3 +217,133 @@ fn agent_prelude_is_optional_and_bounded() {
         );
     }
 }
+
+// D-1087: the activity frames are id-less fire-and-forget notifications. A gateway that does
+// not know them drops them with zero writes and keeps the connection, so the shape is pinned
+// here: `m` + `binding_id` + the neutral fields, and no `id`.
+
+#[test]
+fn tool_activity_started_frame_carries_no_id_and_no_terminal_fields() {
+    let args = serde_json::json!({"cmd": "ls"});
+    let frame = tool_activity_frame(
+        "binding",
+        "activity",
+        "call-1",
+        "execute_shell",
+        "started",
+        2,
+        "2026-10-20T00:00:00Z",
+        None,
+        &args,
+        None,
+        None,
+    );
+    assert_eq!(
+        frame,
+        serde_json::json!({
+            "m": "tool_activity",
+            "binding_id": "binding",
+            "activity_id": "activity",
+            "call_id": "call-1",
+            "tool": "execute_shell",
+            "status": "started",
+            "depth": 2,
+            "started_at": "2026-10-20T00:00:00Z",
+            "args": {"cmd": "ls"},
+        })
+    );
+    assert!(frame.get("id").is_none());
+}
+
+#[test]
+fn tool_activity_terminal_frame_adds_duration_result_and_error_only_when_present() {
+    let args = serde_json::json!({});
+    let result = serde_json::json!({"ok": true});
+    let completed = tool_activity_frame(
+        "binding",
+        "activity",
+        "call-1",
+        "execute_shell",
+        "completed",
+        0,
+        "2026-10-20T00:00:00Z",
+        Some(12),
+        &args,
+        Some(&result),
+        None,
+    );
+    assert_eq!(completed["duration_ms"], 12);
+    assert_eq!(completed["result"], serde_json::json!({"ok": true}));
+    assert!(completed.get("error").is_none());
+
+    let rejected = tool_activity_frame(
+        "binding",
+        "activity",
+        "call-2",
+        "execute_shell",
+        "rejected",
+        0,
+        "2026-10-20T00:00:00Z",
+        Some(0),
+        &args,
+        None,
+        Some("rejected: owner"),
+    );
+    assert_eq!(rejected["error"], "rejected: owner");
+    assert!(rejected.get("result").is_none());
+    assert!(rejected.get("id").is_none());
+}
+
+#[test]
+fn subtask_lifecycle_frame_omits_the_fields_that_do_not_apply() {
+    let started = subtask_lifecycle_frame(
+        "binding",
+        "run-1",
+        "started",
+        "shell job",
+        "do it",
+        None,
+        None,
+        None,
+    );
+    assert_eq!(
+        started,
+        serde_json::json!({
+            "m": "subtask_lifecycle",
+            "binding_id": "binding",
+            "run_id": "run-1",
+            "status": "started",
+            "label": "shell job",
+            "task": "do it",
+        })
+    );
+    assert!(started.get("id").is_none());
+
+    let completed = subtask_lifecycle_frame(
+        "binding",
+        "run-1",
+        "completed",
+        "",
+        "",
+        None,
+        Some(42),
+        Some("done"),
+    );
+    assert!(completed.get("label").is_none());
+    assert!(completed.get("task").is_none());
+    assert_eq!(completed["duration_ms"], 42);
+    assert_eq!(completed["result_text"], "done");
+
+    let progress = subtask_lifecycle_frame(
+        "binding",
+        "run-1",
+        "progress",
+        "shell job",
+        "",
+        Some("half way"),
+        None,
+        None,
+    );
+    assert_eq!(progress["detail"], "half way");
+    assert!(progress.get("duration_ms").is_none());
+}

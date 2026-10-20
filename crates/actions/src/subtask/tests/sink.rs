@@ -5,6 +5,8 @@
         pub(crate) events: Mutex<Vec<SubtaskSettled>>,
         /// 停止通知（`on_subtask_cancelled`）を別に記録する。
         pub(crate) cancelled: Mutex<Vec<SubtaskSettled>>,
+        /// D-1087: ライフサイクル通知を順に記録する（`(status, subtask_id, duration)`）。
+        pub(crate) lifecycle: Mutex<Vec<(SubtaskLifecycleStatus, String, Option<u64>)>>,
     }
 
     // ---- #638: 継続の判断が transport 非依存であること（core 側の 1 本） ----
@@ -120,6 +122,13 @@
         }
         fn on_subtask_cancelled(&self, ev: SubtaskSettled) {
             self.cancelled.lock().unwrap().push(ev);
+        }
+        fn on_subtask_lifecycle(&self, ev: &SubtaskLifecycleEvent<'_>) {
+            self.lifecycle.lock().unwrap().push((
+                ev.status,
+                ev.subtask_id.to_string(),
+                ev.duration_ms,
+            ));
         }
     }
 

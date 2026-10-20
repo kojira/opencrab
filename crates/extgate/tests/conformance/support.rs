@@ -67,6 +67,8 @@ struct TestRuntime {
     tool_sources: Arc<Mutex<Vec<ToolSources>>>,
     last_sink: Arc<Mutex<Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>>>,
     partial_script: PartialScript,
+    /// D-1087: the faked engine's tool/lifecycle steps for the turn.
+    activity_script: ActivityScript,
     gated_tool: GatedToolScript,
 }
 
@@ -94,6 +96,7 @@ impl TestRuntime {
             tool_sources: Arc::new(Mutex::new(Vec::new())),
             last_sink: Arc::new(Mutex::new(None)),
             partial_script: PartialScript::default(),
+            activity_script: ActivityScript::default(),
             gated_tool: GatedToolScript::default(),
         }
     }
@@ -130,6 +133,8 @@ impl AgentRuntime for TestRuntime {
             cb(origin).await;
         }
         self.partial_script.play(&req.on_partial_text, &req.on_continuation_speech).await;
+        self.activity_script
+            .play(&req.tool_event_sink, &req.completion_sink);
         self.turn_entered.notify_waiters();
         // 旧 V3（sink 無し）はツールを同期実行する。sink があれば detach 済みなので待たない。
         if req.completion_sink.is_none() {

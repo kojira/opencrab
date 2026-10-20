@@ -286,6 +286,33 @@
         );
     }
 
+    /// D-1087: 停止は活動の観測者へも 1 件届く（abort で終端通知は来ないので、ここが唯一）。
+    #[tokio::test]
+    async fn cancel_subtask_reports_aborted_to_the_lifecycle_observer() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let parent = "web-agent-a-conv1";
+        let _handle = insert_fake_subtask(&registry, "st-abort", parent);
+
+        let sink = RecordingSink::default();
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            Some(&sink),
+            "st-abort",
+            CallerIdentity::Agent,
+            Some(parent),
+        );
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+
+        let lifecycle = sink.lifecycle.lock().unwrap();
+        assert_eq!(lifecycle.len(), 1, "{lifecycle:?}");
+        assert_eq!(lifecycle[0].0, SubtaskLifecycleStatus::Aborted);
+        assert_eq!(lifecycle[0].1, "st-abort");
+        assert!(lifecycle[0].2.is_some(), "aborted carries the elapsed time");
+    }
+
     /// #161: 存在しない subtask_id は NotFound（権限拒否ではない）。
     #[tokio::test]
     async fn cancel_subtask_missing_is_not_found() {
