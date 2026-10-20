@@ -39,7 +39,7 @@ pub trait ActionExecutor: Send + Sync {
     async fn execute(&self, name: &str, args: &Value) -> ActionResult;
 
     /// Execute an action, propagating the LLM-provided `tool_call_id` for
-    /// correlation (e.g. activity webhooks, tracing).
+    /// correlation (e.g. gateway activity traces, tracing).
     ///
     /// The default implementation ignores the id and delegates to [`execute`],
     /// so existing implementors keep working unchanged. Implementors that emit

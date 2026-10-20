@@ -317,7 +317,13 @@ CREATE TABLE IF NOT EXISTS soul_presets (
 CREATE INDEX IF NOT EXISTS idx_soul_presets_agent ON soul_presets(agent_id);
 
 -- ============================================
--- Agent Webhook Config (subtask/tool/lifecycle webhook defaults)
+-- Agent Webhook Config — legacy, retained (D-1087)
+--
+-- No core code reads or writes this table any more: webhook routing is a gateway
+-- concern and the gateway owns its own store. The DDL stays because existing
+-- databases already hold user-configured rows and no migration ever created it
+-- (only this fresh-install SQL did), so removing it here would leave fresh and
+-- migrated databases divergent unless a DROP migration destroyed that data.
 -- ============================================
 CREATE TABLE IF NOT EXISTS agent_webhook_config (
     scope        TEXT NOT NULL DEFAULT 'agent',

@@ -32,7 +32,7 @@ impl CallerIdentity {
     /// L3 Action（`update_instructions`）/ L4 server ハンドラ（`configure_llm_provider` /
     /// `manage_allowed_commands` / `configure_nostr` / `configure_self` /
     /// `configure_mcp_server` / `add_allowed_command` / `remove_allowed_command` /
-    /// ハートビート指示更新）/ L5 webhook 設定（set/disable）/ L6 voice（VC 参加/退出）—
+    /// ハートビート指示更新）/ L5 voice（VC 参加/退出）—
     /// はすべてこの述語を通す。[`Self::trust_level`] / [`Self::skill_origin_tag`] も
     /// これに追従する。ここを唯一の源にすることで「同じ owner 判定が 2 箇所にあって
     /// 食い違う」事故を防ぐ。

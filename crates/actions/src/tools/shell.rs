@@ -220,9 +220,10 @@ impl Action for ShellToolAction {
         };
 
         // No source-level truncation: stdout/stderr are passed through in full so that
-        // downstream consumers (the LLM and the webhook layer) receive every byte. The
-        // webhook layer performs lossless, ordered chunking (`build_tool_event_message`)
-        // to satisfy Discord size limits, so we must not drop the tail here.
+        // downstream consumers (the LLM and the gateway's activity delivery) receive every
+        // byte. The gateway performs lossless, ordered chunking
+        // (`build_tool_event_message`) to satisfy its transport size limits, so we must
+        // not drop the tail here.
         // Only lossy step is `from_utf8_lossy`, which replaces invalid UTF-8 sequences
         // rather than dropping bytes — no bytes are silently discarded.
         let stdout_str = String::from_utf8_lossy(&output.stdout).into_owned();

@@ -483,7 +483,7 @@ impl BridgedExecutor {
     /// instrumentation 付き実行本体。
     ///
     /// `tool_call_id` は LLM 由来の元 ID を伝播するための相関キー。`Some(id)` なら
-    /// その ID を webhook/トレースの相関に使う（skill engine の tool_call.id と一致）。
+    /// その ID をトレースの相関に使う（skill engine の tool_call.id と一致）。
     /// `None`（id を持たない直接呼び出し）のときのみ合成 UUID を生成し、ペイロード上は
     /// `correlation = "synthetic"` として区別できるようにする。
     async fn execute_instrumented(

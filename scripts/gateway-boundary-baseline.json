@@ -330,7 +330,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 422,
+      "line": 428,
       "snippet": "CREATE TABLE IF NOT EXISTS trusted_users (",
       "classification": "production-violation",
       "violation": "V06",
@@ -340,7 +340,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 434,
+      "line": 440,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -350,7 +350,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 658,
+      "line": 664,
       "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
       "classification": "production-violation",
       "violation": "V06",
@@ -360,7 +360,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 667,
+      "line": 673,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -830,7 +830,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 557,
+      "line": 563,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",

@@ -134,7 +134,7 @@ pub async fn maybe_run_memory_declare(state: &AppState, agent_id: &str) -> anyho
 /// 宣言ラン（sleep）のロジック本体。**必要な手足だけ**を引数で受け取る（#370）:
 /// DB・設定・二重起動スロット・1 ターンを回す [`OrganizeTurnRunner`]。
 ///
-/// `AppState` を受け取らないので、この関数からは gateway/MCP/activity webhook を構築できない
+/// `AppState` を受け取らないので、この関数からは gateway/MCP を構築できない
 /// （構造的に外へ出ない）。1 ターンを走らせる部分だけを `runner` に委ね、本番は
 /// `run_agent_response` 実装、テストは結果差し替えのフェイクを渡す。
 async fn run_declare(

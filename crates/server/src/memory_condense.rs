@@ -103,7 +103,7 @@ pub async fn maybe_run_memory_condense(state: &AppState, agent_id: &str) -> anyh
 }
 
 /// 凝縮ラン（sleep）のロジック本体。**必要な手足だけ**を引数で受け取る（#370）。
-/// `AppState` を受け取らないので gateway/MCP/activity webhook を構築できない（構造的に外へ出ない）。
+/// `AppState` を受け取らないので gateway/MCP を構築できない（構造的に外へ出ない）。
 async fn run_condense(
     db: &opencrab_db::Db,
     cfg: &MemoryCondenseConfig,
