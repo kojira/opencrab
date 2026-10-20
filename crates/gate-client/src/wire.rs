@@ -6,10 +6,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::json::{parse_object_no_dup, JsonError};
 
+mod activity;
 mod partial;
 mod provisional;
 mod response;
 mod turn_profile;
+pub use activity::{SubtaskLifecycle, ToolActivity};
 pub use partial::{say_stream_id, Partial};
 pub use provisional::{
     provisional_cancel_frame, provisional_frame, ProvisionalRequest, ProvisionalResult,
@@ -445,6 +447,8 @@ pub enum CoreMsg {
     Bind(Bind),
     Say(Say),
     Activity(Activity),
+    ToolActivity(activity::ToolActivity),
+    SubtaskLifecycle(activity::SubtaskLifecycle),
     TurnFailed(TurnFailed),
     Partial(Partial),
     ProvisionalResult(ProvisionalResult),
@@ -570,6 +574,22 @@ fn parse_core_msg(obj: &Value) -> CoreMsg {
         },
         "activity" => match parse_activity(obj) {
             Ok(a) => CoreMsg::Activity(a),
+            Err(_) => CoreMsg::Invalid {
+                id: opt_id(obj),
+                code: "bad_request",
+                m,
+            },
+        },
+        "tool_activity" => match activity::parse_tool_activity(obj) {
+            Ok(a) => CoreMsg::ToolActivity(a),
+            Err(_) => CoreMsg::Invalid {
+                id: opt_id(obj),
+                code: "bad_request",
+                m,
+            },
+        },
+        "subtask_lifecycle" => match activity::parse_subtask_lifecycle(obj) {
+            Ok(l) => CoreMsg::SubtaskLifecycle(l),
             Err(_) => CoreMsg::Invalid {
                 id: opt_id(obj),
                 code: "bad_request",

@@ -275,6 +275,43 @@ async fn cancellation_case(explicit: bool) {
 }
 
 #[tokio::test]
+async fn activity_frames_reach_the_live_queue_without_a_reply() {
+    let mut f = Fixture::new().await;
+    write_json(
+        &mut f.core,
+        &json!({"m":"tool_activity", "binding_id":BINDING, "activity_id":"act-1",
+        "call_id":"call-1", "tool":"execute_shell", "status":"started", "depth":0,
+        "started_at":"2026-10-20T00:00:00Z", "args":{"command":"ls"}}),
+    )
+    .await
+    .unwrap();
+    write_json(
+        &mut f.core,
+        &json!({"m":"subtask_lifecycle", "binding_id":BINDING, "run_id":"run-1",
+        "status":"started", "label":"task", "task":"do it"}),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        f.client.next_live(ADDRESS).await,
+        Some(LiveEvent::ToolActivity { tool, status, .. })
+            if tool == "execute_shell" && status == "started"
+    ));
+    assert!(matches!(
+        f.client.next_live(ADDRESS).await,
+        Some(LiveEvent::SubtaskLifecycle { run_id, status, .. })
+            if run_id == "run-1" && status == "started"
+    ));
+    // id を持たない通知なので、gateway から core へは何も返さない。
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), read_frame(&mut f.core))
+            .await
+            .is_err(),
+        "activity frames must not be answered"
+    );
+}
+
+#[tokio::test]
 async fn fatal_frame_cancels_held_handler() {
     let mut f = Fixture::new().await;
     f.start_held().await;

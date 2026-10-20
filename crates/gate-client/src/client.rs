@@ -18,9 +18,10 @@ use super::wire::{
     ok_frame, parse_frame_bytes, provisional_cancel_frame, provisional_frame, read_frame,
     said_frame_with_context, say_reply_target, say_stream_id, say_text, write_json, Activity,
     Attachment, Bind, CoreMsg, FrameError, Invoke, Partial, ProvisionalRequest, ProvisionalResult,
-    SaidCaller, SaidContext, Say, TurnFailed, WireResponse,
+    SaidCaller, SaidContext, Say, SubtaskLifecycle, ToolActivity, TurnFailed, WireResponse,
 };
 
+include!("client/live_event.rs");
 include!("client/state_api.rs");
 include!("client/transport.rs");
 include!("client/handlers.rs");

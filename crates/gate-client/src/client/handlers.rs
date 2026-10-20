@@ -6,6 +6,14 @@ async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> b
         }
         CoreMsg::Say(say) => handle_say(client, say, generation).await,
         CoreMsg::Activity(activity) => handle_activity(client, activity, generation).await,
+        CoreMsg::ToolActivity(activity) => {
+            handle_tool_activity(client, activity).await;
+            false
+        }
+        CoreMsg::SubtaskLifecycle(lifecycle) => {
+            handle_subtask_lifecycle(client, lifecycle).await;
+            false
+        }
         CoreMsg::TurnFailed(tf) => {
             handle_turn_failed(client, tf).await;
             false
@@ -288,8 +296,80 @@ async fn handle_activity(client: &InstanceClient, activity: Activity, generation
     false
 }
 
-/// R3(❌): core→gate のターン失敗通知を live queue へ載せる。binding_id→address を解決し、
-/// 未 ack binding は捨てる（handle_activity と同じ経路）。id を持たない通知なので応答は返さない。
+/// D-1087: ツール活動を、その binding を ack 済みの address の live queue へ積む。
+///
+/// id を持たない通知なので応答しない。binding が未 ack（別 gateway の担当・切断）なら捨てる。
+/// 見ない consumer は無視してよく、core の挙動は変わらない。
+async fn handle_tool_activity(client: &InstanceClient, activity: ToolActivity) {
+    let Some(address) = acknowledged_address(client, &activity.binding_id).await else {
+        return;
+    };
+    push_live(
+        client,
+        &address,
+        LiveEvent::ToolActivity {
+            activity_id: activity.activity_id,
+            call_id: activity.call_id,
+            tool: activity.tool,
+            status: activity.status,
+            depth: activity.depth,
+            started_at: activity.started_at,
+            duration_ms: activity.duration_ms,
+            args: activity.args,
+            result: activity.result,
+            error: activity.error,
+        },
+    )
+    .await;
+}
+
+/// D-1087: サブタスク走行のライフサイクルを live queue へ積む（応答しない）。
+async fn handle_subtask_lifecycle(client: &InstanceClient, lifecycle: SubtaskLifecycle) {
+    let Some(address) = acknowledged_address(client, &lifecycle.binding_id).await else {
+        return;
+    };
+    push_live(
+        client,
+        &address,
+        LiveEvent::SubtaskLifecycle {
+            run_id: lifecycle.run_id,
+            status: lifecycle.status,
+            label: lifecycle.label,
+            task: lifecycle.task,
+            detail: lifecycle.detail,
+            duration_ms: lifecycle.duration_ms,
+            result_text: lifecycle.result_text,
+        },
+    )
+    .await;
+}
+
+/// binding を ack している address。無ければ None。
+async fn acknowledged_address(client: &InstanceClient, binding_id: &str) -> Option<String> {
+    let inner = client.inner.lock().await;
+    if inner.closed {
+        return None;
+    }
+    inner
+        .acknowledged
+        .iter()
+        .find(|(_, bid)| *bid == binding_id)
+        .map(|(a, _)| a.clone())
+}
+
+/// live queue へ 1 件積む。溢れたら best-effort で捨てる（partial と同じ扱い）。
+async fn push_live(client: &InstanceClient, address: &str, event: LiveEvent) {
+    let mut inner = client.inner.lock().await;
+    if inner.closed {
+        return;
+    }
+    if let Some(queue) = inner.live.get_mut(address) {
+        if !queue.try_push(event) {
+            tracing::debug!(%address, "activity live event dropped: queue full");
+        }
+    }
+}
+
 async fn handle_turn_failed(client: &InstanceClient, tf: TurnFailed) {
     let mut inner = client.inner.lock().await;
     if inner.closed {

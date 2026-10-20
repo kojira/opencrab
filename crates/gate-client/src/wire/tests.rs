@@ -264,6 +264,55 @@ fn parse_turn_failed_missing_origin_is_bad_request() {
     }
 }
 
+// D-1087: 活動の 2 frame。id を持たないので応答対象にならず、値だけを運ぶ。
+#[test]
+fn tool_activity_frame_parses_started_and_terminal_fields() {
+    let started = br#"{"m":"tool_activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"act-1","call_id":"call-1","tool":"execute_shell","status":"started","depth":0,"started_at":"2026-10-20T00:00:00Z","args":{"command":"ls"}}"#;
+    match parse_frame_bytes(started).unwrap() {
+        CoreMsg::ToolActivity(a) => {
+            assert_eq!(a.activity_id, "act-1");
+            assert_eq!(a.status, "started");
+            assert_eq!(a.args["command"], "ls");
+            assert_eq!(a.duration_ms, None);
+            assert_eq!(a.result, None);
+            assert_eq!(a.error, None);
+        }
+        other => panic!("{other:?}"),
+    }
+    let terminal = br#"{"m":"tool_activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"act-1","call_id":"call-1","tool":"execute_shell","status":"completed","depth":0,"started_at":"2026-10-20T00:00:00Z","duration_ms":12,"args":{"command":"ls"},"result":{"exit_code":0}}"#;
+    match parse_frame_bytes(terminal).unwrap() {
+        CoreMsg::ToolActivity(a) => {
+            assert_eq!(a.duration_ms, Some(12));
+            assert_eq!(a.result.unwrap()["exit_code"], 0);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn subtask_lifecycle_frame_parses_optional_fields() {
+    let raw = br#"{"m":"subtask_lifecycle","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","run_id":"run-1","status":"progress","detail":"half"}"#;
+    match parse_frame_bytes(raw).unwrap() {
+        CoreMsg::SubtaskLifecycle(l) => {
+            assert_eq!(l.run_id, "run-1");
+            assert_eq!(l.status, "progress");
+            assert_eq!(l.detail.as_deref(), Some("half"));
+            assert_eq!(l.label, None);
+            assert_eq!(l.duration_ms, None);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn tool_activity_without_a_binding_is_bad_request() {
+    let raw = br#"{"m":"tool_activity","activity_id":"act-1"}"#;
+    match parse_frame_bytes(raw).unwrap() {
+        CoreMsg::Invalid { code, .. } => assert_eq!(code, "bad_request"),
+        other => panic!("{other:?}"),
+    }
+}
+
 // 後方互換: 未知 `m` かつ id 無しの core→gate 通知（turn_failed を知らない旧 gateway 相当）は
 // Unknown に落ち、handle_msg で write 0・keep（close しない）。DESIGN-EXTGATE-V3 §「RUNNING の
 // 未知 m は unknown_message・keep」。これが崩れると外部 DI gateway を壊すので固定する。
