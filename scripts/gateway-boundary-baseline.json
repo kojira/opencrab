@@ -1198,11 +1198,11 @@
     {
       "violation": "V15",
       "classification": "dead-or-legacy-pending-reachability",
-      "path": "crates/discord/Cargo.toml",
-      "line": 2,
+      "path": "docs/evidence/d1087-webhook-move.md",
+      "line": 17,
       "needle": "opencrab-discord",
       "owner_stage": "S5/S10",
-      "expires_when": "classify every linked edge before deliberate deletion; do not assume the crate is dead"
+      "expires_when": "linked edges classified (0 dependent crates) before the deliberate deletion; the code lives in the gateway repository (D-1087)"
     },
     {
       "violation": "V15",

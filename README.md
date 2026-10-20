@@ -82,7 +82,7 @@ through `gate-client` over the V3 Unix-socket protocol, pinned to an exact core 
 
 **Direction of travel**: the goal is a structure where the **core keeps running while the outer layers (transports, extensions) can be swapped without downtime** — ultimately so that agents can develop opencrab itself. Generic functionality must not live in transport crates, state belongs to the core, and the upper layer should not name individual gateways. See **[docs/design-plugin-architecture.md](docs/design-plugin-architecture.md)** before adding a new gateway or moving code between crates.
 
-Some of this is not yet true and is tracked as issues: `discord` still holds generic tools, a concrete Discord transport sits in `gateway/` next to the traits, and the `Gateway` trait itself has no consumers yet. These are being unwound.
+Some of this is not yet true and is tracked as issues: a concrete Discord transport sits in `gateway/` next to the traits, and the `Gateway` trait itself has no consumers yet. These are being unwound.
 
 ## Prerequisites
 

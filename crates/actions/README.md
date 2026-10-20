@@ -51,4 +51,4 @@ Nostr の `session_watches` 付きセッションだけ。ゲートは形（即�
 
 ## 関連
 
-- [opencrab-discord](../discord/README.md)
+- Discord 実装は gateway リポジトリ（[opencrab-gateways](https://github.com/kojira/opencrab-gateways) の `opencrab-discord-gateway`）
