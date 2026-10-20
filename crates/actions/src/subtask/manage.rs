@@ -174,10 +174,20 @@ pub fn cancel_subtask(
                 }
             }
 
-            // 停止を sink へ通知する（完了経路とは別メソッド = resume しない）。
-            // これで「最後の subtask が cancel されたのに誰もセッションを完了に
-            // しない」（REST が永久 active）が起きない。
+            // D-1087: 中断も activity の観測者へ伝える。abort で spawned closure は止まり
+            // 終端通知は来ないので、ここが唯一の終端。
             if let Some(sink) = sink {
+                sink.on_subtask_lifecycle(&crate::subtask::SubtaskLifecycleEvent {
+                    subtask_id,
+                    parent_session_id: &subtask.parent_session_id,
+                    agent_id: &subtask.agent_id,
+                    status: crate::subtask::SubtaskLifecycleStatus::Aborted,
+                    label: &subtask.label,
+                    task: "",
+                    detail: None,
+                    duration_ms: Some(subtask.started_at.elapsed().as_millis() as u64),
+                    result_text: None,
+                });
                 sink.on_subtask_cancelled(SubtaskSettled {
                     session_id: parent,
                     agent_id: subtask.agent_id.clone(),

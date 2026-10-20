@@ -122,6 +122,8 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
         speaker_id: inputs.author_id.clone(),
         system_context: inputs.system_context.clone(),
         model_profile: TurnModelProfile::Realtime,
+        // 先行生成は採用されるまで会話ではないので、活動は流さない。
+        activity: None,
     });
     let task = {
         let runtime = runtime.clone();

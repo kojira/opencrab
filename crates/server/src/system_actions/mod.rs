@@ -65,6 +65,8 @@ struct ProgressSubtaskEntry {
     session_id: String,
     /// 親セッション ID（進捗ログと resume の宛先）。
     parent_session_id: String,
+    /// registry の人間可読ラベル（D-1087 のライフサイクル通知に載せる）。
+    label: String,
     /// **親ターンの呼び出し元**（#298）。進捗デバウンス発火は親会話を resume する
     /// ので、resume 先の権限は元のターンのものでなければならない。
     caller: opencrab_actions::CallerIdentity,
@@ -76,6 +78,7 @@ impl ProgressSubtaskEntry {
             subtask_id,
             session_id: entry.session_id.clone(),
             parent_session_id: entry.parent_session_id.clone(),
+            label: entry.label.clone(),
             caller: entry.caller.clone(),
         }
     }

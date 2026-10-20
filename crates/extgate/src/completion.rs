@@ -8,9 +8,11 @@ use std::sync::Arc;
 
 use opencrab_actions::{
     delivery_effect, run_session_turn, AgentRuntime, CallerIdentity, LiveInboundScope, RunRequest,
-    SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled, TurnModelProfile,
+    SubtaskCompletionSink, SubtaskLifecycleEvent, SubtaskRegistry, SubtaskSettled,
+    TurnModelProfile,
 };
 
+use crate::activity_stream::ActivityEmitter;
 use crate::delivery::apply_delivery_effect;
 use crate::listen::{emit_activity, emit_ended_activity};
 use crate::registry::ExtgateState;
@@ -93,6 +95,10 @@ pub struct ExtgateCompletionSink<R: AgentRuntime> {
     pub system_context: String,
     /// D-1081: profile of the turn that created this sink; said-less resumes reuse it.
     pub model_profile: TurnModelProfile,
+    /// D-1087: the activity stream of this turn (tool executions and subtask lifecycles).
+    /// `None` when the sink is built outside a `said`-carrying turn (timed fire, provisional),
+    /// where nothing observes the run.
+    pub activity: Option<Arc<ActivityEmitter>>,
 }
 
 impl<R: AgentRuntime> Clone for ExtgateCompletionSink<R> {
@@ -108,6 +114,7 @@ impl<R: AgentRuntime> Clone for ExtgateCompletionSink<R> {
             speaker_id: self.speaker_id.clone(),
             system_context: self.system_context.clone(),
             model_profile: self.model_profile,
+            activity: self.activity.clone(),
         }
     }
 }
@@ -139,6 +146,20 @@ impl<R: AgentRuntime> SubtaskCompletionSink for ExtgateCompletionSink<R> {
         tokio::spawn(async move {
             resume_v3_turn(sink, ev).await;
         });
+    }
+
+    /// D-1087: 走行のライフサイクルも同じ活動 stream に載せる。観測者が居なければ何もしない。
+    fn on_subtask_lifecycle(&self, ev: &SubtaskLifecycleEvent<'_>) {
+        if let Some(activity) = &self.activity {
+            activity.lifecycle(ev);
+        }
+    }
+
+    /// D-1087: このターンの活動 stream を副実行へ引き継ぐ（副実行のツール実行も載る）。
+    fn tool_event_sink(&self) -> Option<Arc<dyn opencrab_actions::ToolEventSink>> {
+        self.activity
+            .as_ref()
+            .map(|activity| Arc::clone(activity) as Arc<dyn opencrab_actions::ToolEventSink>)
     }
 }
 
@@ -180,6 +201,11 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
     locks
         .run_serialized(&session_id, async move {
             let activity_id = uuid::Uuid::new_v4().to_string();
+            // D-1087: このターンの活動はこの activity に属する（継承した sink を使い回すため
+            // ここで差し替える）。
+            if let Some(activity) = &sink.activity {
+                activity.set_activity_id(&activity_id);
+            }
             emit_activity(
                 &sink.state,
                 &sink.instance_id,
@@ -308,6 +334,12 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                     }
                     if let Some(ga) = ops_actions.clone() {
                         req = req.with_gateway_actions(ga);
+                    }
+                    // D-1087: resume ターンのツール実行も同じ活動 stream に載せる。
+                    if let Some(activity) = &sink.activity {
+                        req = req.with_tool_event_sink(
+                            Arc::clone(activity) as Arc<dyn opencrab_actions::ToolEventSink>
+                        );
                     }
                     v3_attach_dispatch(
                         req,

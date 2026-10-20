@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use opencrab_gateway::GatewayActions;
 
+use crate::bridge::ToolEventSink;
 use crate::subtask::{SubtaskCompletionSink, SubtaskRegistry};
 use crate::traits::CallerIdentity;
 
@@ -146,6 +147,11 @@ pub struct RunRequest {
     /// [`PROVISIONAL_READ_ONLY_TOOLS`] the run stops without running it and aborts the gate.
     /// From the promotion on, the run's turn logs are recorded: the ones buffered before it first. Set with [`RunRequest::as_provisional`].
     pub promotion_gate: Option<opencrab_core::PromotionGate>,
+    /// D-1087: the observer of every tool execution of this run (started, then its terminal
+    /// state), in occurrence order. The extgate turn installs one so a connected gateway can
+    /// follow what the agent is doing. `None` = nobody observes; the run behaves and records
+    /// exactly as before.
+    pub tool_event_sink: Option<Arc<dyn ToolEventSink>>,
 }
 
 /// D-1085 §12: the tools a provisional run may run before its promotion: memory reads and
@@ -210,7 +216,15 @@ impl RunRequest {
             lightweight: false,
             provisional: false,
             promotion_gate: None,
+            tool_event_sink: None,
         }
+    }
+
+    /// D-1087: observe every tool execution of this run (see
+    /// [`RunRequest::tool_event_sink`]).
+    pub fn with_tool_event_sink(mut self, sink: Arc<dyn ToolEventSink>) -> Self {
+        self.tool_event_sink = Some(sink);
+        self
     }
 
     pub fn with_gateway_actions(mut self, ga: Arc<dyn GatewayActions>) -> Self {

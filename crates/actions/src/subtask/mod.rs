@@ -29,7 +29,10 @@ mod sink;
 pub use dispatcher::{default_non_dispatch_tools, SharedExecutor, SubtaskToolDispatcher};
 pub use manage::{cancel_subtask, steer_subtask, CancelOutcome, SteerOutcome, STEER_LOG_TYPE};
 pub use settle::{settle_completed, SettleContext};
-pub use sink::{dispatch_settled, NoopCompletionSink, SubtaskCompletionSink, SubtaskSettled};
+pub use sink::{
+    dispatch_settled, NoopCompletionSink, SubtaskCompletionSink, SubtaskLifecycleEvent,
+    SubtaskLifecycleStatus, SubtaskSettled,
+};
 
 /// dispatch した subtask の既定タイムアウト（秒）。`spawn_subtask` の既定と揃える
 /// （旧 `crates/discord` の `subtask_engine.rs` の `timeout_secs`。現行は gateway リポジトリ）。

@@ -69,8 +69,9 @@ pub use skill_management::OWNER_SKILLS_INDEX_NAME;
 pub use subtask::{
     cancel_subtask, default_non_dispatch_tools, dispatch_settled, steer_subtask, CancelOutcome,
     NoopCompletionSink, SettleKind, SharedExecutor, SpawnedSubtask, SteerOutcome,
-    SubtaskCompletionSink, SubtaskLifecycle, SubtaskRegistry, SubtaskSettled,
-    SubtaskToolDispatcher, DEFAULT_DISPATCH_TIMEOUT_SECS, STEER_LOG_TYPE,
+    SubtaskCompletionSink, SubtaskLifecycle, SubtaskLifecycleEvent, SubtaskLifecycleStatus,
+    SubtaskRegistry, SubtaskSettled, SubtaskToolDispatcher, DEFAULT_DISPATCH_TIMEOUT_SECS,
+    STEER_LOG_TYPE,
 };
 pub use subtask_notify::{
     NoopLifecycleNotifier, NoopRunNotifier, NotifyTarget, NotifyTargetError,

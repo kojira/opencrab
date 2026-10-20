@@ -1,5 +1,6 @@
 //! External gate V3 最小形。
 
+pub mod activity_stream;
 pub mod admin;
 pub mod admin_socket;
 pub mod close;

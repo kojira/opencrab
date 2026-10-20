@@ -284,6 +284,23 @@ impl SystemGatewayActions {
             }
         }
 
+        // D-1087: 進捗を活動の観測者へ流す（旧実装で lifecycle 通知口へ `on_progress` して
+        // いたのと同じ位置・同じ範囲 = 登録簿に載っている run だけ）。デバウンスとは別で、
+        // 報告のたびに 1 件出る。購読が無ければ既定実装が何もしない。
+        if let (Some(entry), Some(sink)) = (&subtask_entry, self.completion_sink.as_deref()) {
+            sink.on_subtask_lifecycle(&opencrab_actions::SubtaskLifecycleEvent {
+                subtask_id: &entry.subtask_id,
+                parent_session_id: &entry.parent_session_id,
+                agent_id: &agent_id,
+                status: opencrab_actions::SubtaskLifecycleStatus::Progress,
+                label: &entry.label,
+                task: "",
+                detail: Some(&message),
+                duration_ms: None,
+                result_text: None,
+            });
+        }
+
         // 完了受け口が未配線の経路（`with_dispatch` していない run）では、デバウンス
         // タスクを**起動しない**。起動しても 3 秒後に通知先が無く黙って消えるだけで、
         // (a) 無駄な tokio タスクと (b) 世代カウンタの残骸を積むだけだからである。

@@ -278,6 +278,7 @@ pub async fn run_agent_response(
             completion_sink: req.completion_sink.clone(),
             reply_target: req.reply_target.clone(),
             tool_allowlist: req.tool_allowlist.clone(),
+            tool_event_sink: req.tool_event_sink.clone(),
         },
         |caller_is_trusted| {
             state.mcp_manager.as_ref().map(|manager| {

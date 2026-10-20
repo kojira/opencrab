@@ -152,11 +152,16 @@ pub async fn spawn_subtask(
     let run_subtask_id = subtask_id.clone();
     let run_registry = registry.clone();
     let run_lifecycle = lifecycle.clone();
+    // D-1087: 終端イベント用の写し（`label` は登録簿、`task` は sub-run がそれぞれ所有する）。
+    let run_label = label.clone();
+    let run_task_text = task.clone();
     let run_sink: Arc<dyn SubtaskCompletionSink> =
         sink.unwrap_or_else(|| Arc::new(opencrab_actions::NoopCompletionSink));
     // sub-run（クロージャ）へ渡す実行 caller。登録簿 insert 用に `parent_caller` は
     // クロージャ外へ残す（同一値のクローン）。
     let run_caller = parent_caller.clone();
+    // D-1087: 開始イベントは走行前に本体スレッドから出す（closure は `run_sink` を所有する）。
+    let start_sink = run_sink.clone();
 
     let join_handle = tokio::spawn(async move {
         // insert 完了を待つ（送信側が drop された場合も先へ進む）。
@@ -185,6 +190,11 @@ pub async fn spawn_subtask(
         // 親と同一の登録簿・完了受け口を渡す。sub-engine の `report_progress` は
         // ここから自分自身のエントリを引き、進捗を親セッションへ再注入する。
         let mut req = req.with_dispatch(Some(run_registry.clone()), run_sink.clone());
+        // D-1087: 副実行のツール実行も同じ活動の観測者に載せる（旧実装で run_notifier を
+        // 子へ引き継いでいたのと同じ範囲）。購読が無ければ `None` で、executor は素通りする。
+        if let Some(sink) = run_sink.tool_event_sink() {
+            req = req.with_tool_event_sink(sink);
+        }
         if let Some(root) = root_gateway {
             req = req.with_gateway_actions(root);
         }
@@ -217,6 +227,21 @@ pub async fn spawn_subtask(
             ),
         };
 
+        // D-1087: 終端（正常 / 異常 / タイムアウト）を活動の観測者へ伝える。表示への写像と
+        // 購読フィルタは実装側の責務。`settle_completed` の前に出すのは、決着の記録と
+        // 通知の順序を旧実装と同じ「終端通知 → DB・sink」に保つため。
+        run_sink.on_subtask_lifecycle(&opencrab_actions::SubtaskLifecycleEvent {
+            subtask_id: &run_subtask_id,
+            parent_session_id: &run_parent_session_id,
+            agent_id: &run_agent_id,
+            status: opencrab_actions::SubtaskLifecycleStatus::from_exit_reason(&exit_reason),
+            label: &run_label,
+            task: &run_task_text,
+            detail: None,
+            duration_ms: Some(started_instant.elapsed().as_millis() as u64),
+            result_text: Some(&result_text),
+        });
+
         // 保留中の progress デバウンスを無効化する。エントリが消えると、まだ sleep 中の
         // デバウンスタスクは「最新ではない」扱いになり発火しない。これが無いと、終了
         // イベントの後に遅延 progress（0〜3秒窓）が届いて完了返信の直後に余計な推論・
@@ -239,6 +264,21 @@ pub async fn spawn_subtask(
             },
             &result_text,
         );
+    });
+
+    // D-1087: 開始を活動の観測者へ伝える。走行を許す前に 1 回だけ発火するので、
+    // この走行の他のイベント（進捗・終端）より必ず先に届く。購読が無いときの
+    // `NoopCompletionSink` は既定実装で何もしない。
+    start_sink.on_subtask_lifecycle(&opencrab_actions::SubtaskLifecycleEvent {
+        subtask_id: &subtask_id,
+        parent_session_id: &parent_session_id,
+        agent_id: &agent_id,
+        status: opencrab_actions::SubtaskLifecycleStatus::Started,
+        label: &label,
+        task: &task,
+        detail: None,
+        duration_ms: None,
+        result_text: None,
     });
 
     let abort_handle = join_handle.abort_handle();

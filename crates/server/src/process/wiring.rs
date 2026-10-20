@@ -63,6 +63,9 @@ pub(crate) struct TurnExecutorWiring {
     pub completion_sink: Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>,
     pub reply_target: Option<String>,
     pub tool_allowlist: Option<Vec<String>>,
+    /// D-1087: observer of this run's tool executions (the extgate turn installs one so a
+    /// connected gateway can follow the run). `None` keeps the executor unobserved.
+    pub tool_event_sink: Option<Arc<dyn opencrab_actions::ToolEventSink>>,
 }
 
 /// Production と外形採取が共有する turn executor の唯一の組立口。
@@ -112,6 +115,10 @@ where
         .with_reply_target(wiring.reply_target)
         .with_tool_allowlist(wiring.tool_allowlist)
         .with_gateway_actions(gateway_actions);
+    let bridged = match wiring.tool_event_sink {
+        Some(sink) => bridged.with_tool_event_sink(sink),
+        None => bridged,
+    };
 
     if wiring.depth == 0 {
         match mcp_provider(caller_is_trusted) {

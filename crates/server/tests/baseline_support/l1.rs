@@ -89,6 +89,7 @@ fn production_executor(
             completion_sink: None,
             reply_target: None,
             tool_allowlist: None,
+            tool_event_sink: None,
         },
         |_| None,
     ))

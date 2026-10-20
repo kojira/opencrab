@@ -134,6 +134,15 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     .start_session_turn_count
                     .fetch_add(1, Ordering::SeqCst);
                 let activity_id = uuid::Uuid::new_v4().to_string();
+                // D-1087: このターンの活動（ツール実行とサブタスクのライフサイクル）を
+                // gateway へ流す stream。activity_id は下の `activity` フレームと同じ値。
+                // 読む者が居なければ書くだけ。
+                let activity_stream = crate::activity_stream::ActivityEmitter::spawn(
+                    Arc::clone(&state),
+                    instance_id.clone(),
+                    binding_id.clone(),
+                    activity_id.clone(),
+                );
                 // #964: started は typing の開始だけを通知する。発端 origin の read（👀）は、
                 // その origin を含む初回 LLM request が完成した後、chat 呼び出し直前に別途 emit する。
                 emit_activity(
@@ -294,6 +303,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 speaker_id: author_id.clone(),
                                 system_context,
                                 model_profile,
+                                activity: Some(Arc::clone(&activity_stream)),
                             });
                         start_session_turn(
                             &runtime,
@@ -406,6 +416,11 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 if let Some(hook) = partial_hook.clone() {
                                     req = req.with_on_partial_text(hook);
                                 }
+                                // D-1087: ツール実行を活動 stream に載せる（開始 → 終端の順）。
+                                req = req.with_tool_event_sink(
+                                    Arc::clone(&activity_stream)
+                                        as Arc<dyn opencrab_actions::ToolEventSink>,
+                                );
                                 // Gateway が与えた opaque な返信先だけを subtask 完了へ持ち回る。
                                 // 内部 origin を外部返信先として推測しない。
                                 if let Some(target) = request_reply_target.clone() {
