@@ -96,5 +96,4 @@ pub enum LiveEvent {
         code: String,
         detail: Option<String>,
     },
-    Disconnected,
 }
