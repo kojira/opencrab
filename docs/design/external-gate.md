@@ -61,6 +61,8 @@ ErrDetail  = string | null
 
 > 注: 先行生成（D-1085 P5）。gateway は確定前の realtime 発話について `provisional` を送れる。core は session lock を取らずに、送信時点の session 高水位までの行と仮の発話行・`agent_prelude` 行のうち、新しい方から 30 番目の speech 行以降のすべての行を履歴として realtime の単発生成を始める。DB には何も書かない。生成の途中経過は `partial` に `provisional_id` を付けて送る。同じ binding・同じ author の新しい `provisional` は古いものを中止する。binding あたり 4 件、10 秒を超えたものは中止する。`said` が同じ `provisional_id` を持ち、`author_id`・`author_label`・`caller`・`system_context`・`agent_prelude`・`text` が完全一致し、profile が realtime で添付が無く、高水位より後に said 自身の行以外が増えていなければ、ターンはその生成結果を使う（`promoted:true`）。それ以外は中止して通常ターンを行う。どちらの場合も core はターンの say より前に `provisional_result` を送る。
 
+> 注: 走行の活動（D-1087）。core は 1 ターンのツール実行と、サブタスク走行のライフサイクルを、id を持たない通知として流す（`partial` / `turn_failed` と同じ扱い。未知 `m` は write 0・keep）。どちらも宛先も整形も持たない。どの binding の活動をどこへ送るかは gateway の設定で決まり、core は宛先を知らない。並びはターン内の発生順で、`activity` の `ended` は活動の書き込みが終わってから送る。購読しない gateway では、core の挙動も記録も変わらない。
+
 ### 3.3 message の完全表
 
 表の field は全て必須である。追加 field は §3.1 の規則で無視する。
@@ -76,6 +78,8 @@ ErrDetail  = string | null
 | gate→core `provisional_cancel` | `id,m,binding_id,provisional_id` | `m="provisional_cancel"` | core→gate `ok`（冪等）。`ok` の後にその生成の `partial` は来ない。 |
 | core→gate `partial` | `m,binding_id,stream_id,text` | 先行生成のものは `provisional_id` を持つ | 応答なし。 |
 | core→gate `provisional_result` | `m,binding_id,provisional_id,promoted` | `promoted` は bool; `provisional_id` 付き said のターンで say より前に 1 回 | 応答なし。 |
+| core→gate `tool_activity` | `m,binding_id,activity_id,call_id,tool,status,depth,started_at,args` | `m="tool_activity"`; `status="started"` は `duration_ms`/`result`/`error` を持たない。終端（`completed`/`failed`/`rejected`）は `duration_ms` と `result`（`rejected`/`failed` は `error`）を持つ。`args`/`result` は core が持つ値そのまま。`activity_id` は同じターンの `activity` と同じ値 | 応答なし（D-1087）。 |
+| core→gate `subtask_lifecycle` | `m,binding_id,run_id,status` | `m="subtask_lifecycle"`; `status="started"\|"progress"\|"completed"\|"failed"\|"timed_out"\|"aborted"`; 任意 `label`,`task`（started のみ）,`detail`（progress）,`duration_ms`/`result_text`（終端） | 応答なし（D-1087）。 |
 | response `ok` | `id,m` または `id,m,seq` | `m="ok"`; hello/bind/say は前者、said は `seq:positive-i64|null` を持つ | pending request 1 件を消費。 |
 | response `err` | `id,m,code,detail` | `m="err"`; `code` は §5.4; `detail` は `ErrDetail` | pending request 1 件を消費。 |
 

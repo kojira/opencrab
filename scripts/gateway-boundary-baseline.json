@@ -520,7 +520,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/server/src/process/wiring.rs",
-      "line": 88,
+      "line": 91,
       "snippet": "| opencrab_actions::CallerIdentity::TrustedUser",
       "classification": "production-violation",
       "violation": "V11",
@@ -890,7 +890,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/turn.rs",
-      "line": 266,
+      "line": 277,
       "snippet": "channel_id: Some(&address),",
       "classification": "production-violation",
       "violation": "V11",
