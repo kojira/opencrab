@@ -184,13 +184,23 @@ pub fn ended_activity_frame(
 
 /// D-1083: cumulative released text of one partial stream. It has no `id`: gateways that do not
 /// know the frame ignore it without a reply and keep the connection.
-pub fn partial_frame(binding_id: &str, stream_id: &str, text: &str) -> Value {
-    json!({
+/// D-1085: a partial of a provisional run also carries its `provisional_id`.
+pub fn partial_frame(
+    binding_id: &str,
+    stream_id: &str,
+    text: &str,
+    provisional_id: Option<&str>,
+) -> Value {
+    let mut frame = json!({
         "m": "partial",
         "binding_id": binding_id,
         "stream_id": stream_id,
         "text": text,
-    })
+    });
+    if let Some(provisional_id) = provisional_id {
+        frame["provisional_id"] = json!(provisional_id);
+    }
+    frame
 }
 
 /// R3(❌): ターン失敗通知フレーム。id を持たない fire-and-forget 通知（activity と同型）。
@@ -203,7 +213,7 @@ pub fn turn_failed_frame(binding_id: &str, origin: &str) -> Value {
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Hello {
     pub id: String,
     pub protocol: u64,
@@ -214,6 +224,9 @@ pub struct Hello {
     pub operation_protocol: u64,
     pub final_delivery: String,
     pub operations: Value,
+    /// D-1091: the environment this gateway declares for its own instance (name → value).
+    /// Absent or empty means "no declaration" and changes nothing. Core never interprets it.
+    pub run_env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +291,12 @@ pub struct Said {
     pub only_speaker: bool,
     /// D-1081: which session model slot a turn started by this said uses (`model_profile`).
     pub model_profile: opencrab_actions::TurnModelProfile,
+    /// D-1085: text the agent already spoke to the user before this reply (at most
+    /// [`MAX_AGENT_PRELUDE_CHARS`] chars). Core records it as the agent's own speech right after
+    /// this said and never delivers it back.
+    pub agent_prelude: Option<String>,
+    /// D-1085: the provisional run this said may promote (see [`Provisional`]).
+    pub provisional_id: Option<String>,
     pub text: String,
     pub attachments: Vec<SaidAttachment>,
 }
@@ -311,6 +330,8 @@ pub enum InboundMsg {
     CreateBinding(CreateBinding),
     Command(Command),
     Said(Said),
+    Provisional(Provisional),
+    ProvisionalCancel(ProvisionalCancel),
     Response(WireResponse),
     Reverse {
         id: Option<String>,
@@ -392,6 +413,22 @@ pub fn parse_inbound(obj: &Value) -> Result<InboundMsg, GateError> {
                 m,
             }),
         },
+        "provisional" => match provisional::parse_provisional(obj) {
+            Ok(p) => Ok(InboundMsg::Provisional(p)),
+            Err(e) => Ok(InboundMsg::Invalid {
+                id: opt_id(obj),
+                code: e.code,
+                m,
+            }),
+        },
+        "provisional_cancel" => match provisional::parse_provisional_cancel(obj) {
+            Ok(c) => Ok(InboundMsg::ProvisionalCancel(c)),
+            Err(e) => Ok(InboundMsg::Invalid {
+                id: opt_id(obj),
+                code: e.code,
+                m,
+            }),
+        },
         "command" => match parse_command(obj) {
             Ok(command) => Ok(InboundMsg::Command(command)),
             Err(e) => Ok(InboundMsg::Invalid {
@@ -437,6 +474,7 @@ fn parse_hello(obj: &Value) -> Result<Hello, GateError> {
         operation_protocol,
         final_delivery,
         operations,
+        run_env: parse_run_env(obj)?,
     })
 }
 
@@ -481,17 +519,7 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
     let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
     let origin = nonempty_str(obj, "origin")?;
     let author_id = nonempty_str(obj, "author_id")?;
-    let author_label = match obj.get("author_label") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(label))
-            if !label.trim().is_empty()
-                && label.chars().count() <= 100
-                && !label.chars().any(char::is_control) =>
-        {
-            Some(label.clone())
-        }
-        _ => return Err(GateError::new(ErrorCode::BadRequest)),
-    };
+    let author_label = parse_author_label(obj.get("author_label"))?;
     let caller = parse_said_caller(obj.get("caller"))?;
     let start_turn = match obj.get("start_turn") {
         None | Some(Value::Null) => true,
@@ -506,14 +534,11 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
         Some(Value::String(scope)) if scope == "speaker" => true,
         _ => return Err(GateError::new(ErrorCode::BadRequest)),
     };
-    let model_profile = match obj.get("model_profile") {
-        None | Some(Value::Null) => opencrab_actions::TurnModelProfile::Default,
-        Some(Value::String(profile)) if profile == "default" => {
-            opencrab_actions::TurnModelProfile::Default
-        }
-        Some(Value::String(profile)) if profile == "realtime" => {
-            opencrab_actions::TurnModelProfile::Realtime
-        }
+    let model_profile = parse_model_profile(obj.get("model_profile"))?;
+    let agent_prelude = parse_agent_prelude(obj.get("agent_prelude"))?;
+    let provisional_id = match obj.get("provisional_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(raw)) => Some(parse_uuid(raw)?),
         _ => return Err(GateError::new(ErrorCode::BadRequest)),
     };
     let text = require_str(obj, "text")?;
@@ -533,9 +558,55 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
         reply_target,
         only_speaker,
         model_profile,
+        agent_prelude,
+        provisional_id,
         text,
         attachments,
     })
+}
+
+fn parse_author_label(value: Option<&Value>) -> Result<Option<String>, GateError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(label))
+            if !label.trim().is_empty()
+                && label.chars().count() <= 100
+                && !label.chars().any(char::is_control) =>
+        {
+            Ok(Some(label.clone()))
+        }
+        _ => Err(GateError::new(ErrorCode::BadRequest)),
+    }
+}
+
+fn parse_model_profile(
+    value: Option<&Value>,
+) -> Result<opencrab_actions::TurnModelProfile, GateError> {
+    match value {
+        None | Some(Value::Null) => Ok(opencrab_actions::TurnModelProfile::Default),
+        Some(Value::String(profile)) if profile == "default" => {
+            Ok(opencrab_actions::TurnModelProfile::Default)
+        }
+        Some(Value::String(profile)) if profile == "realtime" => {
+            Ok(opencrab_actions::TurnModelProfile::Realtime)
+        }
+        _ => Err(GateError::new(ErrorCode::BadRequest)),
+    }
+}
+
+/// Upper bound of `said.agent_prelude`, in chars.
+pub const MAX_AGENT_PRELUDE_CHARS: usize = 64;
+
+fn parse_agent_prelude(value: Option<&Value>) -> Result<Option<String>, GateError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text))
+            if !text.trim().is_empty() && text.chars().count() <= MAX_AGENT_PRELUDE_CHARS =>
+        {
+            Ok(Some(text.clone()))
+        }
+        _ => Err(GateError::new(ErrorCode::BadRequest)),
+    }
 }
 
 fn parse_said_caller(value: Option<&Value>) -> Result<SaidCaller, GateError> {
@@ -692,6 +763,17 @@ fn parse_response(obj: &Value, m: &str) -> Result<WireResponse, GateError> {
         })
     }
 }
+
+mod activity_frames;
+pub use activity_frames::{subtask_lifecycle_frame, tool_activity_frame};
+
+mod run_env;
+pub(crate) use run_env::parse_run_env;
+
+mod hello_debug;
+
+mod provisional;
+pub use provisional::{provisional_result_frame, Provisional, ProvisionalCancel};
 
 #[cfg(test)]
 #[path = "protocol/activity_tests.rs"]

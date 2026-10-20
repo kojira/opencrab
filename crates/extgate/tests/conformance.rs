@@ -1,6 +1,7 @@
 //! V3 §9 conformance。mock gateway が omoikane 役。
 
 include!("conformance/support.rs");
+include!("conformance/support_wait.rs");
 include!("conformance/liveness.rs");
 include!("conformance/wire_protocol.rs");
 include!("conformance/admin_registry.rs");
@@ -16,7 +17,11 @@ include!("conformance/s3_operations.rs");
 include!("conformance/strict_separation_parity.rs");
 include!("conformance/s9_synthetic_gateway.rs");
 include!("conformance/hello_diagnostics.rs");
+include!("conformance/binding_run_env.rs");
 include!("conformance/workspace_files.rs");
 include!("conformance/session_model_commands.rs");
 include!("conformance/turn_model_profile.rs");
 include!("conformance/partial_stream.rs");
+include!("conformance/activity_stream.rs");
+include!("conformance/agent_prelude.rs");
+include!("conformance/provisional.rs");

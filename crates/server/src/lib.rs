@@ -27,7 +27,6 @@ pub mod skill_consolidation;
 pub mod subtask_registries;
 pub mod subtask_spawn;
 pub mod system_actions;
-pub mod webhook_targets;
 
 #[cfg(feature = "baseline-l1")]
 #[doc(hidden)]
@@ -128,33 +127,9 @@ pub struct AppState {
     /// デバウンスが毎回リセットされ全ての進捗報告が発火する。プロセス寿命の共有状態
     /// である `AppState` に置いて、gateway の生成を跨いで間引きが効くようにする。
     pub progress_debounce: Arc<subtask_registries::ProgressDebounce>,
-    /// 走行中サブタスクの lifecycle 通知口（subtask_id → 通知口 / #175 S3・S4）。
-    ///
-    /// `spawn_subtask`（server 側）が insert し、決着・停止で remove する。registry と
-    /// 対で共有し、Discord の `cancel_subtask` もここから引いて中断を通知する。
-    pub subtask_notifiers: opencrab_actions::subtask_notify::SubtaskNotifiers,
-    /// サブタスク lifecycle 通知の実装（未設定なら通知しない / #175 S4）。
-    ///
-    /// Discord webhook 実装は起動時にここへ差し込む。`AppState` は clone されて
-    /// 各所へ配られるため、後から差し替えられるよう内部可変にしている
-    /// （`voice_runtime` と同じ流儀）。
-    pub subtask_lifecycle_notifier: Arc<
-        std::sync::Mutex<
-            Option<Arc<dyn opencrab_actions::subtask_notify::SubtaskLifecycleNotifier>>,
-        >,
-    >,
     /// 非ブロック dispatch の kill switch（`[subtask] auto_dispatch` / 既定 true）。
     /// `false` にすると全ツールが inline 実行に戻る（#152 導入前の挙動）。
     pub subtask_auto_dispatch: bool,
-    /// 設定ファイル由来の**通知先フォールバック**（#157 S5）。
-    ///
-    /// 通知先の解決は「明示指定 → DB の scope 別既定（tool>agent>global）→ ここ」の順で、
-    /// DB 行が皆無のときだけ効く（`WebhookSource::EnvConfig`）。以前この値は Discord
-    /// 起動ブロックのローカル変数にしか無く、gateway 非依存層からは到達できなかった。
-    /// 管理ツール（`get_default_subtask_webhook` 等）を合成層へ移すにあたり、
-    /// **transport の機能フラグに依存しない形**でここへ持ち上げた
-    /// （`config::AppConfig::default_subtask_webhook`）。
-    pub default_subtask_webhook: Option<opencrab_actions::webhook_target::WebhookConfig>,
     /// 外部イベント受信（webhook intake / issue #454）の設定。
     ///
     /// webhook ハンドラ（source→secret の解決 / ルーティング）と、受信箱の消化・catch-up
@@ -189,17 +164,6 @@ impl AppState {
             memory_index_token_cap: self.llm_config.memory_index_token_cap,
             functions_token_cap: self.llm_config.functions_token_cap,
         }
-    }
-
-    /// サブタスク lifecycle 通知の実装を返す（未設定なら何もしない Noop）。
-    pub fn subtask_lifecycle_notifier(
-        &self,
-    ) -> Arc<dyn opencrab_actions::subtask_notify::SubtaskLifecycleNotifier> {
-        self.subtask_lifecycle_notifier
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
-            .unwrap_or_else(|| Arc::new(opencrab_actions::NoopLifecycleNotifier))
     }
 }
 
@@ -240,9 +204,6 @@ pub(crate) fn test_app_state() -> AppState {
         session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
         timed_fire_router: Arc::new(timed_fire_router),
         progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
-        subtask_notifiers: Arc::new(dashmap::DashMap::new()),
-        subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),
-        default_subtask_webhook: None,
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
     }
 }

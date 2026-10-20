@@ -224,37 +224,7 @@ pub fn assemble_from_snapshot(
     let all = crate::conversation::retain_conversation_logs(
         opencrab_db::queries::list_session_logs_by_session(conn, session_id)?,
     );
-    let completed_for_read = completed_tool_call_ids(&all);
-    // §9A: u/e/c 短縮参照は全履歴の初出順で採番し、snapshot 境界を跨いでも安定させる。
-    let refs = build_conversation_refs(conn, &all, agent_id);
-    // 並行バッチの spawn 受理（同一 subtask を call ごとに重複記録）は初出だけ残す（row295 item4）。
-    let mut seen_spawns = std::collections::HashSet::new();
-    let delta = logs
-        .iter()
-        .filter(|l| match crate::conversation::spawn_ack_subtask_id(l) {
-            Some(sid) => seen_spawns.insert(sid),
-            None => true,
-        })
-        .map(|l| {
-            let text = format_single_log_with_echo(l, Some(&completed_for_read), Some(&refs));
-            // row318 検知器: delta 描画に生識別子が残る＝描画器のバグ。fail-loud に WARN（本番では
-            // 短縮形が出ているはずなのでここは鳴らない）。凍結 snapshot blob はこの対象外。
-            // #847/row339: speech 本文（利用者・全話者の自由記述）は**原文のまま**描画するので
-            // 検知対象から外す（構造ヘッダ行は引き続き見る）。full スクラブ基準で本文を見ると利用者が
-            // UUID/npub/64hex 等を書いた瞬間に偽 WARN が出て、本物の描画器バグ WARN をマスクする。
-            if let Some(line) = crate::conversation::leaked_identifier_in_render(l, &text) {
-                tracing::warn!(
-                    session_id,
-                    log_id = l.id.unwrap_or(0),
-                    log_type = %l.log_type,
-                    leaked = %line,
-                    "delta 描画に生識別子が残存（描画器バグ・短縮形が出ていない）"
-                );
-            }
-            text
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let delta = render_conversation_rows(conn, session_id, agent_id, &all, &logs);
     // #826 snapshot は凍結済みテキストの blob で、§9A/refs 描画経路を通らずそのまま連結される。
     // row339: 世代ゲートで復元する。新規凍結（v2 マーカー付き）は生成元が既にクリーン（構造=u/e/c/s・
     // 本文=原文）なのでスクラブせず本文原文のまま復元する（本文の UUID/npub/64hex を再マスクしない＝
@@ -290,6 +260,48 @@ pub fn assemble_from_snapshot(
         items,
         ledger,
     })
+}
+
+/// Renders `rows` the way a turn's conversation shows them: short refs numbered over `all` (the
+/// session's retained rows, so they stay stable across windows), completed tool calls and a
+/// parallel batch's spawn acks once. Shared by the snapshot delta and the D-1085 recent window.
+pub(crate) fn render_conversation_rows(
+    conn: &Connection,
+    session_id: &str,
+    agent_id: &str,
+    all: &[opencrab_db::queries::SessionLogRow],
+    rows: &[opencrab_db::queries::SessionLogRow],
+) -> String {
+    let completed_for_read = completed_tool_call_ids(all);
+    // §9A: u/e/c 短縮参照は全履歴の初出順で採番し、snapshot 境界を跨いでも安定させる。
+    let refs = build_conversation_refs(conn, all, agent_id);
+    // 並行バッチの spawn 受理（同一 subtask を call ごとに重複記録）は初出だけ残す（row295 item4）。
+    let mut seen_spawns = std::collections::HashSet::new();
+    rows.iter()
+        .filter(|l| match crate::conversation::spawn_ack_subtask_id(l) {
+            Some(sid) => seen_spawns.insert(sid),
+            None => true,
+        })
+        .map(|l| {
+            let text = format_single_log_with_echo(l, Some(&completed_for_read), Some(&refs));
+            // row318 検知器: delta 描画に生識別子が残る＝描画器のバグ。fail-loud に WARN（本番では
+            // 短縮形が出ているはずなのでここは鳴らない）。凍結 snapshot blob はこの対象外。
+            // #847/row339: speech 本文（利用者・全話者の自由記述）は**原文のまま**描画するので
+            // 検知対象から外す（構造ヘッダ行は引き続き見る）。full スクラブ基準で本文を見ると利用者が
+            // UUID/npub/64hex 等を書いた瞬間に偽 WARN が出て、本物の描画器バグ WARN をマスクする。
+            if let Some(line) = crate::conversation::leaked_identifier_in_render(l, &text) {
+                tracing::warn!(
+                    session_id,
+                    log_id = l.id.unwrap_or(0),
+                    log_type = %l.log_type,
+                    leaked = %line,
+                    "delta 描画に生識別子が残存（描画器バグ・短縮形が出ていない）"
+                );
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 組立結果。

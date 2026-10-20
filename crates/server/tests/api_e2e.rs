@@ -27,5 +27,6 @@ include!("api_e2e/dialogue_evaluator.rs");
 include!("api_e2e/model_pricing.rs");
 include!("api_e2e/tool_logs.rs");
 include!("api_e2e/turn_continuation.rs");
+include!("api_e2e/activity_stream.rs");
 include!("api_e2e/no_reply_persistence.rs");
 include!("api_e2e/system_prompt_tool_index.rs");

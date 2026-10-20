@@ -70,9 +70,8 @@ async fn spawn_subtask_runs_and_settles_without_discord() {
         Some("sub-engine done"),
         "完了本文が親セッションログへ着地する"
     );
-    // 決着後は登録簿からも随伴マップからも消える。
+    // 決着後は登録簿から消える。
     assert!(!reg.contains_key(&subtask_id));
-    assert!(!state.subtask_notifiers.contains_key(&subtask_id));
 }
 
 /// **停止の到達性**: spawn した subtask は、同じ `SystemGatewayActions` の
@@ -129,77 +128,6 @@ async fn spawned_subtask_is_cancellable_through_the_shared_registry() {
     assert!(
         !has_log_of_type(&state.db, "web-parent-1", "subtask_completed"),
         "停止した subtask の完了ログが着地してはならない"
-    );
-}
-
-/// **開始ゲート**: 走行が終わる時点では必ず登録簿へ登録済み。登録より先に決着すると
-/// 「running のまま」のエントリがリークする。
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn subtask_is_registered_before_the_run_can_finish() {
-    /// 終了時点の登録簿の状態を記録する通知口。
-    struct RegistryWatcher {
-        registry: SubtaskRegistry,
-        registered_at_finish: Mutex<Option<bool>>,
-    }
-    impl opencrab_actions::subtask_notify::SubtaskRunNotifier for RegistryWatcher {
-        fn on_finished(&self, _exit: &str, _ms: u64, _text: &str) {
-            *self.registered_at_finish.lock().unwrap() = Some(!self.registry.is_empty());
-        }
-    }
-    struct WatcherFactory(Arc<RegistryWatcher>);
-    impl opencrab_actions::subtask_notify::SubtaskLifecycleNotifier for WatcherFactory {
-        fn begin_run(
-            &self,
-            _run: &SubtaskRunInfo<'_>,
-        ) -> Result<
-            opencrab_actions::subtask_notify::SubtaskNotifySession,
-            opencrab_actions::subtask_notify::NotifyTargetError,
-        > {
-            Ok(opencrab_actions::subtask_notify::SubtaskNotifySession {
-                notifier: self.0.clone(),
-                target: opencrab_actions::subtask_notify::NotifyTarget::none(),
-            })
-        }
-    }
-
-    let state = state_with_stub_llm("fast", false);
-    let reg = registry();
-    let watcher = Arc::new(RegistryWatcher {
-        registry: reg.clone(),
-        registered_at_finish: Mutex::new(None),
-    });
-    *state.subtask_lifecycle_notifier.lock().unwrap() =
-        Some(Arc::new(WatcherFactory(watcher.clone())));
-
-    let sink = Arc::new(OrderCheckingSink::new(state.db.clone()));
-    let actions = SystemGatewayActions::new(
-        state.clone(),
-        None,
-        Some(reg.clone()),
-        Some(sink.clone() as Arc<dyn SubtaskCompletionSink>),
-    );
-    let res = actions
-        .execute(
-            "spawn_subtask",
-            &json!({ "task": "すぐ終わる" }),
-            &parent_ctx("web-parent-1"),
-        )
-        .await;
-    assert!(res.success, "{:?}", res.error);
-
-    assert!(
-        wait_until(|| watcher.registered_at_finish.lock().unwrap().is_some()).await,
-        "終了通知が届かない"
-    );
-    assert_eq!(
-        *watcher.registered_at_finish.lock().unwrap(),
-        Some(true),
-        "開始ゲートが無いと、登録より先に決着してエントリがリークする"
-    );
-    // 決着後は空（リークしていない）。
-    assert!(
-        wait_until(|| reg.is_empty()).await,
-        "登録簿にエントリが残った"
     );
 }
 
@@ -357,48 +285,6 @@ async fn spawn_subtask_refuses_without_a_registry() {
         .await;
     assert!(!res.success, "登録簿が無ければ起動してはならない");
     assert!(res.error.unwrap().contains("登録簿"));
-    assert!(!has_log_of_type(
-        &state.db,
-        "web-parent-1",
-        "subtask_spawned"
-    ));
-}
-
-/// 通知先の解決に失敗したら spawn しない（fail-closed）。親ログも汚さない。
-#[tokio::test]
-async fn spawn_subtask_is_not_started_when_notify_target_fails() {
-    struct FailingFactory;
-    impl opencrab_actions::subtask_notify::SubtaskLifecycleNotifier for FailingFactory {
-        fn begin_run(
-            &self,
-            _run: &SubtaskRunInfo<'_>,
-        ) -> Result<
-            opencrab_actions::subtask_notify::SubtaskNotifySession,
-            opencrab_actions::subtask_notify::NotifyTargetError,
-        > {
-            Err(opencrab_actions::subtask_notify::NotifyTargetError {
-                code: "invalid_webhook_url".to_string(),
-                message: "url must start with https://".to_string(),
-                source: "explicit",
-            })
-        }
-    }
-
-    let state = state_with_stub_llm("x", false);
-    *state.subtask_lifecycle_notifier.lock().unwrap() = Some(Arc::new(FailingFactory));
-    let reg = registry();
-    let actions = SystemGatewayActions::new(state.clone(), None, Some(reg.clone()), None);
-
-    let res = actions
-        .execute(
-            "spawn_subtask",
-            &json!({ "task": "t" }),
-            &parent_ctx("web-parent-1"),
-        )
-        .await;
-    assert!(!res.success);
-    assert!(res.error.unwrap().contains("invalid_webhook_url"));
-    assert!(reg.is_empty(), "起動していないので登録簿は空");
     assert!(!has_log_of_type(
         &state.db,
         "web-parent-1",

@@ -1,37 +1,5 @@
 use super::*;
 
-/// sub-engine のツール呼び出しを進捗テキストへ要約する（#175 S4）。
-///
-/// 旧 Discord 実装（`execute_spawn_subtask`）から移設。`{function:{name}}`（正準）と
-/// `{name}`（旧形状）の両方に対応し、assistant 本文は先頭 500 文字だけ添える。
-fn summarize_tool_calls(assistant_content: &str, tool_calls_json: &str) -> String {
-    let mut names = Vec::new();
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(tool_calls_json) {
-        if let Some(calls) = value.as_array() {
-            for call in calls {
-                let name = call
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|v| v.as_str())
-                    .or_else(|| call.get("name").and_then(|v| v.as_str()));
-                if let Some(name) = name {
-                    names.push(format!("`{name}`"));
-                }
-            }
-        }
-    }
-    let tools = if names.is_empty() {
-        "tool call".to_string()
-    } else {
-        names.join(", ")
-    };
-    let preview: String = assistant_content.trim().chars().take(500).collect();
-    if preview.is_empty() {
-        format!("calling {tools}")
-    } else {
-        format!("calling {tools}\n{preview}")
-    }
-}
 /// 失敗行の `error_body` に、`llm_logs.prompt` 列と**同じ全体シリアライズ**のサイズ
 /// （文字数）を一様に付ける（#706）。空応答など「なぜ答えられなかったか」の行を見た人が、
 /// 別列 `prompt` を辿らずに **1 クエリで「長さが原因か」の当たり**を付けられるようにする。
@@ -161,73 +129,55 @@ pub(super) fn set_llm_log_callback(
     });
 }
 
-/// サブタスク走行の実況（#175 S4）の配線。ツール呼び出しと結果を進捗として通知口へ流す。
+/// Where the turn-log callbacks write their rows.
 ///
-/// 購読していない（`wants_progress()` が false）ならフック自体を挿さず、要約の計算も
-/// 省く（旧 `execute_spawn_subtask` と同じ判定）。
-///
-/// #397: ここと [`set_turn_log_callbacks`] は**同じ engine の同じフック**に載る。engine
-/// 側が代入だった頃は、後から呼ばれる `set_turn_log_callbacks`（`persist_turn_logs` が
-/// true のとき）がこの実況を丸ごと上書きして消していた。今は `add_on_tool_*` で足すので
-/// 両方生き、配線の順序にも依存しない。
-pub(super) fn set_run_notifier_callbacks(
-    engine: &mut opencrab_core::SkillEngine,
-    notifier: &std::sync::Arc<dyn opencrab_actions::SubtaskRunNotifier>,
-    session_id: String,
-) {
-    if !notifier.wants_progress() {
-        return;
-    }
-    let on_call = notifier.clone();
-    engine.add_on_tool_call(move |assistant_content, tool_calls_json| {
-        on_call.on_progress(&summarize_tool_calls(&assistant_content, &tool_calls_json));
-    });
-    let on_result = notifier.clone();
-    engine.add_on_tool_result(move |tool_call_id, tool_name, result_json, is_error| {
-        on_result.on_progress(&tool_result_progress_line(
-            &tool_name,
-            &result_json,
-            is_error,
-            &session_id,
-            &tool_call_id,
-        ));
-    });
+/// D-1085 §12: a provisional run holds its rows until its promotion gate opens. Each row waits
+/// as a hook of the gate, so the promotion writes them (after the said's own rows) in the order
+/// they were made, interleaved with the other hooks of the run (§13.2: its continuation speech);
+/// once promoted, rows go straight to the DB. An aborted gate drops them.
+#[derive(Clone)]
+pub(super) struct TurnLogWriter {
+    db: opencrab_db::Db,
+    gate: Option<opencrab_core::PromotionGate>,
 }
 
-/// 実況として通知口へ流す 1 行を組む（ツール名・成否・結果のプレビュー）。
-///
-/// **無害化してからプレビューを切る**。実況は webhook で系の外へ出る経路なので、
-/// 永続化側（[`set_turn_log_callbacks`]）と同じ `sanitize_tool_result_for_log` を通し、
-/// nsec が生のまま 500 文字に混ざらないようにする。秘密が結果のどこに現れるかは
-/// ツール次第で、先頭 500 文字を見て安全と判断はできないため、**切る前に**通す。
-///
-/// `workspace_root` は `None` を渡す。engine は callback より手前で `cap_tool_result` を
-/// かけており、ここへ来る本文は上限内なので退避は起きない。仮に起きても実況が
-/// ワークスペースへ書く必要はない（永続化側と二重に書くことになる）。
-pub(super) fn tool_result_progress_line(
-    tool_name: &str,
-    result_json: &str,
-    is_error: bool,
-    session_id: &str,
-    tool_call_id: &str,
-) -> String {
-    let status = if is_error { "failed" } else { "completed" };
-    let safe = opencrab_actions::sanitize_tool_result_for_log(
-        tool_name,
-        result_json,
-        session_id,
-        tool_call_id,
-        None,
-    );
-    let preview: String = safe.chars().take(500).collect();
-    format!("tool `{tool_name}` {status}\n{preview}")
+impl TurnLogWriter {
+    pub(super) fn direct(db: opencrab_db::Db) -> Self {
+        Self { db, gate: None }
+    }
+
+    pub(super) fn until_promoted(db: opencrab_db::Db, gate: &opencrab_core::PromotionGate) -> Self {
+        Self {
+            db,
+            gate: Some(gate.clone()),
+        }
+    }
+
+    pub(super) fn write(&self, row: opencrab_db::queries::SessionLogRow, what: &str) {
+        match &self.gate {
+            Some(gate) => {
+                let writer = self.clone();
+                let what = what.to_string();
+                gate.on_promoted(move || writer.insert(&row, &what));
+            }
+            None => self.insert(&row, what),
+        }
+    }
+
+    fn insert(&self, row: &opencrab_db::queries::SessionLogRow, what: &str) {
+        if let Ok(conn) = self.db.lock() {
+            if let Err(e) = opencrab_db::queries::insert_session_log(&conn, row) {
+                tracing::error!(agent_id = %row.agent_id, session_id = %row.session_id, "Failed to insert {what}: {e}");
+            }
+        }
+    }
 }
 
 /// ターンの tool_call / tool_result を session_logs に記録するコールバックの配線
 /// （#33: 段の分解。tool_result はサイズ上限超過時にワークスペースへ退避）。
 pub(super) fn set_turn_log_callbacks(
     engine: &mut opencrab_core::SkillEngine,
-    db: opencrab_db::Db,
+    writer: TurnLogWriter,
     agent_id: String,
     session_id: String,
     tool_result_workspace: std::path::PathBuf,
@@ -237,11 +187,11 @@ pub(super) fn set_turn_log_callbacks(
     di_op_names: std::collections::HashSet<String>,
 ) {
     {
-        let tc_db = db.clone();
+        let tc_writer = writer.clone();
         let tc_agent = agent_id.clone();
         let tc_session = session_id.clone();
         engine.add_on_tool_call(move |content: String, tool_calls_json: String| {
-            if let Ok(conn) = tc_db.lock() {
+            {
                 // LLMがtext+tool_callsを同時に返した場合、textをspeechとして記録する。
                 // #899 §12.6: 保存前に NO_REPLY 終端解釈（単一実装 visible_speech_after_markers）を
                 // typed 履歴へ assistant 'NO_REPLY' として再注入する）。
@@ -268,19 +218,16 @@ pub(super) fn set_turn_log_callbacks(
                         metadata_json: None,
                         created_at: None,
                     };
-                    if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &speech_log) {
-                        tracing::error!(agent_id = %tc_agent, session_id = %tc_session, "Failed to insert speech log (with tool_call): {e}");
-                    }
+                    tc_writer.write(speech_log, "speech log (with tool_call)");
                 }
                 // 発話クラス（reply/reaction/repost・§3.3.1 C6）は engine が tool_calls_json から
                 // 除外して渡す。除外の結果ツールが 1 つも残らない（空配列）ターンは、機械行
                 // （空の tool_call ログ）を残さない。発話本文は配送経路が speech として永続する。
-                let has_persistable_calls = serde_json::from_str::<serde_json::Value>(
-                    &tool_calls_json,
-                )
-                .ok()
-                .and_then(|v| v.as_array().map(|a| !a.is_empty()))
-                .unwrap_or(!tool_calls_json.trim().is_empty());
+                let has_persistable_calls =
+                    serde_json::from_str::<serde_json::Value>(&tool_calls_json)
+                        .ok()
+                        .and_then(|v| v.as_array().map(|a| !a.is_empty()))
+                        .unwrap_or(!tool_calls_json.trim().is_empty());
                 if !has_persistable_calls {
                     return;
                 }
@@ -299,9 +246,7 @@ pub(super) fn set_turn_log_callbacks(
                                             .and_then(|f| f.get("name"))
                                             .or_else(|| it.get("name"))
                                             .and_then(|n| n.as_str())?;
-                                        di_op_names
-                                            .contains(name)
-                                            .then(|| id.to_string())
+                                        di_op_names.contains(name).then(|| id.to_string())
                                     })
                                     .collect()
                             })
@@ -326,16 +271,14 @@ pub(super) fn set_turn_log_callbacks(
                     metadata_json: Some(metadata.to_string()),
                     created_at: None,
                 };
-                if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-                    tracing::error!(agent_id = %tc_agent, session_id = %tc_session, "Failed to insert tool_call log: {e}");
-                }
+                tc_writer.write(log, "tool_call log");
             }
         });
     }
 
     // on_tool_result callback: save tool_result to DB.
     {
-        let tr_db = db;
+        let tr_writer = writer;
         let tr_agent = agent_id;
         let tr_session = session_id;
         let tr_workspace = tool_result_workspace;
@@ -354,7 +297,7 @@ pub(super) fn set_turn_log_callbacks(
                     Some(tr_workspace.as_path()),
                 );
 
-                if let Ok(conn) = tr_db.lock() {
+                {
                     let log = opencrab_db::queries::SessionLogRow {
                         id: None,
                         agent_id: tr_agent.clone(),
@@ -373,9 +316,7 @@ pub(super) fn set_turn_log_callbacks(
                         ),
                         created_at: None,
                     };
-                    if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-                        tracing::error!(agent_id = %tr_agent, session_id = %tr_session, "Failed to insert tool_result log: {e}");
-                    }
+                    tr_writer.write(log, "tool_result log");
                 }
             },
         );

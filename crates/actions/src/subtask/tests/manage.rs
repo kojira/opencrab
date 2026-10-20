@@ -234,7 +234,6 @@
             &registry,
             &db,
             None,
-            None,
             "st-1",
             CallerIdentity::Agent,
             Some(parent),
@@ -272,7 +271,6 @@
             &registry,
             &db,
             Some(&sink),
-            None,
             "st-1",
             CallerIdentity::Owner,
             Some(parent),
@@ -288,6 +286,40 @@
         );
     }
 
+    /// D-1087: 停止は活動の観測者へも 1 件届く（abort で終端通知は来ないので、ここが唯一）。
+    #[tokio::test]
+    async fn cancel_subtask_reports_aborted_to_the_lifecycle_observer() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let parent = "web-agent-a-conv1";
+        let _handle = insert_fake_subtask(&registry, "st-abort", parent);
+
+        let sink = RecordingSink::default();
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            Some(&sink),
+            "st-abort",
+            CallerIdentity::Agent,
+            Some(parent),
+        );
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+
+        let lifecycle = sink.lifecycle.lock().unwrap();
+        assert_eq!(lifecycle.len(), 1, "{lifecycle:?}");
+        assert_eq!(lifecycle[0].0, SubtaskLifecycleStatus::Aborted);
+        assert_eq!(lifecycle[0].1, "st-abort");
+        assert!(lifecycle[0].2.is_some(), "aborted carries the elapsed time");
+
+        // 走行の相関キー（subtask 自身のセッション）と、中断の理由が載る。
+        // 理由が空だと観測側では「理由不明の失敗」と読めてしまう。
+        let session = sink.lifecycle_session.lock().unwrap();
+        assert_eq!(session.len(), 1, "{session:?}");
+        assert_eq!(session[0].0, "subtask-st-abort");
+        assert_eq!(session[0].1.as_deref(), Some(CANCELLED_BY_REQUEST));
+    }
+
     /// #161: 存在しない subtask_id は NotFound（権限拒否ではない）。
     #[tokio::test]
     async fn cancel_subtask_missing_is_not_found() {
@@ -297,7 +329,6 @@
         let outcome = cancel_subtask(
             &registry,
             &db,
-            None,
             None,
             "nope",
             CallerIdentity::Agent,
@@ -317,7 +348,6 @@
         let outcome = cancel_subtask(
             &registry,
             &db,
-            None,
             None,
             "st-x",
             CallerIdentity::Agent,
@@ -341,7 +371,6 @@
             &registry,
             &db,
             None,
-            None,
             "st-ns",
             CallerIdentity::Agent,
             None,
@@ -362,7 +391,6 @@
         let outcome = cancel_subtask(
             &registry,
             &db,
-            None,
             None,
             "st-any",
             CallerIdentity::Owner,
@@ -391,7 +419,6 @@
             &registry,
             &db,
             None,
-            None,
             "st-owner",
             CallerIdentity::Agent,
             Some(parent),
@@ -419,7 +446,6 @@
             &registry,
             &db,
             None,
-            None,
             "st-owner",
             CallerIdentity::Owner,
             Some(parent),
@@ -441,7 +467,6 @@
         let outcome = cancel_subtask(
             &registry,
             &db,
-            None,
             None,
             "st-agent",
             CallerIdentity::Agent,

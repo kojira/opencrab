@@ -11,9 +11,10 @@ use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use opencrab_actions::subtask::{settle_completed, SettleContext};
 use opencrab_actions::{
-    AgentRuntime, CallerIdentity, InboundMessageRecord, InteractionRecord, ModelAdminError,
-    ModelAdministration, ModelSnapshot, OutboundReplyRecord, RunRequest, SessionLocks,
-    SessionModelList, SubtaskLifecycle, SubtaskRegistries, TranscriptSource, TurnModelProfile,
+    AgentRuntime, CallerIdentity, EffortSnapshot, InboundMessageRecord, InteractionRecord,
+    ModelAdminError, ModelAdministration, ModelSnapshot, OutboundReplyRecord, RunRequest,
+    SessionEffortList, SessionLocks, SessionModelList, SubtaskLifecycle, SubtaskRegistries,
+    TranscriptSource, TurnModelProfile, REASONING_EFFORTS,
 };
 use opencrab_core::EngineResult;
 use opencrab_db::queries::{AgentRow, SessionRow};
@@ -58,8 +59,17 @@ struct TestRuntime {
     turn_entered: Arc<Notify>,
     /// D-1081: every `session_turn_model` profile, in turn-start order.
     turn_profiles: Arc<Mutex<Vec<TurnModelProfile>>>,
+    /// D-1085: `RunRequest::lightweight` of every run, in run order.
+    lightweight_runs: Arc<Mutex<Vec<bool>>>,
+    /// D-1085: `(RunRequest::provisional, promotion_gate.is_some())` of every run, in run order.
+    provisional_runs: Arc<Mutex<Vec<(bool, bool)>>>,
+    /// D-1085 §12: [`ToolSources`] of every run, in run order.
+    tool_sources: Arc<Mutex<Vec<ToolSources>>>,
     last_sink: Arc<Mutex<Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>>>,
     partial_script: PartialScript,
+    /// D-1087: the faked engine's tool/lifecycle steps for the turn.
+    activity_script: ActivityScript,
+    gated_tool: GatedToolScript,
 }
 
 impl TestRuntime {
@@ -81,92 +91,14 @@ impl TestRuntime {
             images: Arc::new(Mutex::new(Vec::new())),
             turn_entered: Arc::new(Notify::new()),
             turn_profiles: Arc::new(Mutex::new(Vec::new())),
+            lightweight_runs: Arc::new(Mutex::new(Vec::new())),
+            provisional_runs: Arc::new(Mutex::new(Vec::new())),
+            tool_sources: Arc::new(Mutex::new(Vec::new())),
             last_sink: Arc::new(Mutex::new(None)),
             partial_script: PartialScript::default(),
+            activity_script: ActivityScript::default(),
+            gated_tool: GatedToolScript::default(),
         }
-    }
-}
-
-#[async_trait]
-impl ModelAdministration for TestRuntime {
-    async fn list_models(&self, agent_id: &str) -> Result<ModelSnapshot, ModelAdminError> {
-        let configured_model = self
-            .db
-            .lock()
-            .map_err(|_| ModelAdminError::Internal)?
-            .query_row(
-                "SELECT model FROM agents WHERE agent_id = ?1",
-                [agent_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .map_err(|_| ModelAdminError::Internal)?;
-        Ok(ModelSnapshot {
-            models: vec!["openai:gpt-5".to_string()],
-            current_model: configured_model
-                .clone()
-                .unwrap_or_else(|| "mock:test".to_string()),
-            configured_model,
-            default_model: "mock:test".to_string(),
-        })
-    }
-
-    async fn set_model(
-        &self,
-        agent_id: &str,
-        model: &str,
-    ) -> Result<ModelSnapshot, ModelAdminError> {
-        if model != "openai:gpt-5" && model != "gpt-5" {
-            return Err(ModelAdminError::NotFound);
-        }
-        self.db
-            .lock()
-            .map_err(|_| ModelAdminError::Internal)?
-            .execute(
-                "UPDATE agents SET model = 'openai:gpt-5' WHERE agent_id = ?1",
-                [agent_id],
-            )
-            .map_err(|_| ModelAdminError::Internal)?;
-        self.list_models(agent_id).await
-    }
-
-    async fn reset_model(&self, agent_id: &str) -> Result<ModelSnapshot, ModelAdminError> {
-        self.db
-            .lock()
-            .map_err(|_| ModelAdminError::Internal)?
-            .execute("UPDATE agents SET model = NULL WHERE agent_id = ?1", [agent_id])
-            .map_err(|_| ModelAdminError::Internal)?;
-        self.list_models(agent_id).await
-    }
-    async fn list_session_models(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-    ) -> Result<SessionModelList, ModelAdminError> {
-        self.session_model_list(agent_id, session_id).await
-    }
-
-    async fn set_session_model(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-        profile: TurnModelProfile,
-        model: &str,
-    ) -> Result<ModelSnapshot, ModelAdminError> {
-        if model != "openai:gpt-5" && model != "gpt-5" {
-            return Err(ModelAdminError::NotFound);
-        }
-        self.write_session_model(session_id, profile, Some("openai:gpt-5"))?;
-        self.session_model_snapshot(agent_id, session_id, profile).await
-    }
-
-    async fn reset_session_model(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-        profile: TurnModelProfile,
-    ) -> Result<ModelSnapshot, ModelAdminError> {
-        self.write_session_model(session_id, profile, None)?;
-        self.session_model_snapshot(agent_id, session_id, profile).await
     }
 }
 
@@ -183,6 +115,12 @@ impl AgentRuntime for TestRuntime {
             .lock()
             .unwrap()
             .push(req.system_prompt.clone());
+        self.lightweight_runs.lock().unwrap().push(req.lightweight);
+        self.provisional_runs
+            .lock()
+            .unwrap()
+            .push((req.provisional, req.promotion_gate.is_some()));
+        self.tool_sources.lock().unwrap().push(tool_sources(&req));
         self.reply_targets
             .lock()
             .unwrap()
@@ -195,6 +133,8 @@ impl AgentRuntime for TestRuntime {
             cb(origin).await;
         }
         self.partial_script.play(&req.on_partial_text, &req.on_continuation_speech).await;
+        self.activity_script
+            .play(&req.tool_event_sink, &req.completion_sink);
         self.turn_entered.notify_waiters();
         // 旧 V3（sink 無し）はツールを同期実行する。sink があれば detach 済みなので待たない。
         if req.completion_sink.is_none() {
@@ -207,6 +147,7 @@ impl AgentRuntime for TestRuntime {
         if let Some(rx) = hold {
             let _ = rx.await;
         }
+        if let Some(stopped) = self.gated_tool.run(req.promotion_gate.as_ref(), &self.turns) { return stopped; }
         self.turns.fetch_add(1, Ordering::SeqCst);
         let reply = self.reply.lock().unwrap().clone();
         // R3(❌): "__FAIL__" 応答でエンジン失敗を模擬する（DeliveryEffect::Failed 経路）。
@@ -264,9 +205,19 @@ impl AgentRuntime for TestRuntime {
         _budget: usize,
         _system_prompt: &str,
         _runtime_context_text: &str,
+        window: Option<opencrab_core::conversation::ConversationWindow<'_>>,
     ) -> anyhow::Result<String> {
         let conn = self.db.lock().unwrap();
         let rows = opencrab_db::queries::list_session_logs_by_session(&conn, session_id)?;
+        let rows = match window.map(|window| window.rows) {
+            Some(opencrab_core::conversation::RecentWindow::Snapshot { high_water, pending }) => {
+                rows.into_iter()
+                    .filter(|r| r.id.is_some_and(|id| id <= high_water))
+                    .chain(pending.iter().cloned())
+                    .collect()
+            }
+            _ => rows,
+        };
         Ok(rows
             .into_iter()
             .map(|r| format!("{}:{}", r.log_type, r.content))
@@ -754,45 +705,3 @@ fn err_code(body: &[u8]) -> String {
     let v: Value = serde_json::from_slice(body).unwrap();
     v["error"]["code"].as_str().unwrap().to_string()
 }
-
-fn insert_named_session(h: &Harness, id: &str) {
-    let conn = h.state.db.lock().unwrap();
-    opencrab_db::queries::insert_session(
-        &conn,
-        &SessionRow {
-            id: id.into(),
-            mode: "solo".into(),
-            theme: id.into(),
-            phase: "convergent".into(),
-            turn_number: 0,
-            status: "active".into(),
-            participant_ids_json: r#"["agent-1"]"#.into(),
-            facilitator_id: None,
-            done_count: 0,
-            max_turns: None,
-            metadata_json: None,
-        },
-    )
-    .unwrap();
-}
-
-async fn wait_client_bound(client: &InstanceClient, address: &str, binding_id: &str) {
-    for _ in 0..80 {
-        if client.binding_for_address(address).await.as_deref() == Some(binding_id) {
-            return;
-        }
-        tokio::time::advance(Duration::from_millis(5)).await;
-    }
-    panic!("bind ack");
-}
-/// live entry が消える（切断が反映される）まで待つ。
-async fn wait_not_live(h: &Harness, instance_id: &str) {
-    for _ in 0..200 {
-        if h.state.lock_registry().unwrap().get(instance_id).is_none() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("live entry が消えない: {instance_id}");
-}
-

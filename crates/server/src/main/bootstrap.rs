@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use opencrab_server::{config, config::AppConfig, AppState};
 use tracing_subscriber::EnvFilter;
@@ -221,12 +221,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         // gateway受信ループが同じ実体を共有し、同一セッションのターンを直列化する。
         session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
         progress_debounce: Arc::new(opencrab_server::subtask_registries::ProgressDebounce::new()),
-        subtask_notifiers: Arc::new(dashmap::DashMap::new()),
-        subtask_lifecycle_notifier: Arc::new(Mutex::new(None)),
-        // 設定ファイル由来の通知先フォールバック（#157 S5）。**Discord 機能フラグの
-        // 外**で 1 度だけ解決し、以降の利用者（gateway 非依存の管理ツール / lifecycle
-        // 通知 / Discord gateway_actions）は全てこの 1 つの値を参照する。
-        default_subtask_webhook: cfg.default_subtask_webhook(),
         // 中央スケジューラの起床通知（#437 / #439）。発火ターン完了と schedule CRUD
         // から鳴らして即時反映させる。
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),

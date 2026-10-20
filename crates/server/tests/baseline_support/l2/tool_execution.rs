@@ -73,19 +73,6 @@ async fn observe_tool_postcondition(
                 }
             }))
         }
-        (None, None, None, Some(query)) if query == "webhook_configs" => {
-            let connection = state
-                .db
-                .lock()
-                .map_err(|error| format!("{name} DB observer lock: {error}"))?;
-            let rows =
-                opencrab_db::queries::list_agent_webhook_config(&connection, Some(AGENT_ID), true)
-                    .map_err(|error| format!("{name} DB observer: {error}"))?;
-            let mut value = serde_json::to_value(rows)
-                .map_err(|error| format!("{name} DB observer serialize: {error}"))?;
-            normalize(&mut value);
-            Ok(json!({"db_query":query,"value":value}))
-        }
         (None, None, None, Some(query)) if query == "inner_voice_logs" => {
             let connection = state
                 .db

@@ -5,12 +5,13 @@
 //! 検出できない）。必須項目をコンストラクタ、省略可能項目を builder で受ける
 //! 構造体に置き換える。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use opencrab_gateway::GatewayActions;
 
+use crate::bridge::ToolEventSink;
 use crate::subtask::{SubtaskCompletionSink, SubtaskRegistry};
-use crate::subtask_notify::SubtaskRunNotifier;
 use crate::traits::CallerIdentity;
 
 /// #898: 継続分岐の途中発話を配送・保存する非同期フック（core の同名型と一致させる）。
@@ -104,12 +105,6 @@ pub struct RunRequest {
     /// settle 時に `SubtaskSettled.reply_target` として sink へ届く。session_id から
     /// 返信先を復元できない gateway（Nostr など）用。None なら指定なし。
     pub reply_target: Option<String>,
-    /// サブタスク走行の通知口（#175 S4）。`depth >= 1` の再入実行（sub-engine）で
-    /// 使い、走行中のツール呼び出し/結果を進捗として実況し、ツールイベント sink を
-    /// executor へ挿す。`None`（既定）なら通知しない。
-    ///
-    /// depth0 の通常ターンでは使わない（サブタスクの lifecycle 通知は spawn 側が持つ）。
-    pub run_notifier: Option<Arc<dyn SubtaskRunNotifier>>,
     /// 走行中注入（#289）の対象範囲（#323 / B2）。既定は [`LiveInboundScope::AllOthers`]
     /// （Discord / heartbeat / REST の従来挙動）。Nostr だけが相手を絞る。
     pub live_inbound_scope: LiveInboundScope,
@@ -141,7 +136,54 @@ pub struct RunRequest {
     /// D-1080: the model this whole turn uses (envelopes, output cap, engine). `None` = resolve
     /// once at process entry with session > agent > server default.
     pub pinned_model: Option<String>,
+    /// D-1085: a lightweight turn. No per-agent reasoning effort (the provider default
+    /// applies). §13.1: its tools are
+    /// limited by [`RunRequest::as_lightweight`]; web search follows the agent setting.
+    pub lightweight: bool,
+    /// D-1085: a provisional (speculative) run. It is not a turn yet: nothing is persisted, and
+    /// the depth-0 post-run block (snapshot, memory index build, skill usage) does not run.
+    /// LLM metrics carry purpose `provisional`. Set with [`RunRequest::as_provisional`].
+    pub provisional: bool,
+    /// D-1085 §12: the promotion gate of a provisional run. At a tool outside
+    /// [`PROVISIONAL_READ_ONLY_TOOLS`] the run stops without running it and aborts the gate.
+    /// From the promotion on, the run's turn logs are recorded: the ones buffered before it first. Set with [`RunRequest::as_provisional`].
+    pub promotion_gate: Option<opencrab_core::PromotionGate>,
+    /// D-1087: the observer of every tool execution of this run (started, then its terminal
+    /// state), in occurrence order. The extgate turn installs one so a connected gateway can
+    /// follow what the agent is doing. `None` = nobody observes; the run behaves and records
+    /// exactly as before.
+    pub tool_event_sink: Option<Arc<dyn ToolEventSink>>,
+    /// D-1091: the environment this run's gateway declares for its own binding (name → value).
+    /// `execute_shell` passes it to the child verbatim, after the inherited/allow-listed
+    /// variables, so an explicit declaration wins. Core interprets neither the names nor the
+    /// values; a gateway declares them because only it knows which account the binding is for.
+    /// Empty (the default) keeps today's behaviour exactly. Set with [`RunRequest::with_run_env`].
+    pub run_env: BTreeMap<String, String>,
 }
+
+/// D-1085 §12: the tools a provisional run may run before its promotion: memory reads and
+/// loading tool schemas. Web search is a provider option, not a tool call, and is not gated.
+pub const PROVISIONAL_READ_ONLY_TOOLS: &[&str] = &[
+    "search_memory_index",
+    "retrieve_memory_nodes",
+    "browse_memory_index",
+    "search_my_history",
+    "describe_tools",
+];
+
+/// D-1085 §13.1: the tools of a lightweight turn besides the operations its gateway declares
+/// (see [`RunRequest::as_lightweight`]): memory reads, subtasks and loading tool schemas. Web
+/// search is a provider option and follows the agent setting.
+pub const LIGHTWEIGHT_TURN_TOOLS: &[&str] = &[
+    "search_memory_index",
+    "retrieve_memory_nodes",
+    "browse_memory_index",
+    "search_my_history",
+    "spawn_subtask",
+    "cancel_subtask",
+    "steer_subtask",
+    "describe_tools",
+];
 
 impl RunRequest {
     #[allow(clippy::too_many_arguments)]
@@ -174,12 +216,29 @@ impl RunRequest {
             completion_sink: None,
             subtask_registry: None,
             reply_target: None,
-            run_notifier: None,
             live_inbound_scope: LiveInboundScope::AllOthers,
             tool_allowlist: None,
             persist_turn_logs: true,
             pinned_model: None,
+            lightweight: false,
+            provisional: false,
+            promotion_gate: None,
+            tool_event_sink: None,
+            run_env: BTreeMap::new(),
         }
+    }
+
+    /// D-1087: observe every tool execution of this run (see
+    /// [`RunRequest::tool_event_sink`]).
+    pub fn with_tool_event_sink(mut self, sink: Arc<dyn ToolEventSink>) -> Self {
+        self.tool_event_sink = Some(sink);
+        self
+    }
+
+    /// D-1091: declare this run's per-binding environment (see [`RunRequest::run_env`]).
+    pub fn with_run_env(mut self, run_env: BTreeMap<String, String>) -> Self {
+        self.run_env = run_env;
+        self
     }
 
     pub fn with_gateway_actions(mut self, ga: Arc<dyn GatewayActions>) -> Self {
@@ -260,13 +319,6 @@ impl RunRequest {
         self
     }
 
-    /// サブタスク走行の通知口を渡す（#175 S4）。`with_depth(depth + 1)` と組で使い、
-    /// 再入した `run_agent_response` が進捗フックとツールイベント sink を配線する。
-    pub fn with_run_notifier(mut self, notifier: Arc<dyn SubtaskRunNotifier>) -> Self {
-        self.run_notifier = Some(notifier);
-        self
-    }
-
     /// 走行中注入（#289）の対象範囲を指定する（#323 / B2）。既定は `AllOthers`。
     /// Nostr の inbound は返信中の相手（`OnlySpeaker`）に、resume は `Silent` に絞る。
     pub fn with_live_inbound_scope(mut self, scope: LiveInboundScope) -> Self {
@@ -294,6 +346,34 @@ impl RunRequest {
     /// D-1080: pins the model resolved at turn start for the whole turn.
     pub fn with_pinned_model(mut self, model: impl Into<String>) -> Self {
         self.pinned_model = Some(model.into());
+        self
+    }
+
+    /// D-1085: marks this run as a lightweight turn (see [`RunRequest::lightweight`]).
+    /// §13.1: its tool allowlist becomes [`LIGHTWEIGHT_TURN_TOOLS`] plus every operation the
+    /// run's own gateway ([`RunRequest::gateway_actions`]) declares, within any allowlist the
+    /// run already has.
+    pub fn as_lightweight(mut self) -> Self {
+        self.lightweight = true;
+        let mut tools: Vec<String> = LIGHTWEIGHT_TURN_TOOLS
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        if let Some(gateway) = &self.gateway_actions {
+            tools.extend(gateway.definitions().into_iter().map(|def| def.name));
+        }
+        if let Some(existing) = &self.tool_allowlist {
+            tools.retain(|name| existing.contains(name));
+        }
+        self.tool_allowlist = Some(tools);
+        self
+    }
+
+    /// D-1085: marks this run as provisional (see [`RunRequest::provisional`]); `gate` decides
+    /// its promotion (see [`RunRequest::promotion_gate`]).
+    pub fn as_provisional(mut self, gate: opencrab_core::PromotionGate) -> Self {
+        self.provisional = true;
+        self.promotion_gate = Some(gate);
         self
     }
 }

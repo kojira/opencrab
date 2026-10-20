@@ -483,7 +483,7 @@ impl BridgedExecutor {
     /// instrumentation 付き実行本体。
     ///
     /// `tool_call_id` は LLM 由来の元 ID を伝播するための相関キー。`Some(id)` なら
-    /// その ID を webhook/トレースの相関に使う（skill engine の tool_call.id と一致）。
+    /// その ID をトレースの相関に使う（skill engine の tool_call.id と一致）。
     /// `None`（id を持たない直接呼び出し）のときのみ合成 UUID を生成し、ペイロード上は
     /// `correlation = "synthetic"` として区別できるようにする。
     async fn execute_instrumented(
@@ -492,6 +492,24 @@ impl BridgedExecutor {
         args: &serde_json::Value,
         tool_call_id: Option<&str>,
     ) -> CoreActionResult {
+        self.execute_instrumented_in_run(name, args, tool_call_id, None)
+            .await
+    }
+
+    /// [`Self::execute_instrumented`] の本体。`run` は観測イベントの相関キーの上書き
+    /// （D-1087: 背景 run の一部として実行するとき）。**変えるのは観測イベントだけ**で、
+    /// `tool_logs` の所属（session / agent）は従来どおり executor の文脈で残す。
+    async fn execute_instrumented_in_run(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        tool_call_id: Option<&str>,
+        run: Option<opencrab_core::ExecutorRun<'_>>,
+    ) -> CoreActionResult {
+        let (event_session, event_depth) = run
+            .map_or((self.context.session_id.as_deref(), self.depth), |run| {
+                (Some(run.session_id), run.depth)
+            });
         let Some(sink) = self.tool_event_sink.clone() else {
             let started_at = chrono::Utc::now().to_rfc3339();
             let start = std::time::Instant::now();
@@ -515,7 +533,6 @@ impl BridgedExecutor {
             }
         };
         let started_at = chrono::Utc::now().to_rfc3339();
-        let session_id = self.context.session_id.as_deref();
         // #620: 旧来の「nsec キー名でマスクする」sink ゲート（SECRET_KEYS）は撤去した。
         // キー名一致は実際の混入（値の中に鍵が含まれる形）を検出できず、そもそも `nsec` を
         // キーに持つ JSON を tool 引数/結果へ出す producer は皆無だった（列挙で確認 / #620）。
@@ -525,8 +542,8 @@ impl BridgedExecutor {
             tool_name: name,
             tool_call_id: call_id,
             agent_id: &self.context.agent_id,
-            session_id,
-            depth: self.depth,
+            session_id: event_session,
+            depth: event_depth,
             status: ToolEventStatus::Started,
             started_at: &started_at,
             duration_ms: None,
@@ -557,8 +574,8 @@ impl BridgedExecutor {
             tool_name: name,
             tool_call_id: call_id,
             agent_id: &self.context.agent_id,
-            session_id,
-            depth: self.depth,
+            session_id: event_session,
+            depth: event_depth,
             status,
             started_at: &started_at,
             duration_ms: Some(duration_ms),
@@ -634,6 +651,17 @@ fn tool_log_result_text(result: &CoreActionResult) -> String {
 impl ActionExecutor for BridgedExecutor {
     async fn execute(&self, name: &str, args: &serde_json::Value) -> CoreActionResult {
         self.execute_instrumented(name, args, None).await
+    }
+
+    async fn execute_in_run(
+        &self,
+        run: opencrab_core::ExecutorRun<'_>,
+        name: &str,
+        args: &serde_json::Value,
+        tool_call_id: &str,
+    ) -> CoreActionResult {
+        self.execute_instrumented_in_run(name, args, Some(tool_call_id), Some(run))
+            .await
     }
 
     async fn execute_with_id(

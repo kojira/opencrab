@@ -23,8 +23,8 @@ pub use debounce::PrivilegeFire;
 pub use delivery_effect::{delivery_effect, DeliveryEffect};
 pub use normalize::{NormalizedInbound, NormalizedInboundEvent};
 pub use turn::{
-    prepare_session_inbound, prepare_session_inbound_write, run_session_turn, start_session_turn,
-    PrepareSessionInboundError,
+    prepare_session_inbound, prepare_session_inbound_write, run_provisional_turn, run_session_turn,
+    start_session_turn, PrepareSessionInboundError,
 };
 
 #[cfg(test)]

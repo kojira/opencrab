@@ -85,9 +85,6 @@ impl SystemGatewayActions {
             registry,
             &self.state.db,
             self.completion_sink.as_deref(),
-            // 中断の lifecycle 通知（旧 Discord 実装の後始末）はこのマップ経由で行う。
-            // `spawn_subtask` が insert したものと同一 Arc（`AppState` 共有）。
-            Some(&self.state.subtask_notifiers),
             subtask_id,
             caller,
             ctx.session_id.as_deref(),
@@ -164,7 +161,7 @@ impl SystemGatewayActions {
     }
 
     /// サブタスクの進捗報告（#175 S1）。Discord 実装（`execute_report_progress`）の
-    /// transport 非依存な部分を移植したもの。Discord 固有の webhook 送出は Discord 側に
+    /// transport 非依存な部分を移植したもの。通知の送出は gateway 側に
     /// 残る実装が担当する（この own 実装は inner が未実装の経路でのみ走る）。
     ///
     /// 手順は Discord と同一:
@@ -287,13 +284,22 @@ impl SystemGatewayActions {
             }
         }
 
-        // 進捗を lifecycle 通知口へ流す（#175 S4）。通知口は登録簿と対の随伴マップ
-        // （`AppState.subtask_notifiers`）から引く。旧 Discord 実装が webhook へ
-        // progress を出していた経路の置き換えで、宛先の解決も整形も実装側に閉じている。
-        if let Some(entry) = &subtask_entry {
-            if let Some(notifier) = self.state.subtask_notifiers.get(&entry.subtask_id) {
-                notifier.on_progress(&message);
-            }
+        // D-1087: 進捗を活動の観測者へ流す（旧実装で lifecycle 通知口へ `on_progress` して
+        // いたのと同じ位置・同じ範囲 = 登録簿に載っている run だけ）。デバウンスとは別で、
+        // 報告のたびに 1 件出る。購読が無ければ既定実装が何もしない。
+        if let (Some(entry), Some(sink)) = (&subtask_entry, self.completion_sink.as_deref()) {
+            sink.on_subtask_lifecycle(&opencrab_actions::SubtaskLifecycleEvent {
+                subtask_id: &entry.subtask_id,
+                sub_session_id: &entry.session_id,
+                parent_session_id: &entry.parent_session_id,
+                agent_id: &agent_id,
+                status: opencrab_actions::SubtaskLifecycleStatus::Progress,
+                label: &entry.label,
+                task: "",
+                detail: Some(&message),
+                duration_ms: None,
+                result_text: None,
+            });
         }
 
         // 完了受け口が未配線の経路（`with_dispatch` していない run）では、デバウンス

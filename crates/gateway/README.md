@@ -1,6 +1,6 @@
 # opencrab-gateway
 
-opencrab のゲートウェイ crate。**ポート専用**で、具象 transport（SDK に依存する実装）を含まない。提供するのは **gateway 共通のメッセージ型 / アクション抽象**（ポート）のみ。Discord の具象実装（`DiscordGateway`）は `opencrab-discord` へ移設した（SDK を共有層から切り離すため）。
+opencrab のゲートウェイ crate。**ポート専用**で、具象 transport（SDK に依存する実装）を含まない。提供するのは **gateway 共通のメッセージ型 / アクション抽象**（ポート）のみ。Discord の具象実装（`DiscordGateway`）は gateway リポジトリ（[opencrab-gateways](https://github.com/kojira/opencrab-gateways) の `opencrab-discord-gateway`）へ移設した（SDK を共有層から切り離すため）。
 
 ## 現状（#215 以降）
 
@@ -26,14 +26,14 @@ WebSocket は全メソッド `todo!()`）のまま腐っていたので #215 で
 
 | 経路 | 実体 |
 |---|---|
-| Discord | `DiscordGateway`（`opencrab-discord`）＋ `opencrab-discord` のイベントループ |
+| Discord | `opencrab-discord-gateway`（gateway リポジトリ）のイベントループ |
 | REST | `opencrab-server` の axum ハンドラ（この crate を経由しない） |
-| Nostr | `opencrab-nostr` |
+| Nostr | `opencrab-nostr-gateway`（gateway リポジトリ） |
 | Web | `opencrab-web-gateway` |
 
 ## DiscordGateway
 
-serenity/songbird ベースの Discord Bot 実装は **`opencrab-discord`（`gateway` モジュール）へ移設した**（SDK を共有層から切り離す #1-A）。`DiscordGateway` と関連型（`ComponentInteractionData` / `InteractionKind` / `A2uiFormModalSpec` / `A2uiFormModalResolver`）は `opencrab_discord::` から使う。
+serenity/songbird ベースの Discord Bot 実装は **gateway リポジトリの `opencrab-discord-gateway` が持つ**（SDK を共有層から切り離す #1-A / Issue #1074。D-1087 で core の `opencrab-discord` は削除した）。
 
 ## GatewayActions trait
 
@@ -123,7 +123,7 @@ Silent Reply の例外判定が発火せずレビューが silent に死ぬの�
 opencrab-gateway = { workspace = true }
 ```
 
-feature は 1 つも持たない。この crate はメッセージ型と `GatewayActions` 抽象（ポート）だけを提供し、SDK（serenity / songbird）には依存しない。Discord の具象実装が要るときは `opencrab-discord` を使う。
+feature は 1 つも持たない。この crate はメッセージ型と `GatewayActions` 抽象（ポート）だけを提供し、SDK（serenity / songbird）には依存しない。Discord の具象実装は gateway リポジトリの `opencrab-discord-gateway` にある。
 
 ## 関連ドキュメント
 

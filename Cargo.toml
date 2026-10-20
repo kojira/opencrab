@@ -7,8 +7,6 @@ members = [
     "crates/gateway",
     "crates/actions",
     "crates/db",
-    "crates/discord",
-    "crates/nostr",
     "crates/gate-client",
     "crates/mcp",
     "crates/server",
@@ -91,8 +89,6 @@ opencrab-llm-types = { path = "crates/llm-types" }
 opencrab-gateway = { path = "crates/gateway" }
 opencrab-actions = { path = "crates/actions" }
 opencrab-db = { path = "crates/db" }
-opencrab-discord = { path = "crates/discord" }
-opencrab-nostr = { path = "crates/nostr" }
 opencrab-extgate = { path = "crates/extgate", default-features = false }
 opencrab-gate-client = { path = "crates/gate-client" }
 opencrab-mcp = { path = "crates/mcp" }

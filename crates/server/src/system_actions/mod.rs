@@ -52,6 +52,12 @@ pub struct SystemGatewayActions {
     /// ユーザー応答の受け取りは transport にしか作れない。`Some` のときだけ `send_ui`
     /// を露出する（描画できない transport のターンに「必ず失敗するツール」を出さない）。
     a2ui: Option<Arc<opencrab_core::a2ui::A2uiSurface>>,
+    /// D-1091: この run の binding が宣言した環境変数（`RunRequest::run_env` と同一）。
+    ///
+    /// `spawn_subtask` が起こす sub-run は**親ターンと同じ binding** の作業なので、
+    /// 親の宣言をそのまま引き継ぐ（引き継がないと、サブタスクの `execute_shell` だけ
+    /// 別アカウントの環境で走る）。空なら従来どおり何もしない。
+    run_env: std::collections::BTreeMap<String, String>,
 }
 
 /// `report_progress` が登録簿から引く、進捗通知に要る項目だけの写し。
@@ -65,6 +71,8 @@ struct ProgressSubtaskEntry {
     session_id: String,
     /// 親セッション ID（進捗ログと resume の宛先）。
     parent_session_id: String,
+    /// registry の人間可読ラベル（D-1087 のライフサイクル通知に載せる）。
+    label: String,
     /// **親ターンの呼び出し元**（#298）。進捗デバウンス発火は親会話を resume する
     /// ので、resume 先の権限は元のターンのものでなければならない。
     caller: opencrab_actions::CallerIdentity,
@@ -76,6 +84,7 @@ impl ProgressSubtaskEntry {
             subtask_id,
             session_id: entry.session_id.clone(),
             parent_session_id: entry.parent_session_id.clone(),
+            label: entry.label.clone(),
             caller: entry.caller.clone(),
         }
     }
@@ -95,7 +104,20 @@ impl SystemGatewayActions {
             subtask_registry,
             completion_sink,
             a2ui,
+            run_env: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// D-1091: この run の binding が宣言した環境（`RunRequest::run_env`）を覚える。
+    ///
+    /// `build_turn_executor` が run ごとに組み立てる 1 箇所からだけ呼ぶ。プロセス全体の
+    /// 設定へは置かないので、binding の環境が別の run へ漏れない。
+    pub(crate) fn with_run_env(
+        mut self,
+        run_env: std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        self.run_env = run_env;
+        self
     }
 
     /// 本ツール源が直接提供するツール定義（A2UI 描画面がある構成の全量）。
@@ -127,7 +149,6 @@ include!("definitions/configuration.rs");
 include!("definitions/subtasks_progress.rs");
 include!("definitions/memory_commands_skill.rs");
 include!("definitions/heartbeat_schedules.rs");
-include!("definitions/webhooks.rs");
 include!("definitions.rs");
 
 include!("execution/subtasks_memory.rs");

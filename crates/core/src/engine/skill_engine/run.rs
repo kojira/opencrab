@@ -316,13 +316,13 @@ impl SkillEngine {
                 }
             }
 
-            // If there are tool calls, execute them. Utterance-only generations are also
-            // followed by another LLM call unless this generation explicitly terminates;
-            // query/tool calls produce tool results before the next call.
+            // If there are tool calls, execute them. Utterance-only generations are also followed
+            // by another LLM call unless this generation terminates; tools return results first.
             if !tool_calls.is_empty() {
                 // 照会/道具、またはpermission deniedの発話が1つでもあればproviderの
                 // tool_call/tool_result対を作る。許可済み発話だけでも明示終了が無ければ、
                 // 最小ackを積んで次のLLM呼び出しへ進む。
+                self.stop_at_gated_tool(&tool_calls)?; // D-1085 §12: provisional gate
                 let next_llm_call_needed = tool_calls.iter().any(|tc| {
                     !self.is_utterance_tool(&tc.function.name)
                         || !self.is_action_allowed(&tc.function.name)
@@ -698,7 +698,7 @@ impl SkillEngine {
                 continue;
             }
 
-            // tool call が無い本文も、NO_REPLY が無ければ途中発話として積んで次へ進む。
+            // tool call が無い本文も NO_REPLY が無ければ途中発話として次へ。
             if !termination_requested {
                 if let Some(ref c) = content {
                     // #898 §12.2/§13.1 j: 剥がし後の途中発話を、次イテレーション前に**ループ中で
@@ -729,9 +729,7 @@ impl SkillEngine {
 
             // NO_REPLY生成中に新着が届いていたら、終了より新着を優先する。completion sinkは
             // 親が実行中なら別turnを起動しないため、ここが終了境界での最後の受け渡し点になる。
-            let late_inbound = self
-                .live_inbound
-                .as_ref()
+            let late_inbound = (self.live_inbound.as_ref())
                 .map(|source| source.poll_new_with_origin())
                 .unwrap_or_default();
             if !late_inbound.is_empty() {
@@ -789,7 +787,8 @@ impl SkillEngine {
                 iterations,
                 tool_calls_made: total_tool_calls,
                 stopped_by_limit: false,
-                explicit_termination: Some(crate::engine::ExplicitTermination::NoReply),
+                explicit_termination: termination_requested
+                    .then_some(crate::engine::ExplicitTermination::NoReply),
                 silent_origins: silent_origins.into_silent(),
                 last_posting_utterance_id,
                 last_generation_had_continuation_speech,

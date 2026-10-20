@@ -1,5 +1,6 @@
 //! External gate V3 最小形。
 
+pub mod activity_stream;
 pub mod admin;
 pub mod admin_socket;
 pub mod close;
@@ -21,6 +22,7 @@ pub mod ops_projection;
 pub mod outbound_files;
 pub mod partial_stream;
 pub mod protocol;
+pub mod provisional;
 pub mod race;
 pub mod registry;
 mod secure_path;

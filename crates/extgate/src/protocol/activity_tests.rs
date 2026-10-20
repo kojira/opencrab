@@ -170,3 +170,255 @@ fn said_model_profile_is_strict_and_optional() {
         assert_eq!(profile(&frame), None, "{bad}");
     }
 }
+
+/// D-1085: `agent_prelude` is optional; a non-blank string of at most 64 chars is kept, anything
+/// else is `bad_request`.
+#[test]
+fn agent_prelude_is_optional_and_bounded() {
+    let frame = |prelude: Option<serde_json::Value>| {
+        let mut frame = serde_json::json!({
+            "id": "said-1", "m": "said",
+            "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "origin": "event-1", "author_id": "sender-1",
+            "text": "hello", "attachments": []
+        });
+        if let Some(prelude) = prelude {
+            frame["agent_prelude"] = prelude;
+        }
+        frame
+    };
+    let prelude_of = |frame: &serde_json::Value| match parse_inbound(frame).unwrap() {
+        InboundMsg::Said(said) => Ok(said.agent_prelude),
+        InboundMsg::Invalid { code, .. } => Err(code),
+        _ => panic!("expected said"),
+    };
+    assert_eq!(prelude_of(&frame(None)), Ok(None));
+    assert_eq!(prelude_of(&frame(Some(serde_json::Value::Null))), Ok(None));
+    assert_eq!(
+        prelude_of(&frame(Some(serde_json::json!("うん、")))),
+        Ok(Some("うん、".to_string()))
+    );
+    let longest = "あ".repeat(MAX_AGENT_PRELUDE_CHARS);
+    assert_eq!(
+        prelude_of(&frame(Some(serde_json::json!(longest)))),
+        Ok(Some(longest.clone()))
+    );
+    for bad in [
+        serde_json::json!("あ".repeat(MAX_AGENT_PRELUDE_CHARS + 1)),
+        serde_json::json!(""),
+        serde_json::json!("  "),
+        serde_json::json!(1),
+        serde_json::json!(["うん、"]),
+    ] {
+        assert_eq!(
+            prelude_of(&frame(Some(bad.clone()))),
+            Err(ErrorCode::BadRequest),
+            "{bad}"
+        );
+    }
+}
+
+// D-1087: the activity frames are id-less fire-and-forget notifications. A gateway that does
+// not know them drops them with zero writes and keeps the connection, so the shape is pinned
+// here: `m` + `binding_id` + the neutral fields, and no `id`.
+
+#[test]
+fn tool_activity_started_frame_carries_no_id_and_no_terminal_fields() {
+    let args = serde_json::json!({"cmd": "ls"});
+    let frame = tool_activity_frame(
+        "binding",
+        "activity",
+        "call-1",
+        None,
+        "execute_shell",
+        "started",
+        2,
+        "2026-10-20T00:00:00Z",
+        None,
+        &args,
+        None,
+        None,
+    );
+    assert_eq!(
+        frame,
+        serde_json::json!({
+            "m": "tool_activity",
+            "binding_id": "binding",
+            "activity_id": "activity",
+            "call_id": "call-1",
+            "tool": "execute_shell",
+            "status": "started",
+            "depth": 2,
+            "started_at": "2026-10-20T00:00:00Z",
+            "args": {"cmd": "ls"},
+        })
+    );
+    assert!(frame.get("id").is_none());
+}
+
+#[test]
+fn tool_activity_terminal_frame_adds_duration_result_and_error_only_when_present() {
+    let args = serde_json::json!({});
+    let result = serde_json::json!({"ok": true});
+    let completed = tool_activity_frame(
+        "binding",
+        "activity",
+        "call-1",
+        None,
+        "execute_shell",
+        "completed",
+        0,
+        "2026-10-20T00:00:00Z",
+        Some(12),
+        &args,
+        Some(&result),
+        None,
+    );
+    assert_eq!(completed["duration_ms"], 12);
+    assert_eq!(completed["result"], serde_json::json!({"ok": true}));
+    assert!(completed.get("error").is_none());
+
+    let rejected = tool_activity_frame(
+        "binding",
+        "activity",
+        "call-2",
+        None,
+        "execute_shell",
+        "rejected",
+        0,
+        "2026-10-20T00:00:00Z",
+        Some(0),
+        &args,
+        None,
+        Some("rejected: owner"),
+    );
+    assert_eq!(rejected["error"], "rejected: owner");
+    assert!(rejected.get("result").is_none());
+    assert!(rejected.get("id").is_none());
+}
+
+/// D-1087: 入れ子の走行のツール実行だけが run の相関キー（`sub_session_id`）を運ぶ。
+/// 親ターン（省略）と空文字は field ごと省く。
+#[test]
+fn tool_activity_carries_the_run_key_only_when_given() {
+    let args = serde_json::json!({});
+    let nested = tool_activity_frame(
+        "binding",
+        "activity",
+        "call-1",
+        Some("subtask-s1"),
+        "execute_shell",
+        "started",
+        1,
+        "2026-10-20T00:00:00Z",
+        None,
+        &args,
+        None,
+        None,
+    );
+    assert_eq!(nested["sub_session_id"], "subtask-s1");
+
+    let parent = tool_activity_frame(
+        "binding",
+        "activity",
+        "call-1",
+        None,
+        "execute_shell",
+        "started",
+        0,
+        "2026-10-20T00:00:00Z",
+        None,
+        &args,
+        None,
+        None,
+    );
+    assert!(parent.get("sub_session_id").is_none());
+
+    let empty = tool_activity_frame(
+        "binding",
+        "activity",
+        "call-1",
+        Some(""),
+        "execute_shell",
+        "started",
+        1,
+        "2026-10-20T00:00:00Z",
+        None,
+        &args,
+        None,
+        None,
+    );
+    assert!(empty.get("sub_session_id").is_none());
+}
+
+#[test]
+fn subtask_lifecycle_frame_omits_the_fields_that_do_not_apply() {
+    let started = subtask_lifecycle_frame(
+        "binding",
+        "run-1",
+        "subtask-s1",
+        "started",
+        "shell job",
+        "do it",
+        None,
+        None,
+        None,
+    );
+    assert_eq!(
+        started,
+        serde_json::json!({
+            "m": "subtask_lifecycle",
+            "binding_id": "binding",
+            "run_id": "run-1",
+            "sub_session_id": "subtask-s1",
+            "status": "started",
+            "label": "shell job",
+            "task": "do it",
+        })
+    );
+    assert!(started.get("id").is_none());
+
+    let completed = subtask_lifecycle_frame(
+        "binding",
+        "run-1",
+        "subtask-s1",
+        "completed",
+        "",
+        "",
+        None,
+        Some(42),
+        Some("done"),
+    );
+    assert!(completed.get("label").is_none());
+    assert!(completed.get("task").is_none());
+    assert_eq!(completed["duration_ms"], 42);
+    assert_eq!(completed["result_text"], "done");
+
+    let progress = subtask_lifecycle_frame(
+        "binding",
+        "run-1",
+        "subtask-s1",
+        "progress",
+        "shell job",
+        "",
+        Some("half way"),
+        None,
+        None,
+    );
+    assert_eq!(progress["detail"], "half way");
+    assert!(progress.get("duration_ms").is_none());
+
+    // 走行のセッションが空なら field ごと省く（旧 gateway は未知 field を無視する）。
+    let no_session = subtask_lifecycle_frame(
+        "binding",
+        "run-1",
+        "",
+        "started",
+        "shell job",
+        "do it",
+        None,
+        None,
+        None,
+    );
+    assert!(no_session.get("sub_session_id").is_none());
+}

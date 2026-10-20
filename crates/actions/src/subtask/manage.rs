@@ -47,16 +47,9 @@ pub enum CancelOutcome {
 /// server-neutral 層へ集約する。**停止の実装はこの 1 関数だけ**で、transport 固有の
 /// 実装は持たない（#157 S2 で Discord 実装を撤去し、その固有の後始末をここへ取り込んだ）。
 ///
-/// # Discord 実装から取り込んだ 2 点（#157 S2）
+/// # Discord 実装から取り込んだ点（#157 S2）
 ///
-/// 1. **中断の通知送出**: `notifiers`（registry と対の随伴マップ）から通知口を引いて
-///    `on_cancelled(duration_ms)` を呼び、マップから外す。abort すると spawned closure は
-///    中断されて終了通知が来ないため、ここが lifecycle 通知の唯一の終端になる（RFC §1.5）。
-///    **順序契約との関係**: この通知は親ログ INSERT より前だが、実装（Discord の
-///    `SubtaskWebhookNotifier::on_cancelled`）は webhook 配送キューへ 1 通積むだけで
-///    応答生成を起動しない。「記録 → registry 除去 → sink 発火」という二重返信防止の
-///    順序契約に触れるのは resume する `sink` 側だけで、そちらは従来どおり INSERT の後。
-/// 2. **停止ログの説明文の解決順序**: sub-session の `sessions.theme`（`Subtask: ` prefix を
+/// **停止ログの説明文の解決順序**: sub-session の `sessions.theme`（`Subtask: ` prefix を
 ///    除去）を第一候補にし、引けない/空のときだけ registry の `label`
 ///    （例: `execute_shell(...)`）へフォールバックする。明示的な `spawn_subtask` は
 ///    人間可読なテーマを持つが、自動 dispatch は sub-session の行を作らないため theme を
@@ -72,10 +65,8 @@ pub enum CancelOutcome {
 /// TOCTOU が無い（所有権フィールドは insert 後不変）。
 ///
 /// 成功時: **停止を主張（`claim_cancel`）** → `abort_handle.abort()` → registry から
-/// 除去 → 通知口へ `on_cancelled` → 親セッションログへ `tool_cancelled` を best-effort
-/// 記録 → sink へ `on_subtask_cancelled`（`exit_reason="cancelled"`）を通知する。
-/// この順序は旧 Discord 実装（通知が親ログより先）と neutral 実装（親ログが sink より
-/// 先）の両方を満たす。
+/// 除去 → 親セッションログへ `tool_cancelled` を best-effort 記録 → sink へ
+/// `on_subtask_cancelled`（`exit_reason="cancelled"`）を通知する。
 ///
 /// 停止の主張は registry 除去と同じ shard ロック下（`remove_if` の述語内）で行う。
 /// `abort()` は「ツール本体を await 中」なら効くが、既に完走して `settle_completed`
@@ -92,7 +83,6 @@ pub fn cancel_subtask(
     registry: &SubtaskRegistry,
     db: &opencrab_db::Db,
     sink: Option<&dyn SubtaskCompletionSink>,
-    notifiers: Option<&crate::subtask_notify::SubtaskNotifiers>,
     subtask_id: &str,
     caller: CallerIdentity,
     caller_session_id: Option<&str>,
@@ -109,15 +99,6 @@ pub fn cancel_subtask(
     }) {
         Some((_, subtask)) => {
             subtask.abort_handle.abort();
-
-            // 中断を lifecycle 通知口へ伝え、随伴マップから外す（旧 Discord 実装から移設
-            // / RFC §1.5）。abort で spawned closure は中断されるため終了通知は来ない
-            // → ここが唯一の終端。親ログ INSERT より**前**に呼ぶ（旧実装と同順序）。
-            if let Some(notifiers) = notifiers {
-                if let Some((_, notifier)) = notifiers.remove(subtask_id) {
-                    notifier.on_cancelled(subtask.started_at.elapsed().as_millis() as u64);
-                }
-            }
 
             // 親セッションログへ subtask_cancelled を best-effort 記録する。
             //
@@ -193,10 +174,23 @@ pub fn cancel_subtask(
                 }
             }
 
-            // 停止を sink へ通知する（完了経路とは別メソッド = resume しない）。
-            // これで「最後の subtask が cancel されたのに誰もセッションを完了に
-            // しない」（REST が永久 active）が起きない。
+            // D-1087: 中断も activity の観測者へ伝える。abort で spawned closure は止まり
+            // 終端通知は来ないので、ここが唯一の終端。
             if let Some(sink) = sink {
+                sink.on_subtask_lifecycle(&crate::subtask::SubtaskLifecycleEvent {
+                    subtask_id,
+                    sub_session_id: &subtask.session_id,
+                    parent_session_id: &subtask.parent_session_id,
+                    agent_id: &subtask.agent_id,
+                    status: crate::subtask::SubtaskLifecycleStatus::Aborted,
+                    label: &subtask.label,
+                    task: "",
+                    detail: None,
+                    duration_ms: Some(subtask.started_at.elapsed().as_millis() as u64),
+                    // 中断の理由。abort 経路は spawned closure を止めるので終端通知は来ず、
+                    // ここが唯一の終端になる。理由が無いと「空の結果で失敗した」と読める。
+                    result_text: Some(CANCELLED_BY_REQUEST),
+                });
                 sink.on_subtask_cancelled(SubtaskSettled {
                     session_id: parent,
                     agent_id: subtask.agent_id.clone(),
@@ -229,6 +223,12 @@ pub fn cancel_subtask(
 /// 「途中で親/オーナーが方向を変えた」と履歴上で判別できる（#647 受け入れ・記録要件）。
 /// 走行中注入の `SubtaskSteerInbound`（server 側）もこの値だけを watermark 差分読みする。
 pub const STEER_LOG_TYPE: &str = "steer";
+
+/// 中断（`cancel_subtask`）で走行が止まったときの理由。
+///
+/// abort した走行は終端通知を出せないので、中断のライフサイクルイベントが唯一の終端に
+/// なる。空の結果を渡すと「理由不明の失敗」と読めるため、理由をここで 1 つに固定する。
+pub const CANCELLED_BY_REQUEST: &str = "cancelled by request";
 
 /// `steer_subtask` の結果種別（gateway 非依存 / #647）。
 ///

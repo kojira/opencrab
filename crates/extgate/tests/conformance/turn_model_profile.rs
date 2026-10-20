@@ -38,6 +38,33 @@ async fn realtime_said_starts_a_realtime_turn_and_typed_said_a_default_turn() {
     );
 }
 
+/// D-1085: a realtime said runs a lightweight turn; §13: on the same agent context as a typed
+/// said (plus the gateway context).
+#[tokio::test]
+async fn realtime_said_runs_a_lightweight_turn_on_the_agent_context() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+
+    let mut voice = said_frame_with_profile("v1", &binding_id, "o-v1", Some("realtime"));
+    voice["system_context"] = json!("GATEWAY-CONTEXT");
+    write_frame(&mut s, &voice).await;
+    assert_eq!(read_said_response(&mut s, "v1").await["m"], "ok");
+    wait_turns(&h, 1).await;
+    write_frame(&mut s, &said_frame_with_profile("t1", &binding_id, "o-t1", None)).await;
+    assert_eq!(read_said_response(&mut s, "t1").await["m"], "ok");
+    wait_turns(&h, 2).await;
+
+    let systems = h.runtime.system_prompts.lock().unwrap().clone();
+    assert_eq!(
+        systems,
+        [
+            format!("sys{}GATEWAY-CONTEXT", opencrab_core::SYSTEM_SEGMENT_BREAK),
+            "sys".to_string(),
+        ]
+    );
+    assert_eq!(*h.runtime.lightweight_runs.lock().unwrap(), [true, false]);
+}
+
 /// A realtime said queued behind a running typed turn starts its own realtime turn; one folded
 /// into the running turn starts none, so the running turn's model is unchanged.
 #[tokio::test]

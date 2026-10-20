@@ -24,7 +24,6 @@ include!("session_logs.rs");
 include!("skills.rs");
 include!("task_ledger.rs");
 include!("api_principal_permission.rs");
-include!("webhook_config.rs");
 
 fn setup() -> Connection {
     crate::init_memory().expect("failed to init in-memory DB")

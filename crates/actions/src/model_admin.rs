@@ -28,6 +28,27 @@ pub struct SessionModelList {
     pub realtime_current_model: String,
 }
 
+/// D-1086: the reasoning effort values a session slot accepts.
+pub const REASONING_EFFORTS: &[&str] = &["none", "low", "medium", "high"];
+
+/// D-1086: one reasoning effort slot of a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffortSnapshot {
+    /// The session's override in this slot. `None` = not set.
+    pub configured_effort: Option<String>,
+    /// The effort the slot's next turn uses. `None` = the model's own default.
+    pub current_effort: Option<String>,
+    /// Where `current_effort` comes from.
+    pub source: opencrab_db::queries::ReasoningEffortSource,
+}
+
+/// D-1086: both reasoning effort slots of a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEffortList {
+    pub default: EffortSnapshot,
+    pub realtime: EffortSnapshot,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelAdminError {
     NotFound,
@@ -81,4 +102,31 @@ pub trait ModelAdministration: Send + Sync {
         session_id: &str,
         profile: TurnModelProfile,
     ) -> Result<ModelSnapshot, ModelAdminError>;
+
+    /// D-1086: both reasoning effort slots of the session. `Default` turns use session >
+    /// agent > provider configuration; `Realtime` turns use session > provider configuration.
+    /// `session_id` must have exactly `[agent_id]` as members.
+    async fn list_session_reasoning_efforts(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<SessionEffortList, ModelAdminError>;
+
+    /// D-1086: persists `effort` (one of [`REASONING_EFFORTS`], else `InvalidArgs`) in the
+    /// `profile` slot of the session for its next turn. Never waits for a turn.
+    async fn set_session_reasoning_effort(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        profile: TurnModelProfile,
+        effort: &str,
+    ) -> Result<EffortSnapshot, ModelAdminError>;
+
+    /// D-1086: clears the `profile` slot so it follows its inherited effort again.
+    async fn reset_session_reasoning_effort(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        profile: TurnModelProfile,
+    ) -> Result<EffortSnapshot, ModelAdminError>;
 }

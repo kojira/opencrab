@@ -12,7 +12,7 @@ pub const REJECTION_CODE_PREFIX: &str = "rejected: ";
 pub(crate) fn gateway_reject(msg: impl Into<String>) -> opencrab_gateway::GatewayActionResult {
     let msg = msg.into();
     tracing::debug!(
-        target: "webhook_audit",
+        target: "action_rejection_audit",
         reason = %msg,
         "gateway action rejected by permission policy"
     );

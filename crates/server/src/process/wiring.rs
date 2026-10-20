@@ -63,6 +63,12 @@ pub(crate) struct TurnExecutorWiring {
     pub completion_sink: Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>,
     pub reply_target: Option<String>,
     pub tool_allowlist: Option<Vec<String>>,
+    /// D-1087: observer of this run's tool executions (the extgate turn installs one so a
+    /// connected gateway can follow the run). `None` keeps the executor unobserved.
+    pub tool_event_sink: Option<Arc<dyn opencrab_actions::ToolEventSink>>,
+    /// D-1091: the environment this run's gateway declared for its binding. Applied to
+    /// `execute_shell` children only; empty keeps today's behaviour.
+    pub run_env: std::collections::BTreeMap<String, String>,
 }
 
 /// Production と外形採取が共有する turn executor の唯一の組立口。
@@ -78,7 +84,13 @@ where
     F: FnOnce(bool) -> Option<Arc<dyn opencrab_gateway::GatewayActions>>,
 {
     let mut dispatcher = opencrab_actions::ActionDispatcher::new();
-    let tools_config = resolve_run_tools_config(state, &wiring.context.agent_id);
+    let mut tools_config = resolve_run_tools_config(state, &wiring.context.agent_id);
+    // D-1091: the gateway's declaration for this binding reaches `execute_shell` only. Setting it
+    // on the per-turn shell config (rebuilt for every run) keeps it out of the process-wide
+    // config, so one binding's environment can never leak into another run's children.
+    if let Some(shell) = tools_config.shell.as_mut() {
+        shell.run_env = wiring.run_env.clone();
+    }
     opencrab_actions::register_tools_from_config(&tools_config, &mut dispatcher);
 
     let caller_is_trusted = matches!(
@@ -93,13 +105,17 @@ where
             state.llm_router.get().image_generator(),
         ),
     ));
-    let system_actions: Arc<dyn opencrab_gateway::GatewayActions> =
-        Arc::new(crate::system_actions::SystemGatewayActions::new(
+    // D-1091: `spawn_subtask` が起こす sub-run は同じ binding の作業なので、この run の
+    // 宣言を渡す（サブタスクの `execute_shell` だけ別アカウントの環境にならない）。
+    let system_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
+        crate::system_actions::SystemGatewayActions::new(
             state.clone(),
             wiring.gateway_actions,
             Some(wiring.subtask_registry),
             wiring.completion_sink,
-        ));
+        )
+        .with_run_env(wiring.run_env.clone()),
+    );
     let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = if wiring.depth == 0 {
         system_actions
     } else {
@@ -112,6 +128,10 @@ where
         .with_reply_target(wiring.reply_target)
         .with_tool_allowlist(wiring.tool_allowlist)
         .with_gateway_actions(gateway_actions);
+    let bridged = match wiring.tool_event_sink {
+        Some(sink) => bridged.with_tool_event_sink(sink),
+        None => bridged,
+    };
 
     if wiring.depth == 0 {
         match mcp_provider(caller_is_trusted) {

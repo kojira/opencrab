@@ -7,7 +7,7 @@ pub enum ToolEventStatus {
     Rejected,
 }
 
-/// 1 ツール実行イベントの観測データ（webhook 等の sink へ渡す）。
+/// 1 ツール実行イベントの観測データ（gateway の活動 sink へ渡す）。
 ///
 /// #620: 旧来の「`nsec` キー名でマスクする」sink ゲート（SECRET_KEYS / #519・#526）は撤去した。
 /// キー名一致は実際の混入（別の文字列値の中に鍵が含まれる形）を検出できず、`nsec` を JSON の

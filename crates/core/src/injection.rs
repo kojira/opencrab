@@ -125,7 +125,7 @@ mod tests {
 
         // メソッド名まで広げて綴り変種を拾う（限界は上記 doc 参照）。
         let needle = "is_control";
-        let allowed: [std::path::PathBuf; 5] = [
+        let allowed: [std::path::PathBuf; 6] = [
             crates_dir.join("core").join("src").join("injection.rs"),
             // Frozen v56 heartbeat-instructions sanitizer used only by the v57 migration (#612).
             crates_dir
@@ -136,6 +136,13 @@ mod tests {
                 .join("v57.rs"),
             // Wire metadata validation, not prompt-field sanitization.
             crates_dir.join("extgate").join("src").join("protocol.rs"),
+            // Wire metadata validation (`hello.run_env` values, D-1091), not prompt-field
+            // sanitization: a declaration carrying a control character is refused outright.
+            crates_dir
+                .join("extgate")
+                .join("src")
+                .join("protocol")
+                .join("run_env.rs"),
             // Outbound attachment file-name validation (D-1079a), not prompt-field sanitization.
             crates_dir
                 .join("extgate")

@@ -79,16 +79,17 @@ fi
 # 既定 relay は製品が接続する公共 Nostr relay で、個人の endpoint ではないため許可する。
 # first label が r の既定 relay は Damus の日本語圏の既定で、誰でも接続できる公共 server。
 # 同じ domain にある first label が x の relay も公共 relay として許可対象である。
+#
+# D-1087 で concrete な Nostr 実装（crates/nostr）は gateway リポジトリへ移したため、
+# ここを読む元ファイルは core に無い。core が文書（docs/nostaro-interface.md）で参照する
+# 既定 relay を固定で持つ。relay を増やすときはこの一覧も更新する。
 PUBLIC_RELAY_HOSTS=()
-while IFS= read -r host; do
-  [ -n "$host" ] || continue
+for host in yabu.me r.kojira.io; do
   PUBLIC_RELAY_HOSTS+=("$host")
   case "$host" in
     r.*) PUBLIC_RELAY_HOSTS+=("x.${host#*.}") ;;
   esac
-done < <(sed -nE '/^pub const DEFAULT_RELAYS:/p' crates/nostr/src/config.rs 2>/dev/null \
-  | grep -oE 'wss://[[:alnum:].-]+' \
-    | sed 's|^wss://||' | sort -u)
+done
 
 is_public_relay_host() {
   local candidate=$1

@@ -256,12 +256,6 @@ fn tool_category(name: &str) -> &'static str {
         "add_allowed_command" | "list_allowed_commands" | "remove_allowed_command" => {
             "allowed commands"
         }
-        "set_default_webhook"
-        | "get_default_webhook"
-        | "list_webhooks"
-        | "set_default_subtask_webhook"
-        | "get_default_subtask_webhook"
-        | "list_subtask_webhooks" => "webhook",
         "get_system_info" | "update_memory_index_config" => "system",
         _ => "other",
     }

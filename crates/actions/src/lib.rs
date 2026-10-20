@@ -17,7 +17,6 @@ pub mod session_runtime;
 pub mod skill_management;
 pub mod soul;
 pub mod subtask;
-pub mod subtask_notify;
 pub mod subtask_registries;
 pub mod task_ledger;
 pub mod timed_fire;
@@ -25,7 +24,6 @@ pub mod tools;
 pub mod traits;
 pub mod transcript;
 pub mod view_image;
-pub mod webhook_target;
 pub mod workspace;
 
 pub mod run_request;
@@ -43,18 +41,21 @@ pub use bridge::{
 pub use continue_marker::visible_speech_after_markers;
 pub use dispatcher::ActionDispatcher;
 pub use model_admin::{
-    ModelAdminError, ModelAdministration, ModelSnapshot, SessionModelList, TurnModelProfile,
+    EffortSnapshot, ModelAdminError, ModelAdministration, ModelSnapshot, SessionEffortList,
+    SessionModelList, TurnModelProfile, REASONING_EFFORTS,
 };
 pub use no_reply::{
     terminate_at_no_reply, DeliveryContext, NoReplyTermination, NO_REPLY_LOG_TARGET,
     NO_REPLY_SENTINEL, NO_REPLY_TRAILING_DISCARDED_TAG,
 };
-pub use run_request::{LiveInboundScope, RunRequest};
+pub use run_request::{
+    LiveInboundScope, RunRequest, LIGHTWEIGHT_TURN_TOOLS, PROVISIONAL_READ_ONLY_TOOLS,
+};
 pub use session_inbound::{
     accept_inbound, consecutive_trust_groups, delivery_effect, plan_record_only_flags,
-    prepare_session_inbound, prepare_session_inbound_write, run_session_turn, start_session_turn,
-    AdmittedInbound, DeliveryEffect, InboundAgentDrop, InboundDrop, InboundLookups,
-    InboundMessageDrop, InboundWork, NormalizedInbound, NormalizedInboundEvent,
+    prepare_session_inbound, prepare_session_inbound_write, run_provisional_turn, run_session_turn,
+    start_session_turn, AdmittedInbound, DeliveryEffect, InboundAgentDrop, InboundDrop,
+    InboundLookups, InboundMessageDrop, InboundWork, NormalizedInbound, NormalizedInboundEvent,
     PrepareSessionInboundError, PrivilegeFire, WatchAccept,
 };
 pub use session_runtime::{SessionLocks, SessionRuntime};
@@ -67,13 +68,9 @@ pub use skill_management::OWNER_SKILLS_INDEX_NAME;
 pub use subtask::{
     cancel_subtask, default_non_dispatch_tools, dispatch_settled, steer_subtask, CancelOutcome,
     NoopCompletionSink, SettleKind, SharedExecutor, SpawnedSubtask, SteerOutcome,
-    SubtaskCompletionSink, SubtaskLifecycle, SubtaskRegistry, SubtaskSettled,
-    SubtaskToolDispatcher, DEFAULT_DISPATCH_TIMEOUT_SECS, STEER_LOG_TYPE,
-};
-pub use subtask_notify::{
-    NoopLifecycleNotifier, NoopRunNotifier, NotifyTarget, NotifyTargetError,
-    SubtaskLifecycleNotifier, SubtaskNotifiers, SubtaskNotifySession, SubtaskRunInfo,
-    SubtaskRunNotifier,
+    SubtaskCompletionSink, SubtaskLifecycle, SubtaskLifecycleEvent, SubtaskLifecycleStatus,
+    SubtaskRegistry, SubtaskSettled, SubtaskToolDispatcher, DEFAULT_DISPATCH_TIMEOUT_SECS,
+    STEER_LOG_TYPE,
 };
 pub use subtask_registries::SubtaskRegistries;
 pub use timed_fire::{
@@ -92,14 +89,6 @@ pub use traits::*;
 pub use transcript::{
     AgentReplyContext, InboundMessageRecord, InteractionRecord, OutboundReplyRecord,
     TranscriptSource,
-};
-pub use webhook_target::{
-    attachment_filename, build_message_with_optional_attachment, build_part_messages,
-    build_webhook_body, chunk_text, has_activity_default, record_webhook_delivery_failure,
-    redact_secrets, redact_webhook_url, resolve_activity_webhook, resolve_subtask_webhook,
-    validate_webhook_url, WebhookAttachment, WebhookConfig, WebhookMessage, WebhookResolution,
-    WebhookSource, ATTACHMENT_CONTENT_TYPE, ATTACHMENT_MAX_BYTES, ATTACHMENT_PREVIEW_CHARS,
-    ATTACHMENT_THRESHOLD_CHARS,
 };
 
 // 画像生成（D-1076）。境界監査の行番号ベースラインをずらさないよう末尾に置く。

@@ -57,6 +57,12 @@ ErrDetail  = string | null
 
 > 注: 受信の local file 添付は [DC-953](../design-generic-inbound-attachments.md) で追加された。送信側では、operation 宣言の `"format": "workspace-file"` field を core が outbox コピーの descriptor `{id,name,media_type,size,sha256,local_path}`（`local_path` は outbox root 相対）へ書き換えて invoke payload に載せる（[D-1079a](../design-generic-outbound-attachments.md)）。byte や base64 は frame に載せない。
 
+> 注: `said.agent_prelude`（任意、空白のみ不可、64 文字以下、超過は `bad_request`）は、この said への返事より前に agent がすでに相手へ発した短い言葉である（D-1085）。core は said の inbound 記録の直後に、同じ origin transaction 内で agent 自身の `speech` 行（返信と同じ形）として記録する。say としては送り返さない。無い場合の挙動は従来と同じ。
+
+> 注: 先行生成（D-1085 P5）。gateway は確定前の realtime 発話について `provisional` を送れる。core は session lock を取らずに、送信時点の session 高水位までの行と仮の発話行・`agent_prelude` 行のうち、新しい方から 30 番目の speech 行以降のすべての行を履歴として realtime の単発生成を始める。DB には何も書かない。生成の途中経過は `partial` に `provisional_id` を付けて送る。同じ binding・同じ author の新しい `provisional` は古いものを中止する。binding あたり 4 件、10 秒を超えたものは中止する。`said` が同じ `provisional_id` を持ち、`author_id`・`author_label`・`caller`・`system_context`・`agent_prelude`・`text` が完全一致し、profile が realtime で添付が無く、高水位より後に said 自身の行以外が増えていなければ、ターンはその生成結果を使う（`promoted:true`）。それ以外は中止して通常ターンを行う。どちらの場合も core はターンの say より前に `provisional_result` を送る。
+
+> 注: 走行の活動（D-1087）。core は 1 ターンのツール実行と、サブタスク走行のライフサイクルを、id を持たない通知として流す（`partial` / `turn_failed` と同じ扱い。未知 `m` は write 0・keep）。どちらも宛先も整形も持たない。どの binding の活動をどこへ送るかは gateway の設定で決まり、core は宛先を知らない。並びはターン内の発生順で、`activity` の `ended` は活動の書き込みが終わってから送る。購読しない gateway では、core の挙動も記録も変わらない。
+
 ### 3.3 message の完全表
 
 表の field は全て必須である。追加 field は §3.1 の規則で無視する。
@@ -68,12 +74,20 @@ ErrDetail  = string | null
 | core→gate `bind` | `id,m,binding_id,address` | `m="bind"`; `id="bind:"+binding_id` | gate→core `ok`。受理不能は `err(code="bind_failed")`。 |
 | core→gate `say` | `id,m,binding_id,payload` | `m="say"`; `id=delivery_id`; payload は §3.4 | gate→core `ok`。外部 API が非受理と確定した場合だけ `err(code="external_rejected")`。 |
 | core→gate `activity` | `m,binding_id,activity_id,state` | `m="activity"`; `state="started"|"ended"` | 応答なし。 |
+| gate→core `provisional` | `id,m,binding_id,provisional_id,author_id,caller,model_profile,text` | `m="provisional"`; `provisional_id` は UUID; `model_profile="realtime"` 以外は `bad_request`; 任意 `author_label,system_context,agent_prelude` は said と同じ規則 | core→gate `ok`。記録 0。 |
+| gate→core `provisional_cancel` | `id,m,binding_id,provisional_id` | `m="provisional_cancel"` | core→gate `ok`（冪等）。`ok` の後にその生成の `partial` は来ない。 |
+| core→gate `partial` | `m,binding_id,stream_id,text` | 先行生成のものは `provisional_id` を持つ | 応答なし。 |
+| core→gate `provisional_result` | `m,binding_id,provisional_id,promoted` | `promoted` は bool; `provisional_id` 付き said のターンで say より前に 1 回 | 応答なし。 |
+| core→gate `tool_activity` | `m,binding_id,activity_id,call_id,tool,status,depth,started_at,args`、入れ子の走行だけ `sub_session_id` | `m="tool_activity"`; `status="started"` は `duration_ms`/`result`/`error` を持たない。終端（`completed`/`failed`/`rejected`）は `duration_ms` と `result`（`rejected`/`failed` は `error`）を持つ。`args`/`result` は core が持つ値そのまま。`activity_id` は同じターンの `activity` と同じ値。`sub_session_id` は `depth > 0`（サブタスク／自動 dispatch の走行の中）だけが運ぶ run の相関キーで、`subtask_lifecycle` の同名 field と突き合わせる（親ターンは field ごと省く） | 応答なし（D-1087）。 |
+| core→gate `subtask_lifecycle` | `m,binding_id,run_id,status` | `m="subtask_lifecycle"`; `status="started"\|"progress"\|"completed"\|"failed"\|"timed_out"\|"aborted"`; 任意 `label`,`task`（started のみ）,`detail`（progress）,`duration_ms`/`result_text`（終端） | 応答なし（D-1087）。 |
 | response `ok` | `id,m` または `id,m,seq` | `m="ok"`; hello/bind/say は前者、said は `seq:positive-i64|null` を持つ | pending request 1 件を消費。 |
 | response `err` | `id,m,code,detail` | `m="err"`; `code` は §5.4; `detail` は `ErrDetail` | pending request 1 件を消費。 |
 
 response は request と同じ `id` を返す。pending の request 種に合わない shape、未知 ID、消費済み ID、bind pending への `external_rejected`、say pending への `bind_failed` は `response_invalid` で接続を close する。close 時の全 pending say は §6.4 の `indeterminate` へ移す。
 
 hello 成功後、core は当該 instance の open binding 全件へ `binding_id ASC` で bind を書き、各 ID を独立 pending として先に登録する。応答順序は問わない。matching `ok` 後だけ当該 binding を acknowledged set に加える。bind `err`、write failure、60 秒経過は `bind_failed` として接続を close する。hello を 10 秒以内に受理できなければ `protocol_order` で close する。
+
+> 注: binding の環境（D-1091）。gateway は `hello` に任意 field `run_env`（名前→値の string map。最大 64 件、名前 128 文字、値 8192 文字）を載せ、その instance の binding のターンで `execute_shell` の子へ渡す環境変数を宣言できる。core は名前も値も解釈せず、`spawn_subtask` が起こす同じ binding の sub-run へも引き継ぐ。形が不正な宣言（非文字列、空名、上限超過、**制御文字を含む値**）は `bad_request` で拒否し、宣言が効かなかったことを gateway に返す。空・省略は従来と同一の frame（`run_env` field ごと送らない）。**値は秘密情報（アカウントの署名鍵など）でありうる**ので、宣言を書く gateway 側の配置（placement）は 0600 で保管し、値をログ・エラー・`Debug` 出力へ出さない（core は `Hello` の `Debug` で名前だけを出し、値は固定の伏字にする）。
 
 ### 3.4 say payload と activity
 

@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use super::{CallerIdentity, SettleKind};
+use crate::bridge::ToolEventSink;
 
 /// subtask の settle を親セッションへ通知するための最小ペイロード。
 ///
@@ -38,6 +41,69 @@ pub struct SubtaskSettled {
     /// させる経路ではない（元が `Agent` のターンは `Agent` のまま）。registry から
     /// 引けなかった場合は最小権限（`Agent`）へ倒す（fail-closed）。
     pub caller: CallerIdentity,
+}
+
+/// 走行 1 件の中立なライフサイクル状態（D-1087）。
+///
+/// 表示語彙（絵文字・見出し・配送先）は実装側が持つ。ここは「起きたこと」だけを表す。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubtaskLifecycleStatus {
+    Started,
+    Progress,
+    Completed,
+    Failed,
+    TimedOut,
+    Aborted,
+}
+
+impl SubtaskLifecycleStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubtaskLifecycleStatus::Started => "started",
+            SubtaskLifecycleStatus::Progress => "progress",
+            SubtaskLifecycleStatus::Completed => "completed",
+            SubtaskLifecycleStatus::Failed => "failed",
+            SubtaskLifecycleStatus::TimedOut => "timed_out",
+            SubtaskLifecycleStatus::Aborted => "aborted",
+        }
+    }
+
+    /// runtime の内部 `exit_reason` を状態へ写像する。表示への写像は実装側の責務なので、
+    /// ここでは「正常終了か、失敗か、時間切れか」だけを決める。
+    pub fn from_exit_reason(exit_reason: &str) -> Self {
+        match exit_reason {
+            "timeout" => SubtaskLifecycleStatus::TimedOut,
+            "error" => SubtaskLifecycleStatus::Failed,
+            // "completed" / "stopped_by_limit" など
+            _ => SubtaskLifecycleStatus::Completed,
+        }
+    }
+}
+
+/// 走行 1 件のライフサイクル 1 件（D-1087）。
+///
+/// 宛先・整形・配送は実装（gateway）の責務。core は値をそのまま渡すだけ。
+/// 各項目は「その時点で分かっているもの」だけを埋める（例: progress は `detail`）。
+pub struct SubtaskLifecycleEvent<'a> {
+    /// subtask 自身の ID。
+    pub subtask_id: &'a str,
+    /// subtask 自身のセッション ID（走行の相関キー。親とは別の値）。
+    pub sub_session_id: &'a str,
+    /// spawn 元の親セッション ID。
+    pub parent_session_id: &'a str,
+    /// 親セッションのエージェント ID。
+    pub agent_id: &'a str,
+    pub status: SubtaskLifecycleStatus,
+    /// 人間可読ラベル（registry の `label`）。不明なら空。
+    pub label: &'a str,
+    /// 依頼本文。started 以外では空（実装が started で保持する）。
+    pub task: &'a str,
+    /// progress の本文。
+    pub detail: Option<&'a str>,
+    /// 終端（completed / failed / timed_out / aborted）だけ。
+    pub duration_ms: Option<u64>,
+    /// 終端の結果本文。
+    pub result_text: Option<&'a str>,
 }
 
 /// subtask 完了通知の抽象（`LoopEvent` 直依存を置換する）。
@@ -112,6 +178,24 @@ pub trait SubtaskCompletionSink: Send + Sync {
             exit_reason = %ev.exit_reason,
             "subtask cancelled (sink has no cancel-time reconciliation)"
         );
+    }
+
+    /// 走行のライフサイクル（開始 / 進捗 / 終了 / 中断）を 1 件ずつ通知する（D-1087）。
+    ///
+    /// [`Self::deliver_continuation`] とは役割が違う。あちらは**決着を親会話へ戻す**
+    /// （resume）core の責務で、配送可否の判断を伴う。こちらは**起きた事実**を実装へ
+    /// 渡すだけで、resume も配送も起こさない。実装が購読していなければ何もしない
+    /// （既定実装は空）ので、呼び出し側は常に呼んでよい。
+    ///
+    /// 宛先の解決・整形・配送・購読フィルタは実装側の責務。core は宛先も URL も持たない。
+    fn on_subtask_lifecycle(&self, _ev: &SubtaskLifecycleEvent<'_>) {}
+
+    /// 走行中のツールイベントを受け取る sink（D-1087）。
+    ///
+    /// `spawn_subtask` はこの値で副実行の `RunRequest` を組むので、実装は自分の
+    /// 活動 sink を返せばよい（副実行も同じ活動の流れに載る）。既定は `None`（購読なし）。
+    fn tool_event_sink(&self) -> Option<Arc<dyn ToolEventSink>> {
+        None
     }
 }
 

@@ -3,7 +3,7 @@
   "purpose": "Issue #1006 S0 line-specific reviewed burn-down; entries are debts or explicit gateway-store provenance, never wildcard exceptions",
   "review": {
     "status": "line-by-line-reviewed",
-    "finding_count": 115,
+    "finding_count": 105,
     "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance"
   },
   "entries": [
@@ -50,7 +50,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 33,
+      "line": 31,
       "snippet": "pub mod session_watch_policy;",
       "classification": "production-violation",
       "violation": "V11",
@@ -60,7 +60,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 61,
+      "line": 62,
       "snippet": "pub use session_watch_policy::{",
       "classification": "production-violation",
       "violation": "V11",
@@ -70,7 +70,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 62,
+      "line": 63,
       "snippet": "caller_policy_key, parse_session_watch_policy, watch_author_standing, ClassPolicy,",
       "classification": "production-violation",
       "violation": "V11",
@@ -80,7 +80,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 63,
+      "line": 64,
       "snippet": "SessionPolicyError, SessionWatchPolicy, WatchAllowSets, WatchAuthorStanding,",
       "classification": "production-violation",
       "violation": "V11",
@@ -310,7 +310,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 285,
+      "line": 289,
       "snippet": "CREATE TABLE IF NOT EXISTS channel_config (",
       "classification": "production-violation",
       "violation": "V06",
@@ -320,7 +320,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 299,
+      "line": 303,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_channel_guild ON channel_config(guild_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -330,7 +330,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 418,
+      "line": 428,
       "snippet": "CREATE TABLE IF NOT EXISTS trusted_users (",
       "classification": "production-violation",
       "violation": "V06",
@@ -340,7 +340,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 430,
+      "line": 440,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -350,7 +350,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 654,
+      "line": 664,
       "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
       "classification": "production-violation",
       "violation": "V06",
@@ -360,7 +360,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 663,
+      "line": 673,
       "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
       "classification": "production-violation",
       "violation": "V06",
@@ -400,7 +400,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 42,
+      "line": 49,
       "snippet": "SaidCaller::TrustedUser => CallerIdentity::TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -410,7 +410,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 240,
+      "line": 253,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -420,7 +420,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 548,
+      "line": 619,
       "snippet": "Some(\"trusted_user\") => Ok(SaidCaller::TrustedUser),",
       "classification": "production-violation",
       "violation": "V11",
@@ -520,88 +520,8 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/server/src/process/wiring.rs",
-      "line": 88,
+      "line": 100,
       "snippet": "| opencrab_actions::CallerIdentity::TrustedUser",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/system_actions/definitions/webhooks.rs",
-      "line": 15,
-      "snippet": "description: \"spawn_subtask が webhook 未指定時に実際に使うデフォルト subtask webhook を解決して返す。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。\".to_string(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/system_actions/definitions/webhooks.rs",
-      "line": 93,
-      "snippet": "description: \"登録されている subtask webhook 設定を一覧する。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。\".to_string(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/system_actions/definitions/webhooks.rs",
-      "line": 119,
-      "snippet": "description: \"実際に使われるデフォルト webhook を解決して返す（既定 family='activity'＝一般ツール/コマンド活動）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。\".to_string(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/system_actions/definitions/webhooks.rs",
-      "line": 199,
-      "snippet": "description: \"登録されている webhook 設定を一覧する。`family`/`scope` で絞り込み可（省略時は全件）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。\".to_string(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/webhook_targets.rs",
-      "line": 143,
-      "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/webhook_targets.rs",
-      "line": 145,
-      "snippet": "return reject(\"redacted read requires owner/trusted_user/co_agent\");",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/webhook_targets.rs",
-      "line": 458,
-      "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/server/src/webhook_targets.rs",
-      "line": 460,
-      "snippet": "return reject(\"redacted read requires owner/trusted_user/co_agent\");",
       "classification": "production-violation",
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
@@ -880,7 +800,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 286,
+      "line": 290,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -890,7 +810,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 288,
+      "line": 292,
       "snippet": "guild_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -900,7 +820,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 297,
+      "line": 301,
       "snippet": "PRIMARY KEY (channel_id, agent_id)",
       "classification": "production-violation",
       "violation": "V06",
@@ -910,7 +830,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/schema/sql/full.rs",
-      "line": 553,
+      "line": 563,
       "snippet": "channel_id TEXT NOT NULL,",
       "classification": "production-violation",
       "violation": "V06",
@@ -920,7 +840,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 118,
+      "line": 127,
       "snippet": "channel_id: row.address.as_str(),",
       "classification": "production-violation",
       "violation": "V11",
@@ -930,7 +850,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 120,
+      "line": 129,
       "snippet": "guild_id: instance_id,",
       "classification": "production-violation",
       "violation": "V11",
@@ -940,7 +860,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 150,
+      "line": 159,
       "snippet": "let whitelist = |channel_id: &str, agent_id: &str| {",
       "classification": "production-violation",
       "violation": "V11",
@@ -950,7 +870,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 160,
+      "line": 169,
       "snippet": "channel_whitelisted(&tx, agent_id, instance_id, channel_id)",
       "classification": "production-violation",
       "violation": "V11",
@@ -961,7 +881,7 @@
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/record.rs",
       "line": 59,
-      "snippet": "\"channel_id\": row.address,",
+      "snippet": "\"channel_id\": address,",
       "classification": "production-violation",
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
@@ -970,7 +890,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/turn.rs",
-      "line": 150,
+      "line": 284,
       "snippet": "channel_id: Some(&address),",
       "classification": "production-violation",
       "violation": "V11",
@@ -1020,7 +940,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/agent_runtime_impl.rs",
-      "line": 714,
+      "line": 753,
       "snippet": "channel_id = %c.channel_id,",
       "classification": "production-violation",
       "violation": "V11",
@@ -1032,26 +952,6 @@
       "path": "crates/server/src/agent_schedule.rs",
       "line": 88,
       "snippet": "for key in [\"scope\", \"channel_id\", \"guild_id\", \"session_id\"] {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/system_actions/definitions/webhooks.rs",
-      "line": 60,
-      "snippet": "\"description\": \"Discord webhook URL。空/省略でそのscopeを無効化する。\"",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/system_actions/definitions/webhooks.rs",
-      "line": 170,
-      "snippet": "\"description\": \"Discord webhook URL。空/省略でそのscopeを無効化する。\"",
       "classification": "production-violation",
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
@@ -1198,11 +1098,11 @@
     {
       "violation": "V15",
       "classification": "dead-or-legacy-pending-reachability",
-      "path": "crates/discord/Cargo.toml",
-      "line": 2,
+      "path": "docs/evidence/d1087-webhook-move.md",
+      "line": 17,
       "needle": "opencrab-discord",
       "owner_stage": "S5/S10",
-      "expires_when": "classify every linked edge before deliberate deletion; do not assume the crate is dead"
+      "expires_when": "linked edges classified (0 dependent crates) before the deliberate deletion; the code lives in the gateway repository (D-1087)"
     },
     {
       "violation": "V15",

@@ -286,3 +286,56 @@ fn test_index_write_helpers_work_inside_outer_transaction() {
     assert_eq!(nodes_count(&conn), 1);
     assert_eq!(fts_count(&conn), 1);
 }
+
+/// D-1085 §13.3: a date range keeps the nodes whose own range overlaps it (undated nodes never
+/// match); without a query they come newest first.
+#[test]
+fn test_search_index_nodes_in_range() {
+    let conn = setup();
+    for (id, from, to) in [
+        ("sep", "2026-09-20", "2026-09-30"),
+        ("span", "2026-09-29", "2026-10-02"),
+        ("oct", "2026-10-10", "2026-10-11"),
+        ("nov", "2026-11-01", "2026-11-01"),
+    ] {
+        let mut node = mk_topic_node(id, "a1", &format!("{id} Rust"), "話", &[]);
+        node.date_from = Some(from.to_string());
+        node.date_to = Some(to.to_string());
+        insert_index_node(&conn, &node).unwrap();
+    }
+    let mut undated = mk_topic_node("undated", "a1", "undated Rust", "話", &[]);
+    undated.date_from = None;
+    undated.date_to = None;
+    insert_index_node(&conn, &undated).unwrap();
+    let october = IndexDateRange {
+        from: Some("2026-10-01".to_string()),
+        to: Some("2026-10-31".to_string()),
+    };
+    let ids = |hits: Vec<IndexNodeSearchResult>| -> Vec<String> {
+        hits.into_iter().map(|h| h.node_id).collect()
+    };
+
+    let hits = search_index_nodes_in_range(&conn, "a1", None, 10, None, &october).unwrap();
+    assert_eq!(ids(hits), ["oct", "span"], "newest first, overlap counts");
+
+    let mut hits =
+        ids(search_index_nodes_in_range(&conn, "a1", Some("Rust"), 10, None, &october).unwrap());
+    hits.sort();
+    assert_eq!(hits, ["oct", "span"]);
+
+    let since_nov = IndexDateRange {
+        from: Some("2026-11-01".to_string()),
+        to: None,
+    };
+    let hits = search_index_nodes_in_range(&conn, "a1", None, 10, None, &since_nov).unwrap();
+    assert_eq!(ids(hits), ["nov"]);
+
+    let until_sep = IndexDateRange {
+        from: None,
+        to: Some("2026-09-28".to_string()),
+    };
+    // 「話」 is shorter than a trigram: the LIKE fallback keeps the range too.
+    let hits =
+        search_index_nodes_in_range(&conn, "a1", Some("話"), 10, None, &until_sep).unwrap();
+    assert_eq!(ids(hits), ["sep"]);
+}

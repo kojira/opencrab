@@ -175,3 +175,24 @@ async fn nonowner_turn_system_prompt_index_lists_owner_only_setting_same_as_owne
     let index = |sp: &str| sp[sp.find("## More tools").expect("index")..].to_string();
     assert_eq!(index(&nonowner), index(&owner), "More tools index が caller で変わった");
 }
+
+/// D-1087: webhook は gateway の概念なので、core のツール一覧に現れない。
+///
+/// 観測境界は既存と同じ **LLM に渡る system prompt**（run_agent_response が組んだ最終 prompt）。
+/// 6 ツールを撤去する前は index の "webhook" カテゴリとして現れ、実装後は 0 件になる。
+/// 名前だけでなく語そのものを禁じ、URL 解決・宛先設定の概念が core へ戻る変形も同時に落とす。
+#[tokio::test]
+async fn system_prompt_has_no_webhook_tool_vocabulary() {
+    let sp = captured_system_prompt(
+        opencrab_actions::CallerIdentity::Owner,
+        IdxProbeGateway {
+            nostr_ops: false,
+            config_op: true,
+        },
+    )
+    .await;
+    assert!(
+        sp.to_lowercase().find("webhook").is_none(),
+        "core の system prompt に webhook が残っている:\n{sp}"
+    );
+}

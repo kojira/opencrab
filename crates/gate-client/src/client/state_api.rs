@@ -34,55 +34,6 @@ struct WriteOut {
     tx: mpsc::UnboundedSender<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LiveEvent {
-    Message {
-        /// core が say に載せた既存 delivery id。gateway は platform message id との対応に使う。
-        delivery_id: String,
-        text: String,
-        /// この say が**特定の inbound イベントへの返信**なら、その said の origin。
-        ///
-        /// 即時ターン（`occupy_until_turn_ends=true` の said 1 本）でだけ `Some`。bundle
-        /// ターン（複数 said・activity started 起源）や、同一ターンに複数の即時 said が
-        /// 相乗りした曖昧ケースでは`None`（単一の返信先が無い）。consumerは`Some`を
-        /// 対象返信、`None`を「返信先無し」として扱う。返信先を使わないconsumerは無視してよい。
-        reply_origin: Option<String>,
-        /// D-1083: the partial stream this say completes. `Some` only when core sent `Partial`
-        /// events with the same id before this say; the text of those partials is a prefix-like
-        /// preview of `text`, which stays the authoritative body.
-        stream_id: Option<String>,
-    },
-    /// D-1083: cumulative released text of a realtime-profile turn's stream, sent before the say
-    /// carrying the same `stream_id`. Best effort: dropped silently when the live queue is full.
-    /// Consumers that do not preview text ignore it.
-    Partial { stream_id: String, text: String },
-    Activity {
-        activity_id: String,
-        state: String,
-        /// #964: 次の LLM request に新しく含める投稿の origin（state="read" のときだけ Some）。
-        /// consumerはread+Someを外部側の既読表現へ変換できる。
-        origin: Option<String>,
-    },
-    /// #915: activity ended で core が指定した完了サインの付け先（発話 id）。
-    Completed { target: String },
-    CompletedNoReply {
-        /// 沈黙で終えたターン（say 無し）の発端 origin。即時ターン（`occupy_until_turn_ends`）が
-        /// 単独で握った said（`ReplyOrigin::Single`）だけ `Some`。bundle ターンや複数即時 said の
-        /// 相乗り（`None`/`Ambiguous`）では単一の発端を決められないので `None`。consumer は `Some` を
-        /// 「その発端messageが沈黙で終えた」サインに使い、`None`は無視してよい。
-        /// 裁定A（core が ended を say の後に出す）により、返信ターンでは saw_utterance=true のため
-        /// このイベントは立たず、真の沈黙ターンだけに立つ。
-        reply_origin: Option<String>,
-    },
-    /// R3(❌): ターン失敗（DeliveryEffect::Failed）。`reply_origin` は発端メッセージの origin。
-    /// consumerはこのoriginへ外部側の失敗表現を付けられる。error本文は運ばない。
-    TurnFailed { reply_origin: String },
-    Error {
-        code: String,
-        detail: Option<String>,
-    },
-}
-
 #[derive(Debug)]
 pub enum SaidOutcome {
     Accepted {
@@ -221,6 +172,9 @@ pub struct InstanceClient {
     /// DI 拡張 §3.1: hello に載せる能力宣言配列（None は従来の hello＝能力ゼロ）。
     operations: Option<Value>,
     runtime_capabilities: super::wire::RuntimeCapabilities,
+    /// D-1091: hello に載せる、この instance の binding 用の環境変数（名前→値）。core は解釈せず
+    /// `execute_shell` の子へ渡すだけ。空なら従来と同じ frame。
+    run_env: std::collections::BTreeMap<String, String>,
     /// DI 拡張 §5: invoke の実行 handler（None は operation_unknown を返す）。
     invoke_handler: Option<Arc<dyn InvokeHandler>>,
     inner: Mutex<Inner>,
@@ -239,6 +193,27 @@ impl InstanceClient {
         runtime_capabilities: super::wire::RuntimeCapabilities,
         invoke_handler: Option<Arc<dyn InvokeHandler>>,
     ) -> Self {
+        Self::blank_with_env(
+            instance_id,
+            author_id,
+            say_policy,
+            operations,
+            runtime_capabilities,
+            std::collections::BTreeMap::new(),
+            invoke_handler,
+        )
+    }
+
+    /// D-1091: [`Self::blank`] plus the environment the gateway declares for this instance.
+    fn blank_with_env(
+        instance_id: String,
+        author_id: String,
+        say_policy: SayPolicy,
+        operations: Option<Value>,
+        runtime_capabilities: super::wire::RuntimeCapabilities,
+        run_env: std::collections::BTreeMap<String, String>,
+        invoke_handler: Option<Arc<dyn InvokeHandler>>,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
         Self {
@@ -247,6 +222,7 @@ impl InstanceClient {
             say_policy,
             operations,
             runtime_capabilities,
+            run_env,
             invoke_handler,
             inner: Mutex::new(Inner {
                 acknowledged: HashMap::new(),
@@ -350,6 +326,39 @@ impl InstanceClient {
             say_policy,
             operations,
             runtime_capabilities,
+            Some(invoke_handler),
+        ));
+        tokio::spawn(reconnect_loop(
+            client.clone(),
+            socket,
+            revision,
+            config_digest,
+        ));
+        client
+    }
+
+    /// D-1091: `spawn_with_operations` plus the environment this gateway declares for the
+    /// instance's bindings. Core hands it to `execute_shell` children of that instance's turns.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_operations_and_env(
+        socket: PathBuf,
+        instance_id: String,
+        revision: u64,
+        author_id: String,
+        config_digest: String,
+        say_policy: SayPolicy,
+        operations: Option<Value>,
+        runtime_capabilities: super::wire::RuntimeCapabilities,
+        invoke_handler: Arc<dyn InvokeHandler>,
+        run_env: std::collections::BTreeMap<String, String>,
+    ) -> Arc<Self> {
+        let client = Arc::new(Self::blank_with_env(
+            instance_id,
+            author_id,
+            say_policy,
+            operations,
+            runtime_capabilities,
+            run_env,
             Some(invoke_handler),
         ));
         tokio::spawn(reconnect_loop(

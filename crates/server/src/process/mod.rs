@@ -21,8 +21,9 @@ mod wiring;
 
 pub use budget::{
     build_conversation_string, build_conversation_string_with_memory_index,
-    build_conversation_string_with_waters, check_agent_model_change, compute_context_budget,
-    core_functions_tokens, ensure_functions_within_cap, ensure_model_context_window_registered,
+    build_conversation_string_with_waters, build_conversation_string_with_window,
+    check_agent_model_change, compute_context_budget, core_functions_tokens,
+    ensure_functions_within_cap, ensure_model_context_window_registered,
     ensure_model_max_output_tokens_registered, ensure_request_functions_budget,
     ensure_startup_budget_inputs, include_memory_index, measure_functions_tokens,
     model_context_window_missing_message, normalize_model_spec, resolve_agent_request_envelope,
@@ -39,8 +40,8 @@ pub(crate) use wiring::{
 
 use budget::spawn_background_turn_end_snapshot;
 use callbacks::{
-    merge_image_urls, normalize_image_urls, set_llm_log_callback, set_run_notifier_callbacks,
-    set_turn_log_callbacks,
+    merge_image_urls, normalize_image_urls, set_llm_log_callback, set_turn_log_callbacks,
+    TurnLogWriter,
 };
 use live_inbound::SubtaskSteerInbound;
 use loop_restart::prepare_loop_restart;
@@ -49,6 +50,9 @@ use skills::{record_used_skills, spawn_background_index_build};
 #[cfg(test)]
 #[path = "tests/agent_visible_skill_index.rs"]
 mod agent_visible_skill_index_tests;
+#[cfg(test)]
+#[path = "tests/binding_run_env.rs"]
+mod binding_run_env_tests;
 #[cfg(test)]
 #[path = "tests/curated_long_term_injection.rs"]
 mod curated_long_term_injection_tests;
@@ -79,9 +83,6 @@ mod skill_mentioned_tests;
 #[cfg(test)]
 #[path = "tests/steer_inbound.rs"]
 mod steer_inbound_tests;
-#[cfg(test)]
-#[path = "tests/tool_result_progress_line.rs"]
-mod tool_result_progress_line_tests;
 /// 実行対象の agent 行が `agents` に存在しないときのエラー（#632）。
 ///
 /// `run_agent_response` は**サーバ側の全ターン実行が通る唯一のチョークポイント**
@@ -193,10 +194,21 @@ pub async fn run_agent_response(
             )?
         }
     };
-    // per-agent の推論（thinking）強度。空/未設定なら None（プロバイダー既定に従う）。
+    // 推論（thinking）強度。None はプロバイダー設定（無ければモデル既定）に従う。
+    // D-1086: default turns use session > agent; a lightweight turn (D-1085) uses only the
+    // session's realtime slot, never the per-agent effort.
     let agent_reasoning_effort = {
+        let slot = if req.lightweight {
+            opencrab_db::queries::SessionEffortSlot::Realtime
+        } else {
+            opencrab_db::queries::SessionEffortSlot::Default
+        };
         let conn = state.db.lock().unwrap();
-        opencrab_db::queries::effective_reasoning_effort_for_agent(&conn, agent_id).unwrap_or(None)
+        opencrab_db::queries::effective_reasoning_effort_for_session(
+            &conn, agent_id, session_id, slot,
+        )
+        .map(|(effort, _)| effort)
+        .unwrap_or(None)
     };
     // per-agent の本文URL読取り（provider native web_search / url_context）。既定は無効。
     let agent_web_search = {
@@ -210,8 +222,11 @@ pub async fn run_agent_response(
     // depth >= 1 の再入実行は sub-engine（`spawn_subtask` が起動したサブタスク）。
     // メトリクスの purpose ラベルは旧 Discord 実装（`execute_spawn_subtask`）と同じく
     // "subtask" にする（#175 S4）。
+    // D-1085: a provisional run is labelled `provisional` so its cost stays visible.
     let current_purpose = Arc::new(std::sync::Mutex::new(
-        if depth == 0 {
+        if req.provisional {
+            "provisional"
+        } else if depth == 0 {
             "conversation"
         } else {
             "subtask"
@@ -266,6 +281,8 @@ pub async fn run_agent_response(
             completion_sink: req.completion_sink.clone(),
             reply_target: req.reply_target.clone(),
             tool_allowlist: req.tool_allowlist.clone(),
+            tool_event_sink: req.tool_event_sink.clone(),
+            run_env: req.run_env.clone(),
         },
         |caller_is_trusted| {
             state.mcp_manager.as_ref().map(|manager| {
@@ -274,23 +291,6 @@ pub async fn run_agent_response(
             })
         },
     );
-    // ツール/コマンド活動を webhook へ実況する sink を挿す。
-    //
-    // - サブタスク走行（`run_notifier` あり）は、その run 専用の配送ワーカーを共有する
-    //   sink を通知実装から受け取る（lifecycle と tool_call_* の順序が 1 本の worker で
-    //   保たれる）。
-    // - それ以外（depth0 / メインターン）は activity family のデフォルト宛先から
-    //   factory で組む。activity 行が無ければ factory は None を返し、配送 worker も
-    //   起動しない（best-effort）。無効/不正なデフォルトは sink 側で診断を残し、黙って
-    //   fall through しない。
-    let run_notifier = req.run_notifier.clone();
-    let notifier_tool_sink = run_notifier.as_ref().and_then(|n| n.tool_event_sink());
-    let tool_event_sink = notifier_tool_sink;
-    let executor = match tool_event_sink {
-        Some(sink) => executor.with_tool_event_sink(sink),
-        None => executor,
-    };
-
     // §2.7 案B: 「## More tools」静的 index を effective − 投影 から導出し system prompt へ後付け。
     // executor が具体型（`BridgedExecutor`）のうちに計算する（この直後に Arc<dyn> へ包む）。
     // lane・owner-only は effective に現れるかで自動的に出し分け、build_agent_context の
@@ -344,6 +344,20 @@ pub async fn run_agent_response(
         max_iterations,
     );
     engine.set_assistant_history_name(agent_name.to_string());
+    // D-1085 §12: a provisional run stops at any tool but the read-only set, without running it.
+    if let Some(gate) = &req.promotion_gate {
+        engine.set_promotion_gate(
+            gate.clone(),
+            opencrab_actions::PROVISIONAL_READ_ONLY_TOOLS
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+        );
+    }
+    let turn_log_writer = match &req.promotion_gate {
+        Some(gate) => TurnLogWriter::until_promoted(state.db.clone(), gate),
+        None => TurnLogWriter::direct(state.db.clone()),
+    };
 
     // #676（案Y）: 送るプロバイダのモデルは、出力上限（max_output_tokens）を model_pricing から
     // 実能力値で解決して engine に渡す。未登録（NULL / 0 以下 / 行なし）なら fail loud で
@@ -404,6 +418,8 @@ pub async fn run_agent_response(
                 session_id.to_string(),
             )
             .with_reply_target(req.reply_target.clone())
+            // 背景バッチの観測（D-1087）: ツール実行は親ターンの 1 つ下の走行として載る。
+            .with_depth(depth)
             // このターンの呼び出し元を dispatch した subtask へ引き継ぐ（#298）。
             // 決着で親会話を resume する sink が、元の権限のまま再開できる
             // （落とすと owner/trusted のツールが resume 後に丸ごと消える）。
@@ -413,10 +429,6 @@ pub async fn run_agent_response(
             .with_workspace_root(Some(tool_result_workspace.clone()));
             engine.set_tool_dispatcher(std::sync::Arc::new(dispatcher));
         }
-    }
-
-    if let Some(notifier) = run_notifier {
-        set_run_notifier_callbacks(&mut engine, &notifier, session_id.to_string());
     }
 
     // per-agent の thinking 強度を各 ChatRequest に付与（プロバイダーが per-request で優先）。
@@ -483,7 +495,7 @@ pub async fn run_agent_response(
             .unwrap_or_default();
         set_turn_log_callbacks(
             &mut engine,
-            state.db.clone(),
+            turn_log_writer.clone(),
             agent_id.to_string(),
             session_id.to_string(),
             tool_result_workspace,
@@ -557,7 +569,10 @@ pub async fn run_agent_response(
                 Err(e) => {
                     if req.persist_turn_logs {
                         end_event::persist_context_budget_error(
-                            &state.db, agent_id, session_id, &e,
+                            &turn_log_writer,
+                            agent_id,
+                            session_id,
+                            &e,
                         );
                     }
                     return Err(e.into());
@@ -644,13 +659,14 @@ pub async fn run_agent_response(
 
     // 配送しない制御終端も、通常 speech と分離した system event として監査可能にする。
     if req.persist_turn_logs {
-        end_event::persist_result(&state.db, agent_id, session_id, &result);
+        end_event::persist_result(&turn_log_writer, agent_id, session_id, &result);
     }
 
     // 記憶インデックスの背景ビルドとスキル利用回数は depth 0（メインターン）のみ。
     // sub-engine の内部 run では走らせない（旧 `execute_spawn_subtask` の sub-engine は
     // どちらも持たなかった。サブタスクごとに LLM 支出が増えるのを避ける）。
-    if depth == 0 {
+    // D-1085: a provisional run is not a turn yet and leaves no trace here.
+    if depth == 0 && !req.provisional {
         if let Some((high, low)) = last_waters {
             spawn_background_turn_end_snapshot(state, session_id, agent_id, high, low);
         }

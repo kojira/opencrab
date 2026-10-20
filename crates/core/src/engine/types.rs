@@ -28,6 +28,20 @@ pub struct ActionResult {
     pub images: Vec<String>,
 }
 
+/// 背景で走る 1 本の run の文脈（観測の相関キー）。
+///
+/// `session_id` は走行自身のセッション（subtask なら `subtask-<uuid>`）、`depth` は親ターン
+/// からの深さ。観測イベントを出す executor は `ToolEvent` にこの値を載せるので、consumer は
+/// 入れ子の走行で起きたツール実行を、どの走行のものか取り違えずに並べられる。
+///
+/// **記録の所属は変えない**（`tool_logs` などは従来どおり実行した executor の文脈で残る）。
+/// ここで差し替えるのは観測だけ。
+#[derive(Clone, Copy, Debug)]
+pub struct ExecutorRun<'a> {
+    pub session_id: &'a str,
+    pub depth: u32,
+}
+
 /// Trait for executing actions (tool calls).
 ///
 /// This trait is defined in `opencrab-core` so that the engine can call
@@ -39,7 +53,7 @@ pub trait ActionExecutor: Send + Sync {
     async fn execute(&self, name: &str, args: &Value) -> ActionResult;
 
     /// Execute an action, propagating the LLM-provided `tool_call_id` for
-    /// correlation (e.g. activity webhooks, tracing).
+    /// correlation (e.g. gateway activity traces, tracing).
     ///
     /// The default implementation ignores the id and delegates to [`execute`],
     /// so existing implementors keep working unchanged. Implementors that emit
@@ -47,6 +61,22 @@ pub trait ActionExecutor: Send + Sync {
     /// real tool-call id instead of synthesizing one.
     async fn execute_with_id(&self, name: &str, args: &Value, _tool_call_id: &str) -> ActionResult {
         self.execute(name, args).await
+    }
+
+    /// 背景 run の一部として実行する（観測イベントの相関キーを `run` にする）。
+    ///
+    /// 既定は [`Self::execute_with_id`] へ委譲する（文脈を持たない executor は従来どおり）。
+    /// 観測イベントを出す実装（`BridgedExecutor`）だけが override し、`ToolEvent` の
+    /// `session_id` / `depth` を `run` の値にする。**記録の所属は変えない**。
+    async fn execute_in_run(
+        &self,
+        run: ExecutorRun<'_>,
+        name: &str,
+        args: &Value,
+        tool_call_id: &str,
+    ) -> ActionResult {
+        let _ = run;
+        self.execute_with_id(name, args, tool_call_id).await
     }
 
     /// List available action (tool) definitions for LLM function calling.

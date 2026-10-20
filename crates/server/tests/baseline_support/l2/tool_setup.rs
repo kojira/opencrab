@@ -429,6 +429,8 @@ pub(super) fn build_executor_with_state(
             completion_sink: None,
             reply_target: None,
             tool_allowlist: allowlist,
+            tool_event_sink: None,
+            run_env: std::collections::BTreeMap::new(),
         },
         |caller_is_trusted| {
             Some(Arc::new(opencrab_mcp::McpToolProvider::new(
@@ -504,6 +506,8 @@ pub(super) fn build_subtask_fixture_executor(
             completion_sink: None,
             reply_target: None,
             tool_allowlist: None,
+            tool_event_sink: None,
+            run_env: std::collections::BTreeMap::new(),
         },
         |_| None,
     );

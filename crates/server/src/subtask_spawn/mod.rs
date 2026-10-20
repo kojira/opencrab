@@ -7,13 +7,15 @@
 //! workspace 解決・モデル解決までほぼ同一で、コメントまで同文だった。
 //!
 //! ここでは sub-engine を組み立てず、**`process::run_agent_response` を depth+1 で
-//! 再入呼び出し**する。差分として明示的に渡すのは次の 4 つだけ:
+//! 再入呼び出し**する。差分として明示的に渡すのは次の 3 つだけ:
 //!
 //! 1. 許可リスト（`SubEngineGatewayActions`）— `run_agent_response` が depth>=1 で自動的に
 //!    合成 gateway の最外周へ被せる。
 //! 2. `current_purpose = "subtask"` 相当 — 同じく depth から導出される。
-//! 3. 通知（`SubtaskRunNotifier` / #175 S3）— `RunRequest::with_run_notifier`。
-//! 4. タイムアウト — ここで `tokio::time::timeout` として掛ける。
+//! 3. タイムアウト — ここで `tokio::time::timeout` として掛ける。
+//!
+//! 通知の抽象境界（#175 S3）は D-1087 で core から削除した。通知先は gateway の概念なので、
+//! 走行の実況は gateway が core の活動 frame（`subtask_lifecycle`）から駆動する。
 //!
 //! 守る不変条件（壊すと重大。順に対応するテストがある）:
 //! - **順序契約**: DB 永続化 → 登録簿から除去 → 完了通知。`settle_completed` を必ず経由する。

@@ -14,7 +14,7 @@
 //! 決着後は中身が空の `DashMap` が残るだけ（外部gatewayのregistriesも同様）。
 //!
 //! #168 で `crates/server` からこの gateway 非依存層へ移した。Nostr ゲートウェイ
-//! （`crates/nostr`）も per-session registry を必要とするが、依存方向は
+//! （gateway リポジトリの `opencrab-nostr-gateway`）も per-session registry を必要とするが、依存方向は
 //! server → nostr であり nostr から server の型は参照できない。同型の構造を各
 //! gateway crate に複製するより、registry 本体（`SubtaskRegistry`）と同じ層に
 //! 1 つだけ置く方が「dispatcher と `cancel_subtask` が同一 Arc を見る」という

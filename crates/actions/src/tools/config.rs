@@ -1,4 +1,26 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+
+/// 実行環境変数のうち、core プロセス自身が持つ資格情報として**binding から上書きさせない**名前。
+///
+/// これらは「その binding の持ち主アカウント」ではなく、core が外向きに使うプロセスの資格情報
+/// である。binding 宣言で差し替えられると、core の LLM 呼び出しが別アカウントの鍵で走る。
+/// それ以外の名前は gateway の領分なので、宣言された値をそのまま渡す（core は解釈しない）。
+pub const CORE_OWNED_ENV_NAMES: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "CURSOR_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+];
+
+/// 名前が core 自身の資格情報か（[`CORE_OWNED_ENV_NAMES`]）。
+pub fn is_core_owned_env(name: &str) -> bool {
+    CORE_OWNED_ENV_NAMES
+        .iter()
+        .any(|owned| owned.eq_ignore_ascii_case(name))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -43,19 +65,40 @@ pub struct ShellToolConfig {
     pub working_dir: Option<String>,
     #[serde(default)]
     pub inherit_env: bool,
+    /// `inherit_env = false` のときに子へ渡す環境変数。`PATH` は設定に無くても必ず渡す
+    /// （[`ShellToolConfig::effective_env_vars`]）。許可コマンドを裸の名前で起動するには
+    /// 子の `PATH` が要り、無いと許可済みでも `No such file or directory` になるため。
     #[serde(default = "default_allowed_env_vars")]
     pub allowed_env_vars: Vec<String>,
     /// Deprecated / no longer enforced: execute_shell no longer truncates stdout/stderr
-    /// at the source. Full output is preserved and the webhook layer chunks losslessly.
+    /// at the source. Full output is preserved and the gateway chunks losslessly.
     /// Kept only for config backward-compatibility (existing TOML files keep parsing).
     #[serde(default = "default_max_output")]
     pub max_output_bytes: usize,
     // NEW: structured command list with permissions
     #[serde(default)]
     pub commands: Vec<CommandConfig>,
+    /// D-1091: この binding の gateway が宣言した環境変数（名前→値）。`execute_shell` の子へ
+    /// そのまま渡す。core は値も名前も解釈しない。
+    ///
+    /// 設定ファイルからは設定できない（`serde(skip)`）。gateway が自分の binding について
+    /// だけ宣言する値であり、TOML に書けると「どの binding の値か」が失われる。
+    #[serde(skip)]
+    pub run_env: BTreeMap<String, String>,
 }
 
 impl ShellToolConfig {
+    /// `inherit_env = false` のときに子へ実際に渡す環境変数名。`allowed_env_vars` に
+    /// `PATH` が無ければ先頭へ足す（D-1089）。他の変数は設定どおりに限定したまま
+    /// （`env_clear()` 後にこれだけを渡す）。
+    pub fn effective_env_vars(&self) -> Vec<String> {
+        let mut vars = self.allowed_env_vars.clone();
+        if !vars.iter().any(|name| name == "PATH") {
+            vars.insert(0, "PATH".to_string());
+        }
+        vars
+    }
+
     /// Returns all effective commands (merging allowed_commands as Agent-level)
     pub fn effective_commands(&self) -> Vec<CommandConfig> {
         let mut cmds: Vec<CommandConfig> = self.commands.clone();
@@ -71,6 +114,30 @@ impl ShellToolConfig {
         }
         cmds
     }
+
+    /// debug ログに載せる名前（値は絶対に含めない）。
+    ///
+    /// ログは子プロセスとは別の読者を持つ。宣言値は binding の資格情報なので、名前だけを出す。
+    /// この関数がログ payload の唯一の源であることをテストが固定する。
+    pub fn declared_env_log_names(&self) -> Vec<String> {
+        self.declared_env_split().0
+    }
+
+    /// 宣言された環境変数を「実際に渡す名前」と「core 所有として拒否した名前」に分ける。
+    ///
+    /// 拒否するのは [`CORE_OWNED_ENV_NAMES`] だけ。値は返さない（名前だけをログに出す）。
+    pub fn declared_env_split(&self) -> (Vec<String>, Vec<String>) {
+        let mut applied = Vec::new();
+        let mut refused = Vec::new();
+        for name in self.run_env.keys() {
+            if is_core_owned_env(name) || name.trim().is_empty() {
+                refused.push(name.clone());
+            } else {
+                applied.push(name.clone());
+            }
+        }
+        (applied, refused)
+    }
 }
 
 impl Default for ShellToolConfig {
@@ -85,6 +152,7 @@ impl Default for ShellToolConfig {
             allowed_env_vars: vec!["PATH".to_string(), "HOME".to_string(), "LANG".to_string()],
             max_output_bytes: 65536,
             commands: vec![],
+            run_env: BTreeMap::new(),
         }
     }
 }

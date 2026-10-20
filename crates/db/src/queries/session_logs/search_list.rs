@@ -197,6 +197,32 @@ pub fn list_recent_session_logs_of_type(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// D-1085: the largest `memory_sessions.id` of a session (0 when it has no rows).
+pub fn session_log_high_water(conn: &Connection, session_id: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(id), 0) FROM memory_sessions WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// D-1085: whether the session has a row with `id > high_water` other than `except`.
+pub fn session_has_rows_after(
+    conn: &Connection,
+    session_id: &str,
+    high_water: i64,
+    except: &[i64],
+) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT id FROM memory_sessions WHERE session_id = ?1 AND id > ?2")?;
+    let ids = stmt.query_map(params![session_id, high_water], |row| row.get::<_, i64>(0))?;
+    for id in ids {
+        if !except.contains(&id?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// List the most recent N **user** speech logs of a session (returned in id DESC order).
 ///
 /// 「ユーザーの発言」= `log_type='speech'` かつ発話者がエージェント自身でない行。

@@ -139,14 +139,6 @@ pub struct GatewayConfig {
     pub rest: RestGatewayConfig,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct SubtaskWebhookConfig {
-    #[serde(default)]
-    pub url: String,
-    #[serde(default)]
-    pub events: Option<Vec<String>>,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct RestGatewayConfig {
     #[serde(default = "default_port")]

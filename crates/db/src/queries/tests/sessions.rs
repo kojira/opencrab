@@ -252,3 +252,45 @@ fn realtime_model_lookup_failures_are_errors() {
         .unwrap();
     assert!(effective_realtime_model_for_session(&conn, "a1", "sess-a", "srv:default").is_err());
 }
+
+/// D-1086: default-profile effort is session > agent > provider; the realtime slot is session >
+/// provider (never the agent effort); slots and sessions are independent; a reset slot falls back.
+#[test]
+fn session_reasoning_effort_chain_per_slot() {
+    use ReasoningEffortSource::{Agent, Provider, Session};
+    use SessionEffortSlot::{Default as Def, Realtime as Rt};
+    let conn = setup();
+    d1080_agent(&conn, "a1", None);
+    conn.execute("UPDATE agents SET reasoning_effort = 'high' WHERE agent_id = 'a1'", [])
+        .unwrap();
+    d1080_session(&conn, "sess-a", r#"["a1"]"#);
+    d1080_session(&conn, "sess-b", r#"["a1"]"#);
+    let eff = |s: &str, slot| effective_reasoning_effort_for_session(&conn, "a1", s, slot).unwrap();
+    let some = |v: &str, src| (Some(v.to_string()), src);
+
+    assert_eq!(eff("sess-a", Def), some("high", Agent));
+    assert_eq!(eff("sess-a", Rt), (None, Provider));
+
+    assert!(set_session_reasoning_effort(&conn, "sess-a", Def, Some("low")).unwrap());
+    assert!(set_session_reasoning_effort(&conn, "sess-a", Rt, Some("none")).unwrap());
+    assert_eq!(
+        get_session_reasoning_effort(&conn, "sess-a", Def).unwrap().as_deref(),
+        Some("low")
+    );
+    assert_eq!(eff("sess-a", Def), some("low", Session));
+    assert_eq!(eff("sess-a", Rt), some("none", Session));
+    assert_eq!(eff("sess-b", Def), some("high", Agent));
+    assert_eq!(eff("sess-b", Rt), (None, Provider));
+
+    assert!(set_session_reasoning_effort(&conn, "sess-a", Def, None).unwrap());
+    assert_eq!(eff("sess-a", Def), some("high", Agent));
+    assert_eq!(eff("sess-a", Rt), some("none", Session));
+    conn.execute("UPDATE agents SET reasoning_effort = NULL WHERE agent_id = 'a1'", [])
+        .unwrap();
+    assert_eq!(eff("sess-a", Def), (None, Provider));
+
+    // A run without a session row has no session override; a missing session cannot be set.
+    assert_eq!(eff("sleep-run-1", Rt), (None, Provider));
+    assert!(get_session_reasoning_effort(&conn, "missing", Def).is_err());
+    assert!(!set_session_reasoning_effort(&conn, "missing", Def, Some("low")).unwrap());
+}

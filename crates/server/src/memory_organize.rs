@@ -37,10 +37,10 @@ use opencrab_db::queries::IndexNodeRow;
 /// 部分だけをこの狭い口に切り出す。
 ///
 /// - **本番**は [`AppStateTurnRunner`]（`run_agent_response` を呼ぶ実装）を渡す。ラン構築一式
-///   （dispatcher / gateway スロット / MCP / activity webhook sink / metrics / LLM client /
+///   （dispatcher / gateway スロット / MCP / metrics / LLM client /
 ///   engine）はこの実装の**内側**にだけ存在する。
 /// - **テスト**は結果（[`EngineResult`]）を差し替えるフェイクを渡す。フェイクは何も構築しない
-///   ので、webhook も gateway も MCP も LLM も**そもそも sleep の依存に入らない**（隔離実験の
+///   ので、gateway も MCP も LLM も**そもそも sleep の依存に入らない**（隔離実験の
 ///   つもりが本番 Discord へ飛んだ #370 の再発を、症状の個別封じではなく構造で防ぐ）。
 ///
 /// タイムアウトは呼び出し側（[`run_organize`]）が sleep ポリシーとして被せる。ここは「1 ターンを
@@ -53,7 +53,7 @@ pub trait OrganizeTurnRunner: Send + Sync {
 
 /// 本番の [`OrganizeTurnRunner`]。`run_agent_response`（本番のラン構築経路）へ委譲する。
 ///
-/// この型より外側（sleep ロジック）は `AppState` を持たないため、gateway/MCP/webhook を
+/// この型より外側（sleep ロジック）は `AppState` を持たないため、gateway/MCP を
 /// 構築する術がない。ラン構築が必要とする `state` はこの実装の中だけに閉じ込める。
 pub struct AppStateTurnRunner<'a> {
     pub state: &'a AppState,
@@ -124,7 +124,7 @@ pub const ORGANIZE_ALLOWED_TOOLS: &[&str] = &[
 ///
 /// 本番のラン構築（`run_agent_response`）を [`AppStateTurnRunner`] に閉じ込め、sleep の
 /// ロジック本体は [`run_organize`] に委譲する。sleep 本体は `AppState` を持たないので、
-/// gateway/MCP/webhook を構築する術がない（#370）。
+/// gateway/MCP を構築する術がない（#370）。
 ///
 /// 戻り値: 整理ラン（LLM）を実際に起動したら `true`。既定オフ・ゲート未達・初回シードは
 /// `false`（＝ LLM ゼロコール）。
@@ -143,7 +143,7 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
 /// 整理ラン（sleep）のロジック本体。**必要な手足だけ**を引数で受け取る（#370）:
 /// DB・設定・二重起動スロット・1 ターンを回す [`OrganizeTurnRunner`]。
 ///
-/// `AppState` を受け取らないので、この関数からは gateway/MCP/activity webhook を構築できない
+/// `AppState` を受け取らないので、この関数からは gateway/MCP を構築できない
 /// （構造的に外へ出ない）。1 ターンを走らせる部分だけを `runner` に委ね、本番は
 /// `run_agent_response` 実装、テストは結果差し替えのフェイクを渡す。これにより本番のラン構築を
 /// 通さずにゲート判定・worklist 組み立て・マーカー前進/据え置き・partial の扱いを単体検証できる。

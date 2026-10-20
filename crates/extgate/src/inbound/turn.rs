@@ -11,13 +11,37 @@ use crate::completion::{v3_attach_dispatch, ExtgateCompletionSink};
 use crate::delivery::apply_delivery_effect;
 use crate::error::ErrorCode;
 use crate::listen::{emit_activity, emit_ended_activity};
-use crate::partial_stream::PartialStreamSlot;
 use crate::protocol::Said;
 use crate::registry::ExtgateState;
 
 use super::asserted_caller;
 use super::binding::OriginRow;
 use super::record::seq_for_origin;
+use crate::provisional::{promote, ProvisionalInputs};
+
+/// D-1085: a promoted provisional run had no read origin, so a silent result names the said's
+/// origin as silent, as the normal turn would.
+fn silent_if_no_reply(
+    mut result: opencrab_core::EngineResult,
+    origin: &str,
+) -> opencrab_core::EngineResult {
+    if result.explicit_termination.is_some()
+        && result.response.trim().is_empty()
+        && result.silent_origins.is_empty()
+    {
+        result.silent_origins.push(origin.to_string());
+    }
+    result
+}
+
+/// D-1085 §12: the provisional run ended at a tool outside its read-only set without running it.
+fn stopped_at_gated_tool(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<opencrab_core::StoppedAtGatedTool>()
+            .is_some()
+    })
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_turn<R: AgentRuntime>(
@@ -32,6 +56,8 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     seq: Option<i64>,
     // Gatewayが指定した外部返信相関。coreは内容を解釈せずsayへ返す。
     reply_target: Option<&str>,
+    // D-1085: this said's own memory_sessions rows (inbound, agent prelude).
+    own_rows: Vec<i64>,
 ) {
     let locks = runtime.session_locks();
     let session_id = session_id.to_string();
@@ -49,12 +75,28 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     let caller = asserted_caller(&said.caller);
     let only_speaker = said.only_speaker;
     let model_profile = said.model_profile;
+    let provisional_id = said.provisional_id.clone();
+    // D-1085: the inputs a provisional run must have used to be promoted by this said. A said
+    // with attachments or another profile never promotes.
+    let provisional_inputs = (model_profile == TurnModelProfile::Realtime
+        && said.attachments.is_empty())
+    .then(|| ProvisionalInputs {
+        author_id: said.author_id.clone(),
+        author_label: said.author_label.clone(),
+        caller: said.caller.clone(),
+        system_context: system_context.to_string(),
+        agent_prelude: said.agent_prelude.clone(),
+        text: said.text.clone(),
+    });
     if !state.turn_queues.try_reserve(&session_id) {
         #[cfg(any(test, feature = "extgate-probe"))]
         state
             .probe
             .turn_queue_dropped
             .fetch_add(1, Ordering::SeqCst);
+        if let Some(provisional_id) = &provisional_id {
+            state.provisionals.discard(&binding_id, provisional_id);
+        }
         return;
     }
     let queues = Arc::clone(&state.turn_queues);
@@ -73,6 +115,10 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     let folded = state.is_folded(&session_id, seq);
                     state.prune_folded_below(&session_id, seq);
                     if folded {
+                        if let Some(provisional_id) = &provisional_id {
+                            promote::reject(&state, &instance_id, &binding_id, provisional_id)
+                                .await;
+                        }
                         tracing::info!(
                             session_id = %session_id,
                             origin = %origin,
@@ -88,6 +134,15 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     .start_session_turn_count
                     .fetch_add(1, Ordering::SeqCst);
                 let activity_id = uuid::Uuid::new_v4().to_string();
+                // D-1087: このターンの活動（ツール実行とサブタスクのライフサイクル）を
+                // gateway へ流す stream。activity_id は下の `activity` フレームと同じ値。
+                // 読む者が居なければ書くだけ。
+                let activity_stream = crate::activity_stream::ActivityEmitter::spawn(
+                    Arc::clone(&state),
+                    instance_id.clone(),
+                    binding_id.clone(),
+                    activity_id.clone(),
+                );
                 // #964: started は typing の開始だけを通知する。発端 origin の read（👀）は、
                 // その origin を含む初回 LLM request が完成した後、chat 呼び出し直前に別途 emit する。
                 emit_activity(
@@ -102,19 +157,98 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                 .await;
                 let (system, name) = runtime.build_agent_context(&agent_id, &caller);
                 let system = crate::completion::with_system_context(system, &system_context);
+                // D-1091: この binding の gateway が hello で宣言した環境（名前→値）。core は
+                // 解釈せず `execute_shell` の子へ渡すだけ。宣言が無ければ空で従来と同じ。
+                let run_env = state
+                    .lock_registry()
+                    .ok()
+                    .and_then(|reg| reg.get(&instance_id).map(|live| live.run_env.clone()))
+                    .unwrap_or_default();
                 let last_continuation_say = Arc::new(std::sync::Mutex::new(None::<String>));
+                // D-1085: decided before delivery; `provisional_result` is written either way.
+                let promoted = match (&provisional_id, provisional_inputs) {
+                    (Some(provisional_id), Some(inputs)) => {
+                        promote::take_promotion(
+                            &state,
+                            promote::PromotionKey {
+                                instance_id: &instance_id,
+                                binding_id: &binding_id,
+                                provisional_id,
+                                session_id: &session_id,
+                                inputs,
+                                own_rows: &own_rows,
+                            },
+                        )
+                        .await
+                    }
+                    (Some(provisional_id), None) => {
+                        promote::reject(&state, &instance_id, &binding_id, provisional_id).await;
+                        None
+                    }
+                    (None, _) => None,
+                };
                 // D-1083: only a realtime-profile turn streams partial text; every say of the turn
-                // takes the slot.
-                let partial_stream = PartialStreamSlot::new();
+                // takes the slot. D-1085: a promoted turn delivers on the provisional run's stream.
+                let partial_stream = promoted
+                    .as_ref()
+                    .map(|taken| taken.stream.clone())
+                    .unwrap_or_default();
                 let partial_hook = (model_profile == TurnModelProfile::Realtime).then(|| {
                     crate::partial_stream::partial_text_hook(
                         Arc::clone(&state),
                         instance_id.clone(),
                         binding_id.clone(),
                         partial_stream.clone(),
+                        None,
                     )
                 });
-                let turn_res = {
+                let mut promoted_res = None;
+                if let Some(taken) = promoted {
+                    // D-1085: the promoted run is this turn's run; its said is now
+                    // read like a normal turn's origin.
+                    emit_activity(
+                        &state,
+                        &instance_id,
+                        &binding_id,
+                        &uuid::Uuid::new_v4().to_string(),
+                        "read",
+                        Some(origin.as_str()),
+                        None,
+                    )
+                    .await;
+                    // §13.2: the run's held continuation speech goes out first, in order.
+                    taken
+                        .speech
+                        .release(crate::provisional::speech::SayTarget {
+                            state: Arc::clone(&state),
+                            instance_id: instance_id.clone(),
+                            binding_id: binding_id.clone(),
+                            agent_id: agent_id.clone(),
+                            session_id: session_id.clone(),
+                            reply_target: reply_target.clone(),
+                            latest: Arc::clone(&last_continuation_say),
+                        })
+                        .await;
+                    let res = taken.task.await;
+                    // §12: the run reached a gated tool after its promotion and stopped without
+                    // running it; the normal turn below runs it (on the same partial stream).
+                    if matches!(&res, Ok(Some(Err(e))) if stopped_at_gated_tool(e)) {
+                        tracing::info!(
+                            session_id = %session_id,
+                            origin = %origin,
+                            "promoted provisional reran at gated tool"
+                        );
+                    } else {
+                        promoted_res = Some(res.map(|turn| {
+                            turn.map(|result| result.map(|er| silent_if_no_reply(er, &origin)))
+                        }));
+                    }
+                }
+                // D-1087: ターン終端でキューを書き終えるために手元にも 1 本残す。
+                let turn_activity = Arc::clone(&activity_stream);
+                let turn_res = if let Some(res) = promoted_res {
+                    res
+                } else {
                     let runtime = runtime.clone();
                     let session_id = session_id.clone();
                     let agent_id = agent_id.clone();
@@ -178,6 +312,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 speaker_id: author_id.clone(),
                                 system_context,
                                 model_profile,
+                                activity: Some(Arc::clone(&activity_stream)),
                             });
                         start_session_turn(
                             &runtime,
@@ -290,6 +425,11 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 if let Some(hook) = partial_hook.clone() {
                                     req = req.with_on_partial_text(hook);
                                 }
+                                // D-1087: ツール実行を活動 stream に載せる（開始 → 終端の順）。
+                                req = req.with_tool_event_sink(
+                                    Arc::clone(&activity_stream)
+                                        as Arc<dyn opencrab_actions::ToolEventSink>,
+                                );
                                 // Gateway が与えた opaque な返信先だけを subtask 完了へ持ち回る。
                                 // 内部 origin を外部返信先として推測しない。
                                 if let Some(target) = request_reply_target.clone() {
@@ -298,6 +438,10 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 // DI 拡張 §8: 宣言能力を tool set へ載せる（宣言があるときだけ）。
                                 if let Some(ga) = ops_actions.clone() {
                                     req = req.with_gateway_actions(ga);
+                                }
+                                // D-1091: gateway が宣言した binding の環境をシェル子へ渡す。
+                                if !run_env.is_empty() {
+                                    req = req.with_run_env(run_env.clone());
                                 }
                                 v3_attach_dispatch(
                                     req,
@@ -365,6 +509,8 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                         );
                         // 成功したexecutionだけauthoritative ended outcomeを送る。engine errorは
                         // turn_failed経路が正本であり、empty silenceへ偽装しない。
+                        // D-1087: 活動の frame はキュー越しなので、`ended` の前に書き終える。
+                        turn_activity.flush().await;
                         if engine_succeeded {
                             emit_ended_activity(
                                 &state,
