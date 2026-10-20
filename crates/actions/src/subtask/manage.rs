@@ -179,6 +179,7 @@ pub fn cancel_subtask(
             if let Some(sink) = sink {
                 sink.on_subtask_lifecycle(&crate::subtask::SubtaskLifecycleEvent {
                     subtask_id,
+                    sub_session_id: &subtask.session_id,
                     parent_session_id: &subtask.parent_session_id,
                     agent_id: &subtask.agent_id,
                     status: crate::subtask::SubtaskLifecycleStatus::Aborted,
@@ -186,7 +187,9 @@ pub fn cancel_subtask(
                     task: "",
                     detail: None,
                     duration_ms: Some(subtask.started_at.elapsed().as_millis() as u64),
-                    result_text: None,
+                    // 中断の理由。abort 経路は spawned closure を止めるので終端通知は来ず、
+                    // ここが唯一の終端になる。理由が無いと「空の結果で失敗した」と読める。
+                    result_text: Some(CANCELLED_BY_REQUEST),
                 });
                 sink.on_subtask_cancelled(SubtaskSettled {
                     session_id: parent,
@@ -220,6 +223,12 @@ pub fn cancel_subtask(
 /// 「途中で親/オーナーが方向を変えた」と履歴上で判別できる（#647 受け入れ・記録要件）。
 /// 走行中注入の `SubtaskSteerInbound`（server 側）もこの値だけを watermark 差分読みする。
 pub const STEER_LOG_TYPE: &str = "steer";
+
+/// 中断（`cancel_subtask`）で走行が止まったときの理由。
+///
+/// abort した走行は終端通知を出せないので、中断のライフサイクルイベントが唯一の終端に
+/// なる。空の結果を渡すと「理由不明の失敗」と読めるため、理由をここで 1 つに固定する。
+pub const CANCELLED_BY_REQUEST: &str = "cancelled by request";
 
 /// `steer_subtask` の結果種別（gateway 非依存 / #647）。
 ///

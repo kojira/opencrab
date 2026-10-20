@@ -54,12 +54,14 @@ pub fn tool_activity_frame(
 /// サブタスク走行 1 件のライフサイクル通知（D-1087）。`tool_activity` と同じく id を
 /// 持たない fire-and-forget。`run_id` は subtask の ID、`status` は
 /// `started` / `progress` / `completed` / `failed` / `timed_out` / `aborted`。
+/// `sub_session_id` は走行自身のセッション ID（run の相関キー。宛先ではない）。
 ///
 /// 分からない項目は field ごと省く（旧 gateway は認識しない field を無視する）。
 #[allow(clippy::too_many_arguments)]
 pub fn subtask_lifecycle_frame(
     binding_id: &str,
     run_id: &str,
+    sub_session_id: &str,
     status: &str,
     label: &str,
     task: &str,
@@ -73,6 +75,9 @@ pub fn subtask_lifecycle_frame(
         "run_id": run_id,
         "status": status,
     });
+    if !sub_session_id.is_empty() {
+        frame["sub_session_id"] = json!(sub_session_id);
+    }
     if !label.is_empty() {
         frame["label"] = json!(label);
     }

@@ -17,7 +17,6 @@ pub mod session_runtime;
 pub mod skill_management;
 pub mod soul;
 pub mod subtask;
-pub mod subtask_notify;
 pub mod subtask_registries;
 pub mod task_ledger;
 pub mod timed_fire;
@@ -72,11 +71,6 @@ pub use subtask::{
     SubtaskCompletionSink, SubtaskLifecycle, SubtaskLifecycleEvent, SubtaskLifecycleStatus,
     SubtaskRegistry, SubtaskSettled, SubtaskToolDispatcher, DEFAULT_DISPATCH_TIMEOUT_SECS,
     STEER_LOG_TYPE,
-};
-pub use subtask_notify::{
-    NoopLifecycleNotifier, NoopRunNotifier, NotifyTarget, NotifyTargetError,
-    SubtaskLifecycleNotifier, SubtaskNotifiers, SubtaskNotifySession, SubtaskRunInfo,
-    SubtaskRunNotifier,
 };
 pub use subtask_registries::SubtaskRegistries;
 pub use timed_fire::{

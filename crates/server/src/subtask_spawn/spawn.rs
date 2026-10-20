@@ -231,6 +231,7 @@ pub async fn spawn_subtask(
         // 通知の順序を旧実装と同じ「終端通知 → DB・sink」に保つため。
         run_sink.on_subtask_lifecycle(&opencrab_actions::SubtaskLifecycleEvent {
             subtask_id: &run_subtask_id,
+            sub_session_id: &run_sub_session_id,
             parent_session_id: &run_parent_session_id,
             agent_id: &run_agent_id,
             status: opencrab_actions::SubtaskLifecycleStatus::from_exit_reason(&exit_reason),
@@ -271,6 +272,7 @@ pub async fn spawn_subtask(
     // `NoopCompletionSink` は既定実装で何もしない。
     start_sink.on_subtask_lifecycle(&opencrab_actions::SubtaskLifecycleEvent {
         subtask_id: &subtask_id,
+        sub_session_id: &sub_session_id,
         parent_session_id: &parent_session_id,
         agent_id: &agent_id,
         status: opencrab_actions::SubtaskLifecycleStatus::Started,

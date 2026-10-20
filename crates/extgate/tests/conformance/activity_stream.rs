@@ -87,6 +87,7 @@ impl ActivityScript {
                     };
                     completion.on_subtask_lifecycle(&opencrab_actions::SubtaskLifecycleEvent {
                         subtask_id: run_id,
+                        sub_session_id: "subtask-11111111-2222-3333-4444-555555555555",
                         parent_session_id: "sess",
                         agent_id: "agent-1",
                         status,
@@ -235,6 +236,13 @@ async fn said_turn_writes_tool_activity_and_subtask_lifecycle_in_order_before_en
 
     let (lifecycle_started, progress, lifecycle_done) = (&activity[2], &activity[3], &activity[4]);
     assert_eq!(lifecycle_started["run_id"], "run-1");
+    // 走行の相関キー。旧 gateway は `sessionKey` 行にこの値を出していたので、frame が運ぶ。
+    assert_eq!(
+        lifecycle_started["sub_session_id"],
+        "subtask-11111111-2222-3333-4444-555555555555"
+    );
+    assert_eq!(progress["sub_session_id"], lifecycle_started["sub_session_id"]);
+    assert_eq!(lifecycle_done["sub_session_id"], lifecycle_started["sub_session_id"]);
     assert_eq!(lifecycle_started["label"], "shell job");
     assert_eq!(lifecycle_started["task"], "do the thing");
     assert!(lifecycle_started.get("duration_ms").is_none());

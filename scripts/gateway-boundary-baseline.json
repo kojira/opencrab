@@ -50,7 +50,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 32,
+      "line": 31,
       "snippet": "pub mod session_watch_policy;",
       "classification": "production-violation",
       "violation": "V11",
@@ -60,7 +60,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 63,
+      "line": 62,
       "snippet": "pub use session_watch_policy::{",
       "classification": "production-violation",
       "violation": "V11",
@@ -70,7 +70,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 64,
+      "line": 63,
       "snippet": "caller_policy_key, parse_session_watch_policy, watch_author_standing, ClassPolicy,",
       "classification": "production-violation",
       "violation": "V11",
@@ -80,7 +80,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/actions/src/lib.rs",
-      "line": 65,
+      "line": 64,
       "snippet": "SessionPolicyError, SessionWatchPolicy, WatchAllowSets, WatchAuthorStanding,",
       "classification": "production-violation",
       "violation": "V11",
@@ -430,7 +430,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/gate-client/src/wire.rs",
-      "line": 265,
+      "line": 267,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",

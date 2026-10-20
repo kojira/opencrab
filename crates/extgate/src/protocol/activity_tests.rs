@@ -299,6 +299,7 @@ fn subtask_lifecycle_frame_omits_the_fields_that_do_not_apply() {
     let started = subtask_lifecycle_frame(
         "binding",
         "run-1",
+        "subtask-s1",
         "started",
         "shell job",
         "do it",
@@ -312,6 +313,7 @@ fn subtask_lifecycle_frame_omits_the_fields_that_do_not_apply() {
             "m": "subtask_lifecycle",
             "binding_id": "binding",
             "run_id": "run-1",
+            "sub_session_id": "subtask-s1",
             "status": "started",
             "label": "shell job",
             "task": "do it",
@@ -322,6 +324,7 @@ fn subtask_lifecycle_frame_omits_the_fields_that_do_not_apply() {
     let completed = subtask_lifecycle_frame(
         "binding",
         "run-1",
+        "subtask-s1",
         "completed",
         "",
         "",
@@ -337,6 +340,7 @@ fn subtask_lifecycle_frame_omits_the_fields_that_do_not_apply() {
     let progress = subtask_lifecycle_frame(
         "binding",
         "run-1",
+        "subtask-s1",
         "progress",
         "shell job",
         "",
@@ -346,4 +350,18 @@ fn subtask_lifecycle_frame_omits_the_fields_that_do_not_apply() {
     );
     assert_eq!(progress["detail"], "half way");
     assert!(progress.get("duration_ms").is_none());
+
+    // 走行のセッションが空なら field ごと省く（旧 gateway は未知 field を無視する）。
+    let no_session = subtask_lifecycle_frame(
+        "binding",
+        "run-1",
+        "",
+        "started",
+        "shell job",
+        "do it",
+        None,
+        None,
+        None,
+    );
+    assert!(no_session.get("sub_session_id").is_none());
 }

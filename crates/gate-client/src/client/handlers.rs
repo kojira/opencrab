@@ -333,6 +333,7 @@ async fn handle_subtask_lifecycle(client: &InstanceClient, lifecycle: SubtaskLif
         &address,
         LiveEvent::SubtaskLifecycle {
             run_id: lifecycle.run_id,
+            sub_session_id: lifecycle.sub_session_id,
             status: lifecycle.status,
             label: lifecycle.label,
             task: lifecycle.task,

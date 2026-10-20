@@ -311,6 +311,13 @@
         assert_eq!(lifecycle[0].0, SubtaskLifecycleStatus::Aborted);
         assert_eq!(lifecycle[0].1, "st-abort");
         assert!(lifecycle[0].2.is_some(), "aborted carries the elapsed time");
+
+        // 走行の相関キー（subtask 自身のセッション）と、中断の理由が載る。
+        // 理由が空だと観測側では「理由不明の失敗」と読めてしまう。
+        let session = sink.lifecycle_session.lock().unwrap();
+        assert_eq!(session.len(), 1, "{session:?}");
+        assert_eq!(session[0].0, "subtask-st-abort");
+        assert_eq!(session[0].1.as_deref(), Some(CANCELLED_BY_REQUEST));
     }
 
     /// #161: 存在しない subtask_id は NotFound（権限拒否ではない）。

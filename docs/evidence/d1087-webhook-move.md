@@ -27,8 +27,8 @@ webhook は gateway の概念なので、実装・宛先解決・配送は gatew
 
 - `crates/discord/src/gateway_actions/*`（整形・配送 worker・走行通知・activity sink）は
   gateway リポジトリの `crates/discord-gateway/src/webhook/*` へ移した（同じテストを移設。
-  `cargo test -p opencrab-discord-gateway --features webhook-activity --lib webhook` で
-  48 passed / 1 ignored）。
+  `cargo test -p opencrab-discord-gateway --lib webhook` で 48 passed / 1 ignored。
+  feature gate は無い）。
 - `crates/nostr` は gateway リポジトリの `crates/nostr-gateway` が既に担っており、core 側の
   コピーは残す理由が無い（参照元 0 件）ため、移動せず削除した。
 
@@ -51,9 +51,16 @@ phase 2 で core から撤去した（gateway 側が持つ）:
   `webhook_error` を外した（宛先メタは gateway のもの）。
 - 権限拒否の tracing target `webhook_audit` → `action_rejection_audit`。
 
-core に残した中立の抽象: `opencrab-actions::subtask_notify`（`SubtaskLifecycleNotifier` /
-`SubtaskRunNotifier` / `SubtaskRunInfo` / `SubtaskNotifySession` / `NotifyTarget` /
-`NotifyTargetError` / Noop 実装）と `ToolEventSink`。gateway がこの契約を実装して使う。
+core に残した中立の抽象は `ToolEventSink`（ツール実行 1 件）と
+`SubtaskCompletionSink::on_subtask_lifecycle`（走行 1 件のライフサイクル）だけで、どちらも
+core 自身が呼ぶ観測点ある。`SubtaskCompletionSink` は決着を親会話へ戻す core の責務のまま。
+
+`subtask_notify`（`SubtaskLifecycleNotifier` / `SubtaskRunNotifier` / `SubtaskRunInfo` /
+`SubtaskNotifySession` / `NotifyTarget` / `NotifyTargetError` / Noop 実装）は**削除した**。
+core から呼ばれず、gateway からの参照も 0 件だった一方で、宛先の語彙
+（`redacted_url` / `tool_args` / `SubtaskNotifiers`）を core に残していたため。
+core は活動を frame（`tool_activity` / `subtask_lifecycle`）として流すだけで、
+宛先・整形・配送は gateway が持つ。
 
 残る webhook 語彙（この変更の範囲外・要フォロー）:
 - `crates/db/src/queries/webhook_config.rs` と `agent_webhook_configs` の DDL

@@ -299,6 +299,20 @@ fn subtask_lifecycle_frame_parses_optional_fields() {
             assert_eq!(l.detail.as_deref(), Some("half"));
             assert_eq!(l.label, None);
             assert_eq!(l.duration_ms, None);
+            // 走行の相関キー。frame が省いたら None（consumer は run id で代替できる）。
+            assert_eq!(l.sub_session_id, None);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn subtask_lifecycle_frame_carries_the_run_session_key() {
+    let raw = br#"{"m":"subtask_lifecycle","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","run_id":"run-1","sub_session_id":"subtask-s1","status":"started","task":"do it"}"#;
+    match parse_frame_bytes(raw).unwrap() {
+        CoreMsg::SubtaskLifecycle(l) => {
+            assert_eq!(l.sub_session_id.as_deref(), Some("subtask-s1"));
+            assert_eq!(l.task.as_deref(), Some("do it"));
         }
         other => panic!("{other:?}"),
     }

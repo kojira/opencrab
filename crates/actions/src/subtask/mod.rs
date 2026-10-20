@@ -27,7 +27,10 @@ mod settle;
 mod sink;
 
 pub use dispatcher::{default_non_dispatch_tools, SharedExecutor, SubtaskToolDispatcher};
-pub use manage::{cancel_subtask, steer_subtask, CancelOutcome, SteerOutcome, STEER_LOG_TYPE};
+pub use manage::{
+    cancel_subtask, steer_subtask, CancelOutcome, SteerOutcome, CANCELLED_BY_REQUEST,
+    STEER_LOG_TYPE,
+};
 pub use settle::{settle_completed, SettleContext};
 pub use sink::{
     dispatch_settled, NoopCompletionSink, SubtaskCompletionSink, SubtaskLifecycleEvent,

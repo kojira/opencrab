@@ -290,6 +290,7 @@ impl SystemGatewayActions {
         if let (Some(entry), Some(sink)) = (&subtask_entry, self.completion_sink.as_deref()) {
             sink.on_subtask_lifecycle(&opencrab_actions::SubtaskLifecycleEvent {
                 subtask_id: &entry.subtask_id,
+                sub_session_id: &entry.session_id,
                 parent_session_id: &entry.parent_session_id,
                 agent_id: &agent_id,
                 status: opencrab_actions::SubtaskLifecycleStatus::Progress,

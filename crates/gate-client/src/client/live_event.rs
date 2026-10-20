@@ -85,6 +85,8 @@ pub enum LiveEvent {
     /// 分からない項目は `None`（frame が field ごと省く）。
     SubtaskLifecycle {
         run_id: String,
+        /// 走行自身のセッション ID（run の相関キー。宛先ではない）。frame が省くことがある。
+        sub_session_id: Option<String>,
         status: String,
         label: Option<String>,
         task: Option<String>,

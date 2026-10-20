@@ -36,6 +36,8 @@ pub struct SubtaskLifecycle {
     pub binding_id: String,
     /// subtask の ID。
     pub run_id: String,
+    /// 走行自身のセッション ID（run の相関キー。宛先ではない）。
+    pub sub_session_id: Option<String>,
     /// `started` / `progress` / `completed` / `failed` / `timed_out` / `aborted`。
     pub status: String,
     pub label: Option<String>,
@@ -102,6 +104,7 @@ pub(super) fn parse_subtask_lifecycle(obj: &Value) -> Result<SubtaskLifecycle, F
     Ok(SubtaskLifecycle {
         binding_id: parse_uuid(&require_str(obj, "binding_id")?)?,
         run_id: nonempty_str(obj, "run_id")?,
+        sub_session_id: opt_str(obj, "sub_session_id")?,
         status: nonempty_str(obj, "status")?,
         label: opt_str(obj, "label")?,
         task: opt_str(obj, "task")?,

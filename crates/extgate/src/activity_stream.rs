@@ -81,6 +81,7 @@ impl ActivityEmitter {
         let frame = subtask_lifecycle_frame(
             &self.binding_id,
             ev.subtask_id,
+            ev.sub_session_id,
             ev.status.as_str(),
             ev.label,
             ev.task,
@@ -229,7 +230,15 @@ mod tests {
 
     fn lifecycle_frame(run_id: &str) -> Value {
         subtask_lifecycle_frame(
-            BINDING, run_id, "started", "label", "task", None, None, None,
+            BINDING,
+            run_id,
+            "subtask-s1",
+            "started",
+            "label",
+            "task",
+            None,
+            None,
+            None,
         )
     }
 

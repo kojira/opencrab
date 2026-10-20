@@ -14,8 +14,8 @@
 //! 2. `current_purpose = "subtask"` 相当 — 同じく depth から導出される。
 //! 3. タイムアウト — ここで `tokio::time::timeout` として掛ける。
 //!
-//! 通知（`SubtaskRunNotifier` / #175 S3）は D-1087 で core から外れた。通知先は gateway の
-//! 概念なので、実況は gateway が自分の出来事から駆動する。
+//! 通知の抽象境界（#175 S3）は D-1087 で core から削除した。通知先は gateway の概念なので、
+//! 走行の実況は gateway が core の活動 frame（`subtask_lifecycle`）から駆動する。
 //!
 //! 守る不変条件（壊すと重大。順に対応するテストがある）:
 //! - **順序契約**: DB 永続化 → 登録簿から除去 → 完了通知。`settle_completed` を必ず経由する。

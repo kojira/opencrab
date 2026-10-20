@@ -87,6 +87,8 @@ impl SubtaskLifecycleStatus {
 pub struct SubtaskLifecycleEvent<'a> {
     /// subtask 自身の ID。
     pub subtask_id: &'a str,
+    /// subtask 自身のセッション ID（走行の相関キー。親とは別の値）。
+    pub sub_session_id: &'a str,
     /// spawn 元の親セッション ID。
     pub parent_session_id: &'a str,
     /// 親セッションのエージェント ID。
