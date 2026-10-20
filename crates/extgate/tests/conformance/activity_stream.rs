@@ -251,14 +251,15 @@ async fn many_activity_frames_are_all_written_before_ended() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
     h.runtime.activity_script.set(
-        (0..120)
-            .map(|i| ActivityStep::Tool {
+        std::iter::repeat_n(
+            ActivityStep::Tool {
                 tool: "execute_shell",
                 call_id: "call-many",
                 terminal: opencrab_actions::ToolEventStatus::Completed,
-            })
-            .map(|step| step)
-            .collect(),
+            },
+            120,
+        )
+        .collect(),
     );
 
     write_frame(&mut s, &said_frame_with_profile("a2-many", &binding_id, "o-a2m", None)).await;

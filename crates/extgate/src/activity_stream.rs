@@ -243,7 +243,7 @@ mod tests {
             }
             buf.push(byte[0]);
             if byte[0] == b'\n' {
-                return Some(String::from_utf8(buf).ok()?);
+                return String::from_utf8(buf).ok();
             }
         }
     }
