@@ -22,7 +22,6 @@ pub(crate) struct SayTarget {
     pub binding_id: String,
     pub agent_id: String,
     pub session_id: String,
-    pub reply_target: Option<String>,
     /// The turn's last continuation say (for its `completed_target`).
     pub latest: Arc<Mutex<Option<String>>>,
 }
@@ -116,7 +115,6 @@ async fn deliver(
             &t.agent_id,
             &t.session_id,
             speech,
-            t.reply_target.as_deref(),
             stream_id,
         )
         .await
@@ -128,7 +126,6 @@ async fn deliver(
             &t.agent_id,
             &t.session_id,
             speech,
-            t.reply_target.as_deref(),
             stream_id,
         )
         .await

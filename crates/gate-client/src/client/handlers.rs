@@ -176,16 +176,9 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
         return false;
     };
-    // 返信先: payload の明示 reply_target（送信側が載せた発端 origin・resume 等）を最優先。
-    // 無ければ進行中ターンの pending_turn（即時 said が刻んだ Single だけ Some）に委ねる。
-    let reply_origin =
-        explicit_reply_target.or_else(|| match inner.pending_turn.get(&say.binding_id) {
-            Some(turn) => match &turn.reply_origin {
-                ReplyOrigin::Single(o) => Some(o.clone()),
-                ReplyOrigin::None | ReplyOrigin::Ambiguous => None,
-            },
-            None => None,
-        });
+    // D-1093: 返信先は payload に明示された reply_target だけ。進行中ターンの発端 said から
+    // 推測しない（地の文の say は返信先を持たない）。
+    let reply_origin = explicit_reply_target;
     let q = inner
         .live
         .entry(address.clone())

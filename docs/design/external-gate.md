@@ -91,7 +91,8 @@ hello 成功後、core は当該 instance の open binding 全件へ `binding_id
 
 ### 3.4 say payload と activity
 
-- core が生成する payload は exact `{"text": body}`。`body` は 1 byte 以上の UTF-8 string。
+- core が生成する payload は exact `{"text": body}`（realtime の生成途中を出したときだけ `stream_id` が付く）。`body` は 1 byte 以上の UTF-8 string。
+- core は返信先を決めない（D-1093）。say は返信先を持たず、gateway はそれを通常の投稿として配送する。ターンの発端 said の origin も、said の `reply_target`（受信発言が指す先・表示用）も返信先にしない。返信はモデルが gateway の宣言した返信操作を対象つきで明示的に呼んだときだけ起きる。
 - gateway は payload の `text` 以外の member を無視する。`text` 欠落、string 以外、空 string は `external_rejected` を返し、外部 API I/O は 0。
 - gateway は外部 API が投稿を受理したと確認した後だけ say `ok` を返す。受理前後が不明なら `ok` / `err` を作らず socket を close する。
 - activity は表示専用 best-effort。core はターン開始前に `started`、終了 path の finally 相当箇所で同じ `activity_id` の `ended` を 1 回書く。activity 失敗から say を生成、再送、変更しない。

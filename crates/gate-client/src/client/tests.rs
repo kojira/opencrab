@@ -117,6 +117,56 @@
         }
     }
 
+    /// D-1093: a say without `reply_target` is a plain message. The client must not fill a
+    /// reply destination from the turn's triggering said.
+    #[tokio::test]
+    async fn plain_say_gets_no_reply_origin_from_the_pending_turn() {
+        let client = InstanceClient::blank(
+            "instance".into(),
+            "author".into(),
+            SayPolicy::AcceptToLiveQueue,
+            None,
+            crate::wire::RuntimeCapabilities::default(),
+            None,
+        );
+        {
+            let mut inner = client.inner.lock().await;
+            inner.closed = false;
+            inner
+                .acknowledged
+                .insert("address".into(), "binding".into());
+            inner.pending_turn.insert(
+                "binding".into(),
+                PendingTurn {
+                    saw_utterance: false,
+                    reply_origin: ReplyOrigin::Single("pending-origin".into()),
+                },
+            );
+        }
+        // The blank client has no transport, so acknowledging the say closes it afterwards; the
+        // queued live event is what this test checks.
+        let _ = handle_say(
+            &client,
+            Say {
+                id: "say:plain".into(),
+                binding_id: "binding".into(),
+                payload: serde_json::json!({"text": "plain"}),
+            },
+            0,
+        )
+        .await;
+        let inner = client.inner.lock().await;
+        let events = &inner.live.get("address").expect("queued").events;
+        let message = events
+            .iter()
+            .find(|event| matches!(event, LiveEvent::Message { .. }))
+            .expect("say queued");
+        assert!(
+            matches!(message, LiveEvent::Message { reply_origin: None, text, .. } if text == "plain"),
+            "{events:?}"
+        );
+    }
+
     #[tokio::test]
     async fn completed_target_and_completed_no_reply_are_exclusive() {
         let client = InstanceClient::blank(

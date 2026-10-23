@@ -9,12 +9,9 @@ pub enum LiveEvent {
         /// core が say に載せた既存 delivery id。gateway は platform message id との対応に使う。
         delivery_id: String,
         text: String,
-        /// この say が**特定の inbound イベントへの返信**なら、その said の origin。
-        ///
-        /// 即時ターン（`occupy_until_turn_ends=true` の said 1 本）でだけ `Some`。bundle
-        /// ターン（複数 said・activity started 起源）や、同一ターンに複数の即時 said が
-        /// 相乗りした曖昧ケースでは`None`（単一の返信先が無い）。consumerは`Some`を
-        /// 対象返信、`None`を「返信先無し」として扱う。返信先を使わないconsumerは無視してよい。
+        /// この say の payload に明示された `reply_target`。D-1093 以降の core は地の文の say に
+        /// 返信先を付けないので、通常は `None`（返信先無し＝通常の投稿として配送する）。
+        /// client はターンの発端 said から返信先を推測しない。
         reply_origin: Option<String>,
         /// D-1083: the partial stream this say completes. `Some` only when core sent `Partial`
         /// events with the same id before this say; the text of those partials is a prefix-like

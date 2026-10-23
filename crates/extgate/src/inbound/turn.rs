@@ -54,8 +54,8 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     // #933: この said の external_origins.seq。dequeue 時に「fold 済み集合に含まれる」なら独立
     // ターンを skip する（二重処理防止・非消費）。bundle は個別 said でないので None（skip 対象外）。
     seq: Option<i64>,
-    // Gatewayが指定した外部返信相関。coreは内容を解釈せずsayへ返す。
-    reply_target: Option<&str>,
+    // この said の origin。失敗通知（turn_failed）の相関にだけ使い、返信先にはしない（D-1093）。
+    failure_origin: Option<&str>,
     // D-1085: this said's own memory_sessions rows (inbound, agent prelude).
     own_rows: Vec<i64>,
 ) {
@@ -71,7 +71,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     let address = row.address.clone();
     let origin = said.origin.clone();
     let system_context = system_context.to_string();
-    let reply_target = reply_target.map(str::to_string);
+    let failure_origin = failure_origin.map(str::to_string);
     let caller = asserted_caller(&said.caller);
     let only_speaker = said.only_speaker;
     let model_profile = said.model_profile;
@@ -225,7 +225,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             binding_id: binding_id.clone(),
                             agent_id: agent_id.clone(),
                             session_id: session_id.clone(),
-                            reply_target: reply_target.clone(),
                             latest: Arc::clone(&last_continuation_say),
                         })
                         .await;
@@ -270,8 +269,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     let hook_binding = binding_id.clone();
                     let hook_agent = agent_id.clone();
                     let hook_session = session_id.clone();
-                    let hook_reply = reply_target.clone();
-                    let request_reply_target = reply_target.clone();
                     let hook_last_continuation_say = Arc::clone(&last_continuation_say);
                     let hook_partial_stream = partial_stream.clone();
                     tokio::spawn(async move {
@@ -385,7 +382,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                     let hb = hook_binding.clone();
                                     let ha = hook_agent.clone();
                                     let hse = hook_session.clone();
-                                    let hr = hook_reply.clone();
                                     let latest = Arc::clone(&hook_last_continuation_say);
                                     let partial_stream = hook_partial_stream.clone();
                                     Arc::new(move |speech: String| {
@@ -394,7 +390,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                         let hb = hb.clone();
                                         let ha = ha.clone();
                                         let hse = hse.clone();
-                                        let hr = hr.clone();
                                         let latest = Arc::clone(&latest);
                                         let stream_id = partial_stream.take_for_say();
                                         Box::pin(async move {
@@ -406,7 +401,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                                     &ha,
                                                     &hse,
                                                     &speech,
-                                                    hr.as_deref(),
                                                     stream_id.as_deref(),
                                                 )
                                                 .await
@@ -430,11 +424,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                     Arc::clone(&activity_stream)
                                         as Arc<dyn opencrab_actions::ToolEventSink>,
                                 );
-                                // Gateway が与えた opaque な返信先だけを subtask 完了へ持ち回る。
-                                // 内部 origin を外部返信先として推測しない。
-                                if let Some(target) = request_reply_target.clone() {
-                                    req = req.with_reply_target(target);
-                                }
                                 // DI 拡張 §8: 宣言能力を tool set へ載せる（宣言があるときだけ）。
                                 if let Some(ga) = ops_actions.clone() {
                                     req = req.with_gateway_actions(ga);
@@ -482,8 +471,8 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             ),
                             None => opencrab_actions::DeliveryEffect::Empty,
                         };
-                        // 単一メンションは発端 origin を say payload に明示（gateway が e-tag reply）。
-                        // bundle は None（gateway が standalone post で publish・row292）。
+                        // D-1093: say は返信先を持たない。発端 origin は失敗通知（turn_failed）の
+                        // 相関にだけ使う。
                         let final_say_id = apply_delivery_effect(
                             &state,
                             &instance_id,
@@ -491,7 +480,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             &agent_id,
                             &session_id,
                             effect,
-                            reply_target.as_deref(),
+                            failure_origin.as_deref(),
                             partial_stream.take_for_say().as_deref(),
                         )
                         .await;

@@ -91,9 +91,8 @@ pub fn bind_frame(binding_id: &str, address: &str) -> Value {
     })
 }
 
-/// say フレーム。`reply_target` を渡すと payload に載る（gateway が返信先を導けない
-/// resume ターン等で、発端イベントの origin を明示する）。省略時は gateway 側の相関
-/// （直前に送った said の origin）に委ねる。
+/// say フレーム。地の文の発話で、返信先を持たない（D-1093: core は返信先を決めない。返信は
+/// モデルが対象つきの返信操作を明示的に呼んだときだけ起きる）。
 ///
 /// D-1083: `stream_id` names the partial stream whose released text this say completes. It is
 /// set only when that stream released text.
@@ -101,13 +100,9 @@ pub fn say_frame(
     delivery_id: &str,
     binding_id: &str,
     body: &str,
-    reply_target: Option<&str>,
     stream_id: Option<&str>,
 ) -> Value {
     let mut payload = json!({ "text": body });
-    if let Some(target) = reply_target {
-        payload["reply_target"] = json!(target);
-    }
     if let Some(stream_id) = stream_id {
         payload["stream_id"] = json!(stream_id);
     }

@@ -165,9 +165,8 @@ impl<R: AgentRuntime> SubtaskCompletionSink for ExtgateCompletionSink<R> {
 
 async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: SubtaskSettled) {
     // resume は発端 said の無い自己ターン。heartbeat（#925）と完全に同型なので共有ヘルパへ
-    // 委譲する（単一実装）。resume は発端 origin への返信先（`ev.reply_target`）を持ち回るが、
-    // heartbeat 側は origin が無いので `None`（standalone post）を渡す。
-    run_v3_said_less_turn(sink, ev.caller.clone(), ev.reply_target.clone()).await;
+    // 委譲する（単一実装）。D-1093: core は返信先を決めないので、resume も返信先を持ち回らない。
+    run_v3_said_less_turn(sink, ev.caller.clone()).await;
 }
 
 /// gateway の `system_context`（Nostr の応答文脈・オーナー鍵・heartbeat 指示）を system の
@@ -186,15 +185,13 @@ pub(crate) fn with_system_context(system: String, system_context: &str) -> Strin
 
 /// 発端 said の無い自己ターン（resume 継続 / #925 heartbeat）を 1 本駆動する共有実装。
 ///
-/// `caller` は実行権限（resume は spawn 時の caller・heartbeat は `Owner`）。`reply_target` は
-/// 発端 origin への返信先（resume は spawn 時に捕捉した origin・heartbeat は `None`＝standalone
-/// post）。started（origin=None・👀 は付けない）→ system＋`prompt_suffix` → `run_session_turn`
+/// `caller` は実行権限（resume は spawn 時の caller・heartbeat は `Owner`）。発話は返信先を
+/// 持たない（D-1093）。started（origin=None・👀 は付けない）→ system＋`prompt_suffix` → `run_session_turn`
 /// （新規 said を記録しない）→ 継続（`v3_attach_dispatch`＋`ExtgateCompletionSink`）→ 配送
 /// （`apply_delivery_effect`）→ 🏁（`select_completed_target`）を、通常ターンと同じ機構で回す。
 pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
     sink: ExtgateCompletionSink<R>,
     caller: CallerIdentity,
-    reply_target: Option<String>,
 ) {
     let locks = sink.runtime.session_locks();
     let session_id = sink.session_id.clone();
@@ -293,7 +290,6 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                         let binding_id = sink.binding_id.clone();
                         let agent_id = sink.agent_id.clone();
                         let session_id = sink.session_id.clone();
-                        let reply_target = reply_target.clone();
                         let latest = Arc::clone(&last_continuation_say);
                         Arc::new(move |speech: String| {
                             let state = Arc::clone(&state);
@@ -301,7 +297,6 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                             let binding_id = binding_id.clone();
                             let agent_id = agent_id.clone();
                             let session_id = session_id.clone();
-                            let reply_target = reply_target.clone();
                             let latest = Arc::clone(&latest);
                             Box::pin(async move {
                                 let delivery_id = crate::delivery::deliver_intermediate_say(
@@ -311,7 +306,6 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                                     &agent_id,
                                     &session_id,
                                     &speech,
-                                    reply_target.as_deref(),
                                     None,
                                 )
                                 .await
@@ -327,11 +321,6 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                             })
                         })
                     });
-                    // 連鎖: この resume が更に subtask を spawn したら、その完了 say も
-                    // 同じ発端 origin へ返せるよう reply_target を引き継ぐ。
-                    if let Some(rt) = reply_target.clone() {
-                        req = req.with_reply_target(rt);
-                    }
                     if let Some(ga) = ops_actions.clone() {
                         req = req.with_gateway_actions(ga);
                     }
@@ -382,7 +371,8 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                 &sink.agent_id,
                 &sink.session_id,
                 effect,
-                reply_target.as_deref(),
+                // 発端 said の無いターン: 失敗通知の相関先も無い。
+                None,
                 None,
             )
             .await;
