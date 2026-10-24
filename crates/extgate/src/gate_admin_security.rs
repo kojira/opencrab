@@ -25,6 +25,9 @@ pub enum SecurityError {
     InvalidManifest,
     #[error("gate-admin credential conflict")]
     Conflict,
+    /// A live process accepts connections on the configured admin socket path.
+    #[error("gate-admin socket is in use by a running process")]
+    AdminSocketInUse,
     #[error("unauthorized")]
     Unauthorized,
     #[error("gate-admin store error")]

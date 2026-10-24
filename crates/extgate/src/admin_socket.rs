@@ -230,6 +230,123 @@ fn bind_relative_to(parent: &ParentDir) -> io::Result<std::os::unix::net::UnixLi
     Ok(listener)
 }
 
+/// What a connect() to the existing admin socket path found.
+enum SocketProbe {
+    /// ECONNREFUSED: the socket file is left over and nobody listens on it.
+    NoListener,
+    /// A process accepted the connection.
+    Listening,
+    Failed,
+}
+
+const PROBE_NO_LISTENER: i32 = 0;
+const PROBE_LISTENING: i32 = 1;
+
+fn child_probe(parent: &File, name: &CString) -> ! {
+    // The post-fork child invokes only libc syscalls and exits without touching shared Rust state.
+    let result = unsafe {
+        if libc::fchdir(parent.as_raw_fd()) != 0 {
+            -1
+        } else {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            if fd < 0 {
+                -1
+            } else {
+                let mut address: libc::sockaddr_un = mem::zeroed();
+                address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+                let bytes = name.as_bytes_with_nul();
+                let outcome = if bytes.len() > address.sun_path.len() {
+                    -1
+                } else {
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr().cast::<libc::c_char>(),
+                        address.sun_path.as_mut_ptr(),
+                        bytes.len(),
+                    );
+                    let length = mem::size_of::<libc::sa_family_t>() + bytes.len();
+                    #[cfg(any(target_os = "macos", target_os = "ios"))]
+                    {
+                        address.sun_len = length as u8;
+                    }
+                    let connected = libc::connect(
+                        fd,
+                        (&raw const address).cast::<libc::sockaddr>(),
+                        length as libc::socklen_t,
+                    );
+                    if connected == 0 {
+                        PROBE_LISTENING
+                    } else if io::Error::last_os_error().raw_os_error() == Some(libc::ECONNREFUSED)
+                    {
+                        PROBE_NO_LISTENER
+                    } else {
+                        -1
+                    }
+                };
+                libc::close(fd);
+                outcome
+            }
+        }
+    };
+    // SAFETY: immediate process termination avoids non-async-signal-safe destructors after fork.
+    unsafe { libc::_exit(if result < 0 { 2 } else { result }) }
+}
+
+fn probe_relative_to(parent: &ParentDir) -> SocketProbe {
+    // SAFETY: fork is followed in the child only by the syscall-only `child_probe` path.
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        return SocketProbe::Failed;
+    }
+    if child == 0 {
+        child_probe(parent.directory(), parent.name());
+    }
+    let mut status = 0;
+    // SAFETY: `child` is the direct child created above and status is writable.
+    let waited = unsafe { libc::waitpid(child, &mut status, 0) };
+    if waited != child || !libc::WIFEXITED(status) {
+        return SocketProbe::Failed;
+    }
+    match libc::WEXITSTATUS(status) {
+        PROBE_NO_LISTENER => SocketProbe::NoListener,
+        PROBE_LISTENING => SocketProbe::Listening,
+        _ => SocketProbe::Failed,
+    }
+}
+
+/// Removes a socket file a killed or crashed core left behind. Only a private socket of the
+/// service user that refuses connections is removed; anything else keeps startup refused.
+fn remove_stale_socket(
+    parent: &ParentDir,
+    existing: &libc::stat,
+    service_euid: u32,
+) -> Result<(), SecurityError> {
+    if (existing.st_mode & libc::S_IFMT) != libc::S_IFSOCK
+        || existing.st_uid != service_euid
+        || existing.st_mode & 0o777 != 0o600
+    {
+        return Err(SecurityError::Conflict);
+    }
+    match probe_relative_to(parent) {
+        SocketProbe::NoListener => {}
+        SocketProbe::Listening => return Err(SecurityError::AdminSocketInUse),
+        SocketProbe::Failed => return Err(SecurityError::Conflict),
+    }
+    let stale = SocketCleanup {
+        parent: parent.try_clone().map_err(|_| SecurityError::Store)?,
+        identity: SocketIdentity {
+            device: existing.st_dev,
+            inode: existing.st_ino,
+            uid: existing.st_uid,
+        },
+    };
+    // Unlinks only the probed inode; a replacement that appeared meanwhile is restored.
+    drop(stale);
+    match parent.child_stat() {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        _ => Err(SecurityError::Conflict),
+    }
+}
+
 pub fn prepare_admin_socket(
     path: &Path,
     service_euid: u32,
@@ -242,7 +359,7 @@ pub fn prepare_admin_socket(
         return Err(SecurityError::InvalidConfig);
     }
     match parent.child_stat() {
-        Ok(_) => return Err(SecurityError::Conflict),
+        Ok(existing) => remove_stale_socket(&parent, &existing, service_euid)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(SecurityError::InvalidConfig),
     }
@@ -296,7 +413,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socket_is_private_refuses_stale_path_and_cleanup_is_inode_safe() {
+    async fn socket_is_private_refuses_live_socket_and_cleanup_is_inode_safe() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = temp.path().canonicalize().unwrap().join("admin.sock");
@@ -304,9 +421,10 @@ mod tests {
         let metadata = std::fs::symlink_metadata(&path).unwrap();
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
         assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        // The first listener is still alive, so a second core must not take the path over.
         assert!(matches!(
             prepare_admin_socket(&path, unsafe { libc::geteuid() }),
-            Err(SecurityError::Conflict)
+            Err(SecurityError::AdminSocketInUse)
         ));
         let (_listener, cleanup) = prepared.into_parts();
         std::fs::remove_file(&path).unwrap();
@@ -316,6 +434,74 @@ mod tests {
             path.is_file(),
             "cleanup must not unlink a replacement inode"
         );
+    }
+
+    fn private_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = temp.path().canonicalize().unwrap().join("admin.sock");
+        (temp, path)
+    }
+
+    /// Leaves a socket file with no listener, as a killed or crashed core does.
+    fn leave_stale_socket(path: &Path, mode: u32) -> u64 {
+        drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        std::fs::symlink_metadata(path).unwrap().ino()
+    }
+
+    #[tokio::test]
+    async fn stale_socket_without_listener_is_replaced_by_a_new_listener() {
+        let (_temp, path) = private_dir();
+        let stale_inode = leave_stale_socket(&path, 0o600);
+        let prepared = prepare_admin_socket(&path, unsafe { libc::geteuid() })
+            .expect("a socket nobody listens on must not block startup");
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        assert_ne!(
+            metadata.ino(),
+            stale_inode,
+            "a new socket replaces the stale one"
+        );
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        let (_listener, _cleanup) = prepared.into_parts();
+        std::os::unix::net::UnixStream::connect(&path).expect("new listener accepts");
+    }
+
+    #[tokio::test]
+    async fn live_listener_on_the_path_is_refused_as_in_use() {
+        let (_temp, path) = private_dir();
+        let live = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let inode = std::fs::symlink_metadata(&path).unwrap().ino();
+        assert!(matches!(
+            prepare_admin_socket(&path, unsafe { libc::geteuid() }),
+            Err(SecurityError::AdminSocketInUse)
+        ));
+        assert_eq!(std::fs::symlink_metadata(&path).unwrap().ino(), inode);
+        drop(live);
+    }
+
+    #[tokio::test]
+    async fn regular_file_on_the_path_is_refused_and_kept() {
+        let (_temp, path) = private_dir();
+        std::fs::write(&path, b"not a socket").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            prepare_admin_socket(&path, unsafe { libc::geteuid() }),
+            Err(SecurityError::Conflict)
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"not a socket");
+    }
+
+    #[tokio::test]
+    async fn stale_socket_with_wrong_mode_is_refused_and_kept() {
+        let (_temp, path) = private_dir();
+        let inode = leave_stale_socket(&path, 0o660);
+        assert!(matches!(
+            prepare_admin_socket(&path, unsafe { libc::geteuid() }),
+            Err(SecurityError::Conflict)
+        ));
+        assert_eq!(std::fs::symlink_metadata(&path).unwrap().ino(), inode);
     }
 
     #[tokio::test]
