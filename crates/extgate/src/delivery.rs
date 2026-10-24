@@ -23,7 +23,10 @@ pub async fn apply_delivery_effect(
     agent_id: &str,
     session_id: &str,
     effect: DeliveryEffect,
-    reply_target: Option<&str>,
+    // The origin of the said that started the turn, if any. Used only to tell the gateway which
+    // inbound message a failed turn belongs to (`turn_failed`). It is never a reply destination:
+    // a plain say carries none (D-1093).
+    failure_origin: Option<&str>,
     stream_id: Option<&str>,
 ) -> Option<String> {
     match effect {
@@ -49,7 +52,6 @@ pub async fn apply_delivery_effect(
                 agent_id,
                 session_id,
                 &body,
-                reply_target,
                 stream_id,
             )
             .await
@@ -82,9 +84,9 @@ pub async fn apply_delivery_effect(
             if let DeliveryEffect::Failed { error } = &effect {
                 tracing::error!(error = %error, "session turn failed");
                 // R3(❌): ターン失敗を発端 origin つきで gateway へ通知する（gateway が ❌ を付ける）。
-                // error 本文は wire に載せない（多エージェント相互反応ループ防止・#668）。単一メンション
-                // のみ reply_target=Some（bundle/曖昧は None＝付ける先が無いので通知しない）。
-                if let Some(origin) = reply_target {
+                // error 本文は wire に載せない（多エージェント相互反応ループ防止・#668）。発端 said の
+                // 無いターン（resume / heartbeat）は None＝付ける先が無いので通知しない。
+                if let Some(origin) = failure_origin {
                     emit_turn_failed(state, instance_id, binding_id, origin).await;
                 }
             }
@@ -105,7 +107,6 @@ pub async fn deliver_intermediate_say(
     agent_id: &str,
     session_id: &str,
     body: &str,
-    reply_target: Option<&str>,
     stream_id: Option<&str>,
 ) -> Result<String, GateError> {
     send_text(
@@ -115,7 +116,6 @@ pub async fn deliver_intermediate_say(
         agent_id,
         session_id,
         body,
-        reply_target,
         stream_id,
     )
     .await
@@ -149,7 +149,6 @@ pub(crate) async fn deliver_recorded_say(
     agent_id: &str,
     session_id: &str,
     body: &str,
-    reply_target: Option<&str>,
     stream_id: Option<&str>,
 ) -> Result<String, GateError> {
     send_say(
@@ -159,7 +158,6 @@ pub(crate) async fn deliver_recorded_say(
         agent_id,
         session_id,
         body,
-        reply_target,
         stream_id,
         false,
     )
@@ -174,7 +172,6 @@ async fn send_text(
     agent_id: &str,
     session_id: &str,
     body: &str,
-    reply_target: Option<&str>,
     stream_id: Option<&str>,
 ) -> Result<String, GateError> {
     send_say(
@@ -184,7 +181,6 @@ async fn send_text(
         agent_id,
         session_id,
         body,
-        reply_target,
         stream_id,
         true,
     )
@@ -199,7 +195,6 @@ async fn send_say(
     agent_id: &str,
     session_id: &str,
     body: &str,
-    reply_target: Option<&str>,
     stream_id: Option<&str>,
     record_speech: bool,
 ) -> Result<String, GateError> {
@@ -277,7 +272,7 @@ async fn send_say(
 
     let write_err = write_json(
         &writer,
-        &say_frame(&delivery_id, binding_id, body, reply_target, stream_id),
+        &say_frame(&delivery_id, binding_id, body, stream_id),
     )
     .await
     .is_err();

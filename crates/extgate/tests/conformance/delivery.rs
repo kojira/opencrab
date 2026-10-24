@@ -26,12 +26,9 @@ async fn delivery_ok_rejected_and_disconnect() {
         }
     }
     let say = saw_say.expect("say");
-    // 単一メンション turn の say は発端 said の origin を reply_target に載せる（gateway が
-    // e-tag reply する。裁定A で ended は say の後になったが、返信先は payload で明示する方針）。
-    assert_eq!(
-        say["payload"],
-        json!({"text": "hello from agent", "reply_target": "d1"})
-    );
+    // D-1093: core は返信先を決めない。ターンの発端 origin を say の返信先にしない。返信は
+    // LLM が明示的に返信操作（対象つき）を呼んだときだけ起きる。地の文の say は返信先なし。
+    assert_eq!(say["payload"], json!({"text": "hello from agent"}));
     assert!(!say["payload"]["text"].as_str().unwrap().is_empty());
     write_frame(&mut s, &json!({"id": say["id"], "m": "ok"})).await;
     tokio::time::sleep(Duration::from_millis(50)).await;

@@ -271,8 +271,8 @@ pub fn process_said<R: AgentRuntime>(
             &session_id,
             said.system_context.as_deref().unwrap_or(""),
             Some(seq),
-            // D-1067: 既定返信先はターンの起点（受信発言そのもの）。said.reply_target は
-            // 受信発言が指す先（会話表示用メタ）なので返信先に使わない。
+            // D-1093: core は返信先を決めない。said の origin は失敗通知（turn_failed）の相関に
+            // だけ渡す。返信はモデルが対象つきの返信操作を明示的に呼んだときだけ起きる。
             Some(said.origin.as_str()),
             own_rows,
         );

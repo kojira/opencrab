@@ -84,7 +84,7 @@ impl<R: AgentRuntime> TimedFireSink for ExtgateTimedFireSink<R> {
             activity: None,
         };
         tokio::spawn(async move {
-            run_v3_said_less_turn(sink, req.caller, None).await;
+            run_v3_said_less_turn(sink, req.caller).await;
         });
     }
 }

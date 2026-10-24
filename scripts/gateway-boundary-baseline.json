@@ -410,7 +410,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 253,
+      "line": 248,
       "snippet": "TrustedUser,",
       "classification": "production-violation",
       "violation": "V11",
@@ -420,7 +420,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 619,
+      "line": 614,
       "snippet": "Some(\"trusted_user\") => Ok(SaidCaller::TrustedUser),",
       "classification": "production-violation",
       "violation": "V11",
@@ -890,7 +890,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/turn.rs",
-      "line": 284,
+      "line": 281,
       "snippet": "channel_id: Some(&address),",
       "classification": "production-violation",
       "violation": "V11",

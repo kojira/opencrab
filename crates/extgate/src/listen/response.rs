@@ -280,7 +280,7 @@ async fn handle_utterance_response(
             return Err(());
         }
         // C9: 発話失敗を発端 origin つきで gateway へ通知する（❌ を付ける）。error 本文は
-        // wire に載せない（#668）。単一メンションのみ Some（bundle/曖昧は None）。
+        // wire に載せない（#668）。モデルが発話操作で明示した対象があるときだけ Some。
         if let Some(origin) = reply_target {
             emit_turn_failed(state, instance_id, binding_id, origin).await;
         }

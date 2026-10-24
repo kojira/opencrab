@@ -71,7 +71,7 @@ pub enum Pending {
     Utterance {
         delivery_id: String,
         binding_id: String,
-        /// ❌ を付ける発端 origin（単一メンションのみ Some・bundle/曖昧は None）。
+        /// ❌ を付ける対象 origin。モデルが発話操作で明示した対象（返信先など）だけ Some。
         reply_target: Option<String>,
         /// Outbox copies of declared workspace files; deleted at terminal state.
         staged_files: Vec<StagedFile>,
