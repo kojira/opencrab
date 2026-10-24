@@ -453,17 +453,14 @@ mod tests {
     #[tokio::test]
     async fn stale_socket_without_listener_is_replaced_by_a_new_listener() {
         let (_temp, path) = private_dir();
-        let stale_inode = leave_stale_socket(&path, 0o600);
+        leave_stale_socket(&path, 0o600);
+        std::os::unix::net::UnixStream::connect(&path).expect_err("stale socket refuses");
         let prepared = prepare_admin_socket(&path, unsafe { libc::geteuid() })
             .expect("a socket nobody listens on must not block startup");
         let metadata = std::fs::symlink_metadata(&path).unwrap();
-        assert_ne!(
-            metadata.ino(),
-            stale_inode,
-            "a new socket replaces the stale one"
-        );
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
         let (_listener, _cleanup) = prepared.into_parts();
+        // Accepting proves a live listener replaced the stale socket (inode numbers may be reused).
         std::os::unix::net::UnixStream::connect(&path).expect("new listener accepts");
     }
 
