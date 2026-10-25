@@ -130,14 +130,6 @@ export function getSessionLogs(
   return api.get<SessionLogRow[]>(`/sessions/${id}/logs?${q}`, { signal: opts.signal });
 }
 
-/** 非 web セッションの従来 owner 指示。web-conversation POST/SSE には使わない。 */
-export function sendOwnerInstruction(
-  sessionId: string,
-  content: string,
-): Promise<{ id: number }> {
-  return api.post(`/sessions/${sessionId}/owner`, { content });
-}
-
 export type SendAccepted = {
   client_message_id: string;
   origin: string;

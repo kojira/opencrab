@@ -7,7 +7,6 @@ import {
   getSession,
   getSessionLogs,
   getWebConversationState,
-  sendOwnerInstruction,
   sendWebMessage,
   ConversationSendError,
 } from '../api/sessions';
@@ -560,20 +559,6 @@ export default function SessionDetail() {
     }
   }, [logs, pendingText, liveAgent, sendPhase, noReply, logsKind]);
 
-  const submitOwner = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!id || !ownerInput.trim() || sendPhase === 'submitting') return;
-    const content = ownerInput.trim();
-    setOwnerInput('');
-    setSendError(null);
-    try {
-      await sendOwnerInstruction(id, content);
-      refreshTail(id);
-    } catch (err) {
-      setSendError((err as Error).message);
-    }
-  };
-
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (!isWebConversation || !ownerInput.trim() || sendPhase === 'submitting') return;
@@ -773,19 +758,12 @@ export default function SessionDetail() {
       {sendError ? (
         <ErrorPanel
           endpoint={
-            !isWebConversation
-              ? 'POST /api/sessions/{id}/owner'
-              : sendError === 'sse_disconnected'
-                ? 'GET /api/web-conversations/{session_id}/events'
-                : 'POST /api/web-conversations/{session_id}/messages'
+            sendError === 'sse_disconnected'
+              ? 'GET /api/web-conversations/{session_id}/events'
+              : 'POST /api/web-conversations/{session_id}/messages'
           }
           message={sendError}
           onRetry={() => {
-            if (!isWebConversation) {
-              setSendError(null);
-              if (id) loadSession(id);
-              return;
-            }
             if (sendError === 'sse_disconnected') {
               setSendError(null);
               if (id) loadSession(id);
@@ -796,23 +774,9 @@ export default function SessionDetail() {
         />
       ) : null}
 
-      {sessionKind === 'loaded' && session ? (
+      {sessionKind === 'loaded' && session && isWebConversation ? (
         <div className="card-elevated">
-          {ownershipPending ? null : !isWebConversation ? (
-            <form className="flex gap-3" onSubmit={(e) => void submitOwner(e)}>
-              <input
-                type="text"
-                className="input-outlined flex-1"
-                placeholder={t('sessionDetail.ownerPlaceholder')}
-                value={ownerInput}
-                onChange={(e) => setOwnerInput(e.target.value)}
-              />
-              <button type="submit" className="btn-filled">
-                <span className="material-symbols-outlined text-xl">send</span>
-                {t('common.send')}
-              </button>
-            </form>
-          ) : preparing ? (
+          {preparing ? (
             <div role="status">
               <p className="text-body-lg text-on-surface-variant">
                 {t('sessionDetail.bindingPreparing')}
