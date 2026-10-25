@@ -9,7 +9,6 @@ const getSession = vi.fn();
 const getSessionLogs = vi.fn();
 const getWebConversationState = vi.fn();
 const sendWebMessage = vi.fn();
-const sendOwnerInstruction = vi.fn();
 const getAgent = vi.fn();
 
 vi.mock('../api/sessions', async () => {
@@ -20,7 +19,6 @@ vi.mock('../api/sessions', async () => {
     getSessionLogs: (...args: unknown[]) => getSessionLogs(...args),
     getWebConversationState: (...args: unknown[]) => getWebConversationState(...args),
     sendWebMessage: (...args: unknown[]) => sendWebMessage(...args),
-    sendOwnerInstruction: (...args: unknown[]) => sendOwnerInstruction(...args),
   };
 });
 
@@ -84,7 +82,6 @@ beforeEach(() => {
   getWebConversationState.mockReset();
   getWebConversationState.mockResolvedValue('ready');
   sendWebMessage.mockReset();
-  sendOwnerInstruction.mockReset();
   getAgent.mockReset();
   getAgent.mockResolvedValue({
     id: 'agent-1',
@@ -235,7 +232,7 @@ describe('SessionDetail web conversation', () => {
       </MemoryRouter>,
     );
     await waitFor(() => {
-      expect(screen.getByPlaceholderText('sessionDetail.ownerPlaceholder')).toBeInTheDocument();
+      expect(getSessionLogs).toHaveBeenCalled();
     });
     expect(screen.queryByText('sessionDetail.unbound')).not.toBeInTheDocument();
     expect(screen.queryByText('sessionDetail.bindingPreparing')).not.toBeInTheDocument();
@@ -244,7 +241,7 @@ describe('SessionDetail web conversation', () => {
     expect(sendWebMessage).not.toHaveBeenCalled();
   });
 
-  it('sends owner instruction on intake and never opens web-conversation SSE', async () => {
+  it('shows a non-web session without a send form and never opens web-conversation SSE', async () => {
     getWebConversationState.mockResolvedValue(null);
     getSession.mockResolvedValue({
       id: 'intake-1',
@@ -258,7 +255,6 @@ describe('SessionDetail web conversation', () => {
       metadata_json: null,
     });
     getSessionLogs.mockResolvedValue([]);
-    sendOwnerInstruction.mockResolvedValue({ id: 1 });
     render(
       <MemoryRouter initialEntries={['/sessions/intake-1']}>
         <Routes>
@@ -267,14 +263,13 @@ describe('SessionDetail web conversation', () => {
       </MemoryRouter>,
     );
     await waitFor(() => {
-      expect(screen.getByPlaceholderText('sessionDetail.ownerPlaceholder')).toBeInTheDocument();
+      expect(getSessionLogs).toHaveBeenCalled();
     });
-    const user = userEvent.setup();
-    await user.type(screen.getByPlaceholderText('sessionDetail.ownerPlaceholder'), 'please look');
-    await user.click(screen.getByRole('button', { name: /common.send/ }));
     await waitFor(() => {
-      expect(sendOwnerInstruction).toHaveBeenCalledWith('intake-1', 'please look');
+      expect(screen.getByTestId('session-log-tail')).toBeInTheDocument();
     });
+    expect(screen.queryByPlaceholderText('sessionDetail.ownerPlaceholder')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /common.send/ })).not.toBeInTheDocument();
     expect(sendWebMessage).not.toHaveBeenCalled();
     expect(FakeEventSource.instances).toHaveLength(0);
   });
