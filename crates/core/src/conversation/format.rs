@@ -239,6 +239,20 @@ pub fn format_single_log_with_echo(
                             .unwrap_or("NO_REPLY");
                         return format!("[turn_terminated: {marker}]");
                     }
+                    // D-1096: the agent's previous utterance did not fully reach the other side.
+                    if kind == "delivery_cut" {
+                        let delivered = value
+                            .get("delivered")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if delivered.is_empty() {
+                            return "[delivery_cut: 直前の発言は相手に届く前に中止された]"
+                                .to_string();
+                        }
+                        return format!(
+                            "[delivery_cut: 直前の発言は相手に途中までしか届かなかった。届いたのは『{delivered}』まで]"
+                        );
+                    }
                     if kind == "turn_exhausted" {
                         let reason = value
                             .get("reason")

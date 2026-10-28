@@ -10,6 +10,7 @@ use opencrab_actions::{
 use crate::completion::{v3_attach_dispatch, ExtgateCompletionSink};
 use crate::delivery::apply_delivery_effect;
 use crate::error::ErrorCode;
+use crate::interrupt::{finish_interrupted, InterruptedTurn, TurnRegistration};
 use crate::listen::{emit_activity, emit_ended_activity};
 use crate::protocol::Said;
 use crate::registry::ExtgateState;
@@ -133,6 +134,8 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     .probe
                     .start_session_turn_count
                     .fetch_add(1, Ordering::SeqCst);
+                // D-1096: an `interrupt` of this session stops this turn while it runs.
+                let running = TurnRegistration::begin(&state, &session_id, &agent_id);
                 let activity_id = uuid::Uuid::new_v4().to_string();
                 // D-1087: このターンの活動（ツール実行とサブタスクのライフサイクル）を
                 // gateway へ流す stream。activity_id は下の `activity` フレームと同じ値。
@@ -228,6 +231,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             latest: Arc::clone(&last_continuation_say),
                         })
                         .await;
+                    running.turn.set_task(taken.task.abort_handle());
                     let res = taken.task.await;
                     // §12: the run reached a gated tool after its promotion and stopped without
                     // running it; the normal turn below runs it (on the same partial stream).
@@ -271,7 +275,12 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     let hook_session = session_id.clone();
                     let hook_last_continuation_say = Arc::clone(&last_continuation_say);
                     let hook_partial_stream = partial_stream.clone();
-                    tokio::spawn(async move {
+                    let tracked_tools: Arc<dyn opencrab_actions::ToolEventSink> =
+                        Arc::new(crate::interrupt::TrackedTools::new(
+                            Arc::clone(&activity_stream) as Arc<dyn opencrab_actions::ToolEventSink>,
+                            Arc::clone(&running.turn),
+                        ));
+                    let engine = tokio::spawn(async move {
                         let inbound = NormalizedInbound {
                             session_id: &session_id,
                             agent_id: &agent_id,
@@ -420,10 +429,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                     req = req.with_on_partial_text(hook);
                                 }
                                 // D-1087: ツール実行を活動 stream に載せる（開始 → 終端の順）。
-                                req = req.with_tool_event_sink(
-                                    Arc::clone(&activity_stream)
-                                        as Arc<dyn opencrab_actions::ToolEventSink>,
-                                );
+                                req = req.with_tool_event_sink(Arc::clone(&tracked_tools));
                                 // DI 拡張 §8: 宣言能力を tool set へ載せる（宣言があるときだけ）。
                                 if let Some(ga) = ops_actions.clone() {
                                     req = req.with_gateway_actions(ga);
@@ -442,9 +448,32 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             },
                         )
                         .await
-                    })
-                    .await
+                    });
+                    running.turn.set_task(engine.abort_handle());
+                    engine.await
                 };
+                // D-1096: an interrupted turn delivers nothing more of its own.
+                if let Some(delivered) = running.turn.close() {
+                    let say_recorded = last_continuation_say
+                        .lock()
+                        .expect("continuation say id lock")
+                        .is_some();
+                    finish_interrupted(
+                        &running.turn,
+                        InterruptedTurn {
+                            state: &state,
+                            instance_id: &instance_id,
+                            binding_id: &binding_id,
+                            session_id: &session_id,
+                            activity_id: &activity_id,
+                            activity: Some(&turn_activity),
+                            say_recorded,
+                        },
+                        delivered,
+                    )
+                    .await;
+                    return;
+                }
                 match turn_res {
                     Ok(turn) => {
                         let engine_result = turn.as_ref().and_then(|result| result.as_ref().ok());

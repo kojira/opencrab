@@ -14,6 +14,7 @@ pub mod fire;
 pub mod gate_admin_security;
 pub mod ids;
 pub mod inbound;
+pub mod interrupt;
 pub mod json;
 pub mod listen;
 pub mod operation_calls;

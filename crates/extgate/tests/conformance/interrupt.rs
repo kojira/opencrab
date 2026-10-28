@@ -86,8 +86,14 @@ async fn interrupt_stops_the_running_turn_and_the_next_turn_starts() {
     // The held v1 run never returned; v2's turn ran instead.
     wait_turns(&h, 1).await;
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 1);
+    // v2's turn already sees the cut of v1's (nothing of it was delivered).
     let conversation = h.runtime.conversations.lock().unwrap().last().cloned().unwrap();
-    assert!(conversation.ends_with("speech:v2"), "{conversation}");
+    assert!(
+        conversation.ends_with(
+            "speech:v2\nsystem:{\"delivered\":\"\",\"type\":\"delivery_cut\"}"
+        ),
+        "{conversation}"
+    );
     // The only say after the interrupt is v2's.
     let says: Vec<&Value> = after_ok.iter().filter(|f| f["m"] == "say").collect();
     assert_eq!(says.len(), 1, "{after_ok:?}");
