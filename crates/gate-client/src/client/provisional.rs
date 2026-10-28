@@ -1,4 +1,5 @@
-/// D-1085: why a `provisional` or `provisional_cancel` request was not acknowledged.
+/// D-1085: why a `provisional`, `provisional_cancel` (or D-1096 `interrupt`) request was not
+/// acknowledged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvisionalError {
     NotReady,
@@ -35,6 +36,20 @@ impl InstanceClient {
             provisional_cancel_frame(&id, &binding_id, provisional_id),
         )
         .await
+    }
+
+    /// D-1096: stops the running turn of `address`'s session. `delivered` is the part of the
+    /// agent's last utterance that reached the other side; core records it. Acknowledged once
+    /// the turn has stopped and the cut is recorded (also when no turn was running).
+    pub async fn interrupt(
+        &self,
+        address: &str,
+        delivered: Option<&str>,
+    ) -> Result<(), ProvisionalError> {
+        let binding_id = self.provisional_binding(address).await?;
+        let id = self.next_id();
+        self.provisional_request(&id, interrupt_frame(&id, &binding_id, delivered))
+            .await
     }
 
     async fn provisional_binding(&self, address: &str) -> Result<String, ProvisionalError> {

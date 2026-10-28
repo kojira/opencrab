@@ -50,6 +50,16 @@ pub fn provisional_cancel_frame(id: &str, binding_id: &str, provisional_id: &str
     })
 }
 
+/// D-1096: stop the binding session's running turn. `delivered` is the part of the agent's last
+/// utterance that reached the other side (`Some("")`: none of it); core records it.
+pub fn interrupt_frame(id: &str, binding_id: &str, delivered: Option<&str>) -> Value {
+    let mut frame = json!({"id": id, "m": "interrupt", "binding_id": binding_id});
+    if let Some(delivered) = delivered {
+        frame["delivered"] = json!(delivered);
+    }
+    frame
+}
+
 /// Core's id-less report, written before the turn's say: whether the said that carried
 /// `provisional_id` reuses that run (`promoted`) or runs a normal turn.
 #[derive(Debug, Clone, PartialEq, Eq)]

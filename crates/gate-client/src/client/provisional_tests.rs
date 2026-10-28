@@ -172,3 +172,41 @@ fn said_frame_carries_the_provisional_id() {
     let frame = said_frame_with_context("said:1", BINDING, "o", "a", None, Some(&context), "hi", &[]);
     assert_eq!(frame["provisional_id"], PROVISIONAL);
 }
+
+/// D-1096: `interrupt` is an acknowledged request carrying `delivered` only when given.
+#[tokio::test]
+async fn interrupt_is_an_acknowledged_request_with_optional_delivered() {
+    let (_dir, client, mut core) = bound_client().await;
+    let sent = tokio::spawn({
+        let client = client.clone();
+        async move { client.interrupt(ADDRESS, Some("一文目。")).await }
+    });
+    let frame = read(&mut core).await;
+    assert_eq!(
+        frame,
+        json!({"id": frame["id"], "m": "interrupt", "binding_id": BINDING,
+               "delivered": "一文目。"})
+    );
+    write_json(&mut core, &json!({"id": frame["id"], "m": "ok"}))
+        .await
+        .unwrap();
+    assert_eq!(sent.await.unwrap(), Ok(()));
+
+    let sent = tokio::spawn({
+        let client = client.clone();
+        async move { client.interrupt(ADDRESS, None).await }
+    });
+    let frame = read(&mut core).await;
+    assert_eq!(
+        frame,
+        json!({"id": frame["id"], "m": "interrupt", "binding_id": BINDING})
+    );
+    write_json(&mut core, &json!({"id": frame["id"], "m": "ok"}))
+        .await
+        .unwrap();
+    assert_eq!(sent.await.unwrap(), Ok(()));
+    assert_eq!(
+        client.interrupt("other", None).await,
+        Err(ProvisionalError::NotReady)
+    );
+}
