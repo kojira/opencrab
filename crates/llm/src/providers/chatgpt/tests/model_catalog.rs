@@ -2,7 +2,7 @@
 async fn publishes_gpt_6_models_with_gpt_5_6_capabilities() {
     let models = ChatGptProvider::new().available_models().await.unwrap();
 
-    for id in ["gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
+    for id in ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"] {
         let model = models.iter().find(|model| model.id == id).expect(id);
         assert_eq!(model.context_window, 400_000);
         assert!(model.supports_function_calling);
