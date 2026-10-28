@@ -69,3 +69,23 @@ fn tool_sources(req: &RunRequest) -> ToolSources {
         .unwrap_or_default();
     (op_names, req.completion_sink.is_some())
 }
+
+/// D-1096: a running subtask entry of `parent_session_id` (its task is `abort_handle`).
+fn test_spawned_subtask(
+    abort_handle: tokio::task::AbortHandle,
+    parent_session_id: &str,
+) -> opencrab_actions::SpawnedSubtask {
+    opencrab_actions::SpawnedSubtask {
+        abort_handle,
+        session_id: "subtask-sub-1".to_string(),
+        parent_session_id: parent_session_id.to_string(),
+        agent_id: "agent-1".to_string(),
+        label: "job".to_string(),
+        tool_name: "spawn_subtask".to_string(),
+        started_at: std::time::Instant::now(),
+        reply_target: None,
+        caller: CallerIdentity::Owner,
+        lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+        steerable: false,
+    }
+}

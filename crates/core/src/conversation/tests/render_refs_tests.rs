@@ -607,4 +607,36 @@ mod render_refs_tests {
             "[turn_exhausted: iteration_limit, iterations=11]"
         );
     }
+
+    /// D-1096: a `delivery_cut` note renders as one control line with the delivered text.
+    #[test]
+    fn delivery_cut_renders_as_control_history() {
+        let note = |content: &str| SessionLogRow {
+            id: Some(5),
+            agent_id: "me".into(),
+            session_id: "s".into(),
+            log_type: "system".into(),
+            content: content.into(),
+            speaker_id: None,
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+        assert_eq!(
+            format_single_log_with_echo(
+                &note(r#"{"type":"delivery_cut","delivered":"一文目。"}"#),
+                None,
+                None
+            ),
+            "[delivery_cut: 直前の発言は相手に途中までしか届かなかった。届いたのは『一文目。』まで]"
+        );
+        assert_eq!(
+            format_single_log_with_echo(
+                &note(r#"{"type":"delivery_cut","delivered":""}"#),
+                None,
+                None
+            ),
+            "[delivery_cut: 直前の発言は相手に届く前に中止された]"
+        );
+    }
 }
