@@ -14,6 +14,12 @@ enum ActivityStep {
         call_id: &'static str,
         terminal: opencrab_actions::ToolEventStatus,
     },
+    /// D-1096: a tool that has started and is still running when the turn is stopped (the
+    /// executor wrote only `started`).
+    RunningTool {
+        tool: &'static str,
+        call_id: &'static str,
+    },
     /// One subtask lifecycle event.
     Lifecycle {
         run_id: &'static str,
@@ -76,6 +82,22 @@ impl ActivityScript {
                             .then_some("boom"),
                         });
                     }
+                }
+                ActivityStep::RunningTool { tool, call_id } => {
+                    let Some(sink) = sink else { continue };
+                    sink.on_event(&opencrab_actions::ToolEvent {
+                        tool_name: tool,
+                        tool_call_id: call_id,
+                        agent_id: "agent-1",
+                        session_id: Some("sess"),
+                        depth: 0,
+                        status: opencrab_actions::ToolEventStatus::Started,
+                        started_at: "2026-10-20T00:00:00Z",
+                        duration_ms: None,
+                        args: &args,
+                        result: None,
+                        error: None,
+                    });
                 }
                 ActivityStep::Lifecycle {
                     run_id,

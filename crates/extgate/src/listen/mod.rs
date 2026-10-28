@@ -4,6 +4,7 @@ mod activity;
 mod bind;
 mod create_binding;
 mod hello;
+mod interrupt;
 mod provisional;
 mod response;
 
@@ -326,6 +327,18 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
             .await;
             Err(())
         }
+        (ConnState::PreHello, InboundMsg::Interrupt(interrupt)) => {
+            close_live(
+                state,
+                None,
+                Some(identity),
+                ErrorCode::ProtocolOrder,
+                Some(&interrupt.id),
+                Some(writer),
+            )
+            .await;
+            Err(())
+        }
         (ConnState::PreHello, InboundMsg::Said(said)) => {
             close_live(
                 state,
@@ -419,6 +432,10 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
         (ConnState::Running, InboundMsg::ProvisionalCancel(cancel)) => {
             let inst = instance_id.as_deref().expect("running has instance");
             provisional::handle_provisional_cancel(state, writer, inst, identity, &cancel).await
+        }
+        (ConnState::Running, InboundMsg::Interrupt(interrupt)) => {
+            let inst = instance_id.as_deref().expect("running has instance");
+            interrupt::handle_interrupt(state, writer, inst, identity, &interrupt).await
         }
         (ConnState::Running, InboundMsg::Said(said)) => {
             let inst = instance_id.as_deref().expect("running has instance");

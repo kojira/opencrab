@@ -16,7 +16,8 @@ mod turn_profile;
 pub use activity::{SubtaskLifecycle, ToolActivity};
 pub use partial::{say_stream_id, Partial};
 pub use provisional::{
-    provisional_cancel_frame, provisional_frame, ProvisionalRequest, ProvisionalResult,
+    interrupt_frame, provisional_cancel_frame, provisional_frame, ProvisionalRequest,
+    ProvisionalResult,
 };
 pub use turn_profile::TurnModelProfile;
 

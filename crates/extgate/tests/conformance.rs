@@ -26,3 +26,4 @@ include!("conformance/activity_stream.rs");
 include!("conformance/agent_prelude.rs");
 include!("conformance/provisional.rs");
 include!("conformance/no_implicit_reply.rs");
+include!("conformance/interrupt.rs");

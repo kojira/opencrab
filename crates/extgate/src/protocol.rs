@@ -327,6 +327,7 @@ pub enum InboundMsg {
     Said(Said),
     Provisional(Provisional),
     ProvisionalCancel(ProvisionalCancel),
+    Interrupt(Interrupt),
     Response(WireResponse),
     Reverse {
         id: Option<String>,
@@ -418,6 +419,14 @@ pub fn parse_inbound(obj: &Value) -> Result<InboundMsg, GateError> {
         },
         "provisional_cancel" => match provisional::parse_provisional_cancel(obj) {
             Ok(c) => Ok(InboundMsg::ProvisionalCancel(c)),
+            Err(e) => Ok(InboundMsg::Invalid {
+                id: opt_id(obj),
+                code: e.code,
+                m,
+            }),
+        },
+        "interrupt" => match interrupt::parse_interrupt(obj) {
+            Ok(i) => Ok(InboundMsg::Interrupt(i)),
             Err(e) => Ok(InboundMsg::Invalid {
                 id: opt_id(obj),
                 code: e.code,
@@ -769,6 +778,9 @@ mod hello_debug;
 
 mod provisional;
 pub use provisional::{provisional_result_frame, Provisional, ProvisionalCancel};
+
+mod interrupt;
+pub use interrupt::Interrupt;
 
 #[cfg(test)]
 #[path = "protocol/activity_tests.rs"]

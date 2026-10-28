@@ -229,6 +229,8 @@ pub struct ExtgateState {
     folded_seqs: Mutex<HashMap<String, BTreeSet<i64>>>,
     /// D-1085: provisional runs awaiting their said.
     pub provisionals: crate::provisional::ProvisionalRegistry,
+    /// D-1096: the running said turn of each session (for `interrupt`).
+    pub running_turns: crate::interrupt::RunningTurns,
     #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
 }
@@ -251,6 +253,7 @@ impl ExtgateState {
                 .expect("built-in command names must be unique"),
             folded_seqs: Mutex::new(HashMap::new()),
             provisionals: crate::provisional::ProvisionalRegistry::new(),
+            running_turns: crate::interrupt::RunningTurns::new(),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
         }
