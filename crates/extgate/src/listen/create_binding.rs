@@ -16,11 +16,11 @@ pub async fn handle_create_binding(
 ) -> Result<(), ()> {
     let result = persist(state, instance_id, &request);
     match result {
-        Ok(()) => {
+        Ok(binding_id) => {
             if write_json(writer, &ok_frame(&request.id)).await.is_err() {
                 return Err(());
             }
-            enqueue_bind(state, instance_id, &request.binding_id, &request.address).await;
+            enqueue_bind(state, instance_id, &binding_id, &request.address).await;
             Ok(())
         }
         Err(error) if error.code == ErrorCode::StoreError => Err(()),
@@ -30,15 +30,28 @@ pub async fn handle_create_binding(
     }
 }
 
+/// Returns the binding that now serves the address. D-1098: the instance's own binding for the
+/// address is reused first (an open one as it is, a closed one reopened), so a channel that was
+/// removed and is enabled again keeps its binding and conversation.
 fn persist(
     state: &ExtgateState,
     instance_id: &str,
     request: &CreateBinding,
-) -> Result<(), GateError> {
+) -> Result<String, GateError> {
     let mut conn = state.db.lock().map_err(|_| GateError::store())?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| GateError::store())?;
+    let reused =
+        opencrab_db::queries::reuse_instance_binding_in_tx(&tx, instance_id, &request.address)
+            .map_err(|_| GateError::store())?;
+    if let Some(binding_id) = reused.binding_id().map(str::to_string) {
+        if opencrab_db::queries::injected_commit_failure() {
+            return Err(GateError::store());
+        }
+        tx.commit().map_err(|_| GateError::store())?;
+        return Ok(binding_id);
+    }
     match opencrab_db::queries::create_gate_binding_in_tx(
         &tx,
         &request.binding_id,
@@ -66,5 +79,5 @@ fn persist(
         return Err(GateError::store());
     }
     tx.commit().map_err(|_| GateError::store())?;
-    Ok(())
+    Ok(request.binding_id.clone())
 }
