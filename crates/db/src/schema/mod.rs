@@ -115,13 +115,9 @@ pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
         for migration in MIGRATIONS {
             (migration.up)(&tx)?;
         }
-        tx.execute_batch(
-            "DROP TABLE IF EXISTS channel_config;
-             DROP TABLE IF EXISTS session_watches;
-             DROP TABLE IF EXISTS trusted_users;
-             DROP TABLE IF EXISTS agent_discord_config;
-             DROP TABLE IF EXISTS agent_nostr_config;",
-        )?;
+        for table in migrations::LEGACY_GATEWAY_SETTINGS_TABLES {
+            tx.execute_batch(&format!("DROP TABLE IF EXISTS {table};"))?;
+        }
         tx.execute_batch(&format!(
             "PRAGMA user_version = {}",
             latest_version_for_init()
@@ -191,6 +187,31 @@ where
     Ok(())
 }
 
+/// Last schema that still has the pre-separation gateway settings tables (v63 drops them).
+/// Tests of the historical migrations that read those tables stop here.
+#[cfg(test)]
+const HISTORICAL_LATEST_VERSION: i64 = 62;
+
+#[cfg(test)]
+fn historical_migrations() -> impl Iterator<Item = &'static Migration> + Clone {
+    MIGRATIONS
+        .into_iter()
+        .filter(|migration| migration.version <= HISTORICAL_LATEST_VERSION)
+}
+
+/// [`initialize`] for an existing database, stopping at [`HISTORICAL_LATEST_VERSION`].
+#[cfg(test)]
+fn initialize_historical(conn: &Connection) -> rusqlite::Result<()> {
+    if schema_version(conn)? < BASELINE_VERSION {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(SCHEMA_SQL)?;
+        migrate(&tx)?;
+        tx.execute_batch(&format!("PRAGMA user_version = {BASELINE_VERSION}"))?;
+        tx.commit()?;
+    }
+    run_migrations(conn, historical_migrations())
+}
+
 #[cfg(test)]
 fn init_historical_schema_fixture() -> rusqlite::Result<Connection> {
     let conn = Connection::open_in_memory()?;
@@ -198,7 +219,7 @@ fn init_historical_schema_fixture() -> rusqlite::Result<Connection> {
         "PRAGMA foreign_keys=ON;
          CREATE TABLE historical_fixture_marker (id INTEGER);",
     )?;
-    initialize(&conn)?;
+    initialize_historical(&conn)?;
     conn.execute_batch("DROP TABLE historical_fixture_marker")?;
     Ok(conn)
 }

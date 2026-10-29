@@ -93,8 +93,8 @@ fn v50_migrates_channel_config_without_losing_values_or_leaving_two_authorities(
         }
 
         seed_minimal_s2_prerequisites(&conn);
-        initialize(&conn).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        initialize_historical(&conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), HISTORICAL_LATEST_VERSION);
         assert!(table_exists(&conn, "channel_config").unwrap());
         assert!(!table_exists(&conn, "discord_channel_config").unwrap());
 
@@ -149,12 +149,12 @@ fn v50_migrates_channel_config_without_losing_values_or_leaving_two_authorities(
                 .unwrap();
             assert_eq!(count, 1, "missing {index}");
         }
-        initialize(&conn).unwrap();
+        initialize_historical(&conn).unwrap();
     }
     {
         let conn = Connection::open(&path).unwrap();
-        initialize(&conn).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        initialize_historical(&conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), HISTORICAL_LATEST_VERSION);
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM channel_config", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
