@@ -56,9 +56,7 @@ async fn main() -> anyhow::Result<()> {
         cfg,
         extgate,
         gate_socket,
-        gate_admin_listener,
-        gate_admin_cleanup,
-        gate_admin_router,
+        gate_admin,
         mut state,
         ..
     } = bootstrap::initialize()?;
@@ -93,13 +91,15 @@ async fn main() -> anyhow::Result<()> {
 
     // The protected router and private socket were prepared synchronously by bootstrap.
     // Only after that security gate succeeds may any runtime/public listener be started.
-    tokio::spawn(async move {
-        let _cleanup = gate_admin_cleanup;
-        if let Err(error) = axum::serve(gate_admin_listener, gate_admin_router).await {
-            tracing::error!(%error, "gate-admin listener halted");
-            std::process::exit(1);
-        }
-    });
+    if let Some(gate_admin) = gate_admin {
+        tokio::spawn(async move {
+            let _cleanup = gate_admin.cleanup;
+            if let Err(error) = axum::serve(gate_admin.listener, gate_admin.router).await {
+                tracing::error!(%error, "gate-admin listener halted");
+                std::process::exit(1);
+            }
+        });
+    }
 
     let _watcher_handle = background::spawn_background_tasks(&state, &cfg, &gate_socket);
 

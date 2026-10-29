@@ -118,8 +118,7 @@ fn apply_instance(
             .map_err(|_| GateError::store())?;
         }
         Some((kind_id, stored_subject, revision, config_b64, enabled, deleted_at)) => {
-            if deleted_at.is_some() || kind_id != request.kind_id || stored_subject != subject_id
-            {
+            if deleted_at.is_some() || kind_id != request.kind_id || stored_subject != subject_id {
                 return Err(GateError::new(ErrorCode::InstanceConflict));
             }
             if config_b64 != request.config_b64 || enabled != i64::from(request.enabled) {

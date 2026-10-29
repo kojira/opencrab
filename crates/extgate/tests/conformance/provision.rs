@@ -143,3 +143,44 @@ async fn d1098_provision_after_hello_is_protocol_order() {
     let answer = read_until(&mut s, |v| v["m"] == "err").await;
     assert_eq!(answer["code"], "protocol_order");
 }
+
+#[tokio::test]
+async fn d1098_gate_client_provision_then_instance_client_hello_binds() {
+    use opencrab_gate_client::provision::{binding_id_for, ProvisionClient, ProvisionDesired};
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    let addresses = vec!["chan-a".to_string(), "chan-b".to_string()];
+    let provisioned = ProvisionClient::new(h.sock.clone())
+        .provision(&ProvisionDesired {
+            instance_id: &instance_id,
+            kind_id: "opaque-kind",
+            agent_id: "agent-1",
+            enabled: true,
+            config_b64: config_b64(),
+            addresses: &addresses,
+        })
+        .await
+        .unwrap();
+    assert_eq!(provisioned.revision, 1);
+    assert_eq!(provisioned.config_digest, config_digest());
+    let expected: Vec<String> = addresses
+        .iter()
+        .map(|address| binding_id_for(&instance_id, address).unwrap())
+        .collect();
+    assert_eq!(
+        provisioned
+            .bindings
+            .iter()
+            .map(|b| b.binding_id.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+
+    let mut s = h.connect().await;
+    hello_ok(&mut s, &instance_id, provisioned.revision).await;
+    let mut bound = vec![ack_bind(&mut s).await, ack_bind(&mut s).await];
+    bound.sort();
+    let mut want = expected.clone();
+    want.sort();
+    assert_eq!(bound, want);
+}

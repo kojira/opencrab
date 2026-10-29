@@ -50,7 +50,10 @@ pub(super) fn parse_provision(obj: &Value) -> Result<Provision, GateError> {
     let instance_id = parse_uuid(&require_str(obj, "instance_id")?)?;
     let kind_id = nonempty_str(obj, "kind_id")?;
     let agent_id = nonempty_str(obj, "agent_id")?;
-    let enabled = obj.get("enabled").and_then(Value::as_bool).ok_or_else(bad)?;
+    let enabled = obj
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(bad)?;
     let config_b64 = require_str(obj, "config_b64")?;
     decode_config_b64(&config_b64)?;
     let mut bindings = Vec::new();
