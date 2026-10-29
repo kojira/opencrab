@@ -207,9 +207,7 @@ mod tests {
         let (_lane_read, lane_write) = lane.into_split();
         let (observer_read, observer_write) = observer.into_split();
         let writer = Arc::new(tokio::sync::Mutex::new(lane_write));
-        let state = Arc::new(ExtgateState::new(
-            opencrab_db::Db::memory().unwrap(),
-        ));
+        let state = Arc::new(ExtgateState::new(opencrab_db::Db::memory().unwrap()));
         state.lock_registry().unwrap().insert(
             "instance-1".to_string(),
             LiveEntry {
@@ -368,9 +366,7 @@ mod tests {
     /// No live instance at all: the same, for a gateway that never connected.
     #[tokio::test]
     async fn frames_without_a_live_instance_are_inert() {
-        let state = Arc::new(ExtgateState::new(
-            opencrab_db::Db::memory().unwrap(),
-        ));
+        let state = Arc::new(ExtgateState::new(opencrab_db::Db::memory().unwrap()));
         let emitter = ActivityEmitter::spawn(
             Arc::clone(&state),
             "missing-instance".into(),

@@ -107,26 +107,14 @@ async fn binding_put_reuse_membership_mismatch_conflicts() {
     let instance_id = uuid();
     let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    let (st, body) = h
-        .admin(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/api/gate-bindings/{binding_id}"))
-                .header(header::AUTHORIZATION, auth())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "instance_id": instance_id,
-                        "address": "owned-by-2",
-                        "session": {"session_id": "owned-by-2", "title": "x"}
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(st, StatusCode::CONFLICT);
-    assert_eq!(err_code(&body), "binding_conflict");
+    let result = create_binding_row(&h, &binding_id, &instance_id, "owned-by-2", "owned-by-2", "x");
+    assert!(
+        matches!(
+            result,
+            Err(opencrab_db::queries::CreateGateBindingError::Conflict)
+        ),
+        "{result:?}"
+    );
     let conn = h.state.db.lock().unwrap();
     let bindings: i64 = conn
         .query_row("SELECT COUNT(*) FROM gate_bindings", [], |r| r.get(0))

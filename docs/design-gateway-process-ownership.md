@@ -1,3 +1,5 @@
+> **D-1098 (2026-10-29):** the gate-admin socket, principals, scopes, creation namespaces and subject grants described below were removed. Gateways provision over the ordinary gate socket with no credential; see [external-gate.md](design/external-gate.md) `provision`. This document is kept as the #1006 history.
+
 # Gateway process and storage ownership
 
 Status: **draft design for Issue #1006; not authoritative until architecture review approves it**. If approved, this decision rejects the prior bidirectional ownership and runtime-import design. There is no compatibility fallback.

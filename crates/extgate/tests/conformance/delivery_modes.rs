@@ -5,43 +5,21 @@ fn tool_driven_digest() -> String {
 }
 
 async fn put_instance_config(h: &Harness, instance_id: &str, config_b64: &str) -> Value {
-    let grant = {
-        let mut conn = h.state.db.lock().unwrap();
-        opencrab_db::queries::issue_subject_association_grant(
-            &mut conn,
-            "agent-1",
-            h.subject_id,
-            i64::MAX,
-            now_nanos(),
+    put_instance(h, instance_id, true).await;
+    if config_b64 != self::config_b64() {
+        // Re-declare the config as `provision` would, keeping revision 1 for the hello below.
+        let conn = h.state.db.lock().unwrap();
+        conn.execute(
+            "UPDATE gate_instances SET config_b64=?2, config_digest=?3 WHERE instance_id=?1",
+            rusqlite::params![
+                instance_id,
+                config_b64,
+                opencrab_extgate::ids::config_digest_from_b64(config_b64).unwrap()
+            ],
         )
-        .unwrap()
-    };
-    let (st, body) = h
-        .admin(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/api/gate-instances/{instance_id}"))
-                .header(header::AUTHORIZATION, auth())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "kind_id": "discord",
-                        "subject_id": h.subject_id,
-                        "enabled": true,
-                        "config_b64": config_b64,
-                        "subject_grant": grant,
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await;
-    assert!(
-        st == StatusCode::CREATED || st == StatusCode::OK,
-        "{st} {}",
-        String::from_utf8_lossy(&body)
-    );
-    serde_json::from_slice(&body).unwrap()
+        .unwrap();
+    }
+    json!({"instance_id": instance_id, "revision": 1})
 }
 
 async fn hello_ok_digest(s: &mut UnixStream, instance_id: &str, revision: u64, digest: &str) {

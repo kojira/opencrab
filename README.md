@@ -66,7 +66,7 @@ opencrab/
 │   ├── discord/    # Discord gateway with per-agent manager and message loop
 │   ├── nostr/      # Nostr gateway: per-agent key/relay config, per-session queue,
 │   │               #   concurrency cap, and a thin `nostaro` CLI passthrough
-│   ├── extgate/    # Core side of the external-gateway V3 protocol (runtime UDS, gate-admin)
+│   ├── extgate/    # Core side of the external-gateway V3 protocol (gate socket: provision, hello, said/say)
 │   ├── gate-client/# Client side of the V3 protocol, used by the gateway processes
 │   └── voice/      # STT/TTS provider layer (OpenAI-compatible STT, VOICEVOX/OpenAI TTS)
 ├── web/            # React frontend (Vite + Tailwind CSS + i18n EN/JA)

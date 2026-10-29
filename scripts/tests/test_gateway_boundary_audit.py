@@ -55,7 +55,9 @@ class GatewayBoundaryMutationTests(unittest.TestCase):
         source = (root / "crates/db/src/schema/mod.rs").read_text()
         guard = source.index("if empty_new_database {")
         transaction = source.index("let tx = conn.unchecked_transaction()?;", guard)
-        drop = source.index("for table in migrations::LEGACY_GATEWAY_SETTINGS_TABLES {", transaction)
+        drop = source.index("for table in migrations::LEGACY_GATEWAY_SETTINGS_TABLES", transaction)
+        # D-1098: the same loop also drops the gate-admin credential tables.
+        self.assertIn(".chain(migrations::GATE_ADMIN_TABLES)", source[drop : drop + 160])
         commit = source.index("tx.commit()?;", drop)
         end = source.index("return Ok(());", commit)
         self.assertLess(guard, transaction)

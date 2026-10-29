@@ -1,16 +1,30 @@
-/// A new kind uses the existing protected admin, declared operation, timed route, and
-/// one-frame/one-handler delivery without a concrete branch in core/shared/server.
+/// A new kind provisions itself over the gate socket (D-1098), declares an operation, and gets
+/// timed route and one-frame/one-handler delivery without a concrete branch in core/shared/server.
 #[tokio::test]
 async fn s9_synthetic_gateway_provisions_invokes_and_delivers_a_timed_result() {
     let h = Harness::start().await;
     let instance_id = uuid();
     let binding_id = uuid();
-    let session_id = "synthetic-session";
-    insert_named_session(&h, session_id);
+    let address = "synthetic-address";
+    let session_id_owned = session_id_for_binding(&binding_id);
+    let session_id = session_id_owned.as_str();
 
-    let instance = put_instance_kind(&h, &instance_id, true, "synthetic").await;
-    assert_eq!(instance["kind_id"], "synthetic", "fixture must provision a new kind");
-    put_binding(&h, &binding_id, &instance_id, session_id).await;
+    let mut frame = provision_frame("p1", &instance_id, true, &[(&binding_id, address)]);
+    frame["kind_id"] = json!("synthetic");
+    let provisioned = provision(&h, &frame).await;
+    assert_eq!(provisioned["m"], "provisioned", "{provisioned}");
+    let kind: String = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT kind_id FROM gate_instances WHERE instance_id=?1",
+            [&instance_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kind, "synthetic", "a new kind provisions itself");
 
     let operations = json!([{
         "name": "synthetic.report",

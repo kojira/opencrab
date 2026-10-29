@@ -4,11 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
-use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
-use http_body_util::BodyExt;
 use opencrab_actions::subtask::{settle_completed, SettleContext};
 use opencrab_actions::{
     AgentRuntime, CallerIdentity, EffortSnapshot, InboundMessageRecord, InteractionRecord,
@@ -20,10 +15,8 @@ use opencrab_core::EngineResult;
 use opencrab_db::queries::{AgentRow, SessionRow};
 use opencrab_extgate::completion::ExtgateCompletionSink;
 use opencrab_extgate::{
-    admin_router, invoke_and_wait, now_nanos, recover_stale_calls, recover_stale_deliveries,
-    serve_uds, session_id_for_binding, validate_listen_socket,
-    ExtgateOpsGatewayActions,
-    ExtgateState, UNAUTHORIZED_BODY,
+    invoke_and_wait, now_nanos, recover_stale_calls, recover_stale_deliveries, serve_uds,
+    session_id_for_binding, validate_listen_socket, ExtgateOpsGatewayActions, ExtgateState,
 };
 use opencrab_gate_client::client::{InstanceClient, SaidOutcome};
 use opencrab_gateway::{GatewayActions, GatewayCallContext, GatewayCaller};
@@ -32,12 +25,8 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{oneshot, Notify};
-use tower::ServiceExt;
 use uuid::Uuid;
 
-const TOKEN: &str = "database-backed-fixture";
-const FIXTURE_AUTHORIZATION: &str = "Bearer database-backed-fixture";
-static NEXT_ADMIN_PRINCIPAL: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone)]
 struct TestRuntime {
@@ -388,98 +377,6 @@ impl Harness {
         UnixStream::connect(&self.sock).await.expect("connect")
     }
 
-    async fn admin(&self, req: Request<Body>) -> (StatusCode, Vec<u8>) {
-        let req = self.with_database_backed_admin(req).await;
-        let app = admin_router(Arc::clone(&self.state));
-        let res = app.oneshot(req).await.unwrap();
-        let status = res.status();
-        let body = res.into_body().collect().await.unwrap().to_bytes().to_vec();
-        (status, body)
-    }
-
-    async fn with_database_backed_admin(&self, req: Request<Body>) -> Request<Body> {
-        if req.headers().get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
-            != Some(FIXTURE_AUTHORIZATION)
-        {
-            return req;
-        }
-        let (mut parts, body) = req.into_parts();
-        let body = body.collect().await.unwrap().to_bytes();
-        let body_json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        let path = parts.uri.path();
-        let operation = match (parts.method.as_str(), path.contains("/gate-bindings/"), path.ends_with("/revisions")) {
-            ("GET", false, false) => "instance.read",
-            ("PUT", false, false) => "instance.put",
-            ("DELETE", false, false) => "instance.delete",
-            ("POST", false, true) => "instance.revise",
-            ("PUT", true, false) => "binding.put",
-            ("DELETE", true, false) => "binding.delete",
-            _ => return Request::from_parts(parts, Body::from(body)),
-        };
-        let route_id = path.rsplit('/').nth(usize::from(path.ends_with("/revisions"))).unwrap();
-        let instance_id = if path.contains("/gate-instances/") {
-            route_id.to_owned()
-        } else if let Some(instance_id) = body_json.get("instance_id").and_then(Value::as_str) {
-            instance_id.to_owned()
-        } else {
-            let conn = self.state.db.lock().unwrap();
-            conn.query_row(
-                "SELECT instance_id FROM gate_bindings WHERE binding_id=?1",
-                [route_id],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap_or_else(|_| Uuid::nil().to_string())
-        };
-
-        let sequence = NEXT_ADMIN_PRINCIPAL.fetch_add(1, Ordering::SeqCst) as u64;
-        let mut token = [0_u8; 32];
-        token[..8].copy_from_slice(&sequence.to_be_bytes());
-        token[8..].fill(0x5a);
-        let salt = [0x3c_u8; 32];
-        let mut hasher = Sha256::new();
-        hasher.update(b"opencrab/gate-admin/bearer/v1\0");
-        hasher.update(salt);
-        hasher.update(token);
-        let hash = hasher.finalize().to_vec();
-        let principal_id = format!("conformance-{sequence}");
-        let expires_at = 4_000_000_000_i64 * 1_000_000_000;
-        {
-            let conn = self.state.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO gate_admin_principals
-                 (principal_id, credential_salt, credential_hash, scope_mode, created_at,
-                  expires_at, revoked_at, sealed_at, predecessor_principal_id, overlap_deadline)
-                 VALUES (?1, ?2, ?3, 'exact', 1, ?4, NULL, NULL, NULL, NULL)",
-                rusqlite::params![principal_id, salt.as_slice(), hash, expires_at],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO gate_admin_principal_operations VALUES (?1, ?2)",
-                rusqlite::params![principal_id, operation],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO gate_admin_principal_subjects VALUES (?1, ?2)",
-                rusqlite::params![principal_id, self.subject_id],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO gate_admin_principal_instances VALUES (?1, ?2)",
-                rusqlite::params![principal_id, instance_id],
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE gate_admin_principals SET sealed_at=2 WHERE principal_id=?1",
-                [principal_id],
-            )
-            .unwrap();
-        }
-        parts.headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {}", URL_SAFE_NO_PAD.encode(token)).parse().unwrap(),
-        );
-        Request::from_parts(parts, Body::from(body))
-    }
 }
 
 fn uuid() -> String {
@@ -492,10 +389,6 @@ fn config_b64() -> &'static str {
 
 fn config_digest() -> String {
     opencrab_extgate::ids::config_digest_from_b64(config_b64()).unwrap()
-}
-
-fn auth() -> String {
-    format!("Bearer {TOKEN}")
 }
 
 async fn write_frame(s: &mut UnixStream, v: &Value) {
@@ -555,65 +448,97 @@ async fn put_instance(h: &Harness, instance_id: &str, enabled: bool) -> Value {
     put_instance_kind(h, instance_id, enabled, "discord").await
 }
 
+/// Creates the generic instance (revision 1), or returns the existing one unchanged. D-1098:
+/// gateways do this with `provision`; tests write the same generic rows directly.
 async fn put_instance_kind(h: &Harness, instance_id: &str, enabled: bool, kind_id: &str) -> Value {
-    let grant = {
-        let mut conn = h.state.db.lock().unwrap();
-        let exists: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM gate_instances WHERE instance_id=?1",
-                [instance_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        if exists == 0 {
-            Some(
-                opencrab_db::queries::issue_subject_association_grant(
-                    &mut conn,
-                    "agent-1",
-                    h.subject_id,
-                    i64::MAX,
-                    now_nanos(),
-                )
-                .unwrap(),
-            )
-        } else {
-            None
-        }
-    };
-    let mut request = json!({
-        "kind_id": kind_id,
-        "subject_id": h.subject_id,
-        "enabled": enabled,
-        "config_b64": config_b64(),
-    });
-    if let Some(grant) = grant {
-        request["subject_grant"] = json!(grant);
-    }
-    let (st, body) = h
-        .admin(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/api/gate-instances/{instance_id}"))
-                .header(header::AUTHORIZATION, auth())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(request.to_string()))
-                .unwrap(),
+    let conn = h.state.db.lock().unwrap();
+    let now = now_nanos();
+    conn.execute(
+        "INSERT OR IGNORE INTO gate_instances (
+            instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest,
+            created_at, updated_at, deleted_at
+         ) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?7, NULL)",
+        rusqlite::params![
+            instance_id,
+            kind_id,
+            h.subject_id,
+            i64::from(enabled),
+            config_b64(),
+            config_digest(),
+            now
+        ],
+    )
+    .unwrap();
+    let (revision, enabled): (i64, i64) = conn
+        .query_row(
+            "SELECT revision, enabled FROM gate_instances WHERE instance_id=?1",
+            [instance_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .await;
-    assert!(
-        st == StatusCode::CREATED || st == StatusCode::OK,
-        "{st} {}",
-        String::from_utf8_lossy(&body)
-    );
-    serde_json::from_slice(&body).unwrap()
+        .unwrap();
+    json!({
+        "instance_id": instance_id,
+        "revision": revision,
+        "enabled": enabled == 1,
+        "config_digest": config_digest(),
+    })
 }
 
-async fn put_binding(
+/// Bumps the revision as a changed `provision` does; returns the new revision.
+fn revise_instance(h: &Harness, instance_id: &str, enabled: bool, config_b64: &str) -> u64 {
+    let mut conn = h.state.db.lock().unwrap();
+    let tx = conn.transaction().unwrap();
+    let revision: i64 = tx
+        .query_row(
+            "SELECT revision FROM gate_instances WHERE instance_id=?1",
+            [instance_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let next = opencrab_db::queries::revise_gate_instance_in_tx(
+        &tx,
+        instance_id,
+        u64::try_from(revision).unwrap(),
+        enabled,
+        config_b64,
+        &opencrab_extgate::ids::config_digest_from_b64(config_b64).unwrap(),
+        now_nanos(),
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    next
+}
+
+/// Creates a binding through the same generic service `provision` uses. `Err` carries the
+/// conflict kind.
+fn create_binding_row(
     h: &Harness,
     binding_id: &str,
     instance_id: &str,
     address: &str,
-) -> StatusCode {
+    session_id: &str,
+    title: &str,
+) -> Result<opencrab_db::queries::CoreBindingOutcome, opencrab_db::queries::CreateGateBindingError>
+{
+    let mut conn = h.state.db.lock().unwrap();
+    let tx = conn.transaction().unwrap();
+    let outcome = opencrab_db::queries::CoreBindingService::create_in_tx(
+        &tx,
+        &opencrab_db::queries::CoreBindingRequest {
+            binding_id,
+            instance_id,
+            address,
+            session_id,
+            session_title: title,
+            now: now_nanos(),
+        },
+    )?;
+    tx.commit().unwrap();
+    Ok(outcome)
+}
+
+/// Creates a binding (as `provision` does) and, when the instance is live, sends it `bind`.
+async fn put_binding(h: &Harness, binding_id: &str, instance_id: &str, address: &str) -> bool {
     let (session_id, title) = {
         let conn = h.state.db.lock().unwrap();
         match opencrab_db::queries::get_session(&conn, address).unwrap() {
@@ -621,30 +546,13 @@ async fn put_binding(
             None => (session_id_for_binding(binding_id), address.to_string()),
         }
     };
-    let (st, body) = h
-        .admin(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/api/gate-bindings/{binding_id}"))
-                .header(header::AUTHORIZATION, auth())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "instance_id": instance_id,
-                        "address": address,
-                        "session": {"session_id": session_id, "title": title}
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await;
-    assert!(
-        st == StatusCode::CREATED || st == StatusCode::OK,
-        "{st} {}",
-        String::from_utf8_lossy(&body)
-    );
-    st
+    let outcome = create_binding_row(h, binding_id, instance_id, address, &session_id, &title)
+        .unwrap_or_else(|error| panic!("binding create failed: {error:?}"));
+    let created = outcome == opencrab_db::queries::CoreBindingOutcome::Created;
+    if created {
+        opencrab_extgate::enqueue_bind(&h.state, instance_id, binding_id, address).await;
+    }
+    created
 }
 
 async fn hello_ok(s: &mut UnixStream, instance_id: &str, revision: u64) {
@@ -701,7 +609,3 @@ async fn ready_pair(h: &Harness) -> (UnixStream, String, String) {
     (s, instance_id, binding_id)
 }
 
-fn err_code(body: &[u8]) -> String {
-    let v: Value = serde_json::from_slice(body).unwrap();
-    v["error"]["code"].as_str().unwrap().to_string()
-}
