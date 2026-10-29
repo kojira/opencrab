@@ -136,10 +136,6 @@ port = 3000
 [database]
 path = "data/opencrab.db"
 
-[gate_admin]
-listen_socket = "/var/run/opencrab/gate-admin.sock"
-bootstrap_credential_file = "/etc/opencrab/gate-admin-credential.json"
-
 [gate]
 listen_socket = "/tmp/opencrab-extgate.sock"
 # Both transports are V3-only; missing or any other value fails startup when applicable.

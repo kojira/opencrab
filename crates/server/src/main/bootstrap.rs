@@ -9,10 +9,16 @@ pub(super) struct BootstrapContext {
     pub(super) cfg: AppConfig,
     pub(super) extgate: Arc<opencrab_extgate::ExtgateState>,
     pub(super) gate_socket: Option<std::path::PathBuf>,
-    pub(super) gate_admin_listener: tokio::net::UnixListener,
-    pub(super) gate_admin_cleanup: opencrab_extgate::admin_socket::SocketCleanup,
-    pub(super) gate_admin_router: axum::Router,
+    /// Present only when `[gate_admin]` is configured. Gateways provision over the ordinary gate
+    /// socket (D-1098); the separate admin socket is kept only for existing deployments.
+    pub(super) gate_admin: Option<GateAdmin>,
     pub(super) state: AppState,
+}
+
+pub(super) struct GateAdmin {
+    pub(super) listener: tokio::net::UnixListener,
+    pub(super) cleanup: opencrab_extgate::admin_socket::SocketCleanup,
+    pub(super) router: axum::Router,
 }
 
 fn attachment_inbox_path(database_path: &Path) -> PathBuf {
@@ -98,39 +104,16 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     inject_gate_admin_startup_fault("migration")?;
     let db = opencrab_db::Db::open(&cfg.database.path)?;
 
-    // S1 security boundary: migration is applied by Db::open; manifest/bootstrap and the
-    // protected socket are fully prepared before any runtime or public listener can start.
-    if cfg.gate_admin.listen_socket.is_empty()
-        || cfg.gate_admin.bootstrap_credential_file.is_empty()
-    {
-        anyhow::bail!("[gate_admin] listen_socket and bootstrap_credential_file are required");
-    }
-    if cfg.gate_admin.listen_socket == cfg.gate.listen_socket {
-        anyhow::bail!("[gate_admin].listen_socket must be distinct from [gate].listen_socket");
-    }
-    let service_euid = unsafe { libc::geteuid() };
-    inject_gate_admin_startup_fault("bootstrap")?;
-    let manifest = opencrab_extgate::gate_admin_security::read_manifest(
-        Path::new(&cfg.gate_admin.bootstrap_credential_file),
-        service_euid,
-    )?;
-    {
-        let mut conn = db
-            .lock()
-            .map_err(|_| anyhow::anyhow!("db lock for gate-admin bootstrap"))?;
-        opencrab_extgate::gate_admin_security::bootstrap(
-            &mut conn,
-            &manifest,
-            opencrab_extgate::now_nanos(),
-        )?;
-    }
-    drop(manifest);
-    inject_gate_admin_startup_fault("socket")?;
-    let prepared_admin = opencrab_extgate::admin_socket::prepare_admin_socket(
-        Path::new(&cfg.gate_admin.listen_socket),
-        service_euid,
-    )?;
-    let (gate_admin_listener, gate_admin_cleanup) = prepared_admin.into_parts();
+    // D-1098: `[gate_admin]` is optional. Without it core starts with only the gate socket, and
+    // gateways provision their instances there. When it is configured (existing deployments),
+    // its manifest/bootstrap and private socket are prepared before any listener starts.
+    let gate_admin_configured = !cfg.gate_admin.listen_socket.is_empty()
+        || !cfg.gate_admin.bootstrap_credential_file.is_empty();
+    let prepared_gate_admin = if gate_admin_configured {
+        Some(prepare_gate_admin(&cfg, &db)?)
+    } else {
+        None
+    };
 
     {
         let mut conn = db
@@ -146,8 +129,17 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     }
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
     let extgate = Arc::new(opencrab_extgate::ExtgateState::new_protected(db.clone()));
-    inject_gate_admin_startup_fault("router")?;
-    let gate_admin_router = opencrab_extgate::admin_router(extgate.clone());
+    let gate_admin = match prepared_gate_admin {
+        Some((listener, cleanup)) => {
+            inject_gate_admin_startup_fault("router")?;
+            Some(GateAdmin {
+                listener,
+                cleanup,
+                router: opencrab_extgate::admin_router(extgate.clone()),
+            })
+        }
+        None => None,
+    };
     configure_attachment_inbox(&extgate, Path::new(&cfg.database.path))?;
     configure_attachment_outbox(
         &extgate,
@@ -234,11 +226,49 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         cfg,
         extgate,
         gate_socket,
-        gate_admin_listener,
-        gate_admin_cleanup,
-        gate_admin_router,
+        gate_admin,
         state,
     })
+}
+
+fn prepare_gate_admin(
+    cfg: &AppConfig,
+    db: &opencrab_db::Db,
+) -> anyhow::Result<(
+    tokio::net::UnixListener,
+    opencrab_extgate::admin_socket::SocketCleanup,
+)> {
+    if cfg.gate_admin.listen_socket.is_empty()
+        || cfg.gate_admin.bootstrap_credential_file.is_empty()
+    {
+        anyhow::bail!("[gate_admin] needs both listen_socket and bootstrap_credential_file");
+    }
+    if cfg.gate_admin.listen_socket == cfg.gate.listen_socket {
+        anyhow::bail!("[gate_admin].listen_socket must be distinct from [gate].listen_socket");
+    }
+    let service_euid = unsafe { libc::geteuid() };
+    inject_gate_admin_startup_fault("bootstrap")?;
+    let manifest = opencrab_extgate::gate_admin_security::read_manifest(
+        Path::new(&cfg.gate_admin.bootstrap_credential_file),
+        service_euid,
+    )?;
+    {
+        let mut conn = db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db lock for gate-admin bootstrap"))?;
+        opencrab_extgate::gate_admin_security::bootstrap(
+            &mut conn,
+            &manifest,
+            opencrab_extgate::now_nanos(),
+        )?;
+    }
+    drop(manifest);
+    inject_gate_admin_startup_fault("socket")?;
+    let prepared_admin = opencrab_extgate::admin_socket::prepare_admin_socket(
+        Path::new(&cfg.gate_admin.listen_socket),
+        service_euid,
+    )?;
+    Ok(prepared_admin.into_parts())
 }
 
 #[cfg(test)]

@@ -210,7 +210,7 @@
     {
       "rule": "shared-concrete-schema",
       "path": "crates/extgate/src/protocol.rs",
-      "line": 623,
+      "line": 632,
       "snippet": "Some(\"trusted_user\") => Ok(SaidCaller::TrustedUser),",
       "classification": "production-violation",
       "violation": "V11",

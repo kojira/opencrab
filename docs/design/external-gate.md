@@ -70,6 +70,7 @@ ErrDetail  = string | null
 | 方向 / `m` | exact required fields | 型・値 | 応答 |
 |---|---|---|---|
 | gate→core `hello` | `id,m,protocol,instance_id,revision,config_digest` | `m="hello"`; `protocol=2`; `revision` positive u64 | core→gate `ok`。失敗は `err` 後 close。 |
+| gate→core `provision` | `id,m,instance_id,kind_id,agent_id,enabled,config_b64,bindings` | `hello` より前に 1 回だけ。`bindings` は `[{binding_id,address}]` の完全な一覧（`binding_id` は UUIDv5(instance_id, address)）。ほかのフィールドは `bad_request`。資格情報は無く、gate socket を開けることだけが条件。D-1098 | core→gate `provisioned`（`id,m,instance_id,revision,config_digest,enabled,bindings`）の後 close。無ければ instance を作り（revision 1）、`enabled`/`config_b64` が変われば revision を 1 上げる。一覧に無い開いた binding は閉じる。同じ内容の再送は何も変えない。live な instance は `instance_active`、知らない `agent_id` は `subject_unknown`、別 instance が使う address は `address_in_use`、kind/agent の食い違いは `instance_conflict`。`hello` 後の `provision` は `protocol_order`。 |
 | gate→core `said` | `id,m,binding_id,origin,author_id,text,attachments` | `m="said"`; identity は nonempty; `text` は string; `attachments` は `Attachment[]` | core→gate `ok` に `seq`。記録失敗は `err`。 |
 | core→gate `bind` | `id,m,binding_id,address` | `m="bind"`; `id="bind:"+binding_id` | gate→core `ok`。受理不能は `err(code="bind_failed")`。 |
 | core→gate `say` | `id,m,binding_id,payload` | `m="say"`; `id=delivery_id`; payload は §3.4 | gate→core `ok`。外部 API が非受理と確定した場合だけ `err(code="external_rejected")`。 |

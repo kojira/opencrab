@@ -5,6 +5,7 @@ mod bind;
 mod create_binding;
 mod hello;
 mod interrupt;
+mod provision;
 mod provisional;
 mod response;
 
@@ -279,6 +280,23 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
                 Err(()) => Err(()),
             }
         }
+        // D-1098: one `provision` before `hello`, answered, then the connection closes.
+        (ConnState::PreHello, InboundMsg::Provision(request)) => {
+            let _ = provision::handle_provision(state, writer, request).await;
+            Err(())
+        }
+        (ConnState::Running, InboundMsg::Provision(request)) => {
+            close_live(
+                state,
+                instance_id.as_deref(),
+                Some(identity),
+                ErrorCode::ProtocolOrder,
+                Some(&request.id),
+                Some(writer),
+            )
+            .await;
+            Err(())
+        }
         (ConnState::PreHello, InboundMsg::CreateBinding(request)) => {
             close_live(
                 state,
@@ -376,7 +394,7 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
             Err(())
         }
         (ConnState::PreHello, InboundMsg::Invalid { id, code, m }) => {
-            let reason = if m == "hello" {
+            let reason = if m == "hello" || m == "provision" {
                 code
             } else {
                 ErrorCode::ProtocolOrder
