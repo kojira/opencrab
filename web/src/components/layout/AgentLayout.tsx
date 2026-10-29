@@ -5,15 +5,13 @@ import { getAgent, deleteAgent } from '../../api/agents';
 import type { AgentDetail } from '../../api/types';
 import ConfirmDialog from '../ui/ConfirmDialog';
 
-const tabs = [
+export const agentTabs = [
   { key: 'overview', path: '', icon: 'info', labelKey: 'agentNav.overview' },
   { key: 'skills', path: '/skills', icon: 'psychology', labelKey: 'agentNav.skills' },
   { key: 'sleep', path: '/sleep', icon: 'bedtime', labelKey: 'agentNav.sleep' },
   { key: 'memory', path: '/memory', icon: 'memory', labelKey: 'agentNav.memory' },
   { key: 'sessions', path: '/sessions', icon: 'forum', labelKey: 'agentNav.sessions' },
-  { key: 'co-agents', path: '/co-agents', icon: 'group', labelKey: 'agentNav.coAgents' },
-  { key: 'trusted-users', path: '/trusted-users', icon: 'shield_person', labelKey: 'agentNav.trustedUsers' },
-  { key: 'channels', path: '/channels', icon: 'tag', labelKey: 'agentNav.channels' },
+  { key: 'time-triggers', path: '/time-triggers', icon: 'schedule', labelKey: 'agentNav.timeTriggers' },
   { key: 'allowed-commands', path: '/allowed-commands', icon: 'terminal', labelKey: 'agentNav.allowedCommands' },
   { key: 'llm-logs', path: '/llm-logs', icon: 'receipt_long', labelKey: 'agentNav.llmLogs' },
   { key: 'tool-logs', path: '/tool-logs', icon: 'handyman', labelKey: 'agentNav.toolLogs' },
@@ -125,7 +123,7 @@ export default function AgentLayout() {
           デスクトップ幅でも隠れて存在に気づけないため、折り返して全タブを常時表示する。 */}
       {!isEditRoute && (
         <div className="flex flex-wrap mb-6 gap-0.5 bg-surface-container-high rounded-xl p-1">
-          {tabs.map((tab) => {
+          {agentTabs.map((tab) => {
             const tabPath = `${basePath}${tab.path}`;
             const active =
               tab.path === ''

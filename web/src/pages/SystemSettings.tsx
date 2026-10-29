@@ -9,7 +9,6 @@ import {
 } from './system-settings/DiagnosticsCards';
 import { ModelPricingSection } from './system-settings/ModelPricingSection';
 import ProviderRow from './system-settings/ProviderRow';
-import VoiceSettings from './system-settings/VoiceSettings';
 import { LOG_LEVELS } from './system-settings/shared';
 
 export { ModelPricingSection } from './system-settings/ModelPricingSection';
@@ -95,7 +94,6 @@ export default function SystemSettings() {
       <CursorDiagnosticsCard />
       <AcpDiagnosticsCard />
 
-      <VoiceSettings />
 
       <div className="card-elevated space-y-4">
         <h2 className="text-lg font-semibold text-on-surface">ログ設定</h2>

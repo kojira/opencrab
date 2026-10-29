@@ -150,15 +150,6 @@ export interface SoulPresetDto {
   custom_traits_json: string | null;
 }
 
-// Discord per-agent config
-export interface DiscordConfigDto {
-  configured: boolean;
-  enabled?: boolean;
-  token_masked?: string;
-  owner_discord_id?: string;
-  running?: boolean;
-}
-
 export interface LlmMetricsDetailDto {
   provider: string;
   model: string;
@@ -166,22 +157,6 @@ export interface LlmMetricsDetailDto {
   total_cost: number;
   request_count: number;
   avg_latency: number;
-}
-
-// Channel Config
-export interface ChannelConfigDto {
-  channel_id: string;
-  guild_id: string;
-  channel_name: string;
-  readable: boolean;
-  writable: boolean;
-  whitelisted: boolean;
-}
-
-export interface ChannelConfigListResponse {
-  guild_id: string;
-  configs: ChannelConfigDto[];
-  count: number;
 }
 
 // Time triggers (agent_schedules). cron_expr is a 5-field cron or `@every <dur>`.

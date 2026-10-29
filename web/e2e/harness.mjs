@@ -204,13 +204,6 @@ organization = ""
 enabled = true
 port = ${httpPort}
 
-[gateway.discord]
-enabled = false
-token = ""
-guild_ids = []
-agent_ids = []
-owner_discord_id = ""
-
 [dashboard]
 enabled = false
 port = 3000

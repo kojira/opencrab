@@ -207,17 +207,3 @@ max_topics = 50           # 1 回の worklist に載せる新規 topic の上限
 min_new_topics = 20       # この件数以上の新規 topic が溜まったら発火（下限ゲート）
 min_interval_minutes = 1440  # 前回からこの分数以上経つまで発火しない（既定 1440 = 24 時間）
 timeout_secs = 600        # 整理ラン 1 回のタイムアウト（超過は partial 扱いで前進しない）
-
-# VC（ボイスチャンネル）対話。使う場合はコメントを外して設定する。
-# [voice]
-# enabled = true
-#
-# [voice.stt]
-# provider = "openai"
-# model = "whisper-1"
-# api_key_env = "OPENAI_API_KEY"
-# language = "ja"
-#
-# [voice.tts]
-# provider = "voicevox"
-# default_voice = "3"

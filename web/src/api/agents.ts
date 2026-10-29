@@ -4,7 +4,6 @@ import type {
   AgentDetail,
   AgentPatchBody,
   SoulPresetDto,
-  DiscordConfigDto,
 } from './types';
 
 export function getAgents(): Promise<AgentSummary[]> {
@@ -98,48 +97,4 @@ export function applySoulPreset(
   presetId: string,
 ): Promise<{ ok: boolean; error?: string }> {
   return api.post(`/agents/${agentId}/soul/presets/${presetId}/apply`, {});
-}
-
-// Discord per-agent config
-export function getDiscordConfig(id: string): Promise<DiscordConfigDto> {
-  return api.get<DiscordConfigDto>(`/agents/${id}/discord`);
-}
-
-export function updateDiscordConfig(
-  id: string,
-  body: { bot_token: string; owner_discord_id?: string },
-): Promise<{ ok: boolean; message?: string; error?: string }> {
-  return api.put(`/agents/${id}/discord`, body);
-}
-
-export function patchDiscordConfig(
-  id: string,
-  body: { bot_token?: string; owner_discord_id?: string },
-): Promise<{
-  ok: boolean;
-  configured?: boolean;
-  enabled?: boolean;
-  token_masked?: string;
-  owner_discord_id?: string;
-  error?: string;
-}> {
-  return api.patch(`/agents/${id}/discord`, body);
-}
-
-export function deleteDiscordConfig(
-  id: string,
-): Promise<{ deleted: boolean }> {
-  return api.del(`/agents/${id}/discord`);
-}
-
-export function startDiscordGateway(
-  id: string,
-): Promise<{ ok: boolean; error?: string }> {
-  return api.post(`/agents/${id}/discord/start`, {});
-}
-
-export function stopDiscordGateway(
-  id: string,
-): Promise<{ ok: boolean; error?: string }> {
-  return api.post(`/agents/${id}/discord/stop`, {});
 }
