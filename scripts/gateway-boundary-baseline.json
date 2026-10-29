@@ -853,7 +853,7 @@
       "violation": "V13",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -862,7 +862,7 @@
       "violation": "V14",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -943,7 +943,7 @@
       "violation": "V01",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -952,7 +952,7 @@
       "violation": "V03",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -961,7 +961,7 @@
       "violation": "V04",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -970,7 +970,7 @@
       "violation": "V05",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -979,7 +979,7 @@
       "violation": "V12",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -988,7 +988,7 @@
       "violation": "V02",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; gateway-owned stores live in the gateway repository (Issue #1074)"

@@ -60,13 +60,10 @@ HISTORICAL_FILES = {
 }
 # Five historical tables are created only inside the empty-DB bootstrap transaction
 # and removed before its first commit. This is not an exception for live queries.
-FRESH_BOOTSTRAP_LEGACY_DROP_IDENTITIES = frozenset({
-    ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 119, '"DROP TABLE IF EXISTS channel_config;'),
-    ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 120, "DROP TABLE IF EXISTS session_watches;"),
-    ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 121, "DROP TABLE IF EXISTS trusted_users;"),
-    ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 122, "DROP TABLE IF EXISTS agent_discord_config;"),
-    ("shared-concrete-schema", "crates/db/src/schema/mod.rs", 123, 'DROP TABLE IF EXISTS agent_nostr_config;",'),
-})
+# D-1097: the fresh empty-database cleanup drops the legacy gateway tables through the single
+# list in `migrations/v63.rs` (also used by migration v63), so no concrete DROP literal remains
+# in `schema/mod.rs`. The set stays empty; a reintroduced literal is a production violation.
+FRESH_BOOTSTRAP_LEGACY_DROP_IDENTITIES: frozenset[tuple[str, str, int, str]] = frozenset()
 # Concrete gateways and their own stores live in the separate gateway repository
 # (Issue #1074). Core has no gateway-owned store to approve.
 VALID_GATEWAY_DB_OPEN_IDENTITIES: set[tuple[str, str, int, str]] = set()

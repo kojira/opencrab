@@ -47,40 +47,35 @@ class GatewayBoundaryMutationTests(unittest.TestCase):
             findings,
         )
 
-    def test_s10_fresh_bootstrap_cleanup_is_exactly_five_sites(self):
-        sites = AUDIT.FRESH_BOOTSTRAP_LEGACY_DROP_IDENTITIES
-        self.assertEqual(len(sites), 5)
+    def test_s10_fresh_bootstrap_cleanup_drops_the_shared_legacy_table_list(self):
+        # D-1097: the cleanup loops over migrations::LEGACY_GATEWAY_SETTINGS_TABLES inside the
+        # fresh empty-database transaction, so there are no approved concrete DROP sites left.
+        self.assertEqual(AUDIT.FRESH_BOOTSTRAP_LEGACY_DROP_IDENTITIES, frozenset())
         root = pathlib.Path(__file__).parents[2]
         source = (root / "crates/db/src/schema/mod.rs").read_text()
         guard = source.index("if empty_new_database {")
         transaction = source.index("let tx = conn.unchecked_transaction()?;", guard)
-        drop = source.index('"DROP TABLE IF EXISTS channel_config;', transaction)
+        drop = source.index("for table in migrations::LEGACY_GATEWAY_SETTINGS_TABLES {", transaction)
         commit = source.index("tx.commit()?;", drop)
         end = source.index("return Ok(());", commit)
         self.assertLess(guard, transaction)
         self.assertLess(transaction, drop)
         self.assertLess(drop, commit)
         self.assertLess(commit, end)
-        for rule, path, line, snippet in sites:
-            self.assertEqual((rule, path), ("shared-concrete-schema", "crates/db/src/schema/mod.rs"))
-            approved = AUDIT.Finding(rule, path, line, snippet)
-            moved = AUDIT.Finding(rule, path, line + 1, snippet)
-            self.assertEqual(
-                AUDIT._metadata_for(approved)[:3],
-                ("transitional-empty-db-bootstrap", "V11", "S10"),
-            )
-            self.assertEqual(AUDIT._metadata_for(moved)[0], "production-violation")
+        self.assertNotIn("DROP TABLE IF EXISTS channel_config", source)
 
-    def test_s10_reviewed_boundary_burn_down_has_exactly_105_findings(self):
+    def test_s10_reviewed_boundary_burn_down_has_exactly_84_findings(self):
         root = pathlib.Path(__file__).parents[2]
         baseline = json.loads((root / "scripts/gateway-boundary-baseline.json").read_text())
         findings = AUDIT.audit_texts(AUDIT.repository_texts(root))
         # D-1087: the six webhook management tools and their core resolution layer were
-        # removed, which retired ten findings (115 -> 105). The pin tracks the reviewed
-        # burn-down; a change here must come from removing or reclassifying findings.
-        self.assertEqual(len(findings), 105)
-        self.assertEqual(len(baseline["entries"]), 105)
-        self.assertEqual(baseline["review"]["finding_count"], 105)
+        # removed, which retired ten findings (115 -> 105). D-1097: the Discord/Nostr/voice
+        # settings left in core (session watch policy, fresh-schema DROP literals) were removed,
+        # which retired 21 more (105 -> 84). The pin tracks the reviewed burn-down; a change here
+        # must come from removing or reclassifying findings.
+        self.assertEqual(len(findings), 84)
+        self.assertEqual(len(baseline["entries"]), 84)
+        self.assertEqual(baseline["review"]["finding_count"], 84)
         self.assertFalse(
             [finding for finding in findings if finding.rule == "public-gate-admin-reachable"]
         )
