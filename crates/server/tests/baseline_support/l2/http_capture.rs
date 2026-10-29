@@ -134,18 +134,6 @@ fn seeded_state() -> Result<AppState, String> {
         },
     )
     .map_err(|e| format!("seed curated memory: {e}"))?;
-    opencrab_db::queries::insert_trusted_co_agent(
-        &conn,
-        &opencrab_db::queries::TrustedCoAgentRow {
-            id: "baseline-co-agent-row".to_string(),
-            agent_id: AGENT_ID.to_string(),
-            co_agent_id: "baseline-peer".to_string(),
-            allowed_actions: None,
-            created_by: "owner".to_string(),
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-        },
-    )
-    .map_err(|e| format!("seed co-agent: {e}"))?;
     opencrab_db::queries::add_agent_allowed_command(
         &conn,
         AGENT_ID,
@@ -166,11 +154,6 @@ fn seeded_state() -> Result<AppState, String> {
         },
     )
     .map_err(|e| format!("seed MCP config: {e}"))?;
-    opencrab_db::queries::set_voice_config_override(
-        &conn,
-        r#"{"enabled":false,"stt":{"language":"ja"}}"#,
-    )
-    .map_err(|e| format!("seed voice config: {e}"))?;
     opencrab_db::queries::insert_index_node(
         &conn,
         &opencrab_db::queries::IndexNodeRow {

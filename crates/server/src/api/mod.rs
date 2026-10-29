@@ -2,7 +2,6 @@ pub mod agents;
 pub mod agents_messages;
 pub mod allowed_commands;
 pub mod analytics;
-pub mod co_agents;
 pub mod daily_log_index;
 pub mod hooks;
 pub mod import;

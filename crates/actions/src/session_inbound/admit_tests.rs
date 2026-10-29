@@ -91,8 +91,6 @@ fn work<'a>(sender: &'a str, channel: &'a str, guild: &'a str) -> InboundWork<'a
     InboundWork {
         event: event(sender, channel, guild),
         has_content: true,
-        kind_label: "",
-        author_key: sender,
     }
 }
 
@@ -103,13 +101,11 @@ fn accept_one(
     agents: &[String],
 ) -> Result<AdmittedInbound, InboundDrop> {
     let mut out = None;
-    accept_inbound::<()>(
+    accept_inbound(
         &[item],
         owner,
         agents,
         lookups,
-        None,
-        |_| (),
         |_, adm| out = Some(adm.clone()),
         |_, _, _| {},
     )?;
@@ -181,16 +177,12 @@ fn accept_inbound_drops_untrusted_dm_for_single_item() {
     let work = InboundWork {
         event: event("u1", "ch", ""),
         has_content: true,
-        kind_label: "メンション",
-        author_key: "u1",
     };
-    let err = accept_inbound::<()>(
+    let err = accept_inbound(
         &[work],
         "owner",
         &["a".into()],
         &lookups,
-        None,
-        |_| (),
         |_, _| {},
         |_, _, _| {},
     )
@@ -212,32 +204,24 @@ fn accept_inbound_session_split_runs_latest_with_content() {
         InboundWork {
             event: event("u1", "ch", "g1"),
             has_content: true,
-            kind_label: "",
-            author_key: "u1",
         },
         InboundWork {
             event: event("u2", "ch", "g1"),
             has_content: true,
-            kind_label: "",
-            author_key: "u2",
         },
         InboundWork {
             event: event("u3", "ch", "g1"),
             has_content: false,
-            kind_label: "",
-            author_key: "u3",
         },
     ];
     let mut admitted = Vec::new();
     let mut runs = Vec::new();
     let mut reads = Vec::new();
-    accept_inbound::<()>(
+    accept_inbound(
         &items,
         "owner",
         &["a".into()],
         &lookups,
-        None,
-        |_| (),
         |i, _| admitted.push(i),
         |i, _, read| {
             runs.push(i);
@@ -252,67 +236,6 @@ fn accept_inbound_session_split_runs_latest_with_content() {
         vec![vec![0, 1, 2]],
         "トリガーのターン文脈は同グループの通した全件（record-only 含む）"
     );
-}
-
-#[tokio::test]
-async fn accept_inbound_watch_holds_non_immediate() {
-    let caller = CallerIdentity::Owner;
-    let resolve = |_: &str, _: &[String], _: &str| caller.clone();
-    let lookups = InboundLookups {
-        resolve_caller: &resolve,
-        dm_allowed_any: &|_, _, _| true,
-        dm_allowed: &|_, _, _| true,
-        channel_whitelisted: &|_, _| true,
-    };
-    let owner = std::collections::HashSet::from(["aa".to_string()]);
-    let followees = std::collections::HashSet::new();
-    let empty = std::collections::HashSet::new();
-    let allow = WatchAllowSets {
-        followees: &followees,
-        owner: &owner,
-        co_agents: &empty,
-        trusted_users: &empty,
-    };
-    let fire = PrivilegeFire::new(|_items: Vec<(usize, CallerIdentity)>| async {});
-    let work = InboundWork {
-        event: NormalizedInboundEvent {
-            sender_id: "aa",
-            channel_id: "nostr-a",
-            guild_id: "nostr",
-        },
-        has_content: true,
-        kind_label: "リポスト",
-        author_key: "aa",
-    };
-    let mut held = Vec::new();
-    let mut admitted = Vec::new();
-    let mut runs = Vec::new();
-    accept_inbound(
-        &[work],
-        "",
-        &["a".into()],
-        &lookups,
-        Some(WatchAccept {
-            policy_json: "{}",
-            interval_secs: 60,
-            allow,
-            owner: &owner,
-            followees: &followees,
-            privilege: Some(&fire),
-        }),
-        |i| {
-            held.push(i);
-            i
-        },
-        |i, _| admitted.push(i),
-        |i, _, _| runs.push(i),
-    )
-    .unwrap();
-    assert_eq!(held, vec![0]);
-    assert!(admitted.is_empty());
-    assert!(runs.is_empty());
-    assert_eq!(fire.held_intervals(), vec![60]);
-    assert_eq!(fire.held_len(), 1);
 }
 
 /// row 116-117: record-only は on_run されない。同グループのトリガーの read にだけ入る。
@@ -330,25 +253,19 @@ fn accept_inbound_record_only_is_read_with_the_trigger_not_alone() {
         InboundWork {
             event: event("u1", "ch", "g1"),
             has_content: true,
-            kind_label: "",
-            author_key: "u1",
         },
         InboundWork {
             event: event("u2", "ch", "g1"),
             has_content: true,
-            kind_label: "",
-            author_key: "u2",
         },
     ];
     let mut runs = Vec::new();
     let mut reads = Vec::new();
-    accept_inbound::<()>(
+    accept_inbound(
         &items,
         "owner",
         &["a".into()],
         &lookups,
-        None,
-        |_| (),
         |_, _| {},
         |i, _, read| {
             runs.push(i);
@@ -379,17 +296,13 @@ fn accept_inbound_whitelist_drop_is_agent_drop_not_message_drop() {
     let items = [InboundWork {
         event: event("u1", "ch", "g1"),
         has_content: true,
-        kind_label: "",
-        author_key: "u1",
     }];
     let mut plan = None;
-    accept_inbound::<()>(
+    accept_inbound(
         &items,
         "owner",
         &["a".into()],
         &lookups,
-        None,
-        |_| (),
         |_, adm| plan = Some(adm.clone()),
         |_, _, _| {},
     )

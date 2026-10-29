@@ -124,8 +124,6 @@ pub(crate) fn app_state_with_agent(provider: Arc<dyn LlmProvider>, agent_id: &st
         llm_router: SharedLlmRouter::new(router),
         llm_config: Arc::new(toml::from_str("").unwrap()),
         subtask_auto_dispatch: true,
-        voice_config: Arc::new(Default::default()),
-        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
         #[cfg(any())]
         nostr_master_key: None,

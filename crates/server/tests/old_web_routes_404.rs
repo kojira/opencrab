@@ -13,8 +13,6 @@ fn state() -> opencrab_server::AppState {
         llm_router: opencrab_server::SharedLlmRouter::new(opencrab_llm::router::LlmRouter::new()),
         llm_config: std::sync::Arc::new(toml::from_str("default_provider = \"\"").unwrap()),
         subtask_auto_dispatch: true,
-        voice_config: std::sync::Arc::new(Default::default()),
-        voice_runtime: std::sync::Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
         #[cfg(any())]
         nostr_master_key: None,
@@ -116,4 +114,29 @@ async fn old_session_mentor_is_404() {
         .await,
         StatusCode::NOT_FOUND
     );
+}
+
+/// D-1097: Discord, Nostr and voice settings are owned and served by the gateways. Core mounts
+/// none of the pre-separation settings routes.
+#[test]
+fn core_mounts_no_gateway_settings_routes() {
+    let mounted: Vec<String> = opencrab_server::production_route_inventory()
+        .into_iter()
+        .map(|route| route.path)
+        .collect();
+    for path in [
+        "/api/voice/config",
+        "/api/agents/{id}/co-agents",
+        "/api/agents/{id}/co-agents/{co_agent_id}",
+        "/api/agents/{id}/discord",
+        "/api/agents/{id}/nostr",
+        "/api/agents/{id}/nostr-relay",
+        "/api/agents/{id}/trusted-users",
+        "/api/agents/{id}/channel-configs",
+    ] {
+        assert!(
+            !mounted.iter().any(|mounted| mounted == path),
+            "core must not mount gateway settings route {path}"
+        );
+    }
 }

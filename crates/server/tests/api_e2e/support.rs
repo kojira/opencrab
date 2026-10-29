@@ -27,8 +27,6 @@ fn create_test_state(compaction_ratio: f64) -> (AppState, opencrab_db::Db) {
         // 空 default_provider は「既定なし＝未設定」として検証をスキップする正規の状態。
         llm_config: Arc::new(toml::from_str("default_provider = \"\"").unwrap()),
         subtask_auto_dispatch: true,
-        voice_config: Arc::new(Default::default()),
-        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
 #[cfg(any())]
         nostr_master_key: None,

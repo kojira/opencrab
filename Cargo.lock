@@ -1707,7 +1707,6 @@ dependencies = [
  "opencrab-llm",
  "opencrab-llm-types",
  "opencrab-mcp",
- "opencrab-voice",
  "reqwest",
  "rusqlite",
  "serde",
@@ -1723,19 +1722,6 @@ dependencies = [
  "uuid",
  "zeroize",
  "zip",
-]
-
-[[package]]
-name = "opencrab-voice"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]

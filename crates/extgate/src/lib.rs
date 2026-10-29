@@ -7,7 +7,6 @@ pub mod close;
 pub mod commands;
 pub mod completion;
 pub mod delivery;
-pub mod delivery_mode;
 pub mod error;
 mod file_copy;
 pub mod fire;
@@ -31,9 +30,6 @@ pub mod turn_queue;
 
 pub use admin::admin_router;
 pub use commands::{CommandError, CommandRegistry};
-pub use delivery_mode::{
-    adjust_inbound_effect, delivery_mode_from_config_bytes, dispatches_v3_say, DeliveryMode,
-};
 pub use error::{ErrorCode, GateError, UNAUTHORIZED_BODY};
 pub use fire::ExtgateTimedFireSink;
 pub use ids::{config_digest, encode_config_b64, now_nanos, session_id_for_binding};

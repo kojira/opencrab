@@ -21,15 +21,13 @@ External gate V3 最小形。契約・設計・検収は `docs/design/external-g
 | `protocol.rs` | frame と message の読写 |
 | `inbound/mod.rs` | `crate::inbound` facade と said → `accept_inbound` orchestration。session は `canonical_session_id`（V3.5 reuse）。`kind_id=nostr` は record 前に `NostrSaidAdmit`（V1 アンカー・DM/自己/allow-set）。watch Immediate は `WatchAccept(privilege=Some)`、Bundle は `WatchAccept(privilege=None)`。record 後の turn は session queue 32。溢れは seq=null + 計測（履歴は残さない） |
 | `inbound/bundle_turn.rs` | `NostrBundleCoordinator` の member 決着・全receipt後のturn 0/1、trigger読取、watchと同文面のprompt、完了turnのenqueue。gatewayはackまでだけ`pending_turn`を保持し後続memberを落とさない。完了時のqueue溢れはmemberを残しturnだけ捨てる |
-| `inbound/binding.rs` | binding error/status、origin row・platform 別 owner・`delivery_mode` 解決、heartbeat 用 `BindingContext`。owner 読取失敗は store_error |
+| `inbound/binding.rs` | binding error/status、origin row・owner 解決、heartbeat 用 `BindingContext`。owner 読取失敗は store_error |
 | `inbound/record.rs` | seq採番、inbound session log、Nostr reply metadata、DM/channel admission query。record後にrenderer生本文を転記 |
-| `inbound/turn.rs` | session queue enqueue、`OnlySpeaker` turn、V3 `RunRequest::with_dispatch`（`ExtgateCompletionSink`）、held turn 発火。`delivery_mode` は turn 完了で読む |
+| `inbound/turn.rs` | session queue enqueue、`OnlySpeaker` turn、V3 `RunRequest::with_dispatch`（`ExtgateCompletionSink`）、held turn 発火 |
 | `inbound/nostr_profile.rs` | Nostr 固有の relay/render、V1・renderer kind 解釈、record 前の `sanitize_tool_result_for_log`、prompt 整形 |
 | `inbound/tests.rs` | inbound profile の unit tests |
 | `completion.rs` | V3 の `with_dispatch` 口。`v3_attach_dispatch` は常に sink を付ける。決着は `run_session_turn` + `apply_delivery_effect`（inbound フック無し）。ノブ分岐は置かない |
-| `bundle.rs` | `nostr_bundle_state` の insert/update。最初の非重複 member で manifest 全 origin を `external_origins` と照合し old receipt を先に立てる。重複 origin path は呼ばない。manifest 不一致は store_error |
 | `delivery.rs` | `DeliveryEffect` → say 1 回 |
-| `delivery_mode.rs` | optional `delivery_mode`（欠落=`say`）。`tool_driven` は inbound Text を NoReply にし、自発の V3 say を渡さない。`kind_id` では分岐しない |
 | `turn_queue.rs` | session turn queue（cap 32）。reserve / FIFO consumer。溢れは dropped を足す |
 | `listen.rs` | UDS listenと接続状態機械。`enqueue_bind`はlock失敗・未liveをwarn（fail-quiet禁止）。binding ack/pendingはopaqueなinstance/binding/addressとして管理する |
 | `close.rs` | live close。request id 抽出済みなら err 1 回、未抽出は log のみ（wire 0） |

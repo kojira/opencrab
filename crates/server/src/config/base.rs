@@ -30,9 +30,6 @@ pub struct AppConfig {
     /// スリープ凝縮ラン（#411 / 記憶の 3 段目）。既定 ON（#457。`enabled=false` で opt-out 可）。
     #[serde(default)]
     pub memory_condense: MemoryCondenseConfig,
-    /// VC 対話（STT/TTS）。既定は無効。
-    #[serde(default)]
-    pub voice: opencrab_voice::VoiceConfig,
     /// 非ブロックツール実行（dispatch / RFC #152 S3a）。
     #[serde(default)]
     pub subtask: SubtaskConfig,

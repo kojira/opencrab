@@ -28,7 +28,6 @@ mod subject;
 mod sync_state;
 mod task_ledger;
 mod tool_logs;
-mod trusted_co_agents;
 
 pub use agent_inbox::*;
 pub use agent_logs::*;
@@ -54,7 +53,6 @@ pub use subject::*;
 pub use sync_state::*;
 pub use task_ledger::*;
 pub use tool_logs::*;
-pub use trusted_co_agents::*;
 
 #[cfg(test)]
 #[path = "tests/legacy_channel_helpers.rs"]

@@ -47,8 +47,6 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         llm_router: opencrab_server::SharedLlmRouter::new(router),
         llm_config: Arc::new(toml::from_str("").unwrap()),
         subtask_auto_dispatch: true,
-        voice_config: Arc::new(Default::default()),
-        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base,
         #[cfg(any())]
         nostr_master_key: None,
