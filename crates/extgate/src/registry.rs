@@ -322,6 +322,38 @@ impl ExtgateState {
         }
     }
 
+    pub(crate) fn authorize_admin_subject(
+        &self,
+        operation: crate::gate_admin_security::Operation,
+        authenticated: &crate::gate_admin_security::Authenticated,
+        subject_id: i64,
+    ) -> Result<crate::gate_admin_security::AuthorizedSubject, GateError> {
+        let mut conn = self.db.lock().map_err(|_| GateError::store())?;
+        let now = crate::ids::now_nanos();
+        match crate::gate_admin_security::authorize_subject(
+            &mut conn,
+            authenticated,
+            subject_id,
+            now,
+        ) {
+            Ok(authorized) => Ok(authorized),
+            Err(crate::gate_admin_security::SecurityError::Store) => Err(GateError::store()),
+            Err(_) => {
+                crate::gate_admin_security::append_audit_for_attempt(
+                    &conn,
+                    uuid::Uuid::new_v4(),
+                    now,
+                    operation,
+                    None,
+                    None,
+                    "unauthorized",
+                )
+                .map_err(|_| GateError::store())?;
+                Err(GateError::new(ErrorCode::Unauthorized))
+            }
+        }
+    }
+
     /// #930/#933: この said の external_origins.seq を「走行中ターンへ畳み込んで read 済み」として
     /// 集合へ記録する（read state を emit する時点で・fold した各 said ごとに呼ぶ）。**実際に fold
     /// した seq だけ**を入れる（over-skip を防ぐ）。

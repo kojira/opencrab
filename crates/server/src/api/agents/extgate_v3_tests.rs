@@ -76,6 +76,7 @@ async fn all_six_gate_admin_operations_are_404_on_public_tcp_router() {
         ("POST", format!("/api/gate-instances/{id}/revisions")),
         ("PUT", format!("/api/gate-bindings/{id}")),
         ("DELETE", format!("/api/gate-bindings/{id}")),
+        ("POST", "/api/gate-subject-grants".to_owned()),
     ];
     for (method, uri) in cases {
         let response = app

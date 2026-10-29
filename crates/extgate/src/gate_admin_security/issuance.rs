@@ -1,6 +1,8 @@
 //! Operator issuance of additional sealed principals and subject grants while core runs
 //! (Issue #1070). Authentication full-scans the principal table on every request, so a
-//! principal sealed here is honored without restarting core. No HTTP route is added.
+//! principal sealed here is honored without restarting core. Principals are issued only by the
+//! operator CLI. Subject grants are also issued by the gate-admin route
+//! `POST /api/gate-subject-grants` (D-1097) through [`issue_subject_grant_in_tx`].
 
 use std::collections::BTreeSet;
 
@@ -225,6 +227,23 @@ pub fn issue_subject_grant(
     ttl_nanos: i64,
     now: i64,
 ) -> Result<IssuedCredential, SecurityError> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| SecurityError::Store)?;
+    let issued = issue_subject_grant_in_tx(&tx, agent_id, subject_id, ttl_nanos, now)?;
+    tx.commit().map_err(|_| SecurityError::Store)?;
+    Ok(issued)
+}
+
+/// [`issue_subject_grant`] inside the caller's transaction, shared by the operator CLI and the
+/// gate-admin route so both apply the same validation, lifetime bound, and live-pair check.
+pub fn issue_subject_grant_in_tx(
+    tx: &Transaction<'_>,
+    agent_id: &str,
+    subject_id: i64,
+    ttl_nanos: i64,
+    now: i64,
+) -> Result<IssuedCredential, SecurityError> {
     if agent_id.is_empty()
         || subject_id <= 0
         || ttl_nanos <= 0
@@ -235,8 +254,8 @@ pub fn issue_subject_grant(
     let expires_at = now
         .checked_add(ttl_nanos)
         .ok_or(SecurityError::InvalidConfig)?;
-    opencrab_db::queries::issue_subject_association_grant(
-        conn, agent_id, subject_id, expires_at, now,
+    opencrab_db::queries::issue_subject_association_grant_in_tx(
+        tx, agent_id, subject_id, expires_at, now,
     )
     .map(|grant| IssuedCredential(Zeroizing::new(grant)))
     .map_err(|error| match error {

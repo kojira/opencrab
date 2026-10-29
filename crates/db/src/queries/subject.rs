@@ -28,6 +28,21 @@ pub fn issue_subject_association_grant(
     expires_at: i64,
     now: i64,
 ) -> Result<String, SubjectGrantError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let grant = issue_subject_association_grant_in_tx(&tx, agent_id, subject_id, expires_at, now)?;
+    tx.commit()?;
+    Ok(grant)
+}
+
+/// [`issue_subject_association_grant`] inside the caller's transaction, so a caller can commit
+/// the grant together with its own audit row.
+pub fn issue_subject_association_grant_in_tx(
+    tx: &Transaction<'_>,
+    agent_id: &str,
+    subject_id: i64,
+    expires_at: i64,
+    now: i64,
+) -> Result<String, SubjectGrantError> {
     if expires_at <= now {
         return Err(SubjectGrantError::Expired);
     }
@@ -37,15 +52,13 @@ pub fn issue_subject_association_grant(
     getrandom::fill(&mut salt).map_err(|_| rusqlite::Error::InvalidQuery)?;
     let stored_hash = stored_grant_hash(&salt, &token);
 
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    require_live_pair(&tx, agent_id, subject_id)?;
+    require_live_pair(tx, agent_id, subject_id)?;
     tx.execute(
         "INSERT INTO subject_association_grants
              (grant_hash, agent_id, subject_id, expires_at, consumed_at, consumed_instance_id)
          VALUES (?1, ?2, ?3, ?4, NULL, NULL)",
         params![stored_hash.as_slice(), agent_id, subject_id, expires_at],
     )?;
-    tx.commit()?;
     Ok(URL_SAFE_NO_PAD.encode(token))
 }
 

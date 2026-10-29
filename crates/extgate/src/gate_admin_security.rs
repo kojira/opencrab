@@ -638,6 +638,46 @@ pub fn authorize_target(
     })
 }
 
+/// Revalidates current credential state and authorizes a subject without an instance target.
+/// A subject grant binds only `(agent, subject)`, so the subject scope is the whole check; the
+/// grant still has to pass the instance-scope check of the `PUT instance` that consumes it.
+pub fn authorize_subject(
+    conn: &mut Connection,
+    authenticated: &Authenticated,
+    subject_id: i64,
+    now: i64,
+) -> Result<AuthorizedSubject, SecurityError> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(|_| SecurityError::Store)?;
+    let rows = load_principals(&tx)?;
+    let row = current_principal(&tx, &rows, &authenticated.principal_id, now)?;
+    let subject_allowed = tx
+        .query_row(
+            "SELECT 1 FROM gate_admin_principal_subjects WHERE principal_id=?1 AND subject_id=?2",
+            params![row.id, subject_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|_| SecurityError::Store)?
+        .is_some();
+    if !subject_allowed {
+        return Err(SecurityError::Unauthorized);
+    }
+    let principal_id = row.id.clone();
+    tx.commit().map_err(|_| SecurityError::Store)?;
+    Ok(AuthorizedSubject {
+        principal_id,
+        subject_id,
+    })
+}
+
+#[derive(Clone, Debug)]
+pub struct AuthorizedSubject {
+    pub principal_id: String,
+    pub subject_id: i64,
+}
+
 /// Full-scans every credential and authorizes only one current principal and one target scope.
 pub fn authorize(
     conn: &mut Connection,
@@ -653,10 +693,10 @@ pub fn authorize(
 
 mod audit;
 mod issuance;
-pub use audit::{append_audit, append_audit_for_attempt, audited_mutation};
+pub use audit::{append_audit, append_audit_for_attempt, append_subject_audit, audited_mutation};
 pub use issuance::{
-    issue_principal, issue_subject_grant, IssuedCredential, PrincipalRequest, PrincipalScope,
-    MAX_SUBJECT_GRANT_TTL_NANOS,
+    issue_principal, issue_subject_grant, issue_subject_grant_in_tx, IssuedCredential,
+    PrincipalRequest, PrincipalScope, MAX_SUBJECT_GRANT_TTL_NANOS,
 };
 
 #[cfg(test)]

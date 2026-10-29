@@ -162,7 +162,7 @@ Instance = {instance_id:UUID,kind_id:string,subject_id:positive-i64,revision:pos
 Binding  = {binding_id:UUID,instance_id:UUID,address:string,created_at:i64,closed_at:i64|null}
 ```
 
-### 5.3 6 operation
+### 5.3 operation（6 個 + subject grant 発行）
 
 GET と DELETE の request body は 0 byte。body があれば `bad_request`。
 
@@ -174,6 +174,9 @@ GET と DELETE の request body は 0 byte。body があれば `bad_request`。
 | 4 | `POST /api/gate-instances/{instance_id}/revisions` | `{expected_revision,enabled,config_b64}` | `201 {instance_id,revision,enabled,config_digest}` | `bad_request,instance_unknown,revision_conflict,instance_active,store_error` |
 | 5 | `PUT /api/gate-bindings/{binding_id}` | `{instance_id,address}` | new `201 Binding`; byte-equivalent open row `200 Binding` | `bad_request,instance_unknown,instance_disabled,binding_closed,binding_conflict,address_in_use,store_error` |
 | 6 | `DELETE /api/gate-bindings/{binding_id}` | body なし | `200 {binding_id,closed:true}`。既に closed なら同じ write-zero response。 | `bad_request,binding_unknown,store_error` |
+| 7 | `POST /api/gate-subject-grants` | `{agent_id}` | `201 {subject_id,grant}`。1 回だけ使える subject grant（有効期限 1 時間）。新しい instance の最初の `PUT instance` に `subject_grant` として渡す。 | `bad_request,subject_unknown,store_error` |
+
+`POST /api/gate-subject-grants`（D-1097）は新しい operation を足さない。`instance.put` を持ち、その agent の subject が `subject_ids` の範囲にある principal だけが使える。grant で作れるのは instance だけなので、instance を作れる principal に限れば十分で、範囲外の subject や `instance.put` を持たない principal は `unauthorized` になる。消費する `PUT instance` では、従来どおり instance の範囲（exact な id、または `creation_namespace` から導いた id）も確かめる。発行は監査ログに `instance.put` として残り、authorized subject はあるが authorized instance は空になる。operator CLI の `grant-issue` と同じ発行処理を使う。
 
 Instance PUT は revision 1 で作る。既存 ID の比較対象は `kind_id,subject_id,enabled` と base64 decode 後の config bytes。DELETE 済み ID の PUT は `instance_conflict` で復活させない。Revision POST は `expected_revision` 一致時だけ revision を 1 増やす。
 
