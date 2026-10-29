@@ -49,7 +49,7 @@ pub(crate) fn persist(state: &ExtgateState, request: &Provision) -> Result<Value
         .ok_or_else(|| GateError::new(ErrorCode::SubjectUnknown))?;
     let now = now_nanos();
     apply_instance(&tx, request, subject_id, &digest, now)?;
-    apply_bindings(&tx, request, now)?;
+    let bindings = apply_bindings(&tx, request, now)?;
     let (revision, config_digest, enabled): (i64, String, i64) = tx
         .query_row(
             "SELECT revision, config_digest, enabled FROM gate_instances WHERE instance_id=?1",
@@ -66,9 +66,9 @@ pub(crate) fn persist(state: &ExtgateState, request: &Provision) -> Result<Value
         "revision": revision,
         "config_digest": config_digest,
         "enabled": enabled == 1,
-        "bindings": request.bindings.iter().map(|binding| json!({
-            "binding_id": binding.binding_id,
-            "address": binding.address,
+        "bindings": bindings.iter().map(|(binding_id, address)| json!({
+            "binding_id": binding_id,
+            "address": address,
         })).collect::<Vec<_>>(),
     }))
 }
@@ -139,12 +139,21 @@ fn apply_instance(
     Ok(())
 }
 
+/// Applies the declared bindings and returns the effective `(binding_id, address)` pairs.
+///
+/// The instance's own binding for a declared address wins over the requested id: an open one is
+/// kept as it is, a closed one is reopened (`reuse_instance_binding_in_tx`). Only an address with
+/// no binding of this instance gets a new binding under the requested id.
 fn apply_bindings(
     tx: &rusqlite::Transaction<'_>,
     request: &Provision,
     now: i64,
-) -> Result<(), GateError> {
-    use opencrab_db::queries::{CoreBindingRequest, CoreBindingService, CreateGateBindingError};
+) -> Result<Vec<(String, String)>, GateError> {
+    use opencrab_db::queries::{
+        reuse_instance_binding_in_tx, CoreBindingRequest, CoreBindingService,
+        CreateGateBindingError,
+    };
+    let mut effective = Vec::with_capacity(request.bindings.len());
     for binding in &request.bindings {
         let other_owner: Option<String> = tx
             .query_row(
@@ -157,6 +166,12 @@ fn apply_bindings(
             .map_err(|_| GateError::store())?;
         if other_owner.is_some() {
             return Err(GateError::new(ErrorCode::AddressInUse));
+        }
+        let reused = reuse_instance_binding_in_tx(tx, &request.instance_id, &binding.address)
+            .map_err(|_| GateError::store())?;
+        if let Some(binding_id) = reused.binding_id() {
+            effective.push((binding_id.to_string(), binding.address.clone()));
+            continue;
         }
         let session_id = session_id_for_binding(&binding.binding_id);
         CoreBindingService::create_in_tx(
@@ -178,6 +193,7 @@ fn apply_bindings(
             }
             CreateGateBindingError::Store(_) => GateError::store(),
         })?;
+        effective.push((binding.binding_id.clone(), binding.address.clone()));
     }
     let mut open = tx
         .prepare("SELECT binding_id FROM gate_bindings WHERE instance_id=?1 AND closed_at IS NULL")
@@ -189,7 +205,7 @@ fn apply_bindings(
         .map_err(|_| GateError::store())?;
     drop(open);
     for binding_id in open_ids {
-        if !request.bindings.iter().any(|b| b.binding_id == binding_id) {
+        if !effective.iter().any(|(id, _)| *id == binding_id) {
             tx.execute(
                 "UPDATE gate_bindings SET closed_at=?2 WHERE binding_id=?1",
                 params![binding_id, now],
@@ -197,5 +213,5 @@ fn apply_bindings(
             .map_err(|_| GateError::store())?;
         }
     }
-    Ok(())
+    Ok(effective)
 }
