@@ -50,6 +50,28 @@ where
     }
 }
 
+/// Audits a request authorized for a subject with no instance target (a subject grant).
+pub fn append_subject_audit(
+    conn: &Connection,
+    request_id: Uuid,
+    attempted_at: i64,
+    operation: Operation,
+    principal_id: &str,
+    subject_id: i64,
+    result_class: &str,
+) -> Result<(), SecurityError> {
+    insert_audit(
+        conn,
+        request_id,
+        attempted_at,
+        operation,
+        Some(principal_id),
+        Some(subject_id),
+        None,
+        result_class,
+    )
+}
+
 pub fn append_audit_for_attempt(
     conn: &Connection,
     request_id: Uuid,
@@ -57,6 +79,29 @@ pub fn append_audit_for_attempt(
     operation: Operation,
     principal_id: Option<&str>,
     authorized_target: Option<(i64, Uuid)>,
+    result_class: &str,
+) -> Result<(), SecurityError> {
+    insert_audit(
+        conn,
+        request_id,
+        attempted_at,
+        operation,
+        principal_id,
+        authorized_target.map(|value| value.0),
+        authorized_target.map(|value| value.1),
+        result_class,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_audit(
+    conn: &Connection,
+    request_id: Uuid,
+    attempted_at: i64,
+    operation: Operation,
+    principal_id: Option<&str>,
+    subject_id: Option<i64>,
+    instance_id: Option<Uuid>,
     result_class: &str,
 ) -> Result<(), SecurityError> {
     conn.execute(
@@ -70,8 +115,8 @@ pub fn append_audit_for_attempt(
             attempted_at,
             principal_id,
             operation.as_str(),
-            authorized_target.map(|value| value.0),
-            authorized_target.map(|value| value.1.to_string()),
+            subject_id,
+            instance_id.map(|value| value.to_string()),
             result_class,
         ],
     )

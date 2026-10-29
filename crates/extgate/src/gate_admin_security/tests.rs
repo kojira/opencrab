@@ -570,3 +570,4 @@ fn audit_is_sanitized_and_append_only() {
 }
 
 mod issuance;
+mod subject_grant_route;

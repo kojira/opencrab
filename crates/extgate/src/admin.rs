@@ -1,4 +1,4 @@
-//! 6 operation。V3 §5。
+//! 6 operation と subject grant の発行（D-1097）。V3 §5。
 
 use std::sync::Arc;
 
@@ -18,6 +18,7 @@ use crate::listen::enqueue_bind;
 use crate::registry::ExtgateState;
 
 mod audit;
+mod subject_grants;
 use audit::{audited_operation, begin_request, early};
 
 pub fn admin_router(state: Arc<ExtgateState>) -> Router {
@@ -33,6 +34,10 @@ pub fn admin_router(state: Arc<ExtgateState>) -> Router {
         .route(
             "/api/gate-bindings/{binding_id}",
             put(put_binding).delete(delete_binding),
+        )
+        .route(
+            "/api/gate-subject-grants",
+            post(subject_grants::post_subject_grant),
         )
         .with_state(state)
 }
