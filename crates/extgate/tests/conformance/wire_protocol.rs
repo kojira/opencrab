@@ -99,25 +99,16 @@ async fn s2_runtime_and_admin_binding_creation_delegate_to_one_idempotent_author
     }
 
     let session_id = session_id_for_binding(&binding_id);
-    let (status, body) = h
-        .admin(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/api/gate-bindings/{binding_id}"))
-                .header(header::AUTHORIZATION, auth())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "instance_id": instance_id,
-                        "address": "runtime-opaque-address",
-                        "session": {"session_id": session_id, "title": "Runtime title"}
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{status} {}", String::from_utf8_lossy(&body));
+    let outcome = create_binding_row(
+        &h,
+        &binding_id,
+        &instance_id,
+        "runtime-opaque-address",
+        &session_id,
+        "Runtime title",
+    )
+    .unwrap();
+    assert_eq!(outcome, opencrab_db::queries::CoreBindingOutcome::Existing);
     let conn = h.state.db.lock().unwrap();
     assert_eq!(
         conn.query_row("SELECT count(*) FROM gate_bindings", [], |row| row.get::<_, i64>(0))

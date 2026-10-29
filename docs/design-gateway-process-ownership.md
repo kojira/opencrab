@@ -587,3 +587,5 @@ The stage evidence supplements, and does not weaken, each measurable criterion i
 | V14 | S0, S5, S9 | Concrete dependencies remain dev-only and QC remains runnable. |
 | V15 | S0, S8, S10–S11 | Reachability classification, preserved history/migrations, and matched restores. |
 | V16 | S0, S3, S7, S9 | Synthetic gateway proves generic parity delivery with zero core/shared/server source, schema, migration, or redeployment change. |
+
+> **D-1098 (2026-10-29):** the gate-admin socket, principals, scopes, creation namespaces and subject grants described in this document were removed. Gateways provision over the ordinary gate socket with no credential; see [external-gate.md](design/external-gate.md) `provision`. This document is kept as the #1006 history.

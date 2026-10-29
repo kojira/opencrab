@@ -297,28 +297,19 @@ async fn di_invoke_undeclared_operation_is_unknown() {
 // ===== DI 拡張 改訂ラン: revision digest リセット / indeterminate / recover / option-B 継ぎ目 =====
 
 async fn post_revision(h: &Harness, instance_id: &str, expected: u64) -> u64 {
-    let (st, body) = h
-        .admin(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/gate-instances/{instance_id}/revisions"))
-                .header(header::AUTHORIZATION, auth())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({"expected_revision": expected, "enabled": true, "config_b64": config_b64()})
-                        .to_string(),
-                ))
-                .unwrap(),
+    let current: i64 = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT revision FROM gate_instances WHERE instance_id=?1",
+            [instance_id],
+            |row| row.get(0),
         )
-        .await;
-    assert_eq!(
-        st,
-        StatusCode::CREATED,
-        "{}",
-        String::from_utf8_lossy(&body)
-    );
-    let v: Value = serde_json::from_slice(&body).unwrap();
-    v["revision"].as_u64().unwrap()
+        .unwrap();
+    assert_eq!(u64::try_from(current).unwrap(), expected);
+    revise_instance(h, instance_id, true, config_b64())
 }
 
 /// DI-04: revision を上げると宣言 digest が未確立化し、別宣言の hello が通る（mismatch にならない）。

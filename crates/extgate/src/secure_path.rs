@@ -1,4 +1,4 @@
-//! Directory-fd path resolution for security-sensitive startup files.
+//! Directory-fd path resolution for opening outbound files without following symlinks.
 
 use std::ffi::{CString, OsStr};
 use std::fs::File;
@@ -10,92 +10,6 @@ use std::path::{Component, Path};
 pub struct ParentDir {
     directory: File,
     name: CString,
-}
-
-impl ParentDir {
-    pub fn directory(&self) -> &File {
-        &self.directory
-    }
-
-    pub fn name(&self) -> &CString {
-        &self.name
-    }
-
-    pub fn try_clone(&self) -> io::Result<Self> {
-        Ok(Self {
-            directory: self.directory.try_clone()?,
-            name: self.name.clone(),
-        })
-    }
-
-    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
-        self.directory.metadata()
-    }
-
-    pub fn child_stat(&self) -> io::Result<libc::stat> {
-        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: both pointers are valid and fstatat initializes `stat` on success.
-        let result = unsafe {
-            libc::fstatat(
-                self.directory.as_raw_fd(),
-                self.name.as_ptr(),
-                stat.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if result == 0 {
-            // SAFETY: successful fstatat initialized every field.
-            Ok(unsafe { stat.assume_init() })
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-
-    pub fn rename_child(&self, destination: &CString) -> io::Result<()> {
-        // SAFETY: directory descriptors and both NUL-terminated names remain valid for the call.
-        let result = unsafe {
-            libc::renameat(
-                self.directory.as_raw_fd(),
-                self.name.as_ptr(),
-                self.directory.as_raw_fd(),
-                destination.as_ptr(),
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-
-    pub fn stat_named(&self, name: &CString) -> io::Result<libc::stat> {
-        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: both pointers are valid and fstatat initializes `stat` on success.
-        let result = unsafe {
-            libc::fstatat(
-                self.directory.as_raw_fd(),
-                name.as_ptr(),
-                stat.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if result == 0 {
-            // SAFETY: successful fstatat initialized every field.
-            Ok(unsafe { stat.assume_init() })
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-
-    pub fn unlink_named(&self, name: &CString) -> io::Result<()> {
-        // SAFETY: the descriptor and NUL-terminated child name are valid for unlinkat.
-        let result = unsafe { libc::unlinkat(self.directory.as_raw_fd(), name.as_ptr(), 0) };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
 }
 
 fn component_name(component: &OsStr) -> io::Result<CString> {
@@ -155,24 +69,6 @@ pub fn open_parent(path: &Path) -> io::Result<ParentDir> {
         directory,
         name: final_name.ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?,
     })
-}
-
-pub fn open_file_no_follow(path: &Path) -> io::Result<File> {
-    let parent = open_parent(path)?;
-    // SAFETY: descriptor and name are valid; a nonnegative result is owned.
-    let fd = unsafe {
-        libc::openat(
-            parent.directory.as_raw_fd(),
-            parent.name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        // SAFETY: openat returned a new owned descriptor.
-        Ok(unsafe { File::from_raw_fd(fd) })
-    }
 }
 
 /// Opens a regular file for reading without following a leaf symlink and

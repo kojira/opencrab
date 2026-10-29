@@ -236,8 +236,7 @@ pub struct ExtgateState {
 }
 
 impl ExtgateState {
-    /// Gate-admin authentication is always database-backed.
-    pub fn new_protected(db: Db) -> Self {
+    pub fn new(db: Db) -> Self {
         Self {
             db,
             registry: Mutex::new(Registry::default()),
@@ -256,101 +255,6 @@ impl ExtgateState {
             running_turns: crate::interrupt::RunningTurns::new(),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
-        }
-    }
-
-    pub(crate) fn authenticate_admin(
-        &self,
-        headers: &axum::http::HeaderMap,
-        operation: crate::gate_admin_security::Operation,
-    ) -> Result<crate::gate_admin_security::Authenticated, GateError> {
-        let header = headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok());
-        let mut conn = self.db.lock().map_err(|_| GateError::store())?;
-        let now = crate::ids::now_nanos();
-        match crate::gate_admin_security::authenticate(&mut conn, header, operation, now) {
-            Ok(authenticated) => Ok(authenticated),
-            Err(crate::gate_admin_security::SecurityError::Store) => Err(GateError::store()),
-            Err(_) => {
-                crate::gate_admin_security::append_audit_for_attempt(
-                    &conn,
-                    uuid::Uuid::new_v4(),
-                    now,
-                    operation,
-                    None,
-                    None,
-                    "unauthorized",
-                )
-                .map_err(|_| GateError::store())?;
-                Err(GateError::new(ErrorCode::Unauthorized))
-            }
-        }
-    }
-
-    pub(crate) fn authorize_admin_target(
-        &self,
-        operation: crate::gate_admin_security::Operation,
-        authenticated: &crate::gate_admin_security::Authenticated,
-        subject_id: i64,
-        instance_id: uuid::Uuid,
-    ) -> Result<crate::gate_admin_security::Authorized, GateError> {
-        let mut conn = self.db.lock().map_err(|_| GateError::store())?;
-        let now = crate::ids::now_nanos();
-        match crate::gate_admin_security::authorize_target(
-            &mut conn,
-            authenticated,
-            subject_id,
-            instance_id,
-            now,
-        ) {
-            Ok(authorized) => Ok(authorized),
-            Err(crate::gate_admin_security::SecurityError::Store) => Err(GateError::store()),
-            Err(_) => {
-                crate::gate_admin_security::append_audit_for_attempt(
-                    &conn,
-                    uuid::Uuid::new_v4(),
-                    now,
-                    operation,
-                    None,
-                    None,
-                    "unauthorized",
-                )
-                .map_err(|_| GateError::store())?;
-                Err(GateError::new(ErrorCode::Unauthorized))
-            }
-        }
-    }
-
-    pub(crate) fn authorize_admin_subject(
-        &self,
-        operation: crate::gate_admin_security::Operation,
-        authenticated: &crate::gate_admin_security::Authenticated,
-        subject_id: i64,
-    ) -> Result<crate::gate_admin_security::AuthorizedSubject, GateError> {
-        let mut conn = self.db.lock().map_err(|_| GateError::store())?;
-        let now = crate::ids::now_nanos();
-        match crate::gate_admin_security::authorize_subject(
-            &mut conn,
-            authenticated,
-            subject_id,
-            now,
-        ) {
-            Ok(authorized) => Ok(authorized),
-            Err(crate::gate_admin_security::SecurityError::Store) => Err(GateError::store()),
-            Err(_) => {
-                crate::gate_admin_security::append_audit_for_attempt(
-                    &conn,
-                    uuid::Uuid::new_v4(),
-                    now,
-                    operation,
-                    None,
-                    None,
-                    "unauthorized",
-                )
-                .map_err(|_| GateError::store())?;
-                Err(GateError::new(ErrorCode::Unauthorized))
-            }
         }
     }
 
@@ -508,7 +412,7 @@ mod folded_seq_tests {
     use super::*;
 
     fn test_state() -> ExtgateState {
-        ExtgateState::new_protected(opencrab_db::Db::memory().unwrap())
+        ExtgateState::new(opencrab_db::Db::memory().unwrap())
     }
 
     // #933 不変(i): is_folded は fold した seq **だけ** 真（未 fold は偽）。

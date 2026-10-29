@@ -13,7 +13,7 @@ OpenCrabは、自律的に思考・学習・行動するAIエージェントを�
 - **永続化**: SQLite (rusqlite, bundled)。外部DBサーバー不要で即座に動作
 - **全文検索**: SQLite FTS5。記憶検索にBM25スコアリングを使用
 - **LLMプロバイダー**: OpenAI, Anthropic, Google, OpenRouter, Ollama, llama.cpp の6種をサポート。クラウドとローカルの両方に対応
-- **ゲートウェイ**: Discord / Nostr / Web / CLI は core/server から独立配備し、generic gate-admin/runtime UDS だけで接続する。REST は core の generic 管理 API であり具象 gateway ではない（§7、Issue #1006）
+- **ゲートウェイ**: Discord / Nostr / Web / CLI は core/server から独立配備し、generic runtime UDS（gate socket）だけで接続する。資格情報は無い（D-1098）。REST は core の generic 管理 API であり具象 gateway ではない（§7、Issue #1006）
 
 ### 1.3 設計哲学
 
@@ -35,12 +35,12 @@ operator -- concrete local admin --> gateway daemon --> gateway-owned store/secr
                                       |       |
                                       |       +-- supervises --> gateway instance child
                                       |                            |
-                                      +-- generic gate-admin UDS   +-- generic runtime UDS
+                                      +-- provision (gate socket)  +-- hello/said/say (gate socket)
                                                    |                            |
                                                    v                            v
-                                              core gate admin <---------- core runtime
-                                                   |                            |
-                                                   +------ core conversation store ---+
+                                              core runtime (one gate socket, no credential)
+                                                   |
+                                                   +------ core conversation store
 
 server ---------------- generic core APIs only --------------------------> core
        (never configures, spawns, or supervises a concrete gateway daemon)
@@ -276,7 +276,7 @@ SkillEngine
 
 ### 7.1 Current target and AS-IS label
 
-Discord and Nostr each become an independently deployed owning daemon with gateway-owned store/local admin and supervised instance children. Web and CLI remain independent generic-runtime clients and own their concrete authentication/admission/display behavior; Web also owns a durable identity/policy SQLite store and local admin UDS whenever configured or migrated Web identities exist, while CLI needs no durable store today. REST is a core API, not a gateway. All communicate with core only through generic gate-admin/runtime protocols. The common target diagram and ownership vocabulary are in §2.1–2.4.
+Discord and Nostr each become an independently deployed owning daemon with gateway-owned store/local admin and supervised instance children. Web and CLI remain independent generic-runtime clients and own their concrete authentication/admission/display behavior; Web also owns a durable identity/policy SQLite store and local admin UDS whenever configured or migrated Web identities exist, while CLI needs no durable store today. REST is a core API, not a gateway. All communicate with core only through the generic gate socket protocol (provision, hello, said/say; D-1098). The common target diagram and ownership vocabulary are in §2.1–2.4.
 
 `AgentGatewayLifecycle`, `AgentGatewayRegistry`, server feature wiring, per-platform runner traits, concrete server routes, and platform-shaped timed-fire descriptors are **AS-IS/superseded intermediate architecture**, not extension points. Remove reachable violations according to #1006, while retaining generic `AgentRuntime`, session locks, schedules/heartbeat, subtasks, opaque gate rows, runtime UDS, dynamic operation declarations, inbound deduplication, and the existing single core delivery state machine. Existing Web/CLI independent clients and server dev-only QC dependencies are valid.
 
@@ -304,15 +304,9 @@ The approved evidence-backed source inventory, migration mapping, and completion
 
 ## 8. サーバーとAPI
 
-`server` composes generic core administration and the agent execution pipeline. It may expose agents, subjects, sessions, history, LLM/tool settings, schedules/heartbeat, and non-gateway API principals. It must not expose or proxy concrete gateway configuration, credentials, external identities, policy, or lifecycle, and must not merge a concrete gateway router. The AS-IS `server::create_router_with_gate`/production route inventory merge of `opencrab_extgate::admin_router` into the permissive-CORS public router is removed. Public TCP returns 404 for all six generic gate-admin paths.
+`server` composes generic core administration and the agent execution pipeline. It may expose agents, subjects, sessions, history, LLM/tool settings, schedules/heartbeat, and non-gateway API principals. It must not expose or proxy concrete gateway configuration, credentials, external identities, policy, or lifecycle, and must not merge a concrete gateway router. The AS-IS `server::create_router_with_gate`/production route inventory merge of `opencrab_extgate::admin_router` into the permissive-CORS public router is removed. Public TCP has no `/api/gate*` route.
 
-Generic core gate-admin uses a required separate `[gate_admin]` config with `listen_socket` and `bootstrap_credential_file`; this core admin UDS is distinct from `[gate].listen_socket` (generic runtime) and every gateway-local admin UDS. S1 adds only platform-neutral security tables: sealed principals with a random salt and domain-separated SHA-256 hash of a strict 32-byte bearer, normalized six-operation scopes, immutable positive-subject and canonical-instance scopes or one subject-bounded UUIDv5 creation namespace, expiry/revocation/rotation lineage, and append-only sanitized request audit. Plaintext tokens are never persisted. The exact constraints, indexes, hash input, operation identifiers, and target rules are normative in [design-gateway-process-ownership.md §6](design-gateway-process-ownership.md#6-generic-gate-admin-protocol). S2, not S1, owns subject allocation/tombstone/grant and binding-authority changes.
-
-Before any listener, core strictly parses one regular mode-`0600` versioned JSON credential manifest owned by the core service process's effective UID (UID 0 only when the service runs as root), without following symlinks. It rejects wrong ownership without privileged handoff/override, duplicate/unknown fields, malformed or non-32-byte base64url tokens, empty/unknown scopes, insecure path metadata, and expired/revoked/conflicting state; it zeroizes plaintext buffers. First bootstrap inserts the principal with nullable `sealed_at`, inserts scopes only while unsealed, and performs exactly one `sealed_at NULL -> timestamp` transition atomically. A separate `revoked_at NULL -> timestamp` is the only other principal update; combined updates, reseal/unseal, unrevocation, timestamp edits, and scope insertion after seal are forbidden, and bootstrap/auth/restart reject any pre-existing unsealed row.
-
-Absent-principal bootstrap and rotation use one immediate write transaction to full-scan every other sealed principal, rehash the decoded bearer with each stored salt, compare without early return, reject any duplicate credential, and only then insert/seal. Restart is read-only and requires exactly one matching row—the requested principal—plus exact token, expiry, normalized scopes, and optional predecessor/overlap metadata; it cannot unrevoke/rescope/extend/rotate an existing principal. Every request likewise scans all candidates in one consistent read transaction and authorizes only one unique match. Zero or multiple matches, missing, wrong, expired, revoked, and out-of-scope credentials share one redacted unauthorized response; first-match selection and scope union are forbidden. Authorized mutations and sanitized audit outcomes are atomic through an outer transaction/savepoint; reads and denials are also audited without denied target, token, body, config, path, SQL, salt, or hash bytes. Issuance/revocation/replacement belongs to generic core operator tooling and never creates a seventh gate-admin route.
-
-Startup validates config/security migration/manifest/bootstrap, securely requires an absent socket path, binds, sets and verifies socket mode `0600` and core-service-effective-UID ownership, and constructs the protected router before runtime/public listeners may start. It never unlinks a pre-existing stale path; cleanup removes only the matching device/inode/type/owner socket created by that attempt. Empty-token production construction and fail-open startup are forbidden.
+D-1098: there is no gate-admin socket, credential manifest, principal or subject grant. A gateway declares its own generic instance (kind, agent, enabled, opaque config) and the complete set of its bindings with one `provision` frame on the gate socket before `hello` ([external-gate.md](design/external-gate.md)). Access to the socket file is the only gate, the same as for every other frame. Core needs no `[gate_admin]` config; public TCP still has no `/api/gate*` route.
 
 The REST conversation path continues to record a generic session message, build the agent context/history, run `SkillEngine`, and record/return the response. Old Discord/Nostr/Web feature routes, `AppState` concrete gateway fields, channel/trusted-platform routes, and server-owned gateway startup descriptions are AS-IS violations scheduled by #1006, not APIs to copy. Gateway final delivery is selected by dynamic generic hello metadata, never by server decoding opaque config.
 
@@ -324,15 +318,9 @@ The REST conversation path continues to record a generic session message, build 
 
 | テーブル | 用途 |
 |----------|------|
-| `gate_admin_principals` | S1 の generic admin principal。`sealed_at` は同一 bootstrap transaction の scope 作成中だけ NULL、認証時は必ず sealed。opaque ID、32-byte salt/hash、expiry/revocation、predecessor/overlap lineage。plaintext token は保存しない |
-| `gate_admin_principal_operations` | 6 個の closed generic operation scope（principal と operation の複合主キー） |
-| `gate_admin_principal_subjects` / `gate_admin_principal_instances` | sealed 後 immutable な positive subject / canonical instance exact-target scope |
-| `gate_admin_principal_creation_namespaces` | principal ごと最大 1 個、nonempty subject set に bound された deterministic UUIDv5 creation scope |
-| `gate_admin_request_audit` | request UUID、matched principal、authorized target、generic outcome の append-only sanitized audit。denial の raw target/secret は持たない |
 | `agents` | エージェント基本情報。既存の正の INTEGER `subject_id` は UUID 化・採番し直しをせず byte-for-byte 保存 |
 | `subject_id_allocator` | gateway 非依存の単調 high-water/next-ID。既存最大値より上へ backfill し、減算・再利用禁止 |
 | `subject_tombstones` | hard delete で agent/subject row を消す前に同一 transaction で記録する永続 `subject_id` tombstone |
-| `subject_association_grants` | `(agent_id, subject_id)` に bind した短命・hashed・single-use grant と consume/expiry tombstone。既存 gate association は grant 不要 |
 | `soul` | 性格特性 (Big Five JSON, Social Style JSON, Thinking Style JSON) |
 | `identity` | 名前・役割・所属 |
 | `memory_curated` | キュレーション記憶 (category, content) |
@@ -353,9 +341,9 @@ The REST conversation path continues to record a generic session message, build 
 
 ### 9.2 設計方針
 
-- 会話・記憶テーブルは`agent_id`でスコープする。gate-admin security/audit は principal と generic target でスコープし、gateway kind/name を持たない
-- 通常状態は UPSERT パターンで冪等性を確保する。sealed gate-admin principal/scope は UPSERT せず、exact-idempotent comparison または explicit replacement/revocation だけを許す
-- 外部設定/APIの時刻はUTC RFC3339、DB内部の gate-admin security/audit 時刻は比較可能な UTC Unix nanoseconds とする
+- 会話・記憶テーブルは`agent_id`でスコープする。gateway の instance/binding は generic な kind と opaque config だけを持ち、gateway kind/name で分岐しない
+- 通常状態は UPSERT パターンで冪等性を確保する
+- 外部設定/APIの時刻はUTC RFC3339、DB内部の gateway instance/binding 時刻は比較可能な UTC Unix nanoseconds とする
 - JSONフィールドでスキーマの柔軟性を確保（性格特性、メタデータ等）
 - FTS5はセッションログの全文検索に使用。BM25でランキング
 - Memory Indexはウォーターマーク方式の増分構築。LLMで要約を生成し、閾値超過時にバックグラウンドで自動実行
@@ -401,6 +389,6 @@ Dioxus (Rust製WebUIフレームワーク) + Tailwind CSSで構築。
 
 ## 12. 運用
 
-The previous commands that enabled Discord/Nostr/Web as `opencrab-server` features and configured `[gateway.discord]` were instructions for the superseded in-process architecture. Do not use them as implementation guidance. The target deployment starts core/server generic services and each selected concrete gateway daemon/client independently. Each daemon receives only its gateway-owned DB/admin paths, generic gate-admin/runtime UDS paths, and separately sourced secrets; it never receives a core/legacy DB path. Operators administer platform state through the daemon-local UDS, provision core generic rows through gate-admin, and let the daemon supervise its own children.
+The previous commands that enabled Discord/Nostr/Web as `opencrab-server` features and configured `[gateway.discord]` were instructions for the superseded in-process architecture. Do not use them as implementation guidance. The target deployment starts core/server generic services and each selected concrete gateway daemon/client independently. Each daemon receives only its gateway-owned DB/admin paths, the generic gate socket path, and separately sourced secrets; it never receives a core/legacy DB path. Operators administer platform state through the daemon-local UDS, provision core generic rows through gate-admin, and let the daemon supervise its own children.
 
 Cutover is offline and follows [design-gateway-process-ownership.md §9–11](design-gateway-process-ownership.md#9-offline-migration-and-completeness-proof). Exactly two stopped/offline migration programs may open core directly read-write for gateway legacy state: first, the single `project-core-state` transaction before QC; second, guarded destructive cleanup after post-QC freeze/read-only `verify-freeze`. Ordinary core schema/admin work is not a third phase. S8 creates one matched core-plus-all-participating-gateway backup set, imports every approved present row while core stays read-only, and runs one atomic projection. Any failure restores the whole matched set and restarts; #1006 does not resume/adopt partial progress or reconstruct lost-response provenance. An ordinary successful-completion rerun is a no-op only when current mapped rows, marker, and retained-state digests match. The unchanged later order is protected core UDS/public isolation, provision-only QC, complete post-QC freeze, read-only `verify-freeze`, guarded cleanup, and matched rollback. The generic projection preserves the existing core `deliveries` table byte/logically and adds no delivery-guarantee classification, gateway receipt, request reconstruction, or replay. Existing disconnect/startup handling remains authoritative. Extra migration durability/hardening is non-gating Issue #1016. Production deployment remains a separate operator action.

@@ -8,7 +8,6 @@ include!("tests/early_version_migrations.rs");
 include!("tests/gateway_operation_migration_v47.rs");
 include!("tests/gate_binding_address_index_migration_v51.rs");
 include!("tests/gpt6_model_budget_migration_v52.rs");
-include!("tests/gate_admin_security_migration_v53.rs");
 include!("tests/subject_safeguards_migration_v54.rs");
 include!("tests/generic_heartbeat_instructions_migration_v55.rs");
 include!("tests/api_principals_migration_v56.rs");

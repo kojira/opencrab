@@ -184,3 +184,83 @@ async fn d1098_gate_client_provision_then_instance_client_hello_binds() {
     want.sort();
     assert_eq!(bound, want);
 }
+
+// Kept from the removed gate-admin suite: core's runtime behaviour for a binding added to a live
+// instance (said on the new binding is not ready until its bind is acknowledged).
+#[tokio::test]
+async fn dynamic_binding_put_keeps_old_said_and_new_not_ready() {
+    let h = Harness::start().await;
+    let (mut s, instance_id, binding_a) = ready_pair(&h).await;
+    let binding_b = uuid();
+    put_binding(&h, &binding_b, &instance_id, "chan-2").await;
+    let _ = read_frame_opt(&mut s).await;
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "s1",
+            "m": "said",
+            "binding_id": binding_a,
+            "origin": "oa",
+            "author_id": "u1",
+            "text": "old",
+            "attachments": []
+        }),
+    )
+    .await;
+    let ok = read_said_response(&mut s, "s1").await;
+    assert_eq!(ok["m"], "ok");
+    assert!(ok["seq"].as_i64().unwrap() >= 1);
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "s2",
+            "m": "said",
+            "binding_id": binding_b,
+            "origin": "ob",
+            "author_id": "u1",
+            "text": "new",
+            "attachments": []
+        }),
+    )
+    .await;
+    let err = read_said_response(&mut s, "s2").await;
+    assert_eq!(err["code"], "instance_not_ready");
+}
+
+#[tokio::test]
+async fn listen_socket_rejects_relative_and_nonsocket() {
+    assert_eq!(validate_listen_socket("").unwrap(), None);
+    assert!(validate_listen_socket("relative/path.sock").is_err());
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("not-a-socket");
+    std::fs::write(&file, b"x").unwrap();
+    assert!(validate_listen_socket(file.to_str().unwrap()).is_err());
+}
+
+#[tokio::test]
+async fn lookups_unknown_address_is_false() {
+    let h = Harness::start().await;
+    let conn = h.state.db.lock().unwrap();
+    assert!(!opencrab_extgate::channel_whitelisted(
+        &conn, "agent-1", "missing", "nope"
+    ));
+}
+
+#[tokio::test]
+async fn d1098_provision_does_not_revive_a_deleted_instance() {
+    let h = Harness::start().await;
+    let id = uuid();
+    put_instance(&h, &id, true).await;
+    h.state
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE gate_instances SET deleted_at=1 WHERE instance_id=?1",
+            [&id],
+        )
+        .unwrap();
+    let mut frame = provision_frame("p1", &id, true, &[]);
+    frame["kind_id"] = json!("discord");
+    assert_eq!(provision(&h, &frame).await["code"], "instance_conflict");
+}
