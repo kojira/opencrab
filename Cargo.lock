@@ -1490,7 +1490,6 @@ name = "opencrab-cli"
 version = "0.2.17"
 dependencies = [
  "anyhow",
- "axum",
  "chrono",
  "dotenvy",
  "libc",
@@ -1498,7 +1497,6 @@ dependencies = [
  "opencrab-core",
  "opencrab-db",
  "opencrab-extgate",
- "opencrab-gate-client",
  "opencrab-gateway",
  "opencrab-llm",
  "opencrab-server",
@@ -1550,13 +1548,11 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
- "getrandom 0.3.4",
  "r2d2",
  "r2d2_sqlite",
  "rusqlite",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror",
  "tracing",
@@ -1593,7 +1589,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "zeroize",
 ]
 
 [[package]]
@@ -1610,7 +1605,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "zeroize",
 ]
 
 [[package]]

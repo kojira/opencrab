@@ -13,7 +13,7 @@ fn s2_populated_upgrade_preserves_positive_subject_ids_and_associations_byte_for
          DROP TRIGGER IF EXISTS agents_subject_id_advance_explicit;
          DROP TRIGGER IF EXISTS agents_subject_id_update_guard;
          DROP TRIGGER IF EXISTS agents_subject_tombstone_delete_guard;
-         DROP TABLE subject_association_grants;
+         DROP TABLE IF EXISTS subject_association_grants;
          DROP TABLE subject_tombstones;
          DROP TABLE subject_id_allocator;
          ALTER TABLE gate_bindings DROP COLUMN session_id;
@@ -119,7 +119,7 @@ fn s2_pre_schema_snapshot_restores_byte_identical_fixture() {
              DROP TRIGGER IF EXISTS agents_subject_id_advance_explicit;
              DROP TRIGGER IF EXISTS agents_subject_id_update_guard;
              DROP TRIGGER IF EXISTS agents_subject_tombstone_delete_guard;
-             DROP TABLE subject_association_grants;
+             DROP TABLE IF EXISTS subject_association_grants;
              DROP TABLE subject_tombstones;
              DROP TABLE subject_id_allocator;
              ALTER TABLE gate_bindings DROP COLUMN session_id;
@@ -179,13 +179,9 @@ fn s2_pre_schema_snapshot_restores_byte_identical_fixture() {
 }
 
 #[test]
-fn s2_fresh_schema_installs_allocator_tombstones_and_hashed_grants() {
+fn s2_fresh_schema_installs_allocator_and_tombstones() {
     let conn = crate::init_memory().expect("fresh schema");
-    for table in [
-        "subject_id_allocator",
-        "subject_tombstones",
-        "subject_association_grants",
-    ] {
+    for table in ["subject_id_allocator", "subject_tombstones"] {
         let exists: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -195,18 +191,6 @@ fn s2_fresh_schema_installs_allocator_tombstones_and_hashed_grants() {
             .unwrap();
         assert_eq!(exists, 1, "missing S2 table {table}");
     }
-    let grant_columns: Vec<String> = conn
-        .prepare("SELECT name FROM pragma_table_info('subject_association_grants') ORDER BY cid")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    assert!(grant_columns.contains(&"grant_hash".to_string()));
-    assert!(
-        !grant_columns.iter().any(|name| name.contains("token")),
-        "plaintext grant token column is forbidden: {grant_columns:?}"
-    );
 }
 
 #[test]

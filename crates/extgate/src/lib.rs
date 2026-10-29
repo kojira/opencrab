@@ -1,8 +1,6 @@
 //! External gate V3 最小形。
 
 pub mod activity_stream;
-pub mod admin;
-pub mod admin_socket;
 pub mod close;
 pub mod commands;
 pub mod completion;
@@ -10,7 +8,6 @@ pub mod delivery;
 pub mod error;
 mod file_copy;
 pub mod fire;
-pub mod gate_admin_security;
 pub mod ids;
 pub mod inbound;
 pub mod interrupt;
@@ -28,7 +25,6 @@ pub mod registry;
 mod secure_path;
 pub mod turn_queue;
 
-pub use admin::admin_router;
 pub use commands::{CommandError, CommandRegistry};
 pub use error::{ErrorCode, GateError, UNAUTHORIZED_BODY};
 pub use fire::ExtgateTimedFireSink;

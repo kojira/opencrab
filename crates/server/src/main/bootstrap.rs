@@ -9,16 +9,7 @@ pub(super) struct BootstrapContext {
     pub(super) cfg: AppConfig,
     pub(super) extgate: Arc<opencrab_extgate::ExtgateState>,
     pub(super) gate_socket: Option<std::path::PathBuf>,
-    /// Present only when `[gate_admin]` is configured. Gateways provision over the ordinary gate
-    /// socket (D-1098); the separate admin socket is kept only for existing deployments.
-    pub(super) gate_admin: Option<GateAdmin>,
     pub(super) state: AppState,
-}
-
-pub(super) struct GateAdmin {
-    pub(super) listener: tokio::net::UnixListener,
-    pub(super) cleanup: opencrab_extgate::admin_socket::SocketCleanup,
-    pub(super) router: axum::Router,
 }
 
 fn attachment_inbox_path(database_path: &Path) -> PathBuf {
@@ -70,20 +61,6 @@ fn configure_attachment_outbox(
     Ok(outbox)
 }
 
-#[cfg(test)]
-thread_local! {
-    static INJECTED_GATE_ADMIN_STARTUP_FAULT: std::cell::RefCell<Option<&'static str>> = const { std::cell::RefCell::new(None) };
-}
-
-fn inject_gate_admin_startup_fault(stage: &'static str) -> anyhow::Result<()> {
-    #[cfg(test)]
-    if INJECTED_GATE_ADMIN_STARTUP_FAULT.with(|fault| *fault.borrow() == Some(stage)) {
-        anyhow::bail!("injected gate-admin {stage} startup failure");
-    }
-    let _ = stage;
-    Ok(())
-}
-
 /// Loads and validates startup configuration, scrubs secrets, recovers the DB,
 /// recovers the database and constructs the initial application state.
 /// No task is spawned before this function returns.
@@ -101,19 +78,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     let cfg = config::load_config("config/default.toml")?;
 
     // DB初期化（本番はコネクションプール）
-    inject_gate_admin_startup_fault("migration")?;
     let db = opencrab_db::Db::open(&cfg.database.path)?;
-
-    // D-1098: `[gate_admin]` is optional. Without it core starts with only the gate socket, and
-    // gateways provision their instances there. When it is configured (existing deployments),
-    // its manifest/bootstrap and private socket are prepared before any listener starts.
-    let gate_admin_configured = !cfg.gate_admin.listen_socket.is_empty()
-        || !cfg.gate_admin.bootstrap_credential_file.is_empty();
-    let prepared_gate_admin = if gate_admin_configured {
-        Some(prepare_gate_admin(&cfg, &db)?)
-    } else {
-        None
-    };
 
     {
         let mut conn = db
@@ -128,18 +93,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         })?;
     }
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
-    let extgate = Arc::new(opencrab_extgate::ExtgateState::new_protected(db.clone()));
-    let gate_admin = match prepared_gate_admin {
-        Some((listener, cleanup)) => {
-            inject_gate_admin_startup_fault("router")?;
-            Some(GateAdmin {
-                listener,
-                cleanup,
-                router: opencrab_extgate::admin_router(extgate.clone()),
-            })
-        }
-        None => None,
-    };
+    let extgate = Arc::new(opencrab_extgate::ExtgateState::new(db.clone()));
     configure_attachment_inbox(&extgate, Path::new(&cfg.database.path))?;
     configure_attachment_outbox(
         &extgate,
@@ -226,84 +180,12 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         cfg,
         extgate,
         gate_socket,
-        gate_admin,
         state,
     })
 }
 
-fn prepare_gate_admin(
-    cfg: &AppConfig,
-    db: &opencrab_db::Db,
-) -> anyhow::Result<(
-    tokio::net::UnixListener,
-    opencrab_extgate::admin_socket::SocketCleanup,
-)> {
-    if cfg.gate_admin.listen_socket.is_empty()
-        || cfg.gate_admin.bootstrap_credential_file.is_empty()
-    {
-        anyhow::bail!("[gate_admin] needs both listen_socket and bootstrap_credential_file");
-    }
-    if cfg.gate_admin.listen_socket == cfg.gate.listen_socket {
-        anyhow::bail!("[gate_admin].listen_socket must be distinct from [gate].listen_socket");
-    }
-    let service_euid = unsafe { libc::geteuid() };
-    inject_gate_admin_startup_fault("bootstrap")?;
-    let manifest = opencrab_extgate::gate_admin_security::read_manifest(
-        Path::new(&cfg.gate_admin.bootstrap_credential_file),
-        service_euid,
-    )?;
-    {
-        let mut conn = db
-            .lock()
-            .map_err(|_| anyhow::anyhow!("db lock for gate-admin bootstrap"))?;
-        opencrab_extgate::gate_admin_security::bootstrap(
-            &mut conn,
-            &manifest,
-            opencrab_extgate::now_nanos(),
-        )?;
-    }
-    drop(manifest);
-    inject_gate_admin_startup_fault("socket")?;
-    let prepared_admin = opencrab_extgate::admin_socket::prepare_admin_socket(
-        Path::new(&cfg.gate_admin.listen_socket),
-        service_euid,
-    )?;
-    Ok(prepared_admin.into_parts())
-}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn gate_admin_startup_fault_injection_covers_every_pre_listener_stage() {
-        use std::cell::Cell;
-
-        let source = include_str!("bootstrap.rs");
-        for failed_stage in ["migration", "bootstrap", "socket", "router"] {
-            assert!(
-                source.contains(&format!(
-                    "inject_gate_admin_startup_fault(\"{failed_stage}\")"
-                )),
-                "missing pre-listener fault injection for {failed_stage}"
-            );
-            super::INJECTED_GATE_ADMIN_STARTUP_FAULT
-                .with(|fault| *fault.borrow_mut() = Some(failed_stage));
-            let runtime_accepts = Cell::new(0);
-            let public_accepts = Cell::new(0);
-            let startup = (|| -> anyhow::Result<()> {
-                for stage in ["migration", "bootstrap", "socket", "router"] {
-                    super::inject_gate_admin_startup_fault(stage)?;
-                }
-                runtime_accepts.set(runtime_accepts.get() + 1);
-                public_accepts.set(public_accepts.get() + 1);
-                Ok(())
-            })();
-            super::INJECTED_GATE_ADMIN_STARTUP_FAULT.with(|fault| *fault.borrow_mut() = None);
-            assert!(startup.is_err(), "{failed_stage} fault must stop startup");
-            assert_eq!(runtime_accepts.get(), 0);
-            assert_eq!(public_accepts.get(), 0);
-        }
-    }
-
     #[test]
     fn attachment_inbox_is_derived_from_the_core_database_directory() {
         let database = std::path::Path::new("runtime/data/opencrab.db");
@@ -319,7 +201,7 @@ mod tests {
         let database = temp.path().join("data/opencrab.db");
         std::fs::create_dir_all(database.parent().unwrap()).unwrap();
         let db = opencrab_db::Db::open(database.to_str().unwrap()).unwrap();
-        let extgate = opencrab_extgate::ExtgateState::new_protected(db);
+        let extgate = opencrab_extgate::ExtgateState::new(db);
 
         let inbox = super::configure_attachment_inbox(&extgate, &database).unwrap();
 
@@ -352,7 +234,7 @@ mod tests {
         std::fs::create_dir_all(&stale_dir).unwrap();
         std::fs::write(stale_dir.join("stale.bin"), b"left over").unwrap();
         let db = opencrab_db::Db::open(database.to_str().unwrap()).unwrap();
-        let extgate = opencrab_extgate::ExtgateState::new_protected(db);
+        let extgate = opencrab_extgate::ExtgateState::new(db);
 
         let outbox =
             super::configure_attachment_outbox(&extgate, &database, "ws/{agent_id}").unwrap();

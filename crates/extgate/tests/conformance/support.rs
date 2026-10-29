@@ -361,7 +361,7 @@ impl Harness {
         subject_id: i64,
     ) -> Self {
         let sock = dir.path().join("gate.sock");
-        let state = Arc::new(ExtgateState::new_protected(db.clone()));
+        let state = Arc::new(ExtgateState::new(db.clone()));
         let runtime = TestRuntime::new(db);
         let listen_state = Arc::clone(&state);
         let rt = runtime.clone();

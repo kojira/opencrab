@@ -115,7 +115,10 @@ pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
         for migration in MIGRATIONS {
             (migration.up)(&tx)?;
         }
-        for table in migrations::LEGACY_GATEWAY_SETTINGS_TABLES {
+        for table in migrations::LEGACY_GATEWAY_SETTINGS_TABLES
+            .into_iter()
+            .chain(migrations::GATE_ADMIN_TABLES)
+        {
             tx.execute_batch(&format!("DROP TABLE IF EXISTS {table};"))?;
         }
         tx.execute_batch(&format!(
