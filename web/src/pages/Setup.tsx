@@ -13,22 +13,12 @@ import {
   updateLlmProvider,
   type LlmProviderInfo,
 } from '../api/providers';
-import { getAgents, createAgent, updateDiscordConfig } from '../api/agents';
-import { upsertChannelConfig } from '../api/channel_configs';
-import type { AgentSummary } from '../api/types';
+import { createAgent } from '../api/agents';
 
 export default function Setup() {
   const { t } = useTranslation();
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [current, setCurrent] = useState(0);
-  // ウィザードで作成/選択したエージェント（Discord・チャンネルステップで使う）
-  const [agentId, setAgentId] = useState('');
-  // エージェント一覧は親で 1 度だけ取得し、両ステップの選択に共有する。
-  const [agents, setAgents] = useState<AgentSummary[]>([]);
-
-  const reloadAgents = useCallback(() => {
-    getAgents().then(setAgents).catch(() => {});
-  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -41,7 +31,6 @@ export default function Setup() {
   }, []);
 
   useEffect(() => {
-    reloadAgents();
     // 初回は未完の最初のステップにフォーカスする。
     refresh().then((s) => {
       if (s?.next_step) {
@@ -49,7 +38,7 @@ export default function Setup() {
         if (idx >= 0) setCurrent(idx);
       }
     });
-  }, [refresh, reloadAgents]);
+  }, [refresh]);
 
   const stepDone = (k: StepKey): boolean => status?.steps[k]?.done ?? false;
 
@@ -110,27 +99,9 @@ export default function Setup() {
         )}
         {current === 1 && (
           <AgentStep
-            onCreated={(id) => {
-              setAgentId(id);
-              reloadAgents();
+            onCreated={() => {
               refresh();
             }}
-          />
-        )}
-        {current === 2 && (
-          <DiscordStep
-            agentId={agentId}
-            setAgentId={setAgentId}
-            agents={agents}
-            onDone={refresh}
-          />
-        )}
-        {current === 3 && (
-          <ChannelStep
-            agentId={agentId}
-            setAgentId={setAgentId}
-            agents={agents}
-            onDone={refresh}
           />
         )}
       </div>
@@ -399,210 +370,6 @@ function AgentStep({ onCreated }: { onCreated: (id: string) => void }) {
           </button>
         </>
       )}
-    </div>
-  );
-}
-
-// エージェント選択ドロップダウン（Discord/チャンネルステップ共通）。
-// 一覧は親（Setup）が保持し、prop で受け取る（ステップごとの重複フェッチを避ける）。
-function AgentPicker({
-  agentId,
-  setAgentId,
-  agents,
-}: {
-  agentId: string;
-  setAgentId: (id: string) => void;
-  agents: AgentSummary[];
-}) {
-  const { t } = useTranslation();
-  return (
-    <div>
-      <FieldLabel>{t('setup.selectAgent')}</FieldLabel>
-      <select
-        className="input-outlined"
-        value={agentId}
-        onChange={(e) => setAgentId(e.target.value)}
-      >
-        <option value="">{t('common.selectAgentPlaceholder')}</option>
-        {agents.map((a) => (
-          <option key={a.id} value={a.id}>
-            {a.name} ({a.id.slice(0, 8)})
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
-// ---- Step 3: Discord ----
-function DiscordStep({
-  agentId,
-  setAgentId,
-  agents,
-  onDone,
-}: {
-  agentId: string;
-  setAgentId: (id: string) => void;
-  agents: AgentSummary[];
-  onDone: () => void;
-}) {
-  const { t } = useTranslation();
-  const [token, setToken] = useState('');
-  const [ownerId, setOwnerId] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
-
-  const save = async () => {
-    if (!agentId) {
-      setError(t('setup.discord.needAgent'));
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    setMsg(null);
-    try {
-      const res = await updateDiscordConfig(agentId, {
-        bot_token: token,
-        owner_discord_id: ownerId || undefined,
-      });
-      if (res.ok) {
-        setMsg(res.message || t('setup.discord.saved'));
-        onDone();
-      } else {
-        setError(res.error || 'error');
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="space-y-5">
-      <div>
-        <h2 className="text-lg font-semibold text-on-surface">{t('setup.discord.title')}</h2>
-        <p className="text-body-sm text-on-surface-variant mt-1">{t('setup.discord.desc')}</p>
-      </div>
-      <AgentPicker agentId={agentId} setAgentId={setAgentId} agents={agents} />
-      <div>
-        <FieldLabel>{t('setup.discord.token')}</FieldLabel>
-        <input
-          type="password"
-          className="input-outlined"
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-        />
-      </div>
-      <div>
-        <FieldLabel>{t('setup.discord.owner')}</FieldLabel>
-        <input
-          type="text"
-          className="input-outlined"
-          value={ownerId}
-          placeholder="123456789012345678"
-          onChange={(e) => setOwnerId(e.target.value)}
-        />
-      </div>
-      {error && <ErrorBox message={error} />}
-      {msg && !error && <OkBox message={msg} />}
-      <button className="btn-filled" disabled={saving} onClick={save}>
-        {saving ? t('common.saving') : t('setup.discord.save')}
-      </button>
-    </div>
-  );
-}
-
-// ---- Step 4: Channel whitelist ----
-function ChannelStep({
-  agentId,
-  setAgentId,
-  agents,
-  onDone,
-}: {
-  agentId: string;
-  setAgentId: (id: string) => void;
-  agents: AgentSummary[];
-  onDone: () => void;
-}) {
-  const { t } = useTranslation();
-  const [guildId, setGuildId] = useState('');
-  const [channelId, setChannelId] = useState('');
-  const [channelName, setChannelName] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
-
-  const save = async () => {
-    if (!agentId) {
-      setError(t('setup.channel.needAgent'));
-      return;
-    }
-    if (!channelId.trim()) {
-      setError(t('setup.channel.needChannel'));
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    setMsg(null);
-    try {
-      await upsertChannelConfig(agentId, {
-        channel_id: channelId.trim(),
-        guild_id: guildId.trim(),
-        channel_name: channelName.trim(),
-        readable: true,
-        writable: true,
-        whitelisted: true,
-      });
-      setMsg(t('setup.channel.saved'));
-      onDone();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="space-y-5">
-      <div>
-        <h2 className="text-lg font-semibold text-on-surface">{t('setup.channel.title')}</h2>
-        <p className="text-body-sm text-on-surface-variant mt-1">{t('setup.channel.desc')}</p>
-      </div>
-      <AgentPicker agentId={agentId} setAgentId={setAgentId} agents={agents} />
-      <div>
-        <FieldLabel>{t('setup.channel.guildId')}</FieldLabel>
-        <input
-          type="text"
-          className="input-outlined"
-          value={guildId}
-          onChange={(e) => setGuildId(e.target.value)}
-        />
-      </div>
-      <div>
-        <FieldLabel>{t('setup.channel.channelId')}</FieldLabel>
-        <input
-          type="text"
-          className="input-outlined"
-          value={channelId}
-          onChange={(e) => setChannelId(e.target.value)}
-        />
-      </div>
-      <div>
-        <FieldLabel>{t('setup.channel.channelName')}</FieldLabel>
-        <input
-          type="text"
-          className="input-outlined"
-          value={channelName}
-          onChange={(e) => setChannelName(e.target.value)}
-        />
-      </div>
-      {error && <ErrorBox message={error} />}
-      {msg && !error && <OkBox message={msg} />}
-      <button className="btn-filled" disabled={saving} onClick={save}>
-        {saving ? t('common.saving') : t('setup.channel.save')}
-      </button>
     </div>
   );
 }

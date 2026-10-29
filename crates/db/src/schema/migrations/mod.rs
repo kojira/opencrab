@@ -18,8 +18,11 @@ mod v59;
 mod v60;
 mod v61;
 mod v62;
+mod v63;
 
 use super::Migration;
+
+pub(super) use v63::LEGACY_GATEWAY_SETTINGS_TABLES;
 
 pub(super) static MIGRATION_GROUPS: &[&[Migration]] = &[
     v02_v20::MIGRATIONS,
@@ -42,4 +45,5 @@ pub(super) static MIGRATION_GROUPS: &[&[Migration]] = &[
     v60::MIGRATIONS,
     v61::MIGRATIONS,
     v62::MIGRATIONS,
+    v63::MIGRATIONS,
 ];

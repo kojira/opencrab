@@ -189,11 +189,6 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "set_my_schedule",
     "update_my_schedule",
     "delete_my_schedule",
-    // VC 参加/退出。可視性 == 強制の対称化（#45）: 非 trusted の Agent には
-    // 一覧にも出さない。ハンドラ側はさらに厳しく owner/trusted_user のみ許可
-    // （co_agent は一覧に見えても実行は拒否される）。
-    "join_voice_channel",
-    "leave_voice_channel",
     // caller=Agent（外部受信ターン）に素通しだった 9 個
     // （#356）。棚卸しで OWNER_ONLY にも TRUSTED_ONLY にも入っておらず外部ユーザー由来の
     // 会話ターンから使えていたもの。オーナー要望（2026-08-03「記憶検索はいいと思う。他の

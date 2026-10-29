@@ -92,7 +92,7 @@ fn assert_v43_schema(conn: &Connection) {
 #[test]
 fn v43_fresh_db_has_transplant_schema() {
     let conn = super::init_historical_schema_fixture().expect("init");
-    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    assert_eq!(schema_version(&conn).unwrap(), HISTORICAL_LATEST_VERSION);
     let pre = {
         let tmp = super::init_historical_schema_fixture().expect("pre");
         setup_pre_v43(&tmp);
@@ -149,8 +149,8 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
         )
         .unwrap();
 
-    run_migrations(&conn, MIGRATIONS).expect("v43+v45 migration");
-    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    run_migrations(&conn, historical_migrations()).expect("v43+v45 migration");
+    assert_eq!(schema_version(&conn).unwrap(), HISTORICAL_LATEST_VERSION);
     assert_user_tables_closed(&conn, &expected_v45_user_tables(&before_tables));
     assert_v43_schema(&conn);
 
@@ -182,8 +182,8 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
         .unwrap();
     assert_eq!(done, 1);
 
-    initialize(&conn).expect("second initialize is a no-op");
-    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    initialize_historical(&conn).expect("second initialize is a no-op");
+    assert_eq!(schema_version(&conn).unwrap(), HISTORICAL_LATEST_VERSION);
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM sessions WHERE id='sess-a'", [], |r| r.get::<_, i64>(0))
             .unwrap(),
@@ -269,9 +269,9 @@ fn v43_schema_parity_fresh_vs_migrated() {
     let fresh = super::init_historical_schema_fixture().expect("fresh");
     let migrated = super::init_historical_schema_fixture().expect("migrated");
     setup_pre_v43(&migrated);
-    initialize(&migrated).expect("re-migrate");
+    initialize_historical(&migrated).expect("re-migrate");
 
     assert_eq!(dump(&fresh), dump(&migrated));
-    assert_eq!(schema_version(&fresh).unwrap(), latest_version());
-    assert_eq!(schema_version(&migrated).unwrap(), latest_version());
+    assert_eq!(schema_version(&fresh).unwrap(), HISTORICAL_LATEST_VERSION);
+    assert_eq!(schema_version(&migrated).unwrap(), HISTORICAL_LATEST_VERSION);
 }

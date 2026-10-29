@@ -198,8 +198,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         // 純 TOML を保持する（DB オーバーライド適用前の土台）。API の GET は
         // DB 行が無いときこれを "toml" として返すため、リセット後に古い実効値を
         // TOML と誤表示しないよう effective ではなく cfg.voice を入れる（レビュー指摘）。
-        voice_config: Arc::new(cfg.voice.clone()),
-        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: cfg.agent.workspace_path.clone(),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,

@@ -88,9 +88,6 @@
       "POST /api/agents/{id}/allowed-commands": {
         "command": "printf"
       },
-      "POST /api/agents/{id}/co-agents": {
-        "co_agent_id": "baseline-new-peer"
-      },
       "PUT /api/agents/{id}/mcp": {
         "name": "baseline",
         "command": "false",
@@ -173,8 +170,7 @@
       },
       "PATCH /api/system/log-level": {
         "log_level": "debug"
-      },
-      "PUT /api/voice/config": {}
+      }
     },
     "normal_uncollected_l3": {
       "POST /api/agents/{id}/mcp/{name}/test": "operator supplied subprocess",
@@ -269,14 +265,6 @@
         "method": "GET",
         "path": "/api/agents/{id}/allowed-commands"
       },
-      "POST /api/agents/{id}/co-agents": {
-        "method": "GET",
-        "path": "/api/agents/{id}/co-agents"
-      },
-      "DELETE /api/agents/{id}/co-agents/{co_agent_id}": {
-        "method": "GET",
-        "path": "/api/agents/{id}/co-agents"
-      },
       "PUT /api/agents/{id}/mcp": {
         "method": "GET",
         "path": "/api/agents/{id}/mcp"
@@ -367,14 +355,6 @@
       "POST /api/agents/{id}/messages": {
         "method": "GET",
         "path": "/api/sessions"
-      },
-      "DELETE /api/voice/config": {
-        "method": "GET",
-        "path": "/api/voice/config"
-      },
-      "PUT /api/voice/config": {
-        "method": "GET",
-        "path": "/api/voice/config"
       }
     },
     "successful_non_mutations": {

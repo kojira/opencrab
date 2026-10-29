@@ -76,11 +76,6 @@ pub struct AppState {
     /// 起動時に読んだ TOML の [llm] 設定（DB オーバーライド適用前の土台）。
     /// プロバイダー設定変更時のルーター再構築に使う。
     pub llm_config: Arc<config::LlmConfig>,
-    /// 起動時に読んだ TOML の [voice] 設定（DB オーバーライド適用前の土台）。
-    pub voice_config: Arc<opencrab_voice::VoiceConfig>,
-    /// 稼働中の VC 対話ランタイム（discord 起動後にセットされる）。
-    /// プロバイダー設定変更を再起動なしで反映するために使う。
-    pub voice_runtime: Arc<std::sync::Mutex<Option<Arc<dyn opencrab_voice::VoiceRuntime>>>>,
     pub workspace_base: String,
     pub default_model: String,
     pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
@@ -183,8 +178,6 @@ pub(crate) fn test_app_state() -> AppState {
         llm_router: SharedLlmRouter::new(LlmRouter::new()),
         llm_config: Arc::new(toml::from_str("").unwrap()),
         subtask_auto_dispatch: true,
-        voice_config: Arc::new(Default::default()),
-        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
         default_model: "mock:test".to_string(),
         tools_config: Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
@@ -229,7 +222,6 @@ macro_rules! production_routes {
         $apply!($target, "/api/llm/providers/{name}", put => api::providers::update_provider);
         $apply!($target, "/api/llm/providers/{name}/override", delete => api::providers::delete_provider_override);
         $apply!($target, "/api/llm/providers/{name}/test", post => api::providers::test_provider_endpoint);
-        $apply!($target, "/api/voice/config", get => api::providers::get_voice_config, put => api::providers::update_voice_config, delete => api::providers::delete_voice_config);
         $apply!($target, "/api/agents/{id}/soul/presets", get => api::agents::list_soul_presets, post => api::agents::create_soul_preset);
         $apply!($target, "/api/agents/{id}/soul/presets/{preset_id}", delete => api::agents::delete_soul_preset);
         $apply!($target, "/api/agents/{id}/soul/presets/{preset_id}/apply", post => api::agents::apply_soul_preset);
@@ -262,8 +254,6 @@ macro_rules! production_routes {
         $apply!($target, "/api/agents/{id}/mcp/{name}", delete => api::mcp::delete_mcp_server);
         $apply!($target, "/api/agents/{id}/mcp/{name}/enabled", post => api::mcp::set_mcp_enabled);
         $apply!($target, "/api/agents/{id}/mcp/{name}/test", post => api::mcp::test_mcp_server);
-        $apply!($target, "/api/agents/{id}/co-agents", get => api::co_agents::list_co_agents, post => api::co_agents::add_co_agent);
-        $apply!($target, "/api/agents/{id}/co-agents/{co_agent_id}", delete => api::co_agents::delete_co_agent);
         $apply!($target, "/api/agents/{id}/schedules", get => api::schedules::list_schedules, post => api::schedules::create_schedule);
         $apply!($target, "/api/schedules/{sid}", patch => api::schedules::update_schedule, delete => api::schedules::delete_schedule);
         $apply!($target, "/api/agents/{id}/allowed-commands", get => api::allowed_commands::list_allowed_commands, post => api::allowed_commands::add_allowed_command);

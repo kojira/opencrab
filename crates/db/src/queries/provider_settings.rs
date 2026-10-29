@@ -10,7 +10,7 @@ use super::*;
 // LLM プロバイダー設定のオーバーライド（ダッシュボード編集用）
 //
 // TOML（[llm.providers.*]）を土台に、ここに行があるフィールドだけ上書きする。
-// api_key の平文保存は agent_discord_config.bot_token と同じ扱い
+// api_key は平文で保存する
 // （SQLite ファイルの読み取り権限で保護。API 応答では必ずマスクする）。
 // ============================================
 
@@ -120,39 +120,4 @@ fn map_override_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LlmProviderOver
         working_dir: row.get(8)?,
         timeout_secs: row.get(9)?,
     })
-}
-
-// ============================================
-// 音声（VC）設定のオーバーライド。VoiceConfig の JSON を 1 行で保持する。
-// フィールド粒度のマージはサーバ側（TOML とのマージ関数）で行う。
-// ============================================
-
-pub fn set_voice_config_override(conn: &Connection, config_json: &str) -> Result<()> {
-    conn.execute(
-        "INSERT INTO voice_config_override (id, config_json, updated_at)
-         VALUES (1, ?1, ?2)
-         ON CONFLICT(id) DO UPDATE SET
-            config_json = excluded.config_json,
-            updated_at = excluded.updated_at",
-        params![config_json, Utc::now().to_rfc3339()],
-    )?;
-    Ok(())
-}
-
-pub fn get_voice_config_override(conn: &Connection) -> Result<Option<String>> {
-    let result = conn.query_row(
-        "SELECT config_json FROM voice_config_override WHERE id = 1",
-        [],
-        |row| row.get::<_, String>(0),
-    );
-    match result {
-        Ok(json) => Ok(Some(json)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-pub fn delete_voice_config_override(conn: &Connection) -> Result<()> {
-    conn.execute("DELETE FROM voice_config_override WHERE id = 1", [])?;
-    Ok(())
 }

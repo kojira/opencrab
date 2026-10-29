@@ -98,7 +98,6 @@ pub async fn apply_delivery_effect(
 /// 明示終了前の途中iterationの発話を、最終応答と同じ経路
 /// （[`send_text`] = say配送＋memory_sessions speech保存）で1件配送・保存する。
 /// engineがループ中にawaitし、`Err`はターンを失敗させる。
-/// 呼び出し側（extgate inbound）が `delivery_mode` で say 抑止（ToolDriven）を判断してから呼ぶ。
 #[allow(clippy::too_many_arguments)]
 pub async fn deliver_intermediate_say(
     state: &Arc<ExtgateState>,

@@ -28,7 +28,6 @@ pub mod workspace;
 
 pub mod run_request;
 pub mod session_inbound;
-pub mod session_watch_policy;
 
 pub use a2ui::{send_ui, send_ui_definition};
 pub use agent_runtime::AgentRuntime;
@@ -56,14 +55,9 @@ pub use session_inbound::{
     prepare_session_inbound, prepare_session_inbound_write, run_provisional_turn, run_session_turn,
     start_session_turn, AdmittedInbound, DeliveryEffect, InboundAgentDrop, InboundDrop,
     InboundLookups, InboundMessageDrop, InboundWork, NormalizedInbound, NormalizedInboundEvent,
-    PrepareSessionInboundError, PrivilegeFire, WatchAccept,
+    PrepareSessionInboundError,
 };
 pub use session_runtime::{SessionLocks, SessionRuntime};
-pub use session_watch_policy::{
-    caller_policy_key, parse_session_watch_policy, watch_author_standing, ClassPolicy,
-    SessionPolicyError, SessionWatchPolicy, WatchAllowSets, WatchAuthorStanding,
-    AGREED_IMMEDIATE_KINDS, POLICY_CLASS_KEYS, WATCH_KIND_LABELS,
-};
 pub use skill_management::OWNER_SKILLS_INDEX_NAME;
 pub use subtask::{
     cancel_subtask, default_non_dispatch_tools, dispatch_settled, steer_subtask, CancelOutcome,

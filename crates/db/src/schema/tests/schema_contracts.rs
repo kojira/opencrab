@@ -135,7 +135,7 @@ fn v62_adds_nullable_session_reasoning_effort_slots_preserving_rows() {
         .unwrap()
     };
     let fresh = crate::init_memory().expect("fresh");
-    assert_eq!(latest_version(), 62);
+    assert!(latest_version() >= 62);
     assert_eq!(schema_version(&fresh).unwrap(), latest_version());
     assert_eq!(
         columns(&fresh),

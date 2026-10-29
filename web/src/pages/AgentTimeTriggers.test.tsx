@@ -13,7 +13,7 @@ vi.mock('../api/sessions', () => ({
 
 import { listSchedules, createSchedule, updateSchedule, deleteSchedule } from '../api/schedules';
 import { getSessions } from '../api/sessions';
-import { TimeTriggersSection } from './AgentChannels';
+import { TimeTriggersSection } from './AgentTimeTriggers';
 import type { ScheduleDto, SessionDto } from '../api/types';
 
 const mockedList = vi.mocked(listSchedules);

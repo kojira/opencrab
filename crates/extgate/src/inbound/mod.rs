@@ -131,8 +131,6 @@ pub fn process_said<R: AgentRuntime>(
     let work = [InboundWork {
         event,
         has_content: !said.text.is_empty() || !said.attachments.is_empty(),
-        kind_label: "said",
-        author_key: said.author_id.as_str(),
     }];
     let caller = asserted_caller(&said.caller);
     let resolve = |_sender: &str, _agents: &[String], _owner: &str| {
@@ -175,13 +173,11 @@ pub fn process_said<R: AgentRuntime>(
         channel_whitelisted: &whitelist,
     };
 
-    let accepted = accept_inbound::<()>(
+    let accepted = accept_inbound(
         &work,
         "",
         &agent_ids,
         &lookups,
-        None,
-        |_| (),
         |_, admitted| {
             if admitted.admitted_agent_ids.contains(&row.agent_id) {
                 let recorded_said = record_inbound(&tx, &session_id, &row, said, &said.text)

@@ -231,56 +231,6 @@ async fn test_update_provider_null_clears_field_keeps_others() {
     );
 }
 
-#[tokio::test]
-async fn test_voice_config_invalid_provider_not_persisted() {
-    let app = create_test_app();
-    // enabled + 未知の STT プロバイダ → 400、かつ DB に保存されないこと
-    let bad = serde_json::json!({
-        "enabled": true,
-        "stt": { "provider": "nonexistent", "model": "x", "api_key_env": "X" },
-        "tts": { "provider": "voicevox", "default_voice": "3" }
-    });
-    let (status, _) = send_request(app.clone(), "PUT", "/api/voice/config", Some(bad)).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-
-    // GET は依然 TOML 由来（壊れた値が db として残っていない）
-    let (_, json) = send_request(app, "GET", "/api/voice/config", None).await;
-    assert_eq!(json["source"], "toml");
-    assert_eq!(json["config"]["enabled"], false);
-}
-
-#[tokio::test]
-async fn test_voice_config_roundtrip() {
-    let app = create_test_app();
-    // 初期状態: TOML 由来（テストでは Default = disabled）
-    let (status, json) = send_request(app.clone(), "GET", "/api/voice/config", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["source"], "toml");
-    assert_eq!(json["config"]["enabled"], false);
-    assert_eq!(json["runtime_active"], false);
-
-    // 保存（ランタイム停止中なので restart_required）
-    let mut config = json["config"].clone();
-    config["enabled"] = serde_json::json!(true);
-    config["tts"]["default_voice"] = serde_json::json!("1");
-    let (status, json) = send_request(app.clone(), "PUT", "/api/voice/config", Some(config)).await;
-    assert_eq!(status, StatusCode::OK, "{json}");
-    assert_eq!(json["saved"], true);
-    assert_eq!(json["applied_live"], false);
-    assert_eq!(json["restart_required"], true);
-
-    // 読み直すと DB 由来になっている
-    let (_, json) = send_request(app.clone(), "GET", "/api/voice/config", None).await;
-    assert_eq!(json["source"], "db");
-    assert_eq!(json["config"]["tts"]["default_voice"], "1");
-
-    // リセットで TOML に戻る
-    let (status, _) = send_request(app.clone(), "DELETE", "/api/voice/config", None).await;
-    assert_eq!(status, StatusCode::OK);
-    let (_, json) = send_request(app, "GET", "/api/voice/config", None).await;
-    assert_eq!(json["source"], "toml");
-}
-
 // ==================== Onboarding / Setup ====================
 
 #[tokio::test]

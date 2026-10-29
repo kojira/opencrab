@@ -11,7 +11,6 @@ members = [
     "crates/mcp",
     "crates/server",
     "crates/cli",
-    "crates/voice",
     "crates/extgate",
 ]
 
@@ -84,7 +83,6 @@ songbird = { version = "0.4", default-features = false, features = ["serenity", 
 # Internal crates
 opencrab-core = { path = "crates/core" }
 opencrab-llm = { path = "crates/llm" }
-opencrab-voice = { path = "crates/voice" }
 opencrab-llm-types = { path = "crates/llm-types" }
 opencrab-gateway = { path = "crates/gateway" }
 opencrab-actions = { path = "crates/actions" }

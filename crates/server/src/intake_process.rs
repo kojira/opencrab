@@ -569,8 +569,6 @@ mod tests {
             llm_router: opencrab_server::SharedLlmRouter::new(router),
             llm_config: std::sync::Arc::new(toml::from_str("").unwrap()),
             subtask_auto_dispatch: true,
-            voice_config: std::sync::Arc::new(Default::default()),
-            voice_runtime: std::sync::Arc::new(std::sync::Mutex::new(None)),
             workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
             #[cfg(any())]
             nostr_master_key: None,

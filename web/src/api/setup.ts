@@ -2,10 +2,10 @@ import { api } from './client';
 
 // ============ オンボーディング（初回セットアップ）============
 
-export type StepKey = 'llm_provider' | 'agent' | 'discord' | 'channel';
+export type StepKey = 'llm_provider' | 'agent';
 
 /** ウィザード / チェックリスト共通のステップ順。 */
-export const STEP_ORDER: StepKey[] = ['llm_provider', 'agent', 'discord', 'channel'];
+export const STEP_ORDER: StepKey[] = ['llm_provider', 'agent'];
 
 export interface SetupStep {
   done: boolean;
@@ -20,8 +20,6 @@ export interface SetupStatus {
   steps: {
     llm_provider: SetupStep;
     agent: SetupStep;
-    discord: SetupStep;
-    channel: SetupStep;
   };
   complete: boolean;
   /** 未完の最初のステップ。全完了なら null。 */

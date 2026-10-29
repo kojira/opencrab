@@ -3,7 +3,7 @@
   "purpose": "Issue #1006 S0 line-specific reviewed burn-down; entries are debts or explicit gateway-store provenance, never wildcard exceptions",
   "review": {
     "status": "line-by-line-reviewed",
-    "finding_count": 105,
+    "finding_count": 84,
     "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance"
   },
   "entries": [
@@ -49,166 +49,6 @@
     },
     {
       "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/lib.rs",
-      "line": 31,
-      "snippet": "pub mod session_watch_policy;",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/lib.rs",
-      "line": 62,
-      "snippet": "pub use session_watch_policy::{",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/lib.rs",
-      "line": 63,
-      "snippet": "caller_policy_key, parse_session_watch_policy, watch_author_standing, ClassPolicy,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/lib.rs",
-      "line": 64,
-      "snippet": "SessionPolicyError, SessionWatchPolicy, WatchAllowSets, WatchAuthorStanding,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/session_inbound/admit.rs",
-      "line": 3,
-      "snippet": "use crate::session_watch_policy::{",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 24,
-      "snippet": "pub const POLICY_CLASS_KEYS: &[&str] = &[\"Owner\", \"CoAgent\", \"TrustedUser\", \"Agent\"];",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 69,
-      "snippet": "pub struct SessionWatchPolicy {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 78,
-      "snippet": "CallerIdentity::TrustedUser => \"TrustedUser\",",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 91,
-      "snippet": "pub trusted_users: &'a HashSet<String>,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 99,
-      "snippet": "|| self.trusted_users.contains(author_key)",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 119,
-      "snippet": "pub fn parse_session_watch_policy(",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 121,
-      "snippet": ") -> Result<Option<SessionWatchPolicy>, SessionPolicyError> {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 142,
-      "snippet": "Ok(Some(SessionWatchPolicy { classes }))",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 198,
-      "snippet": "match parse_session_watch_policy(policy_json)? {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 402,
-      "snippet": "parse_session_watch_policy(bad_kind),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 466,
-      "snippet": "trusted_users: &trusted,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
       "path": "crates/core/src/caller.rs",
       "line": 20,
       "snippet": "TrustedUser,",
@@ -246,56 +86,6 @@
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
       "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/schema/mod.rs",
-      "line": 119,
-      "snippet": "\"DROP TABLE IF EXISTS channel_config;",
-      "classification": "transitional-empty-db-bootstrap",
-      "violation": "V11",
-      "owner_stage": "S10",
-      "expires_when": "retain only for historical replay within the fresh empty-database transaction; no live legacy table"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/schema/mod.rs",
-      "line": 120,
-      "snippet": "DROP TABLE IF EXISTS session_watches;",
-      "classification": "transitional-empty-db-bootstrap",
-      "violation": "V11",
-      "owner_stage": "S10",
-      "expires_when": "retain only for historical replay within the fresh empty-database transaction; no live legacy table"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/schema/mod.rs",
-      "line": 121,
-      "snippet": "DROP TABLE IF EXISTS trusted_users;",
-      "classification": "transitional-empty-db-bootstrap",
-      "violation": "V11",
-      "owner_stage": "S10",
-      "expires_when": "retain only for historical replay within the fresh empty-database transaction; no live legacy table"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/schema/mod.rs",
-      "line": 122,
-      "snippet": "DROP TABLE IF EXISTS agent_discord_config;",
-      "classification": "transitional-empty-db-bootstrap",
-      "violation": "V11",
-      "owner_stage": "S10",
-      "expires_when": "retain only for historical replay within the fresh empty-database transaction; no live legacy table"
-    },
-    {
-      "rule": "shared-concrete-schema",
-      "path": "crates/db/src/schema/mod.rs",
-      "line": 123,
-      "snippet": "DROP TABLE IF EXISTS agent_nostr_config;\",",
-      "classification": "transitional-empty-db-bootstrap",
-      "violation": "V11",
-      "owner_stage": "S10",
-      "expires_when": "retain only for historical replay within the fresh empty-database transaction; no live legacy table"
     },
     {
       "rule": "shared-concrete-schema",
@@ -610,7 +400,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/actions/src/session_inbound/admit.rs",
-      "line": 128,
+      "line": 109,
       "snippet": "let is_dm = event.guild_id.is_empty();",
       "classification": "production-violation",
       "violation": "V11",
@@ -620,7 +410,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/actions/src/session_inbound/admit.rs",
-      "line": 140,
+      "line": 121,
       "snippet": "(lookups.channel_whitelisted)(event.channel_id, agent_id),",
       "classification": "production-violation",
       "violation": "V11",
@@ -860,7 +650,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 159,
+      "line": 157,
       "snippet": "let whitelist = |channel_id: &str, agent_id: &str| {",
       "classification": "production-violation",
       "violation": "V11",
@@ -870,7 +660,7 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/extgate/src/inbound/mod.rs",
-      "line": 169,
+      "line": 167,
       "snippet": "channel_whitelisted(&tx, agent_id, instance_id, channel_id)",
       "classification": "production-violation",
       "violation": "V11",
@@ -1063,7 +853,7 @@
       "violation": "V13",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -1072,7 +862,7 @@
       "violation": "V14",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -1153,7 +943,7 @@
       "violation": "V01",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -1162,7 +952,7 @@
       "violation": "V03",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -1171,7 +961,7 @@
       "violation": "V04",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -1180,7 +970,7 @@
       "violation": "V05",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -1189,7 +979,7 @@
       "violation": "V12",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; the concrete gateway and its QC live in the gateway repository (Issue #1074), and core rejects any concrete gateway package"
@@ -1198,7 +988,7 @@
       "violation": "V02",
       "classification": "moved-to-gateway-repository",
       "path": "scripts/gateway_boundary_audit.py",
-      "line": 836,
+      "line": 833,
       "needle": "concrete gateway packages belong in the gateway repository, not core",
       "owner_stage": "S11",
       "expires_when": "never; gateway-owned stores live in the gateway repository (Issue #1074)"

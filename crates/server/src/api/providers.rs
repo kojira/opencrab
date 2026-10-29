@@ -3,10 +3,6 @@
 //! LLM: TOML（[llm.providers.*]）を土台に DB オーバーライドをマージし、
 //! 保存のたびにルーターを再構築してホットスワップする（再起動不要）。
 //! API キーは応答で必ずマスクし、平文は返さない。
-//!
-//! Voice: DB オーバーライドは VoiceConfig の完全置換。voice ランタイムが
-//! 稼働中（discord 起動済み + enabled）なら STT/TTS を即時差し替える。
-//! enabled の切り替え自体は起動時配線のため再起動が必要。
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -692,98 +688,6 @@ pub(crate) async fn apply_provider_override_with_rollback(
         test_ok: Some(false),
         rolled_back: true,
     })
-}
-
-// ============================================
-// Voice (VC) 設定
-// ============================================
-
-/// GET /api/voice/config — 実効 voice 設定と状態
-pub async fn get_voice_config(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let override_json = {
-        let conn = state.db.lock().unwrap();
-        opencrab_db::queries::get_voice_config_override(&conn).unwrap_or(None)
-    };
-    let (config, source) = match &override_json {
-        Some(json_str) => match serde_json::from_str::<opencrab_voice::VoiceConfig>(json_str) {
-            Ok(c) => (c, "db"),
-            Err(_) => (state.voice_config.as_ref().clone(), "toml"),
-        },
-        None => (state.voice_config.as_ref().clone(), "toml"),
-    };
-    let runtime_active = state.voice_runtime.lock().unwrap().is_some();
-    Json(json!({
-        "config": config,
-        "source": source,
-        // ランタイム稼働中なら STT/TTS 変更は即時反映。enabled の切替は再起動が必要。
-        "runtime_active": runtime_active,
-    }))
-}
-
-/// PUT /api/voice/config — 保存（完全置換）+ 可能ならホットスワップ
-pub async fn update_voice_config(
-    State(state): State<AppState>,
-    Json(config): Json<opencrab_voice::VoiceConfig>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // 保存**前**にプロバイダを検証する（enabled のときのみ）。壊れた設定を
-    // DB に残したまま 400 を返すと、GET が db 由来として壊れた値を表示し、
-    // 次回起動で voice が黙って無効化される（レビュー指摘）。検証を通った
-    // Arc をそのまま apply に再利用する。
-    let built = if config.enabled {
-        match (
-            opencrab_voice::build_stt(&config.stt),
-            opencrab_voice::build_tts(&config.tts),
-        ) {
-            (Ok(stt), Ok(tts)) => Some((stt, tts)),
-            (stt, tts) => {
-                let mut errs = Vec::new();
-                if let Err(e) = stt {
-                    errs.push(format!("STT: {e}"));
-                }
-                if let Err(e) = tts {
-                    errs.push(format!("TTS: {e}"));
-                }
-                return Err((StatusCode::BAD_REQUEST, errs.join(" / ")));
-            }
-        }
-    } else {
-        None
-    };
-
-    // 検証通過後に永続化
-    let json_str = serde_json::to_string(&config).map_err(internal)?;
-    {
-        let conn = state.db.lock().unwrap();
-        opencrab_db::queries::set_voice_config_override(&conn, &json_str).map_err(internal)?;
-    }
-
-    // 稼働中ランタイムがあれば検証済みプロバイダを即時差し替え
-    let mut applied_live = false;
-    if let Some((stt, tts)) = built {
-        // guard は clone してすぐ手放す（apply は別の内部ロックを取るため
-        // ここで voice_runtime mutex を保持したまま await/apply しない）
-        let runtime = state.voice_runtime.lock().unwrap().clone();
-        if let Some(rt) = runtime {
-            rt.apply_settings(stt, tts, config.tts.clone(), config.stt.language.clone());
-            applied_live = true;
-        }
-    }
-
-    Ok(Json(json!({
-        "saved": true,
-        "applied_live": applied_live,
-        // ランタイム未稼働（voice 無効で起動 or discord 無効）の変更は再起動で反映
-        "restart_required": !applied_live,
-    })))
-}
-
-/// DELETE /api/voice/config — オーバーライド削除（TOML に戻す。反映は再起動）
-pub async fn delete_voice_config(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let conn = state.db.lock().unwrap();
-    opencrab_db::queries::delete_voice_config_override(&conn).map_err(internal)?;
-    Ok(Json(json!({"deleted": true, "restart_required": true})))
 }
 
 fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {

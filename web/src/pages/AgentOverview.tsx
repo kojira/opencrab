@@ -1,13 +1,10 @@
 import { useTranslation } from 'react-i18next';
 import { useAgentContext } from '../hooks/useAgentContext';
-import { DiscordBotSection } from './agent-overview/DiscordBotSection';
 import { LlmModelSection } from './agent-overview/LlmModelSection';
 import { McpSection } from './agent-overview/McpSection';
-import { NostrSection } from './agent-overview/NostrSection';
-import { NostrRelaySection } from './agent-overview/NostrRelaySection';
 import { ActionCard, DetailRow } from './agent-overview/presentation';
 
-export { LlmModelSection, NostrRelaySection };
+export { LlmModelSection };
 
 export default function AgentOverview() {
   const { t } = useTranslation();
@@ -76,15 +73,6 @@ export default function AgentOverview() {
       </div>
 
       <LlmModelSection agentId={agentId} />
-
-      {/* Discord Bot */}
-      <DiscordBotSection agentId={agentId} />
-
-      {/* Nostr sub-gateway */}
-      <NostrSection agentId={agentId} />
-
-      {/* Nostr 受信 → Discord 転記先 */}
-      <NostrRelaySection agentId={agentId} />
 
       {/* MCP servers */}
       <McpSection agentId={agentId} />

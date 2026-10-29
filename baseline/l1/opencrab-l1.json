@@ -262,7 +262,7 @@
     ]
   },
   "http": {
-    "route_count": 67,
+    "route_count": 64,
     "routes": [
       {
         "activation": "always",
@@ -315,23 +315,6 @@
           "GET"
         ],
         "path": "/api/agents/{id}/analytics/detail",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "GET",
-          "POST"
-        ],
-        "path": "/api/agents/{id}/co-agents",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "DELETE"
-        ],
-        "path": "/api/agents/{id}/co-agents/{co_agent_id}",
         "source": "opencrab_server::create_router"
       },
       {
@@ -799,16 +782,6 @@
           "PATCH"
         ],
         "path": "/api/system/log-level",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "DELETE",
-          "GET",
-          "PUT"
-        ],
-        "path": "/api/voice/config",
         "source": "opencrab_server::create_router"
       },
       {

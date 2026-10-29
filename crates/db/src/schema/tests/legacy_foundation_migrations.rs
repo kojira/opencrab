@@ -125,8 +125,8 @@ fn permission_spelling_migration_rewrites_rows_without_changing_who_is_a_co_agen
         .collect::<Result<_, _>>()
         .unwrap();
 
-    initialize(&conn).expect("upgrade v17 -> v18");
-    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    initialize_historical(&conn).expect("upgrade v17 -> v18");
+    assert_eq!(schema_version(&conn).unwrap(), HISTORICAL_LATEST_VERSION);
 
     // 行は増減しない。
     let n: i64 = conn
@@ -170,7 +170,7 @@ fn permission_spelling_migration_rewrites_rows_without_changing_who_is_a_co_agen
     assert_eq!(spellings, vec!["co-agent", "user", "owner", "coagent"]);
 
     // 再実行しても冪等（2 回目は 0 行更新）。
-    initialize(&conn).expect("idempotent");
+    initialize_historical(&conn).expect("idempotent");
     let after: Vec<String> = conn
         .prepare("SELECT permission FROM trusted_users ORDER BY id")
         .unwrap()

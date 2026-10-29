@@ -1,8 +1,4 @@
-use super::debounce::PrivilegeFire;
 use super::normalize::NormalizedInboundEvent;
-use crate::session_watch_policy::{
-    watch_author_standing, watch_hold_interval_secs, SessionPolicyError, WatchAllowSets,
-};
 use crate::CallerIdentity;
 
 /// メッセージ全体を落とす理由（DM 事前ゲート）。
@@ -32,19 +28,6 @@ pub struct InboundLookups<'a> {
 pub struct InboundWork<'a> {
     pub event: NormalizedInboundEvent<'a>,
     pub has_content: bool,
-    pub kind_label: &'a str,
-    pub author_key: &'a str,
-}
-
-/// watch 束の追加材料。無ければ対話系（discord / web）。
-pub struct WatchAccept<'a, T> {
-    pub policy_json: &'a str,
-    pub interval_secs: u64,
-    pub allow: WatchAllowSets<'a>,
-    pub owner: &'a std::collections::HashSet<String>,
-    pub followees: &'a std::collections::HashSet<String>,
-    /// `Some` = 対話系（core が権限デバウンスし時限発火）。`None` = 機械束ね flush（抱えない）。
-    pub privilege: Option<&'a PrivilegeFire<T>>,
 }
 
 /// 通した 1 件。ゲートはこれを見て配送（ログ）する。ターン対象は `on_run` だけ。
@@ -69,14 +52,12 @@ impl AdmittedInbound {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InboundDrop {
     Message(InboundMessageDrop),
-    Policy(SessionPolicyError),
 }
 
 impl std::fmt::Display for InboundDrop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Message(d) => write!(f, "{d:?}"),
-            Self::Policy(e) => write!(f, "{e}"),
         }
     }
 }
@@ -152,117 +133,56 @@ fn admit_one(
 
 /// 唯一の inbound 入り口。ゲートは正規化イベントの束を 1 回投げる。
 ///
-/// - 対話系（`watch` 無し）: trust 分割（Q13）。`on_admitted` は通した件、`on_run` はトリガー。
-///   `on_run` の第 3 引数は、そのターンの文脈に含めた受信の元 index（record-only を含む）。
-/// - watch 即時（`privilege` あり）: 許可集合・standing・権限デバウンス。抱えた件は
-///   [`PrivilegeFire`] が時限発火する（callback しない）。発火時の件が文脈。
-/// - watch 束 flush（`privilege` 無し）: 許可集合。通した最後だけ `on_run`（文脈は通した全件）。
-///
-/// `take_hold` は権限デバウンスに抱えるときだけ呼ばれる。
-#[allow(clippy::too_many_arguments)]
-pub fn accept_inbound<T: Send + 'static>(
+/// trust 分割（Q13）。`on_admitted` は通した件、`on_run` はトリガー。`on_run` の第 3 引数は、
+/// そのターンの文脈に含めた受信の元 index（record-only を含む）。
+pub fn accept_inbound(
     items: &[InboundWork<'_>],
     owner_id: &str,
     agent_ids: &[String],
     lookups: &InboundLookups<'_>,
-    watch: Option<WatchAccept<'_, T>>,
-    mut take_hold: impl FnMut(usize) -> T,
     mut on_admitted: impl FnMut(usize, &AdmittedInbound),
     mut on_run: impl FnMut(usize, &AdmittedInbound, &[usize]),
 ) -> Result<(), InboundDrop> {
     let mut admitted: Vec<(usize, AdmittedInbound)> = Vec::new();
-    let mut trust_at: Vec<Option<u8>> = vec![None; items.len()];
-    for (i, item) in items.iter().enumerate() {
-        if let Some(w) = watch.as_ref() {
-            if !w.allow.is_allowed(item.author_key) {
-                continue;
+    let mut levels: Vec<u8> = Vec::with_capacity(items.len());
+    for item in items {
+        match admit_one(lookups, &item.event, owner_id, agent_ids) {
+            Ok(plan) => {
+                levels.push(plan.caller.trust_level());
+                admitted.push((levels.len() - 1, plan));
             }
-        }
-        let plan = match admit_one(lookups, &item.event, owner_id, agent_ids) {
-            Ok(p) => p,
             Err(drop) => {
-                if items.len() == 1 && watch.is_none() {
+                if items.len() == 1 {
                     return Err(InboundDrop::Message(drop));
                 }
-                if watch.is_none() {
-                    trust_at[i] = Some(
-                        (lookups.resolve_caller)(item.event.sender_id, agent_ids, owner_id)
-                            .trust_level(),
-                    );
-                }
-                continue;
-            }
-        };
-        trust_at[i] = Some(plan.caller.trust_level());
-        if let Some(w) = watch.as_ref() {
-            if let Some(fire) = w.privilege {
-                let standing = watch_author_standing(item.author_key, w.owner, w.followees);
-                let hold = watch_hold_interval_secs(
-                    w.policy_json,
-                    standing,
-                    &plan.caller,
-                    item.kind_label,
-                    w.interval_secs,
-                )
-                .map_err(InboundDrop::Policy)?;
-                if let Some(secs) = hold {
-                    fire.hold(take_hold(i), plan.caller.clone(), secs);
-                    continue;
-                }
+                levels.push(
+                    (lookups.resolve_caller)(item.event.sender_id, agent_ids, owner_id)
+                        .trust_level(),
+                );
             }
         }
-        admitted.push((i, plan));
     }
 
-    let run_flags = if watch.as_ref().is_some_and(|w| w.privilege.is_none()) {
-        let mut flags = vec![false; admitted.len()];
-        if let Some(last) = flags.last_mut() {
-            *last = true;
-        }
-        flags
-    } else if watch.is_none() {
-        let levels: Vec<u8> = trust_at
-            .iter()
-            .map(|t| t.expect("対話系の全件は admit または DM drop で trust を書いている"))
-            .collect();
-        let has_content: Vec<bool> = items.iter().map(|item| item.has_content).collect();
-        let record_only = plan_record_only_flags(&levels, &has_content);
-        admitted.iter().map(|(i, _)| !record_only[*i]).collect()
-    } else {
-        vec![true; admitted.len()]
-    };
-
-    for (j, (i, adm)) in admitted.iter().enumerate() {
+    let has_content: Vec<bool> = items.iter().map(|item| item.has_content).collect();
+    let record_only = plan_record_only_flags(&levels, &has_content);
+    for (i, adm) in &admitted {
         on_admitted(*i, adm);
-        if run_flags[j] {
-            let read = turn_read_indices(*i, &admitted, watch.as_ref(), &trust_at);
+        if !record_only[*i] {
+            let read = turn_read_indices(*i, &admitted, &levels);
             on_run(*i, adm, &read);
         }
     }
     Ok(())
 }
 
-/// ターン 1 本の文脈に含める受信の元 index。
-///
-/// 対話系: トリガーと同じ連続同権限グループのうち、通した件（record-only 含む）。
-/// watch 束 flush: 通した全件。watch 即時: その 1 件。
-fn turn_read_indices<T>(
+/// ターン 1 本の文脈に含める受信の元 index: トリガーと同じ連続同権限グループのうち、
+/// 通した件（record-only 含む）。
+fn turn_read_indices(
     trigger: usize,
     admitted: &[(usize, AdmittedInbound)],
-    watch: Option<&WatchAccept<'_, T>>,
-    trust_at: &[Option<u8>],
+    levels: &[u8],
 ) -> Vec<usize> {
-    if watch.is_some_and(|w| w.privilege.is_none()) {
-        return admitted.iter().map(|(i, _)| *i).collect();
-    }
-    if watch.is_some() {
-        return vec![trigger];
-    }
-    let levels: Vec<u8> = trust_at
-        .iter()
-        .map(|t| t.expect("対話系の全件は admit または DM drop で trust を書いている"))
-        .collect();
-    let groups = consecutive_trust_groups(&levels);
+    let groups = consecutive_trust_groups(levels);
     let Some(&(start, len)) = groups
         .iter()
         .find(|&&(s, l)| trigger >= s && trigger < s + l)
