@@ -60,7 +60,7 @@ fn assert_v44_schema(conn: &Connection) {
     let open_addr: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master
-             WHERE type='index' AND name='idx_gate_bindings_open_address'",
+             WHERE type='index' AND name='idx_gate_bindings_open_session_key'",
             [],
             |r| r.get(0),
         )
@@ -196,13 +196,13 @@ fn v44_gate_table_constraints() {
     assert!(empty_kind.is_err(), "空 kind_id を受け入れた");
 
     conn.execute(
-        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at)
+        "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at)
          VALUES ('bind-1', 'inst-1', 'addr-a', 1)",
         [],
     )
     .unwrap();
     let dup_open = conn.execute(
-        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at)
+        "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at)
          VALUES ('bind-2', 'inst-1', 'addr-a', 2)",
         [],
     );
@@ -214,7 +214,7 @@ fn v44_gate_table_constraints() {
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at)
+        "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at)
          VALUES ('bind-2', 'inst-1', 'addr-a', 4)",
         [],
     )

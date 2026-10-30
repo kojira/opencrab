@@ -29,11 +29,7 @@ pub use commands::{CommandError, CommandRegistry};
 pub use error::{ErrorCode, GateError, UNAUTHORIZED_BODY};
 pub use fire::ExtgateTimedFireSink;
 pub use ids::{config_digest, encode_config_b64, now_nanos, session_id_for_binding};
-pub use inbound::channel_whitelisted;
-pub use listen::{
-    enqueue_bind, recover_stale_deliveries, serve_uds, validate_listen_socket, wait_bind_ack,
-    EnqueueBindOutcome,
-};
+pub use listen::{recover_stale_deliveries, serve_uds, validate_listen_socket};
 pub use operation_calls::{invoke_and_wait, invoke_utterance, recover_stale_calls, InvokeError};
 pub use operations::{
     declaration_digest, runtime_declaration_digest, validate_operations,

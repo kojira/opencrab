@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use opencrab_actions::subtask::{settle_completed, SettleContext};
 use opencrab_actions::{
-    AgentRuntime, CallerIdentity, EffortSnapshot, InboundMessageRecord, InteractionRecord,
+    AgentRuntime, CallerIdentity, EffortSnapshot, InboundMessageRecord,
     ModelAdminError, ModelAdministration, ModelSnapshot, OutboundReplyRecord, RunRequest,
     SessionEffortList, SessionLocks, SessionModelList, SubtaskLifecycle, SubtaskRegistries,
     TranscriptSource, TurnModelProfile, REASONING_EFFORTS,
@@ -16,7 +16,7 @@ use opencrab_db::queries::{AgentRow, SessionRow};
 use opencrab_extgate::completion::ExtgateCompletionSink;
 use opencrab_extgate::{
     invoke_and_wait, now_nanos, recover_stale_calls, recover_stale_deliveries, serve_uds,
-    session_id_for_binding, validate_listen_socket, ExtgateOpsGatewayActions, ExtgateState,
+    ExtgateOpsGatewayActions, ExtgateState,
 };
 use opencrab_gate_client::client::{InstanceClient, SaidOutcome};
 use opencrab_gateway::{GatewayActions, GatewayCallContext, GatewayCaller};
@@ -270,13 +270,6 @@ impl AgentRuntime for TestRuntime {
             .push(record.sender_name.to_string());
     }
     fn record_outbound_reply(&self, _source: TranscriptSource, _record: &OutboundReplyRecord<'_>) {}
-    fn record_interaction_response(
-        &self,
-        _agent_id: &str,
-        _session_id: &str,
-        _record: &InteractionRecord<'_>,
-    ) {
-    }
     fn ensure_session(
         &self,
         _session_id: &str,
@@ -289,16 +282,6 @@ impl AgentRuntime for TestRuntime {
     fn session_theme(&self, _session_id: &str) -> Option<String> {
         None
     }
-    fn mark_interaction_status(
-        &self,
-        _interaction_id: &str,
-        _status: &str,
-        _response_json: Option<&str>,
-        _responder_id: Option<&str>,
-    ) {
-    }
-    fn cleanup_stale_interactions(&self) {}
-    fn cleanup_stale_interactions_for_agent(&self, _agent_id: &str) {}
 }
 
 struct Harness {
@@ -383,14 +366,6 @@ fn uuid() -> String {
     Uuid::new_v4().to_string()
 }
 
-fn config_b64() -> &'static str {
-    "e30="
-}
-
-fn config_digest() -> String {
-    opencrab_extgate::ids::config_digest_from_b64(config_b64()).unwrap()
-}
-
 async fn write_frame(s: &mut UnixStream, v: &Value) {
     let mut buf = serde_json::to_vec(v).unwrap();
     buf.push(b'\n');
@@ -444,12 +419,12 @@ async fn read_frame_opt(s: &mut UnixStream) -> Option<Value> {
         .flatten()
 }
 
+/// D-1099: an instance exists once a gateway says `hello`; tests may also create the row up front
+/// (with any `kind_id`) to model an instance that predates the change.
 async fn put_instance(h: &Harness, instance_id: &str, enabled: bool) -> Value {
-    put_instance_kind(h, instance_id, enabled, "discord").await
+    put_instance_kind(h, instance_id, enabled, "gateway").await
 }
 
-/// Creates the generic instance (revision 1), or returns the existing one unchanged. D-1098:
-/// gateways do this with `provision`; tests write the same generic rows directly.
 async fn put_instance_kind(h: &Harness, instance_id: &str, enabled: bool, kind_id: &str) -> Value {
     let conn = h.state.db.lock().unwrap();
     let now = now_nanos();
@@ -457,105 +432,55 @@ async fn put_instance_kind(h: &Harness, instance_id: &str, enabled: bool, kind_i
         "INSERT OR IGNORE INTO gate_instances (
             instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest,
             created_at, updated_at, deleted_at
-         ) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?7, NULL)",
+         ) VALUES (?1, ?2, ?3, 1, ?4, 'e30=', ?5, ?6, ?6, NULL)",
         rusqlite::params![
             instance_id,
             kind_id,
             h.subject_id,
             i64::from(enabled),
-            config_b64(),
-            config_digest(),
+            opencrab_extgate::ids::config_digest_from_b64("e30=").unwrap(),
             now
         ],
     )
     .unwrap();
-    let (revision, enabled): (i64, i64) = conn
-        .query_row(
-            "SELECT revision, enabled FROM gate_instances WHERE instance_id=?1",
-            [instance_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    json!({
-        "instance_id": instance_id,
-        "revision": revision,
-        "enabled": enabled == 1,
-        "config_digest": config_digest(),
-    })
+    json!({"instance_id": instance_id})
 }
 
-/// Bumps the revision as a changed `provision` does; returns the new revision.
-fn revise_instance(h: &Harness, instance_id: &str, enabled: bool, config_b64: &str) -> u64 {
+/// Core's internal row id for `(instance, key)`, resolving (creating) it like a said does.
+fn session_row(h: &Harness, instance_id: &str, key: &str) -> opencrab_db::queries::GateSession {
     let mut conn = h.state.db.lock().unwrap();
     let tx = conn.transaction().unwrap();
-    let revision: i64 = tx
-        .query_row(
-            "SELECT revision FROM gate_instances WHERE instance_id=?1",
-            [instance_id],
-            |row| row.get(0),
+    let found =
+        opencrab_db::queries::resolve_gate_session_in_tx(&tx, instance_id, key, None).unwrap();
+    tx.commit().unwrap();
+    found
+}
+
+/// A pre-D-1099 record: row `row_id` for `(instance, key)` with session `session_id` (title
+/// `title`). Models a migrated binding whose id and session predate the session-key wire.
+fn legacy_record(h: &Harness, row_id: &str, instance_id: &str, key: &str, session_id: &str, title: &str) {
+    let conn = h.state.db.lock().unwrap();
+    if opencrab_db::queries::get_session(&conn, session_id).unwrap().is_none() {
+        conn.execute(
+            "INSERT INTO sessions (id, theme, created_at, updated_at) VALUES (?1, ?2, 'x', 'x')",
+            rusqlite::params![session_id, title],
         )
         .unwrap();
-    let next = opencrab_db::queries::revise_gate_instance_in_tx(
-        &tx,
-        instance_id,
-        u64::try_from(revision).unwrap(),
-        enabled,
-        config_b64,
-        &opencrab_extgate::ids::config_digest_from_b64(config_b64).unwrap(),
-        now_nanos(),
+        conn.execute(
+            "INSERT OR IGNORE INTO agent_sessions (agent_id, session_id) VALUES ('agent-1', ?1)",
+            [session_id],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at, closed_at, session_id)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+        rusqlite::params![row_id, instance_id, key, now_nanos(), session_id],
     )
     .unwrap();
-    tx.commit().unwrap();
-    next
 }
 
-/// Creates a binding through the same generic service `provision` uses. `Err` carries the
-/// conflict kind.
-fn create_binding_row(
-    h: &Harness,
-    binding_id: &str,
-    instance_id: &str,
-    address: &str,
-    session_id: &str,
-    title: &str,
-) -> Result<opencrab_db::queries::CoreBindingOutcome, opencrab_db::queries::CreateGateBindingError>
-{
-    let mut conn = h.state.db.lock().unwrap();
-    let tx = conn.transaction().unwrap();
-    let outcome = opencrab_db::queries::CoreBindingService::create_in_tx(
-        &tx,
-        &opencrab_db::queries::CoreBindingRequest {
-            binding_id,
-            instance_id,
-            address,
-            session_id,
-            session_title: title,
-            now: now_nanos(),
-        },
-    )?;
-    tx.commit().unwrap();
-    Ok(outcome)
-}
-
-/// Creates a binding (as `provision` does) and, when the instance is live, sends it `bind`.
-async fn put_binding(h: &Harness, binding_id: &str, instance_id: &str, address: &str) -> bool {
-    let (session_id, title) = {
-        let conn = h.state.db.lock().unwrap();
-        match opencrab_db::queries::get_session(&conn, address).unwrap() {
-            Some(session) => (address.to_string(), session.theme),
-            None => (session_id_for_binding(binding_id), address.to_string()),
-        }
-    };
-    let outcome = create_binding_row(h, binding_id, instance_id, address, &session_id, &title)
-        .unwrap_or_else(|error| panic!("binding create failed: {error:?}"));
-    let created = outcome == opencrab_db::queries::CoreBindingOutcome::Created;
-    if created {
-        opencrab_extgate::enqueue_bind(&h.state, instance_id, binding_id, address).await;
-    }
-    created
-}
-
-async fn hello_ok(s: &mut UnixStream, instance_id: &str, revision: u64) {
+async fn hello_ok(s: &mut UnixStream, instance_id: &str) {
     write_frame(
         s,
         &json!({
@@ -566,8 +491,7 @@ async fn hello_ok(s: &mut UnixStream, instance_id: &str, revision: u64) {
             "final_delivery": "automatic",
             "operations": [],
             "instance_id": instance_id,
-            "revision": revision,
-            "config_digest": config_digest(),
+            "agent_id": "agent-1",
         }),
     )
     .await;
@@ -576,36 +500,35 @@ async fn hello_ok(s: &mut UnixStream, instance_id: &str, revision: u64) {
     assert_eq!(ok["id"], "h1");
 }
 
-async fn ack_bind(s: &mut UnixStream) -> String {
-    let bind = read_frame(s).await;
-    assert_eq!(bind["m"], "bind");
-    let id = bind["id"].as_str().unwrap().to_string();
-    let binding_id = bind["binding_id"].as_str().unwrap().to_string();
-    write_frame(s, &json!({"id": id, "m": "ok"})).await;
-    binding_id
-}
-
+/// A connected instance and the session key its frames use. The third value is the key (it plays
+/// the role the old binding id did in the test bodies).
 async fn ready_pair(h: &Harness) -> (UnixStream, String, String) {
     let instance_id = uuid();
-    let binding_id = uuid();
-    put_instance(h, &instance_id, true).await;
-    put_binding(h, &binding_id, &instance_id, "chan-1").await;
+    let key = "chan-1".to_string();
     let mut s = h.connect().await;
-    hello_ok(&mut s, &instance_id, 1).await;
-    let acked = ack_bind(&mut s).await;
-    assert_eq!(acked, binding_id);
-    for _ in 0..50 {
-        let acked = h
-            .state
-            .lock_registry()
-            .unwrap()
-            .get(&instance_id)
-            .is_some_and(|e| e.acknowledged.contains(&binding_id));
-        if acked {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    (s, instance_id, binding_id)
+    hello_ok(&mut s, &instance_id).await;
+    (s, instance_id, key)
 }
 
+/// Adds a second agent (its own subject).
+fn add_agent(h: &Harness, agent_id: &str) {
+    let conn = h.state.db.lock().unwrap();
+    opencrab_db::queries::upsert_agent(
+        &conn,
+        &AgentRow {
+            agent_id: agent_id.into(),
+            name: agent_id.into(),
+            job_title: None,
+            organization: None,
+            image_url: None,
+            persona_name: "p".into(),
+            personality: None,
+            instructions: String::new(),
+            model: None,
+            reasoning_effort: None,
+            web_search: None,
+            metadata_json: None,
+        },
+    )
+    .unwrap();
+}

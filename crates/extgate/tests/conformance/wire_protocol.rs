@@ -15,7 +15,7 @@ async fn framing_max_size_ok_and_too_large_closes() {
         &json!({
             "id": "s1",
             "m": "said",
-            "binding_id": instance_id, // wrong on purpose? use real binding below
+            "session": instance_id, // wrong on purpose? use real binding below
             "origin": "o",
             "author_id": "u1",
             "text": "x",
@@ -74,50 +74,6 @@ async fn framing_invalid_utf8_json_non_object_and_duplicates_close() {
 }
 
 #[tokio::test]
-async fn s2_runtime_and_admin_binding_creation_delegate_to_one_idempotent_authority() {
-    let h = Harness::start().await;
-    let instance_id = uuid();
-    let binding_id = uuid();
-    put_instance(&h, &instance_id, true).await;
-    let mut stream = h.connect().await;
-    hello_ok(&mut stream, &instance_id, 1).await;
-
-    for request_id in ["create-1", "create-2"] {
-        write_frame(
-            &mut stream,
-            &json!({
-                "id": request_id,
-                "m": "create_binding",
-                "binding_id": binding_id,
-                "address": "runtime-opaque-address",
-                "session_theme": "Runtime title"
-            }),
-        )
-        .await;
-        let response = read_until(&mut stream, |value| value["id"] == request_id).await;
-        assert_eq!(response["m"], "ok", "{response}");
-    }
-
-    let session_id = session_id_for_binding(&binding_id);
-    let outcome = create_binding_row(
-        &h,
-        &binding_id,
-        &instance_id,
-        "runtime-opaque-address",
-        &session_id,
-        "Runtime title",
-    )
-    .unwrap();
-    assert_eq!(outcome, opencrab_db::queries::CoreBindingOutcome::Existing);
-    let conn = h.state.db.lock().unwrap();
-    assert_eq!(
-        conn.query_row("SELECT count(*) FROM gate_bindings", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-}
-
-#[tokio::test]
 async fn hello_unknown_fields_ignored_and_missing_fields_fail() {
     let h = Harness::start().await;
     let instance_id = uuid();
@@ -133,9 +89,10 @@ async fn hello_unknown_fields_ignored_and_missing_fields_fail() {
             "final_delivery": "automatic",
             "operations": [],
             "instance_id": instance_id,
-            "revision": 1,
-            "config_digest": config_digest(),
-            "extra": true
+            "agent_id": "agent-1",
+            "extra": true,
+            "revision": 7,
+            "config_digest": "ignored"
         }),
     )
     .await;
@@ -157,7 +114,7 @@ async fn protocol_order_before_hello_and_second_hello() {
         &json!({
             "id": "s1",
             "m": "said",
-            "binding_id": uuid(),
+            "session": uuid(),
             "origin": "o",
             "author_id": "u",
             "text": "hi",
@@ -179,8 +136,7 @@ async fn protocol_order_before_hello_and_second_hello() {
             "final_delivery": "automatic",
             "operations": [],
             "instance_id": instance_id,
-            "revision": 1,
-            "config_digest": config_digest()
+            "agent_id": "agent-1"
         }),
     )
     .await;
@@ -201,7 +157,6 @@ async fn response_invalid_unknown_and_consumed_ids() {
 async fn hello_failures_do_not_register() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    put_instance(&h, &instance_id, true).await;
 
     let mut s = h.connect().await;
     write_frame(
@@ -211,8 +166,7 @@ async fn hello_failures_do_not_register() {
             "m": "hello",
             "protocol": 1,
             "instance_id": instance_id,
-            "revision": 1,
-            "config_digest": config_digest(),
+            "agent_id": "agent-1",
             "operation_protocol": 1,
             "final_delivery": "automatic",
             "operations": []
@@ -223,46 +177,7 @@ async fn hello_failures_do_not_register() {
     assert_eq!(v["code"], "protocol_unsupported");
     assert!(!h.state.lock_registry().unwrap().is_live(&instance_id));
 
-    let mut s = h.connect().await;
-    write_frame(
-        &mut s,
-        &json!({
-            "id": "h1",
-            "m": "hello",
-            "protocol": 3,
-            "operation_protocol": 1,
-            "final_delivery": "automatic",
-            "operations": [],
-            "instance_id": uuid(),
-            "revision": 1,
-            "config_digest": config_digest()
-        }),
-    )
-    .await;
-    let v = read_frame_opt(&mut s).await.unwrap();
-    assert_eq!(v["code"], "instance_unknown");
-
-    let disabled = uuid();
-    put_instance(&h, &disabled, false).await;
-    let mut s = h.connect().await;
-    write_frame(
-        &mut s,
-        &json!({
-            "id": "h1",
-            "m": "hello",
-            "protocol": 3,
-            "operation_protocol": 1,
-            "final_delivery": "automatic",
-            "operations": [],
-            "instance_id": disabled,
-            "revision": 1,
-            "config_digest": config_digest()
-        }),
-    )
-    .await;
-    let v = read_frame_opt(&mut s).await.unwrap();
-    assert_eq!(v["code"], "instance_disabled");
-
+    // An agent core does not know.
     let mut s = h.connect().await;
     write_frame(
         &mut s,
@@ -274,14 +189,20 @@ async fn hello_failures_do_not_register() {
             "final_delivery": "automatic",
             "operations": [],
             "instance_id": instance_id,
-            "revision": 9,
-            "config_digest": config_digest()
+            "agent_id": "nobody"
         }),
     )
     .await;
     let v = read_frame_opt(&mut s).await.unwrap();
-    assert_eq!(v["code"], "revision_mismatch");
+    assert_eq!(v["code"], "subject_unknown");
+    assert!(!h.state.lock_registry().unwrap().is_live(&instance_id));
 
+    // An instance that already speaks for another agent.
+    add_agent(&h, "agent-2");
+    let mut s = h.connect().await;
+    hello_ok(&mut s, &instance_id).await;
+    drop(s);
+    wait_not_live(&h, &instance_id).await;
     let mut s = h.connect().await;
     write_frame(
         &mut s,
@@ -293,13 +214,13 @@ async fn hello_failures_do_not_register() {
             "final_delivery": "automatic",
             "operations": [],
             "instance_id": instance_id,
-            "revision": 1,
-            "config_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "agent_id": "agent-2"
         }),
     )
     .await;
     let v = read_frame_opt(&mut s).await.unwrap();
-    assert_eq!(v["code"], "config_digest_mismatch");
+    assert_eq!(v["code"], "instance_conflict");
+    assert!(!h.state.lock_registry().unwrap().is_live(&instance_id));
 }
 
 #[tokio::test]
@@ -317,8 +238,7 @@ async fn double_live_hello_is_instance_active() {
             "final_delivery": "automatic",
             "operations": [],
             "instance_id": instance_id,
-            "revision": 1,
-            "config_digest": config_digest()
+            "agent_id": "agent-1"
         }),
     )
     .await;
@@ -331,35 +251,6 @@ async fn double_live_hello_is_instance_active() {
 async fn registry_starts_empty() {
     let h = Harness::start().await;
     assert!(!h.state.lock_registry().unwrap().is_live(&uuid()));
-}
-
-#[tokio::test]
-async fn said_before_ack_is_instance_not_ready() {
-    let h = Harness::start().await;
-    let instance_id = uuid();
-    let binding_id = uuid();
-    put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-1").await;
-    let mut s = h.connect().await;
-    hello_ok(&mut s, &instance_id, 1).await;
-    let bind = read_frame(&mut s).await;
-    assert_eq!(bind["m"], "bind");
-    write_frame(
-        &mut s,
-        &json!({
-            "id": "s1",
-            "m": "said",
-            "binding_id": binding_id,
-            "origin": "o1",
-            "author_id": "u1",
-            "text": "hi",
-            "attachments": []
-        }),
-    )
-    .await;
-    let v = read_frame(&mut s).await;
-    assert_eq!(v["m"], "err");
-    assert_eq!(v["code"], "instance_not_ready");
 }
 
 #[tokio::test]
@@ -382,48 +273,6 @@ async fn hello_timeout_is_protocol_order() {
 }
 
 #[tokio::test]
-async fn bind_timeout_is_bind_failed() {
-    let h = Harness::start().await;
-    let instance_id = uuid();
-    let binding_id = uuid();
-    put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-1").await;
-    let mut s = h.connect().await;
-    hello_ok(&mut s, &instance_id, 1).await;
-    let bind = read_frame(&mut s).await;
-    assert_eq!(bind["m"], "bind");
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(60)).await;
-    tokio::time::resume();
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    assert!(!h.state.lock_registry().unwrap().is_live(&instance_id));
-}
-
-#[tokio::test]
-async fn bind_err_closes() {
-    let h = Harness::start().await;
-    let instance_id = uuid();
-    let binding_id = uuid();
-    put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-1").await;
-    let mut s = h.connect().await;
-    hello_ok(&mut s, &instance_id, 1).await;
-    let bind = read_frame(&mut s).await;
-    write_frame(
-        &mut s,
-        &json!({
-            "id": bind["id"],
-            "m": "err",
-            "code": "bind_failed",
-            "detail": null
-        }),
-    )
-    .await;
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    assert!(!h.state.lock_registry().unwrap().is_live(&instance_id));
-}
-
-#[tokio::test]
 async fn running_unknown_message_keeps_connection() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
@@ -435,7 +284,7 @@ async fn running_unknown_message_keeps_connection() {
         &json!({
             "id": "s1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "after",
             "author_id": "u",
             "text": "still",
@@ -457,7 +306,7 @@ async fn coagent_model_command_is_forbidden_before_handler_invocation() {
         &json!({
             "m": "command",
             "id": "cmd-coagent-1",
-            "binding_id": binding_id,
+            "session": binding_id,
             "caller": {"role": "co_agent", "agent_id": "agent-b"},
             "name": "set_model",
             "args": {"model": "openai:gpt-5"}
@@ -501,7 +350,7 @@ async fn owner_model_commands_dispatch_and_correlate_results() {
             &json!({
                 "m": "command",
                 "id": id,
-                "binding_id": binding_id,
+                "session": binding_id,
                 "caller": {"role": "owner"},
                 "name": name,
                 "args": args,
@@ -544,7 +393,7 @@ async fn every_non_owner_model_caller_is_forbidden() {
             &json!({
                 "m": "command",
                 "id": id,
-                "binding_id": binding_id,
+                "session": binding_id,
                 "caller": caller,
                 "name": "list_models",
                 "args": {},
@@ -566,7 +415,7 @@ async fn running_reverse_and_unknown_without_id_keep() {
         &mut s,
         &json!({
             "m": "activity",
-            "binding_id": binding_id,
+            "session": binding_id,
             "activity_id": uuid(),
             "state": "started"
         }),
@@ -578,7 +427,7 @@ async fn running_reverse_and_unknown_without_id_keep() {
         &json!({
             "id": "s-keep",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "after-keep",
             "author_id": "u",
             "text": "still",

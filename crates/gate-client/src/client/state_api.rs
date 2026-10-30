@@ -7,7 +7,7 @@ pub trait InvokeHandler: Send + Sync {
     async fn handle(
         &self,
         call_id: &str,
-        binding_id: &str,
+        session_key: &str,
         operation: &str,
         payload: &Value,
     ) -> InvokeOutcome;
@@ -39,6 +39,10 @@ pub enum SaidOutcome {
     Accepted {
         seq: i64,
     },
+    /// D-1099: `open` answered with the key's core session.
+    Opened {
+        session_id: String,
+    },
     NotAdmitted,
     WireErr {
         code: String,
@@ -55,7 +59,7 @@ pub enum PostRefuse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CreateBindingError {
+pub enum OpenError {
     NotReady,
     Rejected { code: String },
     Disconnected,
@@ -83,6 +87,7 @@ enum PendingKind {
     Hello,
     Command,
     Said,
+    Open,
 }
 
 struct PendingSaid {
@@ -153,8 +158,6 @@ impl LiveQueue {
 }
 
 struct Inner {
-    acknowledged: HashMap<String, String>,
-    remembered: HashMap<String, String>,
     pending_said: HashMap<String, PendingSaid>,
     pending_commands: HashMap<String, PendingCommand>,
     expired_commands: HashSet<String>,
@@ -167,6 +170,8 @@ struct Inner {
 
 pub struct InstanceClient {
     pub instance_id: String,
+    /// D-1099: the agent this instance speaks for (sent in `hello`).
+    pub agent_id: String,
     pub author_id: String,
     say_policy: SayPolicy,
     /// DI 拡張 §3.1: hello に載せる能力宣言配列（None は従来の hello＝能力ゼロ）。
@@ -187,6 +192,7 @@ pub struct InstanceClient {
 impl InstanceClient {
     fn blank(
         instance_id: String,
+        agent_id: String,
         author_id: String,
         say_policy: SayPolicy,
         operations: Option<Value>,
@@ -195,6 +201,7 @@ impl InstanceClient {
     ) -> Self {
         Self::blank_with_env(
             instance_id,
+            agent_id,
             author_id,
             say_policy,
             operations,
@@ -205,8 +212,10 @@ impl InstanceClient {
     }
 
     /// D-1091: [`Self::blank`] plus the environment the gateway declares for this instance.
+    #[allow(clippy::too_many_arguments)]
     fn blank_with_env(
         instance_id: String,
+        agent_id: String,
         author_id: String,
         say_policy: SayPolicy,
         operations: Option<Value>,
@@ -218,6 +227,7 @@ impl InstanceClient {
         drop(rx);
         Self {
             instance_id,
+            agent_id,
             author_id,
             say_policy,
             operations,
@@ -225,8 +235,6 @@ impl InstanceClient {
             run_env,
             invoke_handler,
             inner: Mutex::new(Inner {
-                acknowledged: HashMap::new(),
-                remembered: HashMap::new(),
                 pending_said: HashMap::new(),
                 pending_commands: HashMap::new(),
                 expired_commands: HashSet::new(),
@@ -247,19 +255,19 @@ impl InstanceClient {
     pub async fn connect(
         socket: &std::path::Path,
         instance_id: String,
-        revision: u64,
+        agent_id: String,
         author_id: String,
-        config_digest: String,
     ) -> Result<Arc<Self>, FrameError> {
         let client = Arc::new(Self::blank(
             instance_id,
+            agent_id,
             author_id,
             SayPolicy::AcceptToLiveQueue,
             None,
             super::wire::RuntimeCapabilities::default(),
             None,
         ));
-        attach(&client, socket, revision, &config_digest).await?;
+        attach(&client, socket).await?;
         Ok(client)
     }
 
@@ -267,16 +275,14 @@ impl InstanceClient {
     pub fn spawn(
         socket: PathBuf,
         instance_id: String,
-        revision: u64,
+        agent_id: String,
         author_id: String,
-        config_digest: String,
     ) -> Arc<Self> {
         Self::spawn_with_say_policy(
             socket,
             instance_id,
-            revision,
+            agent_id,
             author_id,
-            config_digest,
             SayPolicy::AcceptToLiveQueue,
         )
     }
@@ -284,25 +290,20 @@ impl InstanceClient {
     pub fn spawn_with_say_policy(
         socket: PathBuf,
         instance_id: String,
-        revision: u64,
+        agent_id: String,
         author_id: String,
-        config_digest: String,
         say_policy: SayPolicy,
     ) -> Arc<Self> {
         let client = Arc::new(Self::blank(
             instance_id,
+            agent_id,
             author_id,
             say_policy,
             None,
             super::wire::RuntimeCapabilities::default(),
             None,
         ));
-        tokio::spawn(reconnect_loop(
-            client.clone(),
-            socket,
-            revision,
-            config_digest,
-        ));
+        tokio::spawn(reconnect_loop(client.clone(), socket));
         client
     }
 
@@ -312,9 +313,8 @@ impl InstanceClient {
     pub fn spawn_with_operations(
         socket: PathBuf,
         instance_id: String,
-        revision: u64,
+        agent_id: String,
         author_id: String,
-        config_digest: String,
         say_policy: SayPolicy,
         operations: Option<Value>,
         runtime_capabilities: super::wire::RuntimeCapabilities,
@@ -322,30 +322,25 @@ impl InstanceClient {
     ) -> Arc<Self> {
         let client = Arc::new(Self::blank(
             instance_id,
+            agent_id,
             author_id,
             say_policy,
             operations,
             runtime_capabilities,
             Some(invoke_handler),
         ));
-        tokio::spawn(reconnect_loop(
-            client.clone(),
-            socket,
-            revision,
-            config_digest,
-        ));
+        tokio::spawn(reconnect_loop(client.clone(), socket));
         client
     }
 
     /// D-1091: `spawn_with_operations` plus the environment this gateway declares for the
-    /// instance's bindings. Core hands it to `execute_shell` children of that instance's turns.
+    /// instance. Core hands it to `execute_shell` children of that instance's turns.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_with_operations_and_env(
         socket: PathBuf,
         instance_id: String,
-        revision: u64,
+        agent_id: String,
         author_id: String,
-        config_digest: String,
         say_policy: SayPolicy,
         operations: Option<Value>,
         runtime_capabilities: super::wire::RuntimeCapabilities,
@@ -354,6 +349,7 @@ impl InstanceClient {
     ) -> Arc<Self> {
         let client = Arc::new(Self::blank_with_env(
             instance_id,
+            agent_id,
             author_id,
             say_policy,
             operations,
@@ -361,21 +357,12 @@ impl InstanceClient {
             run_env,
             Some(invoke_handler),
         ));
-        tokio::spawn(reconnect_loop(
-            client.clone(),
-            socket,
-            revision,
-            config_digest,
-        ));
+        tokio::spawn(reconnect_loop(client.clone(), socket));
         client
     }
 
     pub async fn connection_live(&self) -> bool {
         !self.inner.lock().await.closed
-    }
-
-    pub async fn remembered_binding(&self, address: &str) -> Option<String> {
-        self.inner.lock().await.remembered.get(address).cloned()
     }
 
     fn next_id(&self) -> String {
@@ -410,67 +397,33 @@ impl InstanceClient {
         Ok(())
     }
 
-    pub async fn binding_for_address(&self, address: &str) -> Option<String> {
-        let inner = self.inner.lock().await;
-        if inner.closed {
-            return None;
-        }
-        inner.acknowledged.get(address).cloned()
-    }
-
-    /// 接続中instance自身のopaque bindingをcoreへ作成要求する。
-    pub async fn create_binding(
-        &self,
-        binding_id: &str,
-        address: &str,
-        session_theme: &str,
-    ) -> Result<(), CreateBindingError> {
+    /// D-1099: the core session of `session_key`, created when new (`open`). Gateways that
+    /// show a conversation before its first said use it; others never need it.
+    pub async fn open(&self, session_key: &str, title: Option<&str>) -> Result<String, OpenError> {
         if self.inner.lock().await.closed {
-            return Err(CreateBindingError::NotReady);
+            return Err(OpenError::NotReady);
         }
         let id = self.next_id();
         let (tx, rx) = oneshot::channel();
         self.inner.lock().await.pending_said.insert(
             id.clone(),
             PendingSaid {
-                kind: PendingKind::Command,
+                kind: PendingKind::Open,
                 reply: tx,
             },
         );
-        if !send_frame(
-            self,
-            create_binding_frame(&id, binding_id, address, session_theme),
-        )
-        .await
-        {
+        if !send_frame(self, open_frame(&id, session_key, title)).await {
             self.inner.lock().await.pending_said.remove(&id);
-            return Err(CreateBindingError::Disconnected);
+            return Err(OpenError::Disconnected);
         }
         match tokio::time::timeout(SAID_TIMEOUT, rx).await {
-            Ok(Ok(SaidOutcome::Accepted { .. })) => {
-                let mut inner = self.inner.lock().await;
-                match inner.remembered.get(address) {
-                    Some(existing) if existing != binding_id => {
-                        Err(CreateBindingError::Rejected {
-                            code: "binding_conflict".to_string(),
-                        })
-                    }
-                    Some(_) => Ok(()),
-                    None => {
-                        inner
-                            .remembered
-                            .insert(address.to_string(), binding_id.to_string());
-                        Ok(())
-                    }
-                }
+            Ok(Ok(SaidOutcome::Opened { session_id })) => Ok(session_id),
+            Ok(Ok(SaidOutcome::WireErr { code, .. })) => Err(OpenError::Rejected { code }),
+            Ok(Ok(_)) | Ok(Err(_)) => Err(OpenError::Disconnected),
+            Err(_) => {
+                self.inner.lock().await.pending_said.remove(&id);
+                Err(OpenError::Disconnected)
             }
-            Ok(Ok(SaidOutcome::WireErr { code, .. })) => {
-                Err(CreateBindingError::Rejected { code })
-            }
-            Ok(Ok(SaidOutcome::Disconnected)) | Ok(Err(_)) | Err(_) => {
-                Err(CreateBindingError::Disconnected)
-            }
-            Ok(Ok(SaidOutcome::NotAdmitted)) => Err(CreateBindingError::Disconnected),
         }
     }
 
@@ -478,7 +431,7 @@ impl InstanceClient {
     /// out correlations are removed and a late response is ignored.
     pub async fn command(
         &self,
-        address: &str,
+        session_key: &str,
         caller: &SaidCaller,
         name: &str,
         args: &Value,
@@ -490,17 +443,9 @@ impl InstanceClient {
                 message: Some("Invalid command arguments.".to_string()),
             });
         }
-        let binding_id = {
-            let inner = self.inner.lock().await;
-            if inner.closed {
-                return Err(CommandError::NotReady);
-            }
-            inner
-                .acknowledged
-                .get(address)
-                .cloned()
-                .ok_or(CommandError::NotReady)?
-        };
+        if self.inner.lock().await.closed {
+            return Err(CommandError::NotReady);
+        }
         let id = format!("command:{}", self.req_seq.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
         self.inner
@@ -510,7 +455,7 @@ impl InstanceClient {
             .insert(id.clone(), PendingCommand { reply: tx });
         if !send_frame(
             self,
-            command_frame(&id, &binding_id, caller, name, args),
+            command_frame(&id, session_key, caller, name, args),
         )
         .await
         {
@@ -532,25 +477,25 @@ impl InstanceClient {
 
     pub async fn post_said(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         text: &str,
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
-        self.post_said_with_author(address, origin, &self.author_id, text, attachments)
+        self.post_said_with_author(session_key, origin, &self.author_id, text, attachments)
             .await
     }
 
     pub async fn post_said_with_author(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         author_id: &str,
         text: &str,
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
         self.post_said_with_author_label(
-            address,
+            session_key,
             origin,
             author_id,
             None,
@@ -562,7 +507,7 @@ impl InstanceClient {
 
     pub async fn post_said_with_author_label(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         author_id: &str,
         author_label: Option<&str>,
@@ -570,7 +515,7 @@ impl InstanceClient {
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
         self.post_said_inner(
-            address,
+            session_key,
             origin,
             author_id,
             author_label,
@@ -585,14 +530,14 @@ impl InstanceClient {
     /// Platform-neutral contextを伴うSaid。個別gatewayの判断結果はこの汎用形で渡す。
     pub async fn post_said_with_self_context(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         context: &SaidContext,
         text: &str,
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
         self.post_said_with_context(
-            address,
+            session_key,
             origin,
             &self.author_id,
             None,
@@ -607,7 +552,7 @@ impl InstanceClient {
     #[allow(clippy::too_many_arguments)]
     pub async fn post_said_with_context(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         author_id: &str,
         author_label: Option<&str>,
@@ -616,7 +561,7 @@ impl InstanceClient {
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
         self.post_said_inner(
-            address,
+            session_key,
             origin,
             author_id,
             author_label,
@@ -634,14 +579,14 @@ impl InstanceClient {
     /// 次の origin を送れる。ターン中の `CompletedNoReply` 追跡は activity started が立てる。
     pub async fn post_said_receipt(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         author_id: &str,
         text: &str,
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
         self.post_said_receipt_with_author_label(
-            address,
+            session_key,
             origin,
             author_id,
             None,
@@ -653,7 +598,7 @@ impl InstanceClient {
 
     pub async fn post_said_receipt_with_author_label(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         author_id: &str,
         author_label: Option<&str>,
@@ -661,7 +606,7 @@ impl InstanceClient {
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
         self.post_said_inner(
-            address,
+            session_key,
             origin,
             author_id,
             author_label,
@@ -676,7 +621,7 @@ impl InstanceClient {
     #[allow(clippy::too_many_arguments)]
     async fn post_said_inner(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         author_id: &str,
         author_label: Option<&str>,
@@ -685,17 +630,18 @@ impl InstanceClient {
         attachments: &[Attachment],
         occupy_until_turn_ends: bool,
     ) -> Result<SaidOutcome, PostRefuse> {
-        let binding_id = {
+        {
             let mut inner = self.inner.lock().await;
             if inner.closed {
                 return Err(PostRefuse::NotReady);
             }
-            let Some(binding_id) = inner.acknowledged.get(address).cloned() else {
-                return Err(PostRefuse::NotReady);
-            };
+            inner
+                .live
+                .entry(session_key.to_string())
+                .or_insert_with(LiveQueue::new);
             let entry = inner
                 .pending_turn
-                .entry(binding_id.clone())
+                .entry(session_key.to_string())
                 .or_insert_with(|| PendingTurn {
                     saw_utterance: false,
                     reply_origin: ReplyOrigin::None,
@@ -708,8 +654,7 @@ impl InstanceClient {
                     ReplyOrigin::Single(_) | ReplyOrigin::Ambiguous => ReplyOrigin::Ambiguous,
                 };
             }
-            binding_id
-        };
+        }
         let id = self.next_id();
         let (tx, rx) = oneshot::channel();
         {
@@ -724,7 +669,7 @@ impl InstanceClient {
         }
         let frame = said_frame_with_context(
             &id,
-            &binding_id,
+            session_key,
             origin,
             author_id,
             author_label,
@@ -734,13 +679,13 @@ impl InstanceClient {
         );
         tracing::info!(
             instance_id = %self.instance_id,
-            binding_id = %binding_id,
+            session = %session_key,
             origin,
             "said"
         );
         if !send_frame(self, frame).await {
             let mut inner = self.inner.lock().await;
-            inner.pending_turn.remove(&binding_id);
+            inner.pending_turn.remove(session_key);
             inner.pending_said.remove(&id);
             return Ok(SaidOutcome::Disconnected);
         }
@@ -748,11 +693,11 @@ impl InstanceClient {
             Ok(Ok(outcome)) => {
                 if !occupy_until_turn_ends || !matches!(outcome, SaidOutcome::Accepted { .. }) {
                     let mut inner = self.inner.lock().await;
-                    inner.pending_turn.remove(&binding_id);
+                    inner.pending_turn.remove(session_key);
                 }
                 tracing::info!(
                     instance_id = %self.instance_id,
-                    binding_id = %binding_id,
+                    session = %session_key,
                     "said ack"
                 );
                 Ok(outcome)
@@ -765,11 +710,11 @@ impl InstanceClient {
         }
     }
 
-    pub async fn next_live(&self, address: &str) -> Option<LiveEvent> {
+    pub async fn next_live(&self, session_key: &str) -> Option<LiveEvent> {
         let rx = {
             let mut inner = self.inner.lock().await;
             if inner.closed {
-                if let Some(q) = inner.live.get_mut(address) {
+                if let Some(q) = inner.live.get_mut(session_key) {
                     if let Some(ev) = q.subscribe() {
                         return Some(ev);
                     }
@@ -779,7 +724,7 @@ impl InstanceClient {
                     detail: None,
                 });
             }
-            if let Some(q) = inner.live.get_mut(address) {
+            if let Some(q) = inner.live.get_mut(session_key) {
                 if let Some(ev) = q.subscribe() {
                     return Some(ev);
                 }
@@ -787,7 +732,7 @@ impl InstanceClient {
             let (tx, rx) = oneshot::channel();
             let q = inner
                 .live
-                .entry(address.to_string())
+                .entry(session_key.to_string())
                 .or_insert_with(LiveQueue::new);
             q.waiters.push(tx);
             rx

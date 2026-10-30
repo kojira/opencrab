@@ -61,8 +61,14 @@ pub fn ok_frame(id: &str) -> Value {
     json!({"id": id, "m": "ok"})
 }
 
-pub fn ok_said_frame(id: &str, seq: Option<i64>) -> Value {
-    json!({"id": id, "m": "ok", "seq": seq})
+/// `ok` for a said: `seq` (null when not admitted) and the core session the key resolved to.
+pub fn ok_said_frame(id: &str, seq: Option<i64>, session_id: &str) -> Value {
+    json!({"id": id, "m": "ok", "seq": seq, "session_id": session_id})
+}
+
+/// `ok` for `open`: the core session of the key.
+pub fn ok_open_frame(id: &str, session_id: &str) -> Value {
+    json!({"id": id, "m": "ok", "session_id": session_id})
 }
 
 pub fn command_ok_frame(id: &str, result: &Value) -> Value {
@@ -82,15 +88,6 @@ pub fn err_frame(id: &str, code: ErrorCode, detail: Option<&str>) -> Value {
     })
 }
 
-pub fn bind_frame(binding_id: &str, address: &str) -> Value {
-    json!({
-        "id": crate::ids::bind_request_id(binding_id),
-        "m": "bind",
-        "binding_id": binding_id,
-        "address": address,
-    })
-}
-
 /// say フレーム。地の文の発話で、返信先を持たない（D-1093: core は返信先を決めない。返信は
 /// モデルが対象つきの返信操作を明示的に呼んだときだけ起きる）。
 ///
@@ -98,7 +95,7 @@ pub fn bind_frame(binding_id: &str, address: &str) -> Value {
 /// set only when that stream released text.
 pub fn say_frame(
     delivery_id: &str,
-    binding_id: &str,
+    session_key: &str,
     body: &str,
     stream_id: Option<&str>,
 ) -> Value {
@@ -109,7 +106,7 @@ pub fn say_frame(
     json!({
         "id": delivery_id,
         "m": "say",
-        "binding_id": binding_id,
+        "session": session_key,
         "payload": payload,
     })
 }
@@ -118,7 +115,7 @@ pub fn say_frame(
 /// `context.continuation_id` は常に null。payload は opaque JSON-value。
 pub fn invoke_frame(
     call_id: &str,
-    binding_id: &str,
+    session_key: &str,
     declaration_digest: &str,
     declaration: &GatewayOperationDeclaration,
     continuation_id: Option<&str>,
@@ -128,7 +125,7 @@ pub fn invoke_frame(
         "id": call_id,
         "m": "invoke",
         "invocation_protocol": 1,
-        "binding_id": binding_id,
+        "session": session_key,
         "declaration_digest": declaration_digest,
         "operation": declaration.name,
         "dispatch": declaration.policy.dispatch.as_str(),
@@ -139,7 +136,7 @@ pub fn invoke_frame(
 }
 
 pub fn activity_frame(
-    binding_id: &str,
+    session_key: &str,
     activity_id: &str,
     state: &str,
     origin: Option<&str>,
@@ -147,7 +144,7 @@ pub fn activity_frame(
 ) -> Value {
     let mut frame = json!({
         "m": "activity",
-        "binding_id": binding_id,
+        "session": session_key,
         "activity_id": activity_id,
         "state": state,
     });
@@ -167,12 +164,12 @@ pub fn activity_frame(
 /// New coreのsuccessful ended outcome。`silent_origins`はemptyでも必ず載せ、
 /// field欠落を旧core互換fallbackと区別できるようにする。
 pub fn ended_activity_frame(
-    binding_id: &str,
+    session_key: &str,
     activity_id: &str,
     completed_target: Option<&str>,
     silent_origins: &[String],
 ) -> Value {
-    let mut frame = activity_frame(binding_id, activity_id, "ended", None, completed_target);
+    let mut frame = activity_frame(session_key, activity_id, "ended", None, completed_target);
     frame["silent_origins"] = json!(silent_origins);
     frame
 }
@@ -181,14 +178,14 @@ pub fn ended_activity_frame(
 /// know the frame ignore it without a reply and keep the connection.
 /// D-1085: a partial of a provisional run also carries its `provisional_id`.
 pub fn partial_frame(
-    binding_id: &str,
+    session_key: &str,
     stream_id: &str,
     text: &str,
     provisional_id: Option<&str>,
 ) -> Value {
     let mut frame = json!({
         "m": "partial",
-        "binding_id": binding_id,
+        "session": session_key,
         "stream_id": stream_id,
         "text": text,
     });
@@ -200,10 +197,10 @@ pub fn partial_frame(
 
 /// R3(❌): ターン失敗通知フレーム。id を持たない fire-and-forget 通知（activity と同型）。
 /// 未知フレームを ignore する準拠 gateway は write 0・keep で素通しする。error 本文は載せない。
-pub fn turn_failed_frame(binding_id: &str, origin: &str) -> Value {
+pub fn turn_failed_frame(session_key: &str, origin: &str) -> Value {
     json!({
         "m": "turn_failed",
-        "binding_id": binding_id,
+        "session": session_key,
         "origin": origin,
     })
 }
@@ -213,8 +210,8 @@ pub struct Hello {
     pub id: String,
     pub protocol: u64,
     pub instance_id: String,
-    pub revision: u64,
-    pub config_digest: String,
+    /// D-1099: the agent this instance speaks for. Core finds or creates the instance with it.
+    pub agent_id: String,
     /// Versioned dynamic-operation declaration envelope.
     pub operation_protocol: u64,
     pub final_delivery: String,
@@ -248,18 +245,20 @@ pub enum SaidCaller {
     TrustedUser,
 }
 
+/// D-1099: `open` — find or create the core session of a key before its first said (a gateway
+/// that shows the conversation before anyone speaks). Idempotent; there is no list and no close.
 #[derive(Debug, Clone)]
-pub struct CreateBinding {
+pub struct Open {
     pub id: String,
-    pub binding_id: String,
-    pub address: String,
-    pub session_theme: String,
+    pub session_key: String,
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Command {
     pub id: String,
-    pub binding_id: String,
+    /// The gateway's opaque session key (D-1099).
+    pub session_key: String,
     pub caller: SaidCaller,
     pub name: String,
     pub args: serde_json::Map<String, Value>,
@@ -268,8 +267,12 @@ pub struct Command {
 #[derive(Debug, Clone)]
 pub struct Said {
     pub id: String,
-    pub binding_id: String,
+    /// The gateway's opaque session key (D-1099). Core resolves it to its own session.
+    pub session_key: String,
     pub origin: String,
+    /// Optional opaque key other messages use to point at this one (their `reply_target`).
+    /// Core stores it and matches it for conversation references; it never parses `origin`.
+    pub reference: Option<String>,
     pub author_id: String,
     /// Untrusted, display-only label supplied by the gateway.
     pub author_label: Option<String>,
@@ -322,13 +325,12 @@ pub struct WireResponse {
 #[derive(Debug)]
 pub enum InboundMsg {
     Hello(Hello),
-    CreateBinding(CreateBinding),
+    Open(Open),
     Command(Command),
     Said(Said),
     Provisional(Provisional),
     ProvisionalCancel(ProvisionalCancel),
     Interrupt(Interrupt),
-    Provision(Provision),
     Response(WireResponse),
     Reverse {
         id: Option<String>,
@@ -394,8 +396,8 @@ pub fn parse_inbound(obj: &Value) -> Result<InboundMsg, GateError> {
                 m,
             }),
         },
-        "create_binding" => match parse_create_binding(obj) {
-            Ok(request) => Ok(InboundMsg::CreateBinding(request)),
+        "open" => match parse_open(obj) {
+            Ok(request) => Ok(InboundMsg::Open(request)),
             Err(e) => Ok(InboundMsg::Invalid {
                 id: opt_id(obj),
                 code: e.code,
@@ -434,14 +436,6 @@ pub fn parse_inbound(obj: &Value) -> Result<InboundMsg, GateError> {
                 m,
             }),
         },
-        "provision" => match provision::parse_provision(obj) {
-            Ok(p) => Ok(InboundMsg::Provision(p)),
-            Err(e) => Ok(InboundMsg::Invalid {
-                id: opt_id(obj),
-                code: e.code,
-                m,
-            }),
-        },
         "command" => match parse_command(obj) {
             Ok(command) => Ok(InboundMsg::Command(command)),
             Err(e) => Ok(InboundMsg::Invalid {
@@ -458,7 +452,7 @@ pub fn parse_inbound(obj: &Value) -> Result<InboundMsg, GateError> {
                 m,
             }),
         },
-        "bind" | "say" | "activity" => Ok(InboundMsg::Reverse { id: opt_id(obj), m }),
+        "say" | "activity" => Ok(InboundMsg::Reverse { id: opt_id(obj), m }),
         _ => Ok(InboundMsg::Unknown { id: opt_id(obj), m }),
     }
 }
@@ -467,11 +461,7 @@ fn parse_hello(obj: &Value) -> Result<Hello, GateError> {
     let id = parse_request_id(&require_str(obj, "id")?)?;
     let protocol = require_u64(obj, "protocol")?;
     let instance_id = parse_uuid(&require_str(obj, "instance_id")?)?;
-    let revision = require_u64(obj, "revision")?;
-    if revision == 0 {
-        return Err(GateError::new(ErrorCode::BadRequest));
-    }
-    let config_digest = parse_digest(&require_str(obj, "config_digest")?)?;
+    let agent_id = nonempty_str(obj, "agent_id")?;
     let operation_protocol = require_u64(obj, "operation_protocol")?;
     let final_delivery = require_str(obj, "final_delivery")?;
     let operations = obj
@@ -482,8 +472,7 @@ fn parse_hello(obj: &Value) -> Result<Hello, GateError> {
         id,
         protocol,
         instance_id,
-        revision,
-        config_digest,
+        agent_id,
         operation_protocol,
         final_delivery,
         operations,
@@ -491,22 +480,32 @@ fn parse_hello(obj: &Value) -> Result<Hello, GateError> {
     })
 }
 
-fn parse_create_binding(obj: &Value) -> Result<CreateBinding, GateError> {
+fn parse_open(obj: &Value) -> Result<Open, GateError> {
     let id = parse_request_id(&require_str(obj, "id")?)?;
-    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
-    let address = nonempty_str(obj, "address")?;
-    let session_theme = nonempty_str(obj, "session_theme")?;
-    Ok(CreateBinding {
+    let session_key = parse_session_key(obj)?;
+    let title = optional_bounded_text(obj.get("title"), 256)?;
+    Ok(Open {
         id,
-        binding_id,
-        address,
-        session_theme,
+        session_key,
+        title,
     })
+}
+
+/// Upper bound of a session key, in bytes.
+pub const MAX_SESSION_KEY_BYTES: usize = 512;
+
+/// The opaque session key every session-scoped frame carries (D-1099).
+pub(crate) fn parse_session_key(obj: &Value) -> Result<String, GateError> {
+    let key = nonempty_str(obj, "session")?;
+    if key.len() > MAX_SESSION_KEY_BYTES || key.chars().any(char::is_control) {
+        return Err(GateError::new(ErrorCode::BadRequest));
+    }
+    Ok(key)
 }
 
 fn parse_command(obj: &Value) -> Result<Command, GateError> {
     let id = parse_request_id(&require_str(obj, "id")?)?;
-    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
+    let session_key = parse_session_key(obj)?;
     let caller_value = obj
         .get("caller")
         .filter(|value| value.is_object())
@@ -520,7 +519,7 @@ fn parse_command(obj: &Value) -> Result<Command, GateError> {
         .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
     Ok(Command {
         id,
-        binding_id,
+        session_key,
         caller,
         name,
         args,
@@ -529,8 +528,9 @@ fn parse_command(obj: &Value) -> Result<Command, GateError> {
 
 fn parse_said(obj: &Value) -> Result<Said, GateError> {
     let id = parse_request_id(&require_str(obj, "id")?)?;
-    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
+    let session_key = parse_session_key(obj)?;
     let origin = nonempty_str(obj, "origin")?;
+    let reference = optional_bounded_text(obj.get("ref"), 4_096)?;
     let author_id = nonempty_str(obj, "author_id")?;
     let author_label = parse_author_label(obj.get("author_label"))?;
     let caller = parse_said_caller(obj.get("caller"))?;
@@ -561,8 +561,9 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
     }
     Ok(Said {
         id,
-        binding_id,
+        session_key,
         origin,
+        reference,
         author_id,
         author_label,
         caller,
@@ -790,9 +791,6 @@ pub use provisional::{provisional_result_frame, Provisional, ProvisionalCancel};
 
 mod interrupt;
 pub use interrupt::Interrupt;
-
-mod provision;
-pub use provision::{Provision, ProvisionBinding};
 
 #[cfg(test)]
 #[path = "protocol/activity_tests.rs"]

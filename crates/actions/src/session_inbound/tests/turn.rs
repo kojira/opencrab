@@ -10,7 +10,7 @@ fn web_inbound<'a>(
         sender_id,
         sender_name: "",
         avatar_url: None,
-        channel_id: None,
+        session_key: None,
         pubkey: None,
         text,
         image_urls: &[],

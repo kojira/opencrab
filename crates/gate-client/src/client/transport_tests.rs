@@ -4,7 +4,6 @@ use tokio::net::UnixListener;
 use tokio::sync::Semaphore;
 
 const ADDRESS: &str = "test:transport";
-const BINDING: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 struct HeldHandler {
     started: mpsc::UnboundedSender<String>,
@@ -57,20 +56,13 @@ async fn connect(
     socket: PathBuf,
     listener: &UnixListener,
 ) -> UnixStream {
-    let task = tokio::spawn(async move { attach(&client, &socket, 1, &"0".repeat(64)).await });
+    let task = tokio::spawn(async move { attach(&client, &socket).await });
     let (mut core, _) = listener.accept().await.unwrap();
     let hello = read(&mut core).await;
     write_json(&mut core, &json!({"id": hello["id"], "m": "ok"}))
         .await
         .unwrap();
     task.await.unwrap().unwrap();
-    write_json(
-        &mut core,
-        &json!({"id":"bind", "m":"bind", "binding_id": BINDING, "address": ADDRESS}),
-    )
-    .await
-    .unwrap();
-    assert_eq!(read(&mut core).await, json!({"id":"bind", "m":"ok"}));
     core
 }
 
@@ -95,6 +87,7 @@ impl Fixture {
         }]);
         let client = Arc::new(InstanceClient::blank(
             "instance".into(),
+            "agent".into(),
             "author".into(),
             SayPolicy::AcceptToLiveQueue,
             Some(operations),
@@ -122,7 +115,7 @@ impl Fixture {
         .unwrap();
         write_json(
             &mut self.core,
-            &json!({"m":"invoke", "id":id, "binding_id":BINDING,
+            &json!({"m":"invoke", "id":id, "session":ADDRESS,
             "declaration_digest":digest, "operation":"deliver", "dispatch":"background",
             "effect":"utterance", "invocation_protocol":1, "payload":{}}),
         )
@@ -144,7 +137,7 @@ impl Fixture {
     async fn activity(&mut self, state: &str) {
         write_json(
             &mut self.core,
-            &json!({"m":"activity", "binding_id":BINDING,
+            &json!({"m":"activity", "session":ADDRESS,
             "activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "state":state}),
         )
         .await
@@ -263,6 +256,7 @@ async fn cancellation_case(explicit: bool) {
             ok: true,
             seq: None,
             result: None,
+            session_id: None,
             code: None,
             message: None,
             detail: None,
@@ -279,7 +273,7 @@ async fn activity_frames_reach_the_live_queue_without_a_reply() {
     let mut f = Fixture::new().await;
     write_json(
         &mut f.core,
-        &json!({"m":"tool_activity", "binding_id":BINDING, "activity_id":"act-1",
+        &json!({"m":"tool_activity", "session":ADDRESS, "activity_id":"act-1",
         "call_id":"call-1", "tool":"execute_shell", "status":"started", "depth":0,
         "started_at":"2026-10-20T00:00:00Z", "args":{"command":"ls"}}),
     )
@@ -287,7 +281,7 @@ async fn activity_frames_reach_the_live_queue_without_a_reply() {
     .unwrap();
     write_json(
         &mut f.core,
-        &json!({"m":"subtask_lifecycle", "binding_id":BINDING, "run_id":"run-1",
+        &json!({"m":"subtask_lifecycle", "session":ADDRESS, "run_id":"run-1",
         "status":"started", "label":"task", "task":"do it"}),
     )
     .await
@@ -348,7 +342,7 @@ async fn pending_frame_overflow_closes_and_discards_work() {
             write_json(
                 &mut writer,
                 &json!({"m":"invoke", "id":format!("queued-{i}"),
-                "binding_id":BINDING, "declaration_digest":digest, "operation":"deliver",
+                "session":ADDRESS, "declaration_digest":digest, "operation":"deliver",
                 "dispatch":"background", "effect":"utterance", "invocation_protocol":1,
                 "payload":{}}),
             )
@@ -384,7 +378,7 @@ async fn pending_frame_overflow_closes_and_discards_work() {
     // The next ordinary frame exceeds the bound; responses did not consume queue capacity.
     write_json(
         &mut writer,
-        &json!({"m":"activity", "binding_id":BINDING,
+        &json!({"m":"activity", "session":ADDRESS,
         "activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "state":"ended"}),
     )
     .await

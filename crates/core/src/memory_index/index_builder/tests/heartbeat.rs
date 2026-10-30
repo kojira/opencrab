@@ -467,7 +467,7 @@
             content: content.to_string(),
             speaker_id: Some(agent_id.to_string()),
             turn_number: None,
-            metadata_json: Some(opencrab_db::queries::HEARTBEAT_CHANNEL_ECHO_METADATA.to_string()),
+            metadata_json: Some(opencrab_db::queries::HEARTBEAT_ECHO_METADATA.to_string()),
             created_at: None,
         };
         opencrab_db::queries::insert_session_log(conn, &log).unwrap();

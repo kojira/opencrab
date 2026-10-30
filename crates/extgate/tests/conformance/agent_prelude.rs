@@ -20,7 +20,7 @@ fn session_rows(h: &Harness, session_id: &str) -> Vec<(String, Option<String>, S
 
 fn said_with_prelude(id: &str, binding_id: &str, prelude: Option<&str>) -> Value {
     let mut frame = json!({
-        "id": id, "m": "said", "binding_id": binding_id,
+        "id": id, "m": "said", "session": binding_id,
         "origin": format!("o-{id}"), "author_id": "u1",
         "model_profile": "realtime",
         "text": "hello", "attachments": []
@@ -36,7 +36,7 @@ async fn agent_prelude_is_recorded_after_the_said_and_not_delivered() {
     let h = Harness::start().await;
     *h.runtime.reply.lock().unwrap() = "NO_REPLY".into();
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
 
     write_frame(&mut s, &said_with_prelude("p1", &binding_id, Some("うん、"))).await;
     assert_eq!(read_said_response(&mut s, "p1").await["m"], "ok");
@@ -84,7 +84,7 @@ async fn said_without_agent_prelude_records_only_the_said() {
     let h = Harness::start().await;
     *h.runtime.reply.lock().unwrap() = "NO_REPLY".into();
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
 
     write_frame(&mut s, &said_with_prelude("p1", &binding_id, None)).await;
     assert_eq!(read_said_response(&mut s, "p1").await["m"], "ok");
@@ -105,7 +105,7 @@ async fn said_without_agent_prelude_records_only_the_said() {
 async fn oversized_agent_prelude_is_bad_request_and_records_nothing() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
 
     let long = "あ".repeat(65);
     write_frame(&mut s, &said_with_prelude("p1", &binding_id, Some(&long))).await;

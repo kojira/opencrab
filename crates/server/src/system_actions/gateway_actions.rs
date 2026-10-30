@@ -34,7 +34,7 @@ impl SystemGatewayActions {
 impl GatewayActions for SystemGatewayActions {
     fn definitions(&self) -> Vec<GatewayActionDef> {
         Self::merge_definitions(
-            Self::own_definitions_with_a2ui(self.a2ui.is_some()),
+            Self::own_definitions(),
             self.inner.as_ref(),
         )
     }
@@ -103,23 +103,6 @@ impl GatewayActions for SystemGatewayActions {
                 )
                 .await
             }
-            // A2UI 送信（#156 S3）。Discord 側の実装は撤去済みなので inner へは委譲しない
-            // （委譲パターンにすると二重定義を招く）。描画面が無い transport では
-            // `definitions()` に出ないが、モデルが名前で呼んだ場合に備えて明示エラーを返す
-            // （fail-closed。黙って inner へ落とさない）。
-            "send_ui" => match &self.a2ui {
-                Some(surface) => {
-                    opencrab_actions::send_ui(&self.state.db, surface, args, ctx).await
-                }
-                None => GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some(
-                        "send_ui はこのゲートウェイでは利用できません（UI を描画できません）"
-                            .to_string(),
-                    ),
-                },
-            },
             // subtask 停止（#161 / #157 S2）。transport 非依存の唯一の実装（Discord 側の
             // 実装は撤去済み）。**inner へは委譲しない**: 委譲パターンのままにすると、
             // Discord が誤って `cancel_subtask` を再定義したときに own の実装（lifecycle
@@ -157,18 +140,5 @@ impl GatewayActions for SystemGatewayActions {
         }
     }
 
-    /// transport の A2UI 描画面を**そのまま外へ通す**（#156 S3）。
-    ///
-    /// 本番の sub-engine 配線は入れ子（`spawn_subtask` が `ctx.root_gateway` = この合成
-    /// gateway を子へ渡し、子の `run_agent_response` がそれを `inner` にして**もう 1 段**
-    /// 合成 gateway を作り、`SubEngineGatewayActions` で包む）。ここで転送しないと、
-    /// 内側の合成 gateway は描画面を得られず `send_ui` を定義しないため、sub-engine から
-    /// 名前指定で呼ばれたときの拒否が「権限拒否（`rejected:`）」ではなく
-    /// 「Unknown gateway action」に変わる（遮断自体は保たれるが分類が変わる）。
-    /// 移設前は Discord gateway が最内まで `inner` として届いていたので `send_ui` は
-    /// 常に「実在するが許可外」だった。その分類を保つための転送。
-    fn a2ui_surface(&self) -> Option<Arc<opencrab_core::a2ui::A2uiSurface>> {
-        self.a2ui.clone()
-    }
 
 }

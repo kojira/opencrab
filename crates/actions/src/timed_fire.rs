@@ -1,6 +1,6 @@
 //! Generic timed-turn routing for core-owned schedules.
-//! A route is identified only by canonical core binding/session IDs; no transport descriptor,
-//! platform token, or concrete lifecycle registry participates.
+//! A route is core's session and its gateway record (D-1099); no transport descriptor, platform
+//! token, or concrete lifecycle registry participates.
 
 use crate::CallerIdentity;
 use std::sync::{Arc, Mutex};
@@ -22,6 +22,7 @@ pub fn new_turn_id() -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FireTarget {
+    /// Core's internal record of the session's gateway key.
     pub binding_id: String,
     pub session_id: String,
 }
@@ -64,25 +65,22 @@ impl TimedFireRouter {
         self.sink.lock().unwrap().is_some()
     }
 
-    /// Resolve only the canonical generic binding authority. Exact aliases and global-address
-    /// fallbacks have already converged to one binding row; no external address is parsed here.
+    /// The gateway record a core session leads to (D-1099). An ambiguous session is not fired.
     pub fn resolve_persisted_target(
         &self,
         conn: &rusqlite::Connection,
         session_id: &str,
         agent_id: &str,
     ) -> Option<FireTarget> {
-        use opencrab_db::queries::CanonicalGateBindingLookup;
-        match opencrab_db::queries::lookup_canonical_gate_binding(conn, session_id).ok()? {
-            CanonicalGateBindingLookup::Match(binding) if binding.agent_id == agent_id => {
-                Some(FireTarget {
-                    binding_id: binding.binding_id,
-                    session_id: session_id.to_string(),
-                })
-            }
-            CanonicalGateBindingLookup::Match(_)
-            | CanonicalGateBindingLookup::NotFound
-            | CanonicalGateBindingLookup::Ambiguous => None,
+        use opencrab_db::queries::GateSessionLookup;
+        match opencrab_db::queries::gate_session_for_session_id(conn, session_id).ok()? {
+            GateSessionLookup::Match(found) if found.agent_id == agent_id => Some(FireTarget {
+                binding_id: found.row_id,
+                session_id: session_id.to_string(),
+            }),
+            GateSessionLookup::Match(_)
+            | GateSessionLookup::NotFound
+            | GateSessionLookup::Ambiguous => None,
         }
     }
 

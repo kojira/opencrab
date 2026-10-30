@@ -14,7 +14,7 @@
 //! ## transport 中立化（#158 S3 / #156 S6）
 //!
 //! 以前は Discord 用の関数だけが `#[cfg(feature = "discord")]` 配下にあった。理由は
-//! シグネチャが `opencrab_discord` の型（`DiscordReplyContext` / `InteractionRecord`）を
+//! シグネチャが `opencrab_discord` の型（`DiscordReplyContext`）を
 //! 引いていたことだけで、行の形自体は Nostr と同型だった。型を
 //! `opencrab_actions::transcript` へ移したので機能フラグは不要になり、受信発話と
 //! エージェント応答は **由来（[`TranscriptSource`]）を引数で受ける 1 つの関数**に統合した。
@@ -33,8 +33,7 @@
 //! この不変条件が守られている限り web は無変更で動く。
 
 use opencrab_actions::transcript::{
-    AgentReplyContext, InboundMessageRecord, InteractionRecord, OutboundReplyRecord,
-    TranscriptSource,
+    AgentReplyContext, InboundMessageRecord, OutboundReplyRecord, TranscriptSource,
 };
 use opencrab_db::queries::{insert_session_log_best_effort, SessionLogRow};
 use rusqlite::Connection;
@@ -158,50 +157,16 @@ pub fn record_rest_agent_reply(
     );
 }
 
-/// A2UI インタラクション応答の記録。
-pub fn record_interaction_response(
-    conn: &Connection,
-    agent_id: &str,
-    session_id: &str,
-    record: &InteractionRecord<'_>,
-) {
-    insert_session_log_best_effort(
-        conn,
-        &SessionLogRow {
-            id: None,
-            agent_id: agent_id.to_string(),
-            session_id: session_id.to_string(),
-            log_type: "interaction_response".to_string(),
-            content: record.content.to_string(),
-            speaker_id: Some("system".to_string()),
-            turn_number: None,
-            metadata_json: Some(
-                serde_json::json!({
-                    "interaction_id": record.interaction_id,
-                    "surface_id": record.surface_id,
-                    "action_name": record.action_name,
-                    "component_id": record.component_id,
-                    "responder_id": record.responder_id,
-                })
-                .to_string(),
-            ),
-            created_at: None,
-        },
-    );
-}
-
 /// 受信発話の `metadata_json`。
 ///
-/// キーの有無は統合前と同じ条件に保つ: Discord は `channel_id`（Nostr には無い）、
-/// Nostr は `pubkey`（Discord には無い）、`user_avatar_url` / `image_urls` は
-/// 値があるときだけ出す。
+/// 値があるキーだけ出す（`session_key` / `pubkey` / `user_avatar_url` / `image_urls`）。
 fn inbound_metadata_json(source: TranscriptSource, record: &InboundMessageRecord<'_>) -> String {
     let mut meta = serde_json::json!({
         "source": source.inbound(),
         "user_name": record.sender_name,
     });
-    if let Some(channel_id) = record.channel_id {
-        meta["channel_id"] = serde_json::json!(channel_id);
+    if let Some(session_key) = record.session_key {
+        meta["session_key"] = serde_json::json!(session_key);
     }
     if let Some(pubkey) = record.pubkey {
         meta["pubkey"] = serde_json::json!(pubkey);
@@ -218,8 +183,8 @@ fn inbound_metadata_json(source: TranscriptSource, record: &InboundMessageRecord
 /// エージェント応答の `metadata_json`。
 fn outbound_metadata_json(source: TranscriptSource, record: &OutboundReplyRecord<'_>) -> String {
     let mut meta = serde_json::json!({ "source": source.reply() });
-    if let Some(channel_id) = record.channel_id {
-        meta["channel_id"] = serde_json::json!(channel_id);
+    if let Some(session_key) = record.session_key {
+        meta["session_key"] = serde_json::json!(session_key);
     }
     match &record.context {
         // 起動要因を記録しない由来（Nostr）: `source` だけの形を保つ。
@@ -229,10 +194,6 @@ fn outbound_metadata_json(source: TranscriptSource, record: &OutboundReplyRecord
         }
         Some(AgentReplyContext::SubtaskCompleted) => {
             meta["triggered_by"] = serde_json::json!("subtask_completed");
-        }
-        Some(AgentReplyContext::InteractionResponse { interaction_id }) => {
-            meta["triggered_by"] = serde_json::json!("interaction_response");
-            meta["interaction_id"] = serde_json::json!(interaction_id);
         }
     }
     meta.to_string()
@@ -258,7 +219,7 @@ mod tests {
             sender_id: "111",
             sender_name: "エージェントC",
             avatar_url,
-            channel_id: Some("222"),
+            session_key: Some("222"),
             pubkey: None,
             text: "こんにちは",
             image_urls,
@@ -272,7 +233,7 @@ mod tests {
                 TranscriptSource::new("test-in", "test-out"),
                 &discord_inbound(None, &[])
             ),
-            r#"{"channel_id":"222","source":"test-in","user_name":"エージェントC"}"#
+            r#"{"session_key":"222","source":"test-in","user_name":"エージェントC"}"#
         );
     }
 
@@ -287,7 +248,7 @@ mod tests {
                 TranscriptSource::new("test-in", "test-out"),
                 &discord_inbound(Some("https://cdn/avatar.png"), &images)
             ),
-            r#"{"channel_id":"222","image_urls":["https://cdn/a.png","https://cdn/b.png"],"source":"test-in","user_avatar_url":"https://cdn/avatar.png","user_name":"エージェントC"}"#
+            r#"{"image_urls":["https://cdn/a.png","https://cdn/b.png"],"session_key":"222","source":"test-in","user_avatar_url":"https://cdn/avatar.png","user_name":"エージェントC"}"#
         );
     }
 
@@ -299,7 +260,7 @@ mod tests {
             sender_id: "npub-hex",
             sender_name: "だれか",
             avatar_url: None,
-            channel_id: None,
+            session_key: None,
             pubkey: Some("npub-hex"),
             text: "よろしく",
             image_urls: &[],
@@ -310,11 +271,11 @@ mod tests {
         );
     }
 
-    fn discord_reply(context: Option<AgentReplyContext<'_>>) -> OutboundReplyRecord<'_> {
+    fn discord_reply(context: Option<AgentReplyContext>) -> OutboundReplyRecord<'static> {
         OutboundReplyRecord {
             agent_id: "agent-1",
             session_id: "sess-1",
-            channel_id: Some("222"),
+            session_key: Some("222"),
             text: "はい",
             context,
         }
@@ -327,7 +288,7 @@ mod tests {
                 TranscriptSource::new("test-in", "test-out"),
                 &discord_reply(Some(AgentReplyContext::Direct { tool_calls_made: 3 }))
             ),
-            r#"{"channel_id":"222","source":"test-out","tool_calls_made":3}"#
+            r#"{"session_key":"222","source":"test-out","tool_calls_made":3}"#
         );
     }
 
@@ -338,20 +299,7 @@ mod tests {
                 TranscriptSource::new("test-in", "test-out"),
                 &discord_reply(Some(AgentReplyContext::SubtaskCompleted))
             ),
-            r#"{"channel_id":"222","source":"test-out","triggered_by":"subtask_completed"}"#
-        );
-    }
-
-    #[test]
-    fn discord_interaction_reply_metadata_is_byte_identical() {
-        assert_eq!(
-            outbound_metadata_json(
-                TranscriptSource::new("test-in", "test-out"),
-                &discord_reply(Some(AgentReplyContext::InteractionResponse {
-                    interaction_id: "int-9"
-                }))
-            ),
-            r#"{"channel_id":"222","interaction_id":"int-9","source":"test-out","triggered_by":"interaction_response"}"#
+            r#"{"session_key":"222","source":"test-out","triggered_by":"subtask_completed"}"#
         );
     }
 
@@ -360,7 +308,7 @@ mod tests {
         let record = OutboundReplyRecord {
             agent_id: "agent-1",
             session_id: "sess-1",
-            channel_id: None,
+            session_key: None,
             text: "はい",
             context: None,
         };
@@ -370,19 +318,19 @@ mod tests {
         );
     }
 
-    /// 宛先の識別子（web の表示が参照する `channel_id`）を落としていないこと。
+    /// 宛先の識別子（`session_key`）を落としていないこと。
     #[test]
     fn discord_rows_keep_destination_id() {
         assert!(inbound_metadata_json(
             TranscriptSource::new("test-in", "test-out"),
             &discord_inbound(None, &[])
         )
-        .contains(r#""channel_id":"222""#));
+        .contains(r#""session_key":"222""#));
         assert!(outbound_metadata_json(
             TranscriptSource::new("test-in", "test-out"),
             &discord_reply(Some(AgentReplyContext::Direct { tool_calls_made: 0 }))
         )
-        .contains(r#""channel_id":"222""#));
+        .contains(r#""session_key":"222""#));
     }
 
     /// 書き込みまで通した行の形（agent_id / speaker_id / log_type / metadata）。
@@ -422,14 +370,14 @@ mod tests {
                     "agent-1".to_string(),
                     "111".to_string(),
                     "speech".to_string(),
-                    r#"{"channel_id":"222","source":"test-in","user_name":"エージェントC"}"#
+                    r#"{"session_key":"222","source":"test-in","user_name":"エージェントC"}"#
                         .to_string(),
                 ),
                 (
                     "agent-1".to_string(),
                     "agent-1".to_string(),
                     "speech".to_string(),
-                    r#"{"channel_id":"222","source":"test-out","triggered_by":"subtask_completed"}"#
+                    r#"{"session_key":"222","source":"test-out","triggered_by":"subtask_completed"}"#
                         .to_string(),
                 ),
             ]
@@ -448,7 +396,7 @@ mod tests {
             sender_id: "peer-9",
             sender_name: "peer",
             avatar_url: None,
-            channel_id: None,
+            session_key: None,
             pubkey: Some("peer-9"),
             text: "how many grams does pasta weigh",
             image_urls: &[],

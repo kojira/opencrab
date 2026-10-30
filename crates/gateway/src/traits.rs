@@ -62,7 +62,7 @@ impl GatewayCaller {
 ///
 /// 逆向き（`CallerIdentity` → [`GatewayCaller`]）は
 /// `BridgedExecutor::gateway_call_context` が行う。両者は同型なので写像は無損失で、
-/// `GatewayCallContext` しか持たないツールハンドラ（`spawn_subtask` / `send_ui`）が
+/// `GatewayCallContext` しか持たないツールハンドラ（`spawn_subtask` など）が
 /// 「この run の呼び出し元」をそのまま記録できるようにするために必要。
 /// **権限を変換しない**（昇格も降格もしない）。
 ///
@@ -112,8 +112,7 @@ pub struct GatewayCallContext {
     ///
     /// `RunRequest.reply_target`（#167）と**同じ不透明トークン**をツール実行の文脈まで
     /// 運ぶ。宛先を引数で受けるアクションが、引数省略時のフォールバックとして使う。
-    /// トークンの解釈は各 gateway の責務（Discord は
-    /// channel id の数値文字列、Nostr は返信先イベント id）。
+    /// トークンの解釈は各 gateway の責務（core は中身を読まない）。
     ///
     /// 既定 `None`（後方互換 — 宛先を明示するツール呼び出しは従来どおり動く）。
     /// `None` かつ引数も無い場合は空文字で送らず明示エラーにする（fail-closed）。
@@ -201,18 +200,6 @@ pub trait GatewayActions: Send + Sync {
         args: &serde_json::Value,
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult;
-
-    /// この transport が A2UI（`send_ui`）の描画面を提供するなら返す（#156 S3）。
-    ///
-    /// `send_ui` の**実体は gateway 非依存層**（`opencrab_actions::a2ui`）にあるが、
-    /// 描画とユーザー応答の受け取りは transport にしか作れない。合成 gateway
-    /// （`SystemGatewayActions`）はこのメソッドで transport の描画面を引き、
-    /// **提供する transport のターンでだけ** `send_ui` を露出する。
-    ///
-    /// 既定は `None`（A2UI を描画できない transport）。
-    fn a2ui_surface(&self) -> Option<Arc<opencrab_core::a2ui::A2uiSurface>> {
-        None
-    }
 }
 
 /// ツール定義が自ら名乗る分類。
@@ -286,7 +273,7 @@ pub fn utterance_body(
 pub enum SubEngineAccess {
     /// sub-engine に見せて実行も許す。現状は `report_progress` / `nostr_generate_key` のみ。
     Allowed,
-    /// depth>=1 で明示的に拒否する（多層防御）。配送系（`send_ui` /
+    /// depth>=1 で明示的に拒否する（多層防御）。配送系（
     /// discord 送信・VC 参加退出など）。
     Blocked,
     /// 既定。許可リストに載せない（許可・拒否のどちらでもない大多数）。
@@ -301,23 +288,14 @@ pub enum SubEngineAccess {
 /// 投稿 ID）を必須引数に取る、または対話中の live セッションに束縛される（応答を待つ）
 /// ツール。それ以外はすべて `AgentBound`。**
 ///
-/// 2 つ目の条件（live セッション束縛）は必須引数だけを見ても分からない点に注意:
-/// `send_ui` の必須引数は `channel_id`（永続）と `components` だけだが、投稿後に
-/// ユーザーの応答（クリック等）をそのやりとりの中で待つため `ConversationBound`。
-/// 必須引数だけで判断すると `send_ui` 型を `AgentBound` と誤分類する。
-///
-/// 現時点で `ConversationBound` は次の 3 つだけ:
-/// - `discord_add_reaction` — 必須引数 `message_id`（その会話のメッセージ）。
-/// - `nostr_reply` — 必須引数 `target`（受信した投稿の note id）。
-/// - `send_ui` — 対話中の live セッションに束縛される（応答を待つ）。
+/// 2 つ目の条件（live セッション束縛）は必須引数だけを見ても分からない点に注意。
 ///
 /// この段階（PR-2A）ではまだ消費者が無い（挙動に影響しない）。後から共有の機構が
 /// この属性を読むので、形を今のうちに確定させる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolSharing {
     /// 会話固有の一時ハンドルを必須引数に取る、または対話中の live セッションに束縛される
-    /// （応答を待つ）。実例: リアクションの `message_id` / Nostr 返信の投稿 id /
-    /// UI 送信（応答待ち）。
+    /// （応答を待つ）。実例: リアクションの対象メッセージ / 返信の対象投稿。
     ConversationBound,
     /// 会話に縛られず、エージェント全体で共有できる。
     AgentBound,

@@ -85,7 +85,7 @@ pub fn survey_my_history(
         &format!(
             "SELECT COUNT(*), COUNT(DISTINCT session_id), MIN(id), MAX(id),
                     COALESCE(SUM(LENGTH(content)), 0)
-                 FROM memory_sessions WHERE agent_id = ?1 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+                 FROM memory_sessions WHERE agent_id = ?1 AND {EXCLUDE_HEARTBEAT_ECHO_SQL}"
         ),
         params![agent_id],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
@@ -93,7 +93,7 @@ pub fn survey_my_history(
     let total_buckets: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM (SELECT {bucket_expr} AS bkt FROM memory_sessions
-             WHERE agent_id = ?1 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL} GROUP BY bkt)"
+             WHERE agent_id = ?1 AND {EXCLUDE_HEARTBEAT_ECHO_SQL} GROUP BY bkt)"
         ),
         params![agent_id],
         |r| r.get(0),
@@ -102,7 +102,7 @@ pub fn survey_my_history(
         let sql = format!(
             "SELECT {bucket_expr} AS bkt, COUNT(*), COUNT(DISTINCT session_id), MIN(id), MAX(id),
                     COALESCE(SUM(LENGTH(content)), 0)
-             FROM memory_sessions WHERE agent_id = ?1 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}
+             FROM memory_sessions WHERE agent_id = ?1 AND {EXCLUDE_HEARTBEAT_ECHO_SQL}
              GROUP BY bkt ORDER BY bkt DESC LIMIT ?2"
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -132,7 +132,7 @@ pub fn survey_my_history(
         let sql = format!(
             "SELECT {bucket_expr} AS bkt, log_type, COUNT(*)
              FROM memory_sessions WHERE agent_id = ?1 AND {bucket_expr} >= ?2
-               AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}
+               AND {EXCLUDE_HEARTBEAT_ECHO_SQL}
              GROUP BY bkt, log_type"
         );
         let mut stmt = conn.prepare(&sql)?;

@@ -3,7 +3,7 @@
 // utterance was carried; it only records the text the gateway reports.
 
 fn interrupt_frame(id: &str, binding_id: &str, delivered: Option<&str>) -> Value {
-    let mut frame = json!({"id": id, "m": "interrupt", "binding_id": binding_id});
+    let mut frame = json!({"id": id, "m": "interrupt", "session": binding_id});
     if let Some(delivered) = delivered {
         frame["delivered"] = json!(delivered);
     }
@@ -106,7 +106,7 @@ async fn interrupt_stops_the_running_turn_and_the_next_turn_starts() {
 async fn interrupt_logs_a_running_tool_as_stopped_and_keeps_subtasks() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     let subtask = tokio::spawn(std::future::pending::<()>());
     h.runtime
         .registries
@@ -140,7 +140,7 @@ async fn interrupt_logs_a_running_tool_as_stopped_and_keeps_subtasks() {
 async fn interrupt_before_the_say_records_the_delivered_part_and_the_note() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     start_held_turn(&h, &mut s, &binding_id, "v1").await;
 
     write_frame(&mut s, &interrupt_frame("i1", &binding_id, Some("一文目。"))).await;
@@ -167,7 +167,7 @@ async fn interrupt_before_the_say_records_the_delivered_part_and_the_note() {
 async fn interrupt_after_a_recorded_say_keeps_it_and_adds_the_note() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     h.runtime
         .partial_script
         .set(vec![PartialStep::Say("一文目。二文目。")]);
@@ -201,7 +201,7 @@ async fn interrupt_after_a_recorded_say_keeps_it_and_adds_the_note() {
 async fn interrupt_with_empty_delivered_records_that_nothing_was_delivered() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     start_held_turn(&h, &mut s, &binding_id, "v1").await;
 
     write_frame(&mut s, &interrupt_frame("i1", &binding_id, Some(""))).await;
@@ -226,7 +226,7 @@ async fn interrupt_with_empty_delivered_records_that_nothing_was_delivered() {
 async fn interrupt_without_a_running_turn_records_the_note_after_the_say() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     *h.runtime.reply.lock().unwrap() = "一文目。二文目。".into();
     write_frame(&mut s, &said_frame_with_profile("v1", &binding_id, "o-v1", Some("realtime")))
         .await;
@@ -257,7 +257,7 @@ async fn interrupt_without_a_running_turn_records_the_note_after_the_say() {
 async fn interrupt_without_a_running_turn_or_delivered_is_a_no_op() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     let before = session_log_rows(&h, &session_id);
 
     write_frame(&mut s, &interrupt_frame("i1", &binding_id, None)).await;
@@ -276,6 +276,6 @@ async fn interrupt_with_a_malformed_field_is_bad_request() {
     frame["delivered"] = json!(42);
     write_frame(&mut s, &frame).await;
     assert_eq!(read_said_response(&mut s, "i1").await["code"], "bad_request");
-    write_frame(&mut s, &json!({"id": "i2", "m": "interrupt", "binding_id": "not-a-uuid"})).await;
+    write_frame(&mut s, &json!({"id": "i2", "m": "interrupt", "session": ""})).await;
     assert_eq!(read_said_response(&mut s, "i2").await["code"], "bad_request");
 }

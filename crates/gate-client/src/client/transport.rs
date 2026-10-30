@@ -9,8 +9,6 @@ async fn send_frame(client: &InstanceClient, value: Value) -> bool {
 async fn attach(
     client: &Arc<InstanceClient>,
     socket: &std::path::Path,
-    revision: u64,
-    config_digest: &str,
 ) -> Result<(), FrameError> {
     // A replacement cannot become visible until all old connection futures are dropped.
     if let Some(previous) = client.connection.lock().await.take() {
@@ -27,7 +25,6 @@ async fn attach(
         inner.generation = inner.generation.saturating_add(1);
         inner.closed = false;
         inner.stop = Some(stop_tx);
-        inner.acknowledged.clear();
         inner.pending_said.clear();
         inner.pending_commands.clear();
         inner.expired_commands.clear();
@@ -42,8 +39,7 @@ async fn attach(
         hello_frame_with_capabilities_and_env(
             &hello_id,
             &client.instance_id,
-            revision,
-            config_digest,
+            &client.agent_id,
             client.operations.as_ref(),
             client.runtime_capabilities,
             &client.run_env,
@@ -85,7 +81,7 @@ async fn attach(
             );
             Err(FrameError::Io)
         }
-        Ok(SaidOutcome::Disconnected) => {
+        Ok(SaidOutcome::Disconnected | SaidOutcome::Opened { .. }) => {
             tracing::warn!(
                 instance_id = %client.instance_id,
                 reason = "disconnect",
@@ -96,7 +92,7 @@ async fn attach(
         Err(_) => {
             tracing::warn!(
                 instance_id = %client.instance_id,
-                reason = "channel_closed",
+                reason = "hello_reply_dropped",
                 "hello failed"
             );
             Err(FrameError::Io)
@@ -104,15 +100,10 @@ async fn attach(
     }
 }
 
-async fn reconnect_loop(
-    client: Arc<InstanceClient>,
-    socket: PathBuf,
-    revision: u64,
-    config_digest: String,
-) {
+async fn reconnect_loop(client: Arc<InstanceClient>, socket: PathBuf) {
     let mut backoff = RECONNECT_MIN;
     loop {
-        match attach(&client, &socket, revision, &config_digest).await {
+        match attach(&client, &socket).await {
             Ok(()) => {
                 tracing::info!(instance_id = %client.instance_id, "uds connected");
                 backoff = RECONNECT_MIN;

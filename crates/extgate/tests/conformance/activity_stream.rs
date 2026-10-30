@@ -236,7 +236,7 @@ async fn said_turn_writes_tool_activity_and_subtask_lifecycle_in_order_before_en
         .expect("started activity");
     for frame in &activity {
         assert!(frame.get("id").is_none(), "fire-and-forget frame: {frame}");
-        assert_eq!(frame["binding_id"], json!(binding_id), "{frame}");
+        assert_eq!(frame["session"], json!(binding_id), "{frame}");
     }
     for frame in activity.iter().filter(|f| f["m"] == "tool_activity") {
         assert_eq!(frame["activity_id"], json!(turn_activity_id), "{frame}");

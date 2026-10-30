@@ -25,16 +25,16 @@ pub struct SessionLogRow {
 /// `run_one_heartbeat` が渡す）とは別概念**。値がたまたま同じでも用途が違うので混同しないこと。
 pub const HEARTBEAT_SPEAKER_ID: &str = "heartbeat";
 
-/// ハートビート発話を本人の実会話（`discord-…`）セッションへ二重記録した行の
-/// `metadata_json` に入る `source` 値（#425）。
-pub const HEARTBEAT_CHANNEL_ECHO_SOURCE: &str = "heartbeat_channel_echo";
+/// ハートビート発話を本人の実会話セッションへ二重記録した行の
+/// `metadata_json` に入る `source` 値（#425）。過去行に保存済みの値なので変えない。
+pub const HEARTBEAT_ECHO_SOURCE: &str = "heartbeat_channel_echo";
 
-/// 上記エコー行の `metadata_json` そのもの。読み手は [`is_heartbeat_channel_echo`] で判定
+/// 上記エコー行の `metadata_json` そのもの。読み手は [`is_heartbeat_echo`] で判定
 /// すること（キー順・空白の違いに依存しないため）。
 ///
 /// **#573 Stage B 以降、この印を新規に付ける書き手はいない**（HB 発話の記録を実会話
-/// セッションへ一元化し、#425 エコーを撤去した）。定数と読み手フィルタ（[`is_heartbeat_channel_echo`]
-/// / [`EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL`]）を残しているのは、**Stage B 以前に書かれた既存の
+/// セッションへ一元化し、#425 エコーを撤去した）。定数と読み手フィルタ（[`is_heartbeat_echo`]
+/// / [`EXCLUDE_HEARTBEAT_ECHO_SQL`]）を残しているのは、**Stage B 以前に書かれた既存の
 /// エコー行のためだけ**。撤去できないのは今この時点でのデータ事情によるもので、恒久的な仕様
 /// ではない（撤去条件と追跡は #582）。
 ///
@@ -47,7 +47,7 @@ pub const HEARTBEAT_CHANNEL_ECHO_SOURCE: &str = "heartbeat_channel_echo";
 ///   同じ発話と**二重計上**される。
 /// - **撤去の条件と追跡は #582**（材料として不要になった / 過去行を削除した / 二重計上が
 ///   実害でないと確認できた、のいずれか）。
-pub const HEARTBEAT_CHANNEL_ECHO_METADATA: &str = r#"{"source":"heartbeat_channel_echo"}"#;
+pub const HEARTBEAT_ECHO_METADATA: &str = r#"{"source":"heartbeat_channel_echo"}"#;
 
 /// 行が HB 発話のエコー（**表示専用の二重記録**）かどうか（#425）。
 ///
@@ -55,23 +55,23 @@ pub const HEARTBEAT_CHANNEL_ECHO_METADATA: &str = r#"{"source":"heartbeat_channe
 /// （FTS 検索・記憶索引・宣言材料）には一切載せない**。#425 当時、記憶材料としての HB 発話は
 /// heartbeat 専用セッション側が担っており、症状修正のついでに記憶の挙動を変えないための
 /// フィルタだった。**#573 Stage B 以降、新規の HB 発話は実会話セッションへ第一級で記録され、
-/// エコーは書かれない**（[`HEARTBEAT_CHANNEL_ECHO_METADATA`] 参照）。よって現在この判定が効くのは
+/// エコーは書かれない**（[`HEARTBEAT_ECHO_METADATA`] 参照）。よって現在この判定が効くのは
 /// **Stage B 以前に書かれた既存のエコー行だけ**で、それらの本文と同じ発話は HB 専用セッション側
 /// にも残って索引されるため、ここで落として二重計上を防ぐ。判定は次の 2 箇所で使う:
 /// - [`insert_session_log_at`]: FTS 影テーブルへの投入をスキップ（検索に出さない）。
 /// - `index_builder`: topic 要約の材料から除外（索引・宣言材料に入れない）。
 ///
-/// （#588: HB 文脈の専用会話組み立て `build_channel_conversation_section` は撤去したので、そこでの
+/// （#588: HB 文脈の専用会話組み立ては撤去したので、そこでの
 /// 使用は無くなった。この印は #425 のエコー行を索引・検索から落とすためだけに残る。）
 ///
 /// `source` フィールドの**値**で判定するのでキー順・空白の違いに強い。値が現れない
 /// 大きな `metadata_json`（`tool_call` 等）は substring で早期に弾き、無駄な JSON parse を
 /// 避ける（`insert_session_log_at` は全 insert のホットパス）。
-pub fn is_heartbeat_channel_echo(metadata_json: Option<&str>) -> bool {
+pub fn is_heartbeat_echo(metadata_json: Option<&str>) -> bool {
     let Some(m) = metadata_json else {
         return false;
     };
-    if !m.contains(HEARTBEAT_CHANNEL_ECHO_SOURCE) {
+    if !m.contains(HEARTBEAT_ECHO_SOURCE) {
         return false;
     }
     serde_json::from_str::<serde_json::Value>(m)
@@ -79,24 +79,24 @@ pub fn is_heartbeat_channel_echo(metadata_json: Option<&str>) -> bool {
         .as_ref()
         .and_then(|v| v.get("source"))
         .and_then(|s| s.as_str())
-        == Some(HEARTBEAT_CHANNEL_ECHO_SOURCE)
+        == Some(HEARTBEAT_ECHO_SOURCE)
 }
 
 /// エコー行（表示専用）を記憶系クエリから除外する SQL 述語（#425）。**評価が真の行を保持**
 /// する（＝ WHERE へ `AND {…}` の形でそのまま連結する）。
 ///
-/// `metadata_json` の `source` フィールドで判定し、Rust の [`is_heartbeat_channel_echo`] と
+/// `metadata_json` の `source` フィールドで判定し、Rust の [`is_heartbeat_echo`] と
 /// **同じ行**を除外する（規則「エコーは生きた会話表示にだけ見え、記憶系のあらゆる経路から
 /// 不可視」を SQL 経路でも一貫させる）。
 /// - `metadata_json IS NULL`（大多数の行）は保持。
 /// - malformed JSON は `NOT json_valid(...)` で保持する（`json_extract` がエラーにならない）。
 /// - `source` を持たない/別値の JSON は null 安全 `IS NOT` で保持。
-/// - source が [`HEARTBEAT_CHANNEL_ECHO_SOURCE`] の行だけを落とす。
+/// - source が [`HEARTBEAT_ECHO_SOURCE`] の行だけを落とす。
 ///
 /// バインドパラメータを持たず source リテラルは固定（ユーザ入力を含まない）なので、
 /// 各クエリの WHERE 文字列へそのまま連結してよい。リテラルが上記 source 定数と一致することは
 /// 単体テストで固定する（drift ガード）。
-pub const EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL: &str = "(metadata_json IS NULL OR NOT json_valid(metadata_json) OR json_extract(metadata_json, '$.source') IS NOT 'heartbeat_channel_echo')";
+pub const EXCLUDE_HEARTBEAT_ECHO_SQL: &str = "(metadata_json IS NULL OR NOT json_valid(metadata_json) OR json_extract(metadata_json, '$.source') IS NOT 'heartbeat_channel_echo')";
 
 /// `insert_session_log` の best-effort 版: 失敗を握り潰さず warn を残す（#47）。
 ///
@@ -169,9 +169,9 @@ pub fn insert_session_log_at(
     // 埋め戻すことはない（唯一の投入口はこの関数）。
     //
     // ⚠️ 将来 `memory_sessions_fts` を本体から全行再構築するマイグレーションを書く場合も、
-    // ここと同じフィルタ（`is_heartbeat_channel_echo` / `EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL`）を
+    // ここと同じフィルタ（`is_heartbeat_echo` / `EXCLUDE_HEARTBEAT_ECHO_SQL`）を
     // 必ず掛けること。掛け忘れるとエコー行が FTS に埋め戻り、記憶検索の二重ヒットが復活する。
-    if !is_heartbeat_channel_echo(log.metadata_json.as_deref()) {
+    if !is_heartbeat_echo(log.metadata_json.as_deref()) {
         conn.execute(
             "INSERT INTO memory_sessions_fts (rowid, content, agent_id, session_id, log_type)
              VALUES (?1, ?2, ?3, ?4, ?5)",

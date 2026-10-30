@@ -22,8 +22,7 @@ async fn hello_keeps_the_declared_run_env_on_the_live_entry() {
             "final_delivery": "automatic",
             "operations": [],
             "instance_id": instance_id,
-            "revision": 1,
-            "config_digest": config_digest(),
+            "agent_id": "agent-1",
             "run_env": {"OPENCRAB_TEST_BINDING_ACCOUNT": "binding-account-1"},
         }),
     )
@@ -51,7 +50,7 @@ async fn hello_without_run_env_declares_nothing() {
     let instance_id = uuid();
     put_instance(&h, &instance_id, true).await;
     let mut s = h.connect().await;
-    hello_ok(&mut s, &instance_id, 1).await;
+    hello_ok(&mut s, &instance_id).await;
     let run_env = h
         .state
         .lock_registry()
@@ -90,8 +89,7 @@ async fn a_malformed_run_env_is_refused() {
                 "final_delivery": "automatic",
                 "operations": [],
                 "instance_id": instance_id,
-                "revision": 1,
-                "config_digest": config_digest(),
+                "agent_id": "agent-1",
                 "run_env": bad,
             }),
         )
@@ -125,8 +123,7 @@ fn formatting_a_hello_never_prints_a_declared_value() {
         id: "h1".to_string(),
         protocol: 3,
         instance_id: "instance-1".to_string(),
-        revision: 1,
-        config_digest: config_digest(),
+        agent_id: "agent-1".to_string(),
         operation_protocol: 1,
         final_delivery: "automatic".to_string(),
         operations: json!([]),

@@ -8,7 +8,7 @@ async fn noreply_empty_failed_make_zero_say() {
         &json!({
             "id": "s1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "nr",
             "author_id": "u1",
             "text": "hi",
@@ -37,7 +37,7 @@ async fn reply_turn_emits_say_before_ended() {
         &json!({
             "id": "s1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "d1",
             "author_id": "u1",
             "text": "hi",
@@ -86,7 +86,7 @@ async fn no_reply_turn_emits_ended_without_say() {
         &json!({
             "id": "s1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "nr",
             "author_id": "u1",
             "text": "hi",
@@ -127,7 +127,7 @@ async fn turn_failed_emits_frame_with_origin() {
         &json!({
             "id": "s1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "boom-1",
             "author_id": "u1",
             "text": "hi",
@@ -156,7 +156,7 @@ async fn turn_failed_emits_frame_with_origin() {
     }
     let tf = turn_failed.expect("turn_failed frame must be emitted on turn failure");
     assert_eq!(tf["origin"], "boom-1");
-    assert_eq!(tf["binding_id"], binding_id);
+    assert_eq!(tf["session"], binding_id);
     // error 本文は wire に載せない（多エージェント相互反応ループ防止・#668）。
     assert!(tf.get("error").is_none() && tf.get("detail").is_none());
     assert!(!saw_say);
@@ -181,7 +181,7 @@ async fn budget_failure_none_emits_no_authoritative_ended() {
         &json!({
             "id": "none-1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "none-origin",
             "author_id": "u1",
             "text": "hi",
@@ -214,7 +214,7 @@ async fn visible_a_and_folded_b_share_ended_with_completion_and_only_b_silent() 
         &json!({
             "id": "a",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "origin-a",
             "author_id": "u1",
             "text": "slow work",
@@ -229,7 +229,7 @@ async fn visible_a_and_folded_b_share_ended_with_completion_and_only_b_silent() 
         &json!({
             "id": "b",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "origin-b",
             "author_id": "u1",
             "text": "no reply needed",
@@ -269,19 +269,17 @@ async fn visible_a_and_folded_b_share_ended_with_completion_and_only_b_silent() 
 async fn e2e_omoikane_flow() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "omoikane").await;
+    let binding_id_key: String = ("omoikane").to_string();
     let mut s = h.connect().await;
-    hello_ok(&mut s, &instance_id, 1).await;
-    let acked = ack_bind(&mut s).await;
-    assert_eq!(acked, binding_id);
+    hello_ok(&mut s, &instance_id).await;
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     write_frame(
         &mut s,
         &json!({
             "id": "s1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "omo-1",
             "author_id": "user-1",
             "text": "hello",

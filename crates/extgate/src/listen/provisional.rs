@@ -48,17 +48,24 @@ pub(super) async fn handle_provisional_cancel(
     identity: u64,
     cancel: &ProvisionalCancel,
 ) -> Result<(), ()> {
-    let acknowledged = state.lock_registry().ok().is_some_and(|reg| {
-        reg.get(instance_id).is_some_and(|live| {
-            live.identity == identity && live.acknowledged.contains(&cancel.binding_id)
-        })
+    let row_id = state.lock_registry().ok().and_then(|reg| {
+        reg.get(instance_id)
+            .filter(|live| live.identity == identity)
+            .map(|_| ())
     });
-    if acknowledged {
-        if let Some(task) = state
-            .provisionals
-            .remove(&cancel.binding_id, &cancel.provisional_id)
-        {
-            let _ = task.await;
+    if row_id.is_some() {
+        let found = state.db.lock().ok().and_then(|conn| {
+            opencrab_db::queries::find_gate_session(&conn, instance_id, &cancel.session_key)
+                .ok()
+                .flatten()
+        });
+        if let Some(found) = found {
+            if let Some(task) = state
+                .provisionals
+                .remove(&found.row_id, &cancel.provisional_id)
+            {
+                let _ = task.await;
+            }
         }
     }
     respond(state, writer, instance_id, identity, &ok_frame(&cancel.id)).await

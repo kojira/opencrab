@@ -110,8 +110,8 @@ pub struct SubtaskLifecycleEvent<'a> {
 ///
 /// ランタイムは `Arc<dyn SubtaskCompletionSink>` を保持し、**DB 永続化の後に**
 /// `on_subtask_settled` を呼ぶだけで、`LoopEvent` を知らない。sink 実装が
-/// 「resume ＋ その gateway の配送口」を担う（Discord=`send_to_channel` /
-/// Nostr=`reply` / web=SSE / REST=保存して取得 / heartbeat=次 tick 拾い or 保存）。
+/// 「resume ＋ その gateway の配送口」を担う（gateway=セッション宛ての発話 / REST=保存して取得 /
+/// heartbeat=次 tick 拾い or 保存）。
 pub trait SubtaskCompletionSink: Send + Sync {
     /// この transport が持つ**親セッション ID の接頭辞**（例 `discord-` / `web-` / `agent-msg-`）。
     ///
@@ -132,9 +132,8 @@ pub trait SubtaskCompletionSink: Send + Sync {
     /// 既定は [`Self::session_prefix`] の接頭辞一致——大半の transport は「自分の接頭辞で始まる
     /// session は自分のもの」で正しい（Discord / web / REST / heartbeat）。
     ///
-    /// **接頭辞では自分の session を選り分けられない transport だけ** override する。extgate は
-    /// Nostr の再利用セッションを握るとき `canonical_session_id` が binding（`extgate-<id>`）では
-    /// なく address（`nostr-<agent_id>`）へフォールバックするため、接頭辞 `extgate-` では一致せず
+    /// **接頭辞では自分の session を選り分けられない transport だけ** override する。extgate の
+    /// セッションは gateway が決めるキーそのもので接頭辞を持たないため、接頭辞判定では
     /// **全決着を門前払い**していた（resume 不発 / #838 の row284）。この sink は spawn 時に
     /// 握った実 session を保持しており、それと等値比較すれば取り違えなく判定できる。
     fn owns_parent_session(&self, session_id: &str) -> bool {

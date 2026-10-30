@@ -4,7 +4,7 @@ use crate::tokens::estimate_tokens;
 ///
 /// **オーナー指定の配分（#406）**: 長期 20%（`[Memory Index]`。既存の 1/4 ガードが
 /// 掛かっており段階 1 では触らない）／短期 30%（このセクション）／直近 50%
-/// （`[Channel conversation]` + `[Recent conversation]`）。
+/// （`[Recent conversation]`）。
 ///
 /// なぜ上限が要るか（実測。次に読む人が測り直さずに済むように残す）: このセクションは
 /// **そのセッションの topic 要約の全件連結**で、長寿命セッションほど無限に伸びる。

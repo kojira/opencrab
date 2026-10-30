@@ -26,7 +26,7 @@ async fn plain_say_never_carries_a_reply_target() {
     write_frame(
         &mut s,
         &json!({
-            "id": "nir-1", "m": "said", "binding_id": binding_id,
+            "id": "nir-1", "m": "said", "session": binding_id,
             "origin": "nir-origin", "author_id": "u1",
             "reply_target": "nir-parent",
             "text": "hi", "attachments": []

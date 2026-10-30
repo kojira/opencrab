@@ -13,14 +13,12 @@ mod allowed_commands;
 mod api_principals;
 mod conversation_snapshots;
 mod curated_memory;
-mod gate_binding;
-mod gate_binding_reuse;
+mod gate_session;
 mod impressions;
 mod llm_logs;
 mod llm_metrics;
 mod memory_index;
 mod model_pricing;
-mod pending_interactions;
 mod provider_settings;
 mod session_logs;
 mod sessions;
@@ -38,14 +36,12 @@ pub use allowed_commands::*;
 pub use api_principals::*;
 pub use conversation_snapshots::*;
 pub use curated_memory::*;
-pub use gate_binding::*;
-pub use gate_binding_reuse::*;
+pub use gate_session::*;
 pub use impressions::*;
 pub use llm_logs::*;
 pub use llm_metrics::*;
 pub use memory_index::*;
 pub use model_pricing::*;
-pub use pending_interactions::*;
 pub use provider_settings::*;
 pub use session_logs::*;
 pub use sessions::*;
@@ -56,9 +52,9 @@ pub use tool_logs::*;
 
 #[cfg(test)]
 #[path = "tests/legacy_channel_helpers.rs"]
-mod legacy_channel_helpers;
+mod v50_fixture_readback;
 #[cfg(test)]
-pub use legacy_channel_helpers::{get_channel_config, get_channel_config_for_agent};
+pub use v50_fixture_readback::{get_channel_config, get_channel_config_for_agent};
 
 #[cfg(test)]
 mod tests;

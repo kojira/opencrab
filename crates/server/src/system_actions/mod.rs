@@ -46,12 +46,6 @@ pub struct SystemGatewayActions {
     /// REST のように「最後の subtask の決着でセッションを完了にする」経路は、この通知
     /// を受けて `sessions.status` の整合を取る（無いと永久 `active` のまま残る）。
     completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
-    /// transport が提供する A2UI 描画面（#156 S3）。`inner` から 1 度だけ引く。
-    ///
-    /// `send_ui` の実体は gateway 非依存層（`opencrab_actions::a2ui`）にあるが、描画と
-    /// ユーザー応答の受け取りは transport にしか作れない。`Some` のときだけ `send_ui`
-    /// を露出する（描画できない transport のターンに「必ず失敗するツール」を出さない）。
-    a2ui: Option<Arc<opencrab_core::a2ui::A2uiSurface>>,
     /// D-1091: この run の binding が宣言した環境変数（`RunRequest::run_env` と同一）。
     ///
     /// `spawn_subtask` が起こす sub-run は**親ターンと同じ binding** の作業なので、
@@ -97,13 +91,11 @@ impl SystemGatewayActions {
         subtask_registry: Option<SubtaskRegistry>,
         completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
     ) -> Self {
-        let a2ui = inner.as_ref().and_then(|i| i.a2ui_surface());
         Self {
             state,
             inner,
             subtask_registry,
             completion_sink,
-            a2ui,
             run_env: std::collections::BTreeMap::new(),
         }
     }
@@ -120,28 +112,13 @@ impl SystemGatewayActions {
         self
     }
 
-    /// 本ツール源が直接提供するツール定義（A2UI 描画面がある構成の全量）。
+    /// 本ツール源が直接提供するツール定義。
     ///
     /// 各定義は分類属性（`class.dispatch` / `class.sub_engine` / `class.sharing`）を
     /// 名乗る（`ToolClass` に `Default` が無いため構築サイトで必須）。テストの
     /// 分類検査がこの全量から属性を引くので `pub(crate)`。
     pub(crate) fn own_definitions() -> Vec<GatewayActionDef> {
-        let mut defs = Self::always_own_definitions();
-        defs.push(opencrab_actions::send_ui_definition());
-        defs
-    }
-
-    /// `with_a2ui` が false のときは `send_ui` を落とす。
-    ///
-    /// `send_ui` は A2UI を描画できる transport（現状 Discord）のターンだけに出す。
-    /// 移設前は `DiscordGatewayActions::definitions()` にしか無かったので、これで
-    /// 露出範囲が移設前と一致する。
-    fn own_definitions_with_a2ui(with_a2ui: bool) -> Vec<GatewayActionDef> {
-        let mut defs = Self::own_definitions();
-        if !with_a2ui {
-            defs.retain(|d| d.name != "send_ui");
-        }
-        defs
+        Self::always_own_definitions()
     }
 }
 

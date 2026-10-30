@@ -13,8 +13,10 @@ pub struct ConversationRefs {
     agent_name: Option<String>,
     speakers: std::collections::HashMap<String, usize>,
     events: std::collections::HashMap<String, usize>,
-    /// event_id（origin 末尾の 64hex）→ e 番号。返信/リアクションの対象解決（row295c 6b）に使う。
-    event_ids: std::collections::HashMap<String, usize>,
+    /// The gateway's opaque reference of an inbound message (said `ref`, metadata
+    /// `external_ref`) → its e number. `reply_target` values are matched against these and against
+    /// whole origins; core never parses an origin (D-1099).
+    event_refs: std::collections::HashMap<String, usize>,
     calls: std::collections::HashMap<String, usize>,
     /// subtask_id → s 番号（セッション局所・初出順）。spawn 受理と完了本文の両方から採る。
     subtasks: std::collections::HashMap<String, usize>,
@@ -37,14 +39,16 @@ impl ConversationRefs {
                         }
                     }
                     if let Some(origin) = external_origin_of(log) {
-                        if !refs.events.contains_key(&origin) {
-                            let n = refs.events.len() + 1;
-                            // event_id（origin 末尾の 64hex）→ e 番号も引けるようにする（row295c 6b
-                            // の (reply→e番号) 解決）。origin lane が違っても event_id で照合する。
-                            if let Some(eid) = event_id_of_origin(&origin) {
-                                refs.event_ids.entry(eid).or_insert(n);
+                        let n = match refs.events.get(&origin) {
+                            Some(&n) => n,
+                            None => {
+                                let n = refs.events.len() + 1;
+                                refs.events.insert(origin, n);
+                                n
                             }
-                            refs.events.insert(origin, n);
+                        };
+                        if let Some(reference) = external_ref_of(log) {
+                            refs.event_refs.entry(reference).or_insert(n);
                         }
                     }
                 }
@@ -187,23 +191,26 @@ impl ConversationRefs {
         self.subtasks.get(id).copied()
     }
 
-    /// event_id → e 番号（会話内に無い＝未知は None → 表示側は `→外部`）。
-    pub(super) fn event_num_by_id(&self, event_id: &str) -> Option<usize> {
-        self.event_ids.get(event_id).copied()
+    /// A `reply_target` → e number: the gateway's reference of a message, or a whole origin.
+    /// Unknown (not in this conversation) is None → shown as `→外部`.
+    pub(super) fn event_num_by_target(&self, target: &str) -> Option<usize> {
+        self.event_refs
+            .get(target)
+            .or_else(|| self.events.get(target))
+            .copied()
     }
 }
 
-/// origin（`…:<lane>:<event_id>`）末尾の 64hex を取り出す。特定 SDK 名に依存しない。
-fn event_id_of_origin(origin: &str) -> Option<String> {
-    let last = origin.rsplit(':').next()?;
-    if last.len() == 64 && last.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Some(last.to_ascii_lowercase())
-    } else {
-        None
-    }
+/// The gateway's opaque reference of an inbound message (`external_ref`), if it gave one.
+fn external_ref_of(log: &opencrab_db::queries::SessionLogRow) -> Option<String> {
+    let meta: serde_json::Value = serde_json::from_str(log.metadata_json.as_deref()?).ok()?;
+    meta.get("external_ref")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
-/// 受信メタが記録する対象ノート event_id（`reply_target`・row295c 6b）。旧行は未記録＝None。
+/// 受信メタ／発話メタが記録する対象（`reply_target`・row295c 6b）。旧行は未記録＝None。
 pub(super) fn reply_target_of(log: &opencrab_db::queries::SessionLogRow) -> Option<String> {
     let meta: serde_json::Value = serde_json::from_str(log.metadata_json.as_deref()?).ok()?;
     meta.get("reply_target")

@@ -60,7 +60,7 @@ fn inbound_speech_does_not_create_peer_review_progress_after_legacy_identity_cle
             sender_id: "42",
             sender_name: "Reviewer",
             avatar_url: None,
-            channel_id: Some("1"),
+            session_key: Some("1"),
             pubkey: None,
             text,
             image_urls: &[],

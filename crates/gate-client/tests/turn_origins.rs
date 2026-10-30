@@ -9,7 +9,6 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixListener;
 
 const ADDRESS: &str = "discord:test";
-const BINDING: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 struct MockCore {
     reader: OwnedReadHalf,
@@ -49,7 +48,7 @@ impl MockCore {
     async fn activity(&mut self, state: &str, extra: Value) {
         let mut frame = json!({
             "m": "activity",
-            "binding_id": BINDING,
+            "session": ADDRESS,
             "activity_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             "state": state,
         });
@@ -68,9 +67,8 @@ async fn setup() -> (Arc<InstanceClient>, MockCore) {
         InstanceClient::connect(
             &connect_socket,
             "11111111-1111-4111-8111-111111111111".into(),
-            1,
+            "agent".into(),
             "author".into(),
-            "0".repeat(64),
         )
         .await
         .expect("connect client")
@@ -85,14 +83,6 @@ async fn setup() -> (Arc<InstanceClient>, MockCore) {
     let hello = core.read().await;
     core.write(json!({"id": hello["id"], "m": "ok"})).await;
     let client = connect.await.expect("join connect");
-    core.write(json!({
-        "id": "bind:1",
-        "m": "bind",
-        "binding_id": BINDING,
-        "address": ADDRESS,
-    }))
-    .await;
-    assert_eq!(core.read().await, json!({"id": "bind:1", "m": "ok"}));
     (client, core)
 }
 
@@ -118,7 +108,7 @@ async fn queue_core_say(core: &mut MockCore, index: usize) {
     core.write(json!({
         "id": id,
         "m": "say",
-        "binding_id": BINDING,
+        "session": ADDRESS,
         "payload": {"text": format!("queued-{index}")}
     }))
     .await;

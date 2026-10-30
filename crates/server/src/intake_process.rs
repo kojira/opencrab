@@ -8,7 +8,7 @@
 //! **inbox が黙って消化されない**（silent no-op）。それを避けるため、heartbeat の有効・無効に
 //! 依存しない常時起動の専用ループにする（`spawn_intake_process_loop`）。
 //!
-//! さらに **heartbeat の agent-scoped ターン（`channel_id=""`）を再利用しない**。当時のそれは
+//! さらに **heartbeat の agent-scoped ターン（宛先なし）を再利用しない**。当時のそれは
 //! 発話時に稼働中 transport へ配送し、Nostr の text_delivery は宛先を無視して kind:1 を broadcast
 //! する（`crates/nostr/src/text_delivery.rs`）。それを通すと **webhook 起点で外部タイムラインへ
 //! broadcast する経路**を新設してしまう（#454 の意図外・owner 決定 #456 の「agent スコープ全廃」

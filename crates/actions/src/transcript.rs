@@ -1,7 +1,7 @@
 //! ゲートウェイ非依存な転記の語彙（#158 S3 / #156 S6）。
 //!
-//! 以前は「このターンが何で起動されたか」を表す型（`DiscordReplyContext`）と A2UI 応答の
-//! 記録内容（`InteractionRecord`）が `crates/discord` に置かれていた。中身は文字列と数値
+//! 以前は「このターンが何で起動されたか」を表す型（`DiscordReplyContext`）が `crates/discord` に
+//! 置かれていた。中身は文字列と数値
 //! だけで transport 依存の型を一切含まないのに、`crates/server` の転記モジュールが
 //! discord crate の型を引くため、記録の関数が `#[cfg(feature = "discord")]` の配下に
 //! 落ちていた（discord を切ると Nostr/REST と同じ形の記録まで消える）。ここへ移すことで
@@ -38,8 +38,8 @@ impl TranscriptSource {
 
 /// ゲートウェイから受信した発言の記録内容。
 ///
-/// `channel_id` / `pubkey` は **metadata のキー名そのもの**で、由来ごとに異なる識別子を
-/// 落とさないために両方を持つ（Discord は宛先チャンネル、Nostr は送信者公開鍵）。
+/// `session_key` / `pubkey` は **metadata のキー名そのもの**。`session_key` は gateway が決める
+/// 不透明なセッションキー（D-1099。旧行は別名のキーで記録されている）。
 /// `None` のキーは metadata に出さない ＝ 移設前の各サイトの形がそのまま再現される。
 #[derive(Debug, Clone)]
 pub struct InboundMessageRecord<'a> {
@@ -57,8 +57,8 @@ pub struct InboundMessageRecord<'a> {
     pub sender_name: &'a str,
     /// アイコン URL（metadata `user_avatar_url`）。
     pub avatar_url: Option<&'a str>,
-    /// 宛先チャンネル（metadata `channel_id`）。web の表示が参照するので落とさない。
-    pub channel_id: Option<&'a str>,
+    /// The gateway's opaque session key (metadata `session_key`).
+    pub session_key: Option<&'a str>,
     /// 送信者公開鍵（metadata `pubkey`）。
     pub pubkey: Option<&'a str>,
     /// `session_logs.content` に入る本文。
@@ -72,12 +72,12 @@ pub struct InboundMessageRecord<'a> {
 pub struct OutboundReplyRecord<'a> {
     pub agent_id: &'a str,
     pub session_id: &'a str,
-    /// 宛先チャンネル（metadata `channel_id`）。web の表示が参照するので落とさない。
-    pub channel_id: Option<&'a str>,
+    /// The gateway's opaque session key (metadata `session_key`).
+    pub session_key: Option<&'a str>,
     /// `session_logs.content` に入る本文。
     pub text: &'a str,
     /// このターンの起動要因。記録しない由来（Nostr）は `None`。
-    pub context: Option<AgentReplyContext<'a>>,
+    pub context: Option<AgentReplyContext>,
 }
 
 /// このターンが何で起動されたかを表す（旧 `opencrab_discord::DiscordReplyContext`）。
@@ -85,26 +85,11 @@ pub struct OutboundReplyRecord<'a> {
 /// metadata の `triggered_by` 等の差分を型で表現する。記録の実体（`SessionLogRow` の
 /// 組み立てと書き込みポリシー）は server 側の transcript モジュールが所有する。
 #[derive(Debug, Clone)]
-pub enum AgentReplyContext<'a> {
+pub enum AgentReplyContext {
     /// 新着メッセージへの直接応答（metadata `tool_calls_made`）。
     Direct { tool_calls_made: usize },
     /// サブタスク完了を受けた再呼び出しの応答（`triggered_by = "subtask_completed"`）。
     SubtaskCompleted,
-    /// A2UI インタラクション応答を受けた再呼び出しの応答
-    /// （`triggered_by = "interaction_response"` + `interaction_id`）。
-    InteractionResponse { interaction_id: &'a str },
-}
-
-/// A2UI インタラクションの記録内容（旧 `opencrab_discord::InteractionRecord`、#42）。
-#[derive(Debug, Clone)]
-pub struct InteractionRecord<'a> {
-    pub interaction_id: &'a str,
-    pub surface_id: &'a str,
-    pub action_name: &'a str,
-    pub component_id: &'a str,
-    pub responder_id: &'a str,
-    /// `session_logs.content` に書く整形済みテキスト。
-    pub content: &'a str,
 }
 
 #[cfg(test)]

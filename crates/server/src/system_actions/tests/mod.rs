@@ -10,6 +10,5 @@ include!("allowed_command_management.rs");
 include!("cancel_subtask.rs");
 include!("management_transport.rs");
 include!("memory_index_config.rs");
-include!("send_ui.rs");
 include!("skills.rs");
 include!("subtask_control.rs");

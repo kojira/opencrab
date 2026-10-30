@@ -1,30 +1,11 @@
-/// A new kind provisions itself over the gate socket (D-1098), declares an operation, and gets
-/// timed route and one-frame/one-handler delivery without a concrete branch in core/shared/server.
+/// A new kind of gateway just says hello (D-1099), declares an operation, and gets a timed route
+/// and one-frame/one-handler delivery without a concrete branch in core/shared/server.
 #[tokio::test]
-async fn s9_synthetic_gateway_provisions_invokes_and_delivers_a_timed_result() {
+async fn s9_synthetic_gateway_connects_invokes_and_delivers_a_timed_result() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
     let address = "synthetic-address";
-    let session_id_owned = session_id_for_binding(&binding_id);
-    let session_id = session_id_owned.as_str();
-
-    let mut frame = provision_frame("p1", &instance_id, true, &[(&binding_id, address)]);
-    frame["kind_id"] = json!("synthetic");
-    let provisioned = provision(&h, &frame).await;
-    assert_eq!(provisioned["m"], "provisioned", "{provisioned}");
-    let kind: String = h
-        .state
-        .db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT kind_id FROM gate_instances WHERE instance_id=?1",
-            [&instance_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(kind, "synthetic", "a new kind provisions itself");
+    let session_id = address;
 
     let operations = json!([{
         "name": "synthetic.report",
@@ -43,8 +24,7 @@ async fn s9_synthetic_gateway_provisions_invokes_and_delivers_a_timed_result() {
         hello_with_ops(&mut gateway, &instance_id, 1, &operations).await["m"],
         "ok"
     );
-    assert_eq!(ack_bind(&mut gateway).await, binding_id);
-    wait_acked(&h, &instance_id, &binding_id).await;
+    let binding_id = session_row(&h, &instance_id, address).row_id;
 
     let projected = ExtgateOpsGatewayActions::for_binding(
         Arc::clone(&h.state), &instance_id, &binding_id, session_id, "agent-1",
@@ -80,7 +60,7 @@ async fn s9_synthetic_gateway_provisions_invokes_and_delivers_a_timed_result() {
         }
     );
     let say = read_until(&mut gateway, |frame| frame["m"] == "say").await;
-    assert_eq!(say["binding_id"], binding_id);
+    assert_eq!(say["session"], address);
     assert_eq!(say["payload"]["text"], "hello from agent");
     let delivery_id = say["id"].as_str().unwrap();
     write_frame(&mut gateway, &json!({"id": delivery_id, "m": "ok"})).await;

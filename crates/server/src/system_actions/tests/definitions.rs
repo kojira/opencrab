@@ -248,12 +248,8 @@ fn server_gateway_action_table_matches_own_definitions() {
 ///   feature 時のみ push されるので期待値も同じ feature 条件で組む / PR-1B）。
 /// - **Allowed 集合 == {report_progress, nostr_generate_key}**（sub-engine から到達可能な
 ///   ツールが増えていないことの固定。`nostr_generate_key` は nostr feature 時のみ push / PR-1B）。
-/// - **ConversationBound == {send_ui}**（server own で live セッションに束縛される唯一の
-///   ツール。全ゲート横断では {discord_add_reaction, nostr_reply, send_ui} で残り 2 つは
-///   discord / nostr 側の同名テストが覆う）。
-///
-/// `sub_engine == Blocked`（配送系の深さ拒否）は `send_ui_is_blocked_in_sub_engine` 等が
-/// 挙動で覆うのでここでは固定しない。
+/// - **ConversationBound == {}**（server own には会話固有ハンドルを取るツールが無い。
+///   gateway の宣言 operation は gateway 側が名乗る）。
 #[test]
 fn server_tool_class_invariants_are_fixed() {
     use opencrab_gateway::{DispatchMode, SubEngineAccess, ToolSharing};
@@ -294,8 +290,7 @@ fn server_tool_class_invariants_are_fixed() {
         "server own の Dispatchable 集合がずれている（dispatch 属性の Inline/Dispatchable 取り違え）"
     );
 
-    let expected_conv: std::collections::BTreeSet<String> =
-        std::iter::once("send_ui".to_string()).collect();
+    let expected_conv: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     assert_eq!(
         conv_bound, expected_conv,
         "server own の ConversationBound 集合がずれている（sharing 属性の付け忘れ/誤り）"

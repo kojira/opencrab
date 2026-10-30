@@ -14,17 +14,14 @@ fn session_log_count(h: &Harness, session_id: &str) -> i64 {
 async fn said_during_turn_is_recorded_and_runs_after() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
-    put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-1").await;
-    let session_id = format!("extgate-{binding_id}");
+    let session_id = "chan-1".to_string();
     let (release_tx, release_rx) = oneshot::channel();
     *h.runtime.hold_rx.lock().unwrap() = Some(release_rx);
 
-    let client = InstanceClient::connect(&h.sock, instance_id, 1, "u1".into(), config_digest())
-        .await
-        .expect("connect");
-    wait_client_bound(&client, "chan-1", &binding_id).await;
+    let client =
+        InstanceClient::connect(&h.sock, instance_id, "agent-1".into(), "u1".into())
+            .await
+            .expect("connect");
 
     let entered = h.runtime.turn_entered.notified();
     tokio::pin!(entered);
@@ -83,16 +80,12 @@ async fn said_during_turn_is_recorded_and_runs_after() {
 async fn non_nostr_said_records_external_origin_for_e_numbering() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
-    // put_instance は kind_id = "discord"（= 非 nostr）で登録する。
-    put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-di").await;
-    let session_id = format!("extgate-{binding_id}");
+    let session_id = "chan-di".to_string();
 
-    let client = InstanceClient::connect(&h.sock, instance_id, 1, "u1".into(), config_digest())
-        .await
-        .expect("connect");
-    wait_client_bound(&client, "chan-di", &binding_id).await;
+    let client =
+        InstanceClient::connect(&h.sock, instance_id, "agent-1".into(), "u1".into())
+            .await
+            .expect("connect");
 
     let origin = "discord:message:v1:100:200";
     let out = client
@@ -101,7 +94,7 @@ async fn non_nostr_said_records_external_origin_for_e_numbering() {
         .unwrap_or_else(|e| panic!("said refuse {e:?}"));
     assert!(matches!(out, SaidOutcome::Accepted { seq: 1 }), "{out:?}");
 
-    // 1) discord kind でも session log の metadata に external_origin が入る（回帰固定）。
+    // 1) どの gateway でも session log の metadata に external_origin が入る（回帰固定）。
     let logs = {
         let conn = h.state.db.lock().unwrap();
         opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
@@ -136,7 +129,7 @@ async fn non_nostr_said_records_external_origin_for_e_numbering() {
 async fn session_queue_overflow_is_seq_null_and_counted() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = format!("extgate-{binding_id}");
+    let session_id = binding_id.clone();
     let (release_tx, release_rx) = oneshot::channel();
     *h.runtime.hold_rx.lock().unwrap() = Some(release_rx);
 
@@ -147,7 +140,7 @@ async fn session_queue_overflow_is_seq_null_and_counted() {
             &json!({
                 "id": id,
                 "m": "said",
-                "binding_id": binding_id,
+                "session": binding_id,
                 "origin": format!("o-{i}"),
                 "author_id": "u1",
                 "text": format!("m{i}"),
@@ -164,7 +157,7 @@ async fn session_queue_overflow_is_seq_null_and_counted() {
         &json!({
             "id": "sover",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "o-overflow",
             "author_id": "u1",
             "text": "too-many",
@@ -212,7 +205,7 @@ async fn v3_turn_returns_before_slow_tool_finishes() {
         &json!({
             "id": "slow1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "o-slow",
             "author_id": "u1",
             "text": "sleep 120 を実行して",
@@ -244,7 +237,7 @@ async fn said_during_detached_tool_starts_next_turn() {
         &json!({
             "id": "d1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "o-1",
             "author_id": "u1",
             "text": "sleep 120",
@@ -260,7 +253,7 @@ async fn said_during_detached_tool_starts_next_turn() {
         &json!({
             "id": "d2",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "o-2",
             "author_id": "u1",
             "text": "追いメンション",
@@ -281,15 +274,16 @@ async fn said_during_detached_tool_starts_next_turn() {
 #[tokio::test]
 async fn settlement_is_consumed_on_next_turn() {
     let h = Harness::start().await;
-    let (mut s, instance_id, binding_id) = ready_pair(&h).await;
-    let session_id = format!("extgate-{binding_id}");
+    let (mut s, instance_id, key) = ready_pair(&h).await;
+    let session_id = key.clone();
+    let binding_id = session_row(&h, &instance_id, &key).row_id;
 
     write_frame(
         &mut s,
         &json!({
             "id": "c1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": key,
             "origin": "o-1",
             "author_id": "u1",
             "text": "sleep 120",
@@ -350,14 +344,15 @@ async fn settlement_is_consumed_on_next_turn() {
 ///
 /// 旧実装は `dispatch_settled` が `ev.session_id.starts_with("extgate-")` で親判定していたため、
 /// `nostr-agent-1` は門前払いされ resume が一切起きなかった（このテストは turns==0 のまま落ちる）。
-/// 既存の `settlement_is_consumed_on_next_turn` は `extgate-{binding_id}` を使うため接頭辞判定を
+/// 既存の `settlement_is_consumed_on_next_turn` はキーと同じ session を使うため接頭辞判定を
 /// 素通りし、この穴を踏めていなかった。
 #[tokio::test]
 async fn s3_subtask_continuation_routes_by_exact_generic_session_without_prefix() {
     let h = Harness::start().await;
     // 連結済みの instance/binding を用意する（Say 配送の送出先）。ただし決着させる親
-    // セッションは binding の canonical（extgate-…）ではなく、Nostr 再利用の address 形式。
-    let (_s, instance_id, binding_id) = ready_pair(&h).await;
+    // セッションはキーのセッションではなく、別の既存セッション。
+    let (_s, instance_id, key) = ready_pair(&h).await;
+    let binding_id = session_row(&h, &instance_id, &key).row_id;
     let session_id = "nostr-agent-1".to_string();
     assert!(
         !session_id.starts_with("extgate-"),
@@ -417,8 +412,9 @@ async fn s3_subtask_continuation_routes_by_exact_generic_session_without_prefix(
 #[tokio::test]
 async fn settlement_during_active_parent_resumes_after_parent_turn() {
     let h = Harness::start().await;
-    let (_s, instance_id, binding_id) = ready_pair(&h).await;
-    let session_id = format!("extgate-{binding_id}");
+    let (_s, instance_id, key) = ready_pair(&h).await;
+    let session_id = key.clone();
+    let binding_id = session_row(&h, &instance_id, &key).row_id;
     let sink = ExtgateCompletionSink {
         state: Arc::clone(&h.state),
         runtime: h.runtime.clone(),
@@ -488,12 +484,13 @@ async fn settlement_during_active_parent_resumes_after_parent_turn() {
 
 async fn assert_failed_completion_resume_has_no_ended(reply: &str, budget_fails: bool) {
     let h = Harness::start().await;
-    let (mut s, instance_id, binding_id) = ready_pair(&h).await;
+    let (mut s, instance_id, key) = ready_pair(&h).await;
     *h.runtime.reply.lock().unwrap() = reply.to_string();
     h.runtime
         .budget_fails
         .store(budget_fails, Ordering::SeqCst);
-    let session_id = format!("extgate-{binding_id}");
+    let session_id = key.clone();
+    let binding_id = session_row(&h, &instance_id, &key).row_id;
     let sink = ExtgateCompletionSink {
         state: Arc::clone(&h.state),
         runtime: h.runtime.clone(),

@@ -546,3 +546,23 @@ conformance suite は少なくとも次を自動検証する。
 ## V3.5 改訂（2026-08-27・オーナー承認）: Binding PUT の session 再利用例外
 
 Binding PUT で指定 address が既存 session の id と byte 一致する場合、新 session を insert せず既存 session を binding に割り当てる（kind 非依存の一般規則）。一致しない場合は従来どおり `session_id_for_binding(binding_id)` で新設。既存 session を「別の」binding へ流用しない原則は維持する（同一 address への再 PUT は §5 の規則どおり）。動機: 組み込みゲート載せ替えで既存会話をデータ移行なしで引き継ぐため（DESIGN-NOSTRGATE §5）。同 transaction で subject に対応する sole agent membership と、別 open binding による占有を検査し、不一致・複数・占有は `binding_conflict` で全 rollback する。
+
+## D-1099 改訂: core はセッションだけを持つ（§3.3・§4・§5 の binding / address / bind / provision を置き換える）
+
+責任分界: core はセッション（会話記録・記憶・ターン・ツール実行・定期実行・モデル設定）だけを持つ。接続先、Bot、オーナーと権限、どの場所を聞くか、場所とセッションキーの対応、表示、設定画面は gateway が持つ。資格情報は無く、gate socket を開けることだけが条件である。
+
+wire（protocol 3）:
+
+| 方向 / `m` | 必須 field | 応答 |
+|---|---|---|
+| gate→core `hello` | `id,protocol=3,instance_id,agent_id,operation_protocol,final_delivery,operations`、任意 `run_env` | `ok{id}`。instance が無ければ作る。別 agent の instance は `instance_conflict`、知らない agent は `subject_unknown`、live 中は `instance_active`。`revision` / `config_digest` は送られても読まない |
+| gate→core `open` | `id,session`、任意 `title` | `ok{id,session_id}`。新しいキーならセッションを作る（冪等） |
+| gate→core `said` | `id,session,origin,author_id,text,attachments`、任意 `ref` ほか従来の任意 field | `ok{id,seq,session_id}`。新しいキーならセッションを作る。`ref` は metadata `external_ref` に記録し、`reply_target` の照合に使う |
+| gate→core `provisional` / `provisional_cancel` / `interrupt` / `command` | 従来の field の `binding_id` を `session` に置き換えたもの | 従来どおり |
+| core→gate `say` / `partial` / `provisional_result` / `invoke` / `activity` / `tool_activity` / `subtask_lifecycle` / `turn_failed` | 従来の field の `binding_id` を `session` に置き換えたもの | 従来どおり |
+
+- `session` は gateway が決める不透明なセッションキー（空でない、512 byte 以下、制御文字なし）。core は形式を解釈しない。
+- core は (instance, session) を内部の記録（`gate_bindings` 行。v65 で列名 `address` を `session_key` に変更）に解決する。既存の記録があればその session_id（移行済みの会話の続き）、無ければキーそのものを session_id にする。行 id は wire にもログにも出さない。
+- 外向きの送信は instance が live なら送る。bind・ack は無い。
+- `provision`・`create_binding`・`bind` は存在しない（`unknown_message`）。gate-admin、A2UI（`send_ui`・`pending_interactions`、v65 で drop）、Discord 型の受付判定（whitelist・DM・guild）も core から消えた。受付は gateway の仕事である。
+- error code から `address_in_use` を外した。

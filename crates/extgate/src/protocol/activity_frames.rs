@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 /// frame の field と 1:1 に対応するので、引数をまとめない（形がそのまま契約）。
 #[allow(clippy::too_many_arguments)]
 pub fn tool_activity_frame(
-    binding_id: &str,
+    session_key: &str,
     activity_id: &str,
     call_id: &str,
     sub_session_id: Option<&str>,
@@ -35,7 +35,7 @@ pub fn tool_activity_frame(
 ) -> Value {
     let mut frame = json!({
         "m": "tool_activity",
-        "binding_id": binding_id,
+        "session": session_key,
         "activity_id": activity_id,
         "call_id": call_id,
         "tool": tool,
@@ -67,7 +67,7 @@ pub fn tool_activity_frame(
 /// 分からない項目は field ごと省く（旧 gateway は認識しない field を無視する）。
 #[allow(clippy::too_many_arguments)]
 pub fn subtask_lifecycle_frame(
-    binding_id: &str,
+    session_key: &str,
     run_id: &str,
     sub_session_id: &str,
     status: &str,
@@ -79,7 +79,7 @@ pub fn subtask_lifecycle_frame(
 ) -> Value {
     let mut frame = json!({
         "m": "subtask_lifecycle",
-        "binding_id": binding_id,
+        "session": session_key,
         "run_id": run_id,
         "status": status,
     });

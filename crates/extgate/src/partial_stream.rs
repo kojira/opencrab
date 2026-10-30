@@ -105,19 +105,10 @@ async fn write_partial(
     text: &str,
     provisional_id: Option<&str>,
 ) {
-    let writer = {
-        let Ok(reg) = state.lock_registry() else {
-            return;
-        };
-        let Some(live) = reg.get(instance_id) else {
-            return;
-        };
-        if !live.acknowledged.contains(binding_id) {
-            return;
-        }
-        live.writer.clone()
+    let Some((writer, session_key)) = state.live_route(instance_id, binding_id) else {
+        return;
     };
-    let frame = partial_frame(binding_id, stream_id, text, provisional_id);
+    let frame = partial_frame(&session_key, stream_id, text, provisional_id);
     if let Err(e) = write_json(&writer, &frame).await {
         tracing::warn!(
             code = e.code.as_str(),
@@ -126,15 +117,14 @@ async fn write_partial(
     }
 }
 
-/// D-1085: the writer of a live instance, when it acknowledged `binding_id`.
-pub(crate) fn acknowledged_writer(
+/// D-1085: the writer and session key of a live instance's session record.
+pub(crate) fn live_writer(
     state: &ExtgateState,
     instance_id: &str,
     binding_id: &str,
-) -> Option<Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>> {
-    let reg = state.lock_registry().ok()?;
-    let live = reg.get(instance_id)?;
-    live.acknowledged
-        .contains(binding_id)
-        .then(|| live.writer.clone())
+) -> Option<(
+    Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    String,
+)> {
+    state.live_route(instance_id, binding_id)
 }

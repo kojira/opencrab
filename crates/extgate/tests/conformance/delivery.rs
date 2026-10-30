@@ -7,7 +7,7 @@ async fn delivery_ok_rejected_and_disconnect() {
         &json!({
             "id": "s1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "d1",
             "author_id": "u1",
             "text": "hi",
@@ -49,7 +49,7 @@ async fn delivery_ok_rejected_and_disconnect() {
         &json!({
             "id": "s2",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "d2",
             "author_id": "u1",
             "text": "again",
@@ -100,7 +100,7 @@ async fn delivery_disconnect_is_indeterminate_and_no_resend() {
         &json!({
             "id": "s1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "cut",
             "author_id": "u1",
             "text": "hi",
@@ -134,8 +134,7 @@ async fn delivery_disconnect_is_indeterminate_and_no_resend() {
     drop(conn);
 
     let mut s = h.connect().await;
-    hello_ok(&mut s, &instance_id, 1).await;
-    let _ = ack_bind(&mut s).await;
+    hello_ok(&mut s, &instance_id).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     if let Some(v) = read_frame_opt(&mut s).await {
         assert_ne!(v["id"], delivery_id);
@@ -152,7 +151,7 @@ async fn delivery_failure_injection_rolls_back_and_says_zero() {
         &json!({
             "id": "s1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "inj",
             "author_id": "u1",
             "text": "hi",
@@ -208,7 +207,7 @@ async fn startup_recover_stale_sending() {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at)
+            "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at)
              VALUES ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb','aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','a',1)",
             [],
         )

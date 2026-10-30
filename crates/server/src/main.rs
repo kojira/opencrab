@@ -77,17 +77,6 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("context budget fail-loud at startup: {e}"))?;
     }
 
-    // 前プロセスから残った保留対話を**期限切れとして明示的に閉じる**（#196）。
-    // 保留状態のメモリ上の登録簿はプロセスと寿命を共にするので、ここに残っている
-    // `pending` 行は誰も応答を受け取れない。無言で放置すると「ボタンを押しても何も
-    // 起きない」行が DB に溜まり続けるため、起動時に 1 度だけ閉じてログに残す。
-    // transport に依存しない処理なので、Discord 機能フラグやゲートウェイの稼働有無の
-    // **外**で行う（web / REST だけの構成でも効く）。
-    {
-        use opencrab_actions::AgentRuntime as _;
-        state.cleanup_stale_interactions();
-    }
-
     // The protected router and private socket were prepared synchronously by bootstrap.
     // Only after that security gate succeeds may any runtime/public listener be started.
     let _watcher_handle = background::spawn_background_tasks(&state, &cfg, &gate_socket);

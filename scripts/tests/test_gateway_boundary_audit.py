@@ -67,18 +67,21 @@ class GatewayBoundaryMutationTests(unittest.TestCase):
         self.assertLess(commit, end)
         self.assertNotIn("DROP TABLE IF EXISTS channel_config", source)
 
-    def test_s10_reviewed_boundary_burn_down_has_exactly_84_findings(self):
+    def test_s10_reviewed_boundary_burn_down_has_exactly_38_findings(self):
         root = pathlib.Path(__file__).parents[2]
         baseline = json.loads((root / "scripts/gateway-boundary-baseline.json").read_text())
         findings = AUDIT.audit_texts(AUDIT.repository_texts(root))
         # D-1087: the six webhook management tools and their core resolution layer were
         # removed, which retired ten findings (115 -> 105). D-1097: the Discord/Nostr/voice
         # settings left in core (session watch policy, fresh-schema DROP literals) were removed,
-        # which retired 21 more (105 -> 84). The pin tracks the reviewed burn-down; a change here
+        # which retired 21 more (105 -> 84). D-1099: core keeps sessions only; the Discord-shaped
+        # admission, MessageSource, A2UI/pending_interactions and every channel/address name in
+        # core code went (84 -> 38: caller-role words, bootstrap-only tables, and the stored
+        # heartbeat echo marker value). The pin tracks the reviewed burn-down; a change here
         # must come from removing or reclassifying findings.
-        self.assertEqual(len(findings), 84)
-        self.assertEqual(len(baseline["entries"]), 84)
-        self.assertEqual(baseline["review"]["finding_count"], 84)
+        self.assertEqual(len(findings), 38)
+        self.assertEqual(len(baseline["entries"]), 38)
+        self.assertEqual(baseline["review"]["finding_count"], 38)
         self.assertFalse(
             [finding for finding in findings if finding.rule == "public-gate-admin-reachable"]
         )
@@ -353,6 +356,30 @@ opencrab-example-gateway = { path = "../example-gateway" }
             "crates/core/src/example_e2e/fixture.rs": "pub struct DiscordChannelConfig { pub channel_id: String }\n",
             "crates/db/src/schema/migrations/v999.rs": 'const SQL: &str = "CREATE TABLE agent_discord_config";\n',
             "crates/core/src/comment.rs": "// Discord channel_id is historical evidence.\n",
+        }
+        self.assertFalse(self.rules(permitted))
+
+    def test_d1099_channel_and_address_in_core_code_are_rejected(self):
+        for code in (
+            "pub fn route(address: &str) {}\n",
+            "let channel = key;\n",
+            "struct Target { channel_name: String }\n",
+            "const SQL: &str = \"SELECT address FROM gate_bindings\";\n",
+            "pub fn next_live(addresses: &[String]) {}\n",
+            "fn ChannelLookup() {}\n",
+        ):
+            with self.subTest(code=code):
+                found = self.findings({"crates/extgate/src/example.rs": code}, "shared-concrete-vocabulary")
+                self.assertTrue(found, code)
+
+    def test_d1099_std_message_channels_and_comments_are_not_place_vocabulary(self):
+        permitted = {
+            "crates/core/src/example.rs":
+                "let (tx, rx) = tokio::sync::mpsc::unbounded_channel();\n"
+                "let (a, b) = oneshot::channel::<()>();\n"
+                "let (w, _) = watch::channel(false);\n"
+                "let (p, q) = mpsc::channel(8);\n"
+                "// a comment may say channel or address\n",
         }
         self.assertFalse(self.rules(permitted))
 

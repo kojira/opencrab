@@ -58,7 +58,7 @@ pub async fn apply_delivery_effect(
             {
                 Ok(delivery_id) => return Some(delivery_id),
                 Err(e) => {
-                    if e.code == ErrorCode::NotConnected || e.code == ErrorCode::BindingClosed {
+                    if e.code == ErrorCode::NotConnected {
                         return None;
                     }
                     tracing::error!(code = e.code.as_str(), "delivery failed");
@@ -197,16 +197,10 @@ async fn send_say(
     stream_id: Option<&str>,
     record_speech: bool,
 ) -> Result<String, GateError> {
-    let writer = {
-        let reg = state.lock_registry()?;
-        let live = reg
-            .get(instance_id)
-            .ok_or_else(|| GateError::new(ErrorCode::NotConnected))?;
-        if !live.acknowledged.contains(binding_id) {
-            return Err(GateError::new(ErrorCode::NotConnected));
-        }
-        live.writer.clone()
-    };
+    // D-1099: the instance being live is the only condition; the gateway owns the session.
+    let (writer, session_key) = state
+        .live_route(instance_id, binding_id)
+        .ok_or_else(|| GateError::new(ErrorCode::NotConnected))?;
 
     let delivery_id = Uuid::new_v4().to_string();
     let now = now_nanos();
@@ -216,22 +210,6 @@ async fn send_say(
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| GateError::store())?;
-        let open = tx.query_row(
-            "SELECT instance_id, closed_at FROM gate_bindings WHERE binding_id = ?1",
-            params![binding_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
-        );
-        match open {
-            Ok((inst, None)) if inst == instance_id => {}
-            Ok(_) => {
-                let _ = tx.rollback();
-                return Err(GateError::new(ErrorCode::BindingClosed));
-            }
-            Err(_) => {
-                let _ = tx.rollback();
-                return Err(GateError::store());
-            }
-        }
         #[cfg(any(test, feature = "extgate-probe"))]
         if state.probe.fail_reply_log.load(Ordering::SeqCst) {
             let _ = tx.rollback();
@@ -271,7 +249,7 @@ async fn send_say(
 
     let write_err = write_json(
         &writer,
-        &say_frame(&delivery_id, binding_id, body, stream_id),
+        &say_frame(&delivery_id, &session_key, body, stream_id),
     )
     .await
     .is_err();

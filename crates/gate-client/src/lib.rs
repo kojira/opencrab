@@ -3,7 +3,6 @@
 pub mod client;
 pub mod json;
 pub mod outbound;
-pub mod provision;
 pub mod wire;
 
 pub use client::{InvokeHandler, InvokeOutcome, SayPolicy};

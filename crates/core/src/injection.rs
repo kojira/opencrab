@@ -90,7 +90,7 @@ mod tests {
 
     /// drift ガード（**コピペ検知のトリップワイヤ**。単一化の保証ではない）。
     ///
-    /// `heartbeat_channel_echo` の共有定数 + drift ガードと同じ発想（#521 の構造の問い C）。
+    /// `heartbeat` エコー印の共有定数 + drift ガードと同じ発想（#521 の構造の問い C）。
     /// 制御文字除去メソッド `is_control` が、許可サイト以外の `.rs` に現れたら落とす。
     /// 3 つ目の経路が既存イディオムをコピペすれば（`|c| !c.is_control()` / `|&c| ...` /
     /// UFCS `char::is_control` / rustfmt が改行で割った形など、綴りに `is_control` を

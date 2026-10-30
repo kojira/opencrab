@@ -50,7 +50,7 @@ fn test_session_log_insert_and_fts() {
 /// 記憶検索（search_session_logs / count_matching_session_logs）に二重ヒット・過大計上を
 /// 出さない。本体テーブルには残る（会話文脈の表示に使う）。
 #[test]
-fn heartbeat_channel_echo_excluded_from_fts_but_kept_in_table() {
+fn heartbeat_echo_excluded_from_fts_but_kept_in_table() {
     let conn = setup();
 
     // 通常の発話（印なし）と、同内容のエコー行（印つき）を入れる。
@@ -73,7 +73,7 @@ fn heartbeat_channel_echo_excluded_from_fts_but_kept_in_table() {
         content: "pineapple diagnostics report".to_string(),
         speaker_id: Some("agent-1".to_string()),
         turn_number: None,
-        metadata_json: Some(HEARTBEAT_CHANNEL_ECHO_METADATA.to_string()),
+        metadata_json: Some(HEARTBEAT_ECHO_METADATA.to_string()),
         created_at: None,
     };
     insert_session_log(&conn, &normal).unwrap();
@@ -100,25 +100,25 @@ fn heartbeat_channel_echo_excluded_from_fts_but_kept_in_table() {
 /// #425: 判定は `source` フィールドの値で行い、キー順・空白の違いに強い。
 /// 無関係な metadata（tool_call 等）・None は false。
 #[test]
-fn is_heartbeat_channel_echo_matches_on_source_field() {
+fn is_heartbeat_echo_matches_on_source_field() {
     // 書き手が入れる正準形。
-    assert!(is_heartbeat_channel_echo(Some(
-        HEARTBEAT_CHANNEL_ECHO_METADATA
+    assert!(is_heartbeat_echo(Some(
+        HEARTBEAT_ECHO_METADATA
     )));
     // 空白・キー順が違っても source の値で判定する。
-    assert!(is_heartbeat_channel_echo(Some(
+    assert!(is_heartbeat_echo(Some(
         r#"{ "extra": 1, "source" : "heartbeat_channel_echo" }"#
     )));
     // 無関係な metadata は false（substring ゲートで早期に弾かれる）。
-    assert!(!is_heartbeat_channel_echo(Some(
+    assert!(!is_heartbeat_echo(Some(
         r#"{"tool_calls_json":"[...]"}"#
     )));
     // source の値が別物なら false。
-    assert!(!is_heartbeat_channel_echo(Some(r#"{"source":"other"}"#)));
+    assert!(!is_heartbeat_echo(Some(r#"{"source":"other"}"#)));
     // None・空・壊れた JSON は false。
-    assert!(!is_heartbeat_channel_echo(None));
-    assert!(!is_heartbeat_channel_echo(Some("")));
-    assert!(!is_heartbeat_channel_echo(Some("not json")));
+    assert!(!is_heartbeat_echo(None));
+    assert!(!is_heartbeat_echo(Some("")));
+    assert!(!is_heartbeat_echo(Some("not json")));
 }
 
 /// #425 drift ガード: SQL 除外述語のリテラルが Rust 判定の source 定数と一致する。
@@ -126,8 +126,8 @@ fn is_heartbeat_channel_echo_matches_on_source_field() {
 #[test]
 fn exclude_echo_sql_matches_source_constant() {
     assert!(
-        EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL.contains(HEARTBEAT_CHANNEL_ECHO_SOURCE),
-        "SQL 述語のリテラルが source 定数と食い違っている: {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+        EXCLUDE_HEARTBEAT_ECHO_SQL.contains(HEARTBEAT_ECHO_SOURCE),
+        "SQL 述語のリテラルが source 定数と食い違っている: {EXCLUDE_HEARTBEAT_ECHO_SQL}"
     );
 }
 
@@ -139,7 +139,7 @@ fn exclude_echo_sql_matches_source_constant() {
 /// だけだと境界系が動かず恒真になる）。数えると変わる値を**絶対値**で固定するので、除外を
 /// 外すと落ちる。
 #[test]
-fn heartbeat_channel_echo_invisible_to_all_memory_paths() {
+fn heartbeat_echo_invisible_to_all_memory_paths() {
     let conn = setup();
     let agent = "agent-1";
     let ins = |session: &str, speaker: &str, content: &str, echo: bool| {
@@ -153,7 +153,7 @@ fn heartbeat_channel_echo_invisible_to_all_memory_paths() {
                 content: content.to_string(),
                 speaker_id: Some(speaker.to_string()),
                 turn_number: None,
-                metadata_json: echo.then(|| HEARTBEAT_CHANNEL_ECHO_METADATA.to_string()),
+                metadata_json: echo.then(|| HEARTBEAT_ECHO_METADATA.to_string()),
                 created_at: None,
             },
         )

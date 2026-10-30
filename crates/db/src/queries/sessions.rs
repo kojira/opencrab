@@ -67,16 +67,16 @@ pub fn insert_session(conn: &Connection, session: &SessionRow) -> Result<()> {
     Ok(())
 }
 
-/// Binding PUT 同一 TX 用。theme は binding address。他列は schema 既定値。
+/// Creates a session in the caller's transaction. Other columns take the schema defaults.
 pub fn insert_session_in_tx(
     tx: &Transaction<'_>,
     session_id: &str,
-    address: &str,
+    theme: &str,
     now_rfc3339: &str,
 ) -> Result<()> {
     tx.execute(
         "INSERT INTO sessions (id, theme, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-        params![session_id, address, now_rfc3339, now_rfc3339],
+        params![session_id, theme, now_rfc3339, now_rfc3339],
     )?;
     Ok(())
 }

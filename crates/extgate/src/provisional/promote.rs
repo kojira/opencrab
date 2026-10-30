@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use super::{ProvisionalInputs, TakenProvisional};
-use crate::partial_stream::acknowledged_writer;
+use crate::partial_stream::live_writer;
 use crate::protocol::{provisional_result_frame, write_json};
 use crate::registry::ExtgateState;
 
@@ -91,10 +91,10 @@ async fn write_result(
     provisional_id: &str,
     promoted: bool,
 ) {
-    let Some(writer) = acknowledged_writer(state, instance_id, binding_id) else {
+    let Some((writer, session_key)) = live_writer(state, instance_id, binding_id) else {
         return;
     };
-    let frame = provisional_result_frame(binding_id, provisional_id, promoted);
+    let frame = provisional_result_frame(&session_key, provisional_id, promoted);
     if let Err(e) = write_json(&writer, &frame).await {
         tracing::warn!(
             code = e.code.as_str(),

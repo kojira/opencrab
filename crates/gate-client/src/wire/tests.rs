@@ -1,12 +1,6 @@
 use super::*;
 
 #[test]
-fn config_bytes_are_compact_author_id() {
-    let bytes = config_bytes("owner-1");
-    assert_eq!(bytes, br#"{"author_id":"owner-1"}"#);
-}
-
-#[test]
 fn said_author_label_is_additive_and_optional() {
     let legacy = said_frame("said:1", "binding", "origin", "author", "hello", &[]);
     assert!(legacy.get("author_label").is_none());
@@ -31,6 +25,7 @@ fn said_model_profile_is_sent_only_when_not_default() {
         start_turn: true,
         system_context: None,
         reply_target: None,
+        reference: None,
         live_inbound_scope: LiveInboundScope::All,
         model_profile: TurnModelProfile::Default,
         agent_prelude: None,
@@ -45,24 +40,13 @@ fn said_model_profile_is_sent_only_when_not_default() {
 }
 
 #[test]
-fn config_digest_is_sha256_lowerhex() {
-    let d = config_digest("owner-1");
-    assert_eq!(d.len(), 64);
-    assert!(d.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
-    assert_eq!(d, config_digest("owner-1"));
-    assert_ne!(d, config_digest("owner-2"));
-}
-
-#[test]
-fn parse_bind_ok() {
-    let raw = br#"{"id":"bind:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"bind","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","address":"web-a-c"}"#;
-    match parse_frame_bytes(raw).unwrap() {
-        CoreMsg::Bind(b) => {
-            assert_eq!(b.address, "web-a-c");
-            assert_eq!(b.binding_id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-        }
-        other => panic!("{other:?}"),
-    }
+fn bind_is_an_unknown_frame_now() {
+    // D-1099: core never sends `bind`; a gateway treats one like any unknown frame.
+    let raw = br#"{"id":"bind:x","m":"bind","binding_id":"x","address":"a"}"#;
+    assert!(matches!(
+        parse_frame_bytes(raw).unwrap(),
+        CoreMsg::Unknown { .. }
+    ));
 }
 
 #[test]
@@ -93,7 +77,7 @@ fn malformed_present_say_reply_target_is_bad_request() {
         let raw = serde_json::to_vec(&json!({
             "id": "say:1",
             "m": "say",
-            "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "session": "room",
             "payload": {"text": "hi", "reply_target": reply_target}
         }))
         .unwrap();
@@ -112,11 +96,11 @@ fn duplicate_member_is_bad_request() {
 
 #[test]
 fn parse_invoke_ok() {
-    let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","invocation_protocol":1,"binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","declaration_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","operation":"reply","dispatch":"utterance","effect":"utterance","context":{"continuation_id":null},"payload":{"event":"e7","text":"hi"}}"#;
+    let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","invocation_protocol":1,"session":"room","declaration_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","operation":"reply","dispatch":"utterance","effect":"utterance","context":{"continuation_id":null},"payload":{"event":"e7","text":"hi"}}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::Invoke(i) => {
             assert_eq!(i.id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-            assert_eq!(i.binding_id, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+            assert_eq!(i.session_key, "room");
             assert_eq!(i.declaration_digest.len(), 64);
             assert_eq!(i.operation, "reply");
             assert_eq!(i.dispatch, "utterance");
@@ -154,7 +138,7 @@ fn s3_invoke_requires_digest_dispatch_and_effect() {
 
 #[test]
 fn parse_invoke_missing_payload_is_bad_request() {
-    let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","operation":"reply","context":{"continuation_id":null}}"#;
+    let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","session":"room","operation":"reply","context":{"continuation_id":null}}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::Invalid { code, .. } => assert_eq!(code, "bad_request"),
         other => panic!("{other:?}"),
@@ -164,7 +148,7 @@ fn parse_invoke_missing_payload_is_bad_request() {
 // #964: read は次の request に新しく含める投稿の origin を運ぶ。
 #[test]
 fn parse_activity_read_carries_origin() {
-    let raw = br#"{"m":"activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"read","origin":"omo-1"}"#;
+    let raw = br#"{"m":"activity","session":"room","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"read","origin":"omo-1"}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::Activity(a) => {
             assert_eq!(a.state, "read");
@@ -178,7 +162,7 @@ fn parse_activity_read_carries_origin() {
 // origin 欠落は None（後方互換）。additive の未知 field も無視。
 #[test]
 fn parse_activity_without_origin_is_none() {
-    let raw = br#"{"m":"activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"ended","future_field":42}"#;
+    let raw = br#"{"m":"activity","session":"room","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"ended","future_field":42}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::Activity(a) => {
             assert_eq!(a.state, "ended");
@@ -191,7 +175,7 @@ fn parse_activity_without_origin_is_none() {
 
 #[test]
 fn parse_activity_ended_carries_completed_target() {
-    let raw = br#"{"m":"activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"ended","completed_target":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}"#;
+    let raw = br#"{"m":"activity","session":"room","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"ended","completed_target":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::Activity(a) => {
             assert_eq!(a.state, "ended");
@@ -217,7 +201,7 @@ fn parse_activity_distinguishes_absent_empty_and_present_silent_origins() {
         ),
     ] {
         let raw = format!(
-            "{{\"m\":\"activity\",\"binding_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"activity_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"state\":\"ended\"{field}}}"
+            "{{\"m\":\"activity\",\"session\":\"room\",\"activity_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"state\":\"ended\"{field}}}"
         );
         match parse_frame_bytes(raw.as_bytes()).unwrap() {
             CoreMsg::Activity(activity) => assert_eq!(activity.silent_origins, expected),
@@ -230,7 +214,7 @@ fn parse_activity_distinguishes_absent_empty_and_present_silent_origins() {
 fn malformed_silent_origins_is_bad_request() {
     for value in ["null", "{}", "[7]", "[\"\"]"] {
         let raw = format!(
-            "{{\"m\":\"activity\",\"binding_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"activity_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"state\":\"ended\",\"silent_origins\":{value}}}"
+            "{{\"m\":\"activity\",\"session\":\"room\",\"activity_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"state\":\"ended\",\"silent_origins\":{value}}}"
         );
         assert!(matches!(
             parse_frame_bytes(raw.as_bytes()).unwrap(),
@@ -242,13 +226,13 @@ fn malformed_silent_origins_is_bad_request() {
     }
 }
 
-// R3(❌): turn_failed は binding_id + origin を運ぶ。error 本文（未知 field）は無視。
+// R3(❌): turn_failed は session + origin を運ぶ。error 本文（未知 field）は無視。
 #[test]
 fn parse_turn_failed_ok() {
-    let raw = br#"{"m":"turn_failed","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","origin":"boom-1","error":"leaked-should-be-ignored"}"#;
+    let raw = br#"{"m":"turn_failed","session":"room","origin":"boom-1","error":"leaked-should-be-ignored"}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::TurnFailed(t) => {
-            assert_eq!(t.binding_id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+            assert_eq!(t.session_key, "room");
             assert_eq!(t.origin, "boom-1");
         }
         other => panic!("{other:?}"),
@@ -257,7 +241,7 @@ fn parse_turn_failed_ok() {
 
 #[test]
 fn parse_turn_failed_missing_origin_is_bad_request() {
-    let raw = br#"{"m":"turn_failed","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#;
+    let raw = br#"{"m":"turn_failed","session":"room"}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::Invalid { code, .. } => assert_eq!(code, "bad_request"),
         other => panic!("{other:?}"),
@@ -267,7 +251,7 @@ fn parse_turn_failed_missing_origin_is_bad_request() {
 // D-1087: 活動の 2 frame。id を持たないので応答対象にならず、値だけを運ぶ。
 #[test]
 fn tool_activity_frame_parses_started_and_terminal_fields() {
-    let started = br#"{"m":"tool_activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"act-1","call_id":"call-1","tool":"execute_shell","status":"started","depth":0,"started_at":"2026-10-20T00:00:00Z","args":{"command":"ls"}}"#;
+    let started = br#"{"m":"tool_activity","session":"room","activity_id":"act-1","call_id":"call-1","tool":"execute_shell","status":"started","depth":0,"started_at":"2026-10-20T00:00:00Z","args":{"command":"ls"}}"#;
     match parse_frame_bytes(started).unwrap() {
         CoreMsg::ToolActivity(a) => {
             assert_eq!(a.activity_id, "act-1");
@@ -279,7 +263,7 @@ fn tool_activity_frame_parses_started_and_terminal_fields() {
         }
         other => panic!("{other:?}"),
     }
-    let terminal = br#"{"m":"tool_activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"act-1","call_id":"call-1","tool":"execute_shell","status":"completed","depth":0,"started_at":"2026-10-20T00:00:00Z","duration_ms":12,"args":{"command":"ls"},"result":{"exit_code":0}}"#;
+    let terminal = br#"{"m":"tool_activity","session":"room","activity_id":"act-1","call_id":"call-1","tool":"execute_shell","status":"completed","depth":0,"started_at":"2026-10-20T00:00:00Z","duration_ms":12,"args":{"command":"ls"},"result":{"exit_code":0}}"#;
     match parse_frame_bytes(terminal).unwrap() {
         CoreMsg::ToolActivity(a) => {
             assert_eq!(a.duration_ms, Some(12));
@@ -293,7 +277,7 @@ fn tool_activity_frame_parses_started_and_terminal_fields() {
 /// `sub_session_id`（run の相関キー）を運ぶ。depth 0（親ターン）は field ごと省く。
 #[test]
 fn tool_activity_carries_the_run_session_key_for_nested_runs() {
-    let nested = br#"{"m":"tool_activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"act-1","call_id":"call-1","tool":"execute_shell","status":"started","depth":1,"sub_session_id":"subtask-s1","started_at":"2026-10-20T00:00:00Z","args":{}}"#;
+    let nested = br#"{"m":"tool_activity","session":"room","activity_id":"act-1","call_id":"call-1","tool":"execute_shell","status":"started","depth":1,"sub_session_id":"subtask-s1","started_at":"2026-10-20T00:00:00Z","args":{}}"#;
     match parse_frame_bytes(nested).unwrap() {
         CoreMsg::ToolActivity(a) => {
             assert_eq!(a.depth, 1);
@@ -301,7 +285,7 @@ fn tool_activity_carries_the_run_session_key_for_nested_runs() {
         }
         other => panic!("{other:?}"),
     }
-    let parent = br#"{"m":"tool_activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"act-1","call_id":"call-1","tool":"execute_shell","status":"started","depth":0,"started_at":"2026-10-20T00:00:00Z","args":{}}"#;
+    let parent = br#"{"m":"tool_activity","session":"room","activity_id":"act-1","call_id":"call-1","tool":"execute_shell","status":"started","depth":0,"started_at":"2026-10-20T00:00:00Z","args":{}}"#;
     match parse_frame_bytes(parent).unwrap() {
         CoreMsg::ToolActivity(a) => assert_eq!(a.sub_session_id, None),
         other => panic!("{other:?}"),
@@ -310,7 +294,7 @@ fn tool_activity_carries_the_run_session_key_for_nested_runs() {
 
 #[test]
 fn subtask_lifecycle_frame_parses_optional_fields() {
-    let raw = br#"{"m":"subtask_lifecycle","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","run_id":"run-1","status":"progress","detail":"half"}"#;
+    let raw = br#"{"m":"subtask_lifecycle","session":"room","run_id":"run-1","status":"progress","detail":"half"}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::SubtaskLifecycle(l) => {
             assert_eq!(l.run_id, "run-1");
@@ -327,7 +311,7 @@ fn subtask_lifecycle_frame_parses_optional_fields() {
 
 #[test]
 fn subtask_lifecycle_frame_carries_the_run_session_key() {
-    let raw = br#"{"m":"subtask_lifecycle","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","run_id":"run-1","sub_session_id":"subtask-s1","status":"started","task":"do it"}"#;
+    let raw = br#"{"m":"subtask_lifecycle","session":"room","run_id":"run-1","sub_session_id":"subtask-s1","status":"started","task":"do it"}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::SubtaskLifecycle(l) => {
             assert_eq!(l.sub_session_id.as_deref(), Some("subtask-s1"));
@@ -351,7 +335,7 @@ fn tool_activity_without_a_binding_is_bad_request() {
 // 未知 m は unknown_message・keep」。これが崩れると外部 DI gateway を壊すので固定する。
 #[test]
 fn unknown_noid_notification_is_ignorable_unknown() {
-    let raw = br#"{"m":"turn_failed_v99","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","origin":"x"}"#;
+    let raw = br#"{"m":"turn_failed_v99","session":"room","origin":"x"}"#;
     match parse_frame_bytes(raw).unwrap() {
         CoreMsg::Unknown { id, m } => {
             assert_eq!(id, None);
@@ -377,14 +361,14 @@ fn invoke_ok_frame_carries_result() {
 #[test]
 fn hello_always_carries_versioned_runtime_capabilities_and_operations() {
     // Capability-zero clients still declare an explicit empty operation set in protocol v3.
-    let plain = hello_frame_with_operations("h", "iid", 1, &"a".repeat(64), None);
+    let plain = hello_frame_with_operations("h", "iid", "agent", None);
     assert_eq!(plain["protocol"], 3);
     assert_eq!(plain["operation_protocol"], 1);
     assert_eq!(plain["final_delivery"], "automatic");
     assert_eq!(plain["operations"], json!([]));
     // Some carries the declared operation set.
     let ops = json!([{"name":"reply"}]);
-    let withops = hello_frame_with_operations("h", "iid", 1, &"a".repeat(64), Some(&ops));
+    let withops = hello_frame_with_operations("h", "iid", "agent", Some(&ops));
     assert_eq!(withops["operations"], ops);
 }
 
@@ -411,11 +395,11 @@ fn command_replies_preserve_result_and_old_core_unknown_message() {
 
 #[test]
 fn command_frame_round_trips_all_contract_fields() {
-    let binding_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let session_key = "room-1";
     let expected = json!({
         "m": "command",
         "id": "cmd-set-1",
-        "binding_id": binding_id,
+        "session": session_key,
         "caller": {"role": "owner"},
         "name": "set_model",
         "args": {"model": "openai:gpt-5"},
@@ -423,7 +407,7 @@ fn command_frame_round_trips_all_contract_fields() {
 
     let outbound = command_frame(
         "cmd-set-1",
-        binding_id,
+        session_key,
         &SaidCaller::Owner,
         "set_model",
         &json!({"model": "openai:gpt-5"}),
@@ -443,6 +427,7 @@ fn said_agent_prelude_is_sent_only_when_set() {
         start_turn: true,
         system_context: None,
         reply_target: None,
+        reference: None,
         live_inbound_scope: LiveInboundScope::All,
         model_profile: TurnModelProfile::Realtime,
         agent_prelude: None,
@@ -463,15 +448,13 @@ fn said_agent_prelude_is_sent_only_when_set() {
 fn an_empty_run_env_sends_exactly_the_previous_hello_frame() {
     use std::collections::BTreeMap;
 
-    let digest = "a".repeat(64);
     let ops = json!([{"name": "say"}]);
     for operations in [None, Some(&ops)] {
-        let previous = hello_frame_with_operations("h", "iid", 1, &digest, operations);
+        let previous = hello_frame_with_operations("h", "iid", "agent", operations);
         let with_empty_env = crate::wire::hello_env::hello_frame_with_capabilities_and_env(
             "h",
             "iid",
-            1,
-            &digest,
+            "agent",
             operations,
             crate::wire::RuntimeCapabilities::default(),
             &BTreeMap::new(),

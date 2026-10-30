@@ -16,8 +16,8 @@ use crate::protocol::Said;
 use crate::registry::ExtgateState;
 
 use super::asserted_caller;
-use super::binding::OriginRow;
 use super::record::seq_for_origin;
+use super::session::OriginRow;
 use crate::provisional::{promote, ProvisionalInputs};
 
 /// D-1085: a promoted provisional run had no read origin, so a silent result names the said's
@@ -64,12 +64,12 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     let session_id = session_id.to_string();
     let agent_id = row.agent_id.clone();
     let instance_id = row.instance_id.clone();
-    let binding_id = said.binding_id.clone();
+    let binding_id = row.row_id.clone();
     let author_id = said.author_id.clone();
     let author_label = said.author_label.clone();
     let text = said.text.clone();
     let images = said.image_urls();
-    let address = row.address.clone();
+    let session_key_value = row.session_key.clone();
     let origin = said.origin.clone();
     let system_context = system_context.to_string();
     let failure_origin = failure_origin.map(str::to_string);
@@ -257,7 +257,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     let agent_id = agent_id.clone();
                     let author_id = author_id.clone();
                     let author_label = author_label.clone();
-                    let address = address.clone();
+                    let session_key_value = session_key_value.clone();
                     let text = text.clone();
                     let images = images.clone();
                     let origin = origin.clone();
@@ -287,7 +287,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             sender_id: &author_id,
                             sender_name: author_label.as_deref().unwrap_or(""),
                             avatar_url: None,
-                            channel_id: Some(&address),
+                            session_key: Some(&session_key_value),
                             pubkey: None,
                             text: &text,
                             image_urls: &images,

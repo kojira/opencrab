@@ -32,7 +32,7 @@ fn parses_provider_neutral_local_attachment() {
     let frame = serde_json::json!({
         "id": "said-1",
         "m": "said",
-        "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "session": "room-1",
         "origin": "event-1",
         "author_id": "sender-1",
         "text": "",
@@ -59,7 +59,7 @@ fn parses_provider_neutral_local_attachment() {
 fn author_label_is_optional_display_metadata() {
     let mut frame = serde_json::json!({
         "id": "said-1", "m": "said",
-        "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "session": "room-1",
         "origin": "event-1", "author_id": "sender-1", "author_label": "Alice",
         "text": "hello", "attachments": []
     });
@@ -96,7 +96,7 @@ fn command_requires_an_object_caller() {
         let frame = serde_json::json!({
             "id": "command-1",
             "m": "command",
-            "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "session": "room-1",
             "caller": caller,
             "name": "list_models",
             "args": {}
@@ -115,7 +115,7 @@ fn command_requires_an_object_caller() {
 fn rejects_local_attachment_path_traversal() {
     let mut frame = serde_json::json!({
         "id": "said-1", "m": "said",
-        "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "session": "room-1",
         "origin": "event-1", "author_id": "sender-1", "text": "",
         "attachments": [{
             "kind": "file", "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -146,7 +146,7 @@ fn said_model_profile_is_strict_and_optional() {
     use opencrab_actions::TurnModelProfile;
     let mut frame = serde_json::json!({
         "id": "said-1", "m": "said",
-        "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "session": "room-1",
         "origin": "event-1", "author_id": "sender-1",
         "text": "hello", "attachments": []
     });
@@ -178,7 +178,7 @@ fn agent_prelude_is_optional_and_bounded() {
     let frame = |prelude: Option<serde_json::Value>| {
         let mut frame = serde_json::json!({
             "id": "said-1", "m": "said",
-            "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "session": "room-1",
             "origin": "event-1", "author_id": "sender-1",
             "text": "hello", "attachments": []
         });
@@ -220,7 +220,7 @@ fn agent_prelude_is_optional_and_bounded() {
 
 // D-1087: the activity frames are id-less fire-and-forget notifications. A gateway that does
 // not know them drops them with zero writes and keeps the connection, so the shape is pinned
-// here: `m` + `binding_id` + the neutral fields, and no `id`.
+// here: `m` + `session` + the neutral fields, and no `id`.
 
 #[test]
 fn tool_activity_started_frame_carries_no_id_and_no_terminal_fields() {
@@ -243,7 +243,7 @@ fn tool_activity_started_frame_carries_no_id_and_no_terminal_fields() {
         frame,
         serde_json::json!({
             "m": "tool_activity",
-            "binding_id": "binding",
+            "session": "binding",
             "activity_id": "activity",
             "call_id": "call-1",
             "tool": "execute_shell",
@@ -368,7 +368,7 @@ fn subtask_lifecycle_frame_omits_the_fields_that_do_not_apply() {
         started,
         serde_json::json!({
             "m": "subtask_lifecycle",
-            "binding_id": "binding",
+            "session": "binding",
             "run_id": "run-1",
             "sub_session_id": "subtask-s1",
             "status": "started",

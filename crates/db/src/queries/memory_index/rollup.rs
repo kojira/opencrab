@@ -211,7 +211,7 @@ pub fn get_unindexed_stats(conn: &Connection, agent_id: &str) -> Result<(i64, Op
     Ok(conn.query_row(
         &format!(
             "SELECT COUNT(*), MAX(created_at) FROM memory_sessions
-         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_ECHO_SQL}"
         ),
         params![agent_id, last_id],
         |row| Ok((row.get(0)?, row.get(1)?)),

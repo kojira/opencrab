@@ -11,17 +11,13 @@ use opencrab_db::queries::SessionLogRow;
 use super::{ProvisionalInputs, PROVISIONAL_TTL};
 use crate::completion::{v3_attach_dispatch, ExtgateCompletionSink};
 use crate::error::{ErrorCode, GateError};
-use crate::inbound::{
-    agent_prelude_row, asserted_caller, binding_said_error, channel_whitelisted,
-    inbound_speech_metadata, load_origin_row,
-};
+use crate::inbound::{agent_prelude_row, asserted_caller, inbound_speech_metadata, resolve};
 use crate::partial_stream::{partial_text_hook, PartialStreamSlot};
 use crate::protocol::Provisional;
 use crate::registry::ExtgateState;
 
 /// Starts the provisional run without the session lock and registers it. Reads the session once
-/// (high-water mark); writes nothing before its promotion. A provisional the said would not admit
-/// starts nothing. §12: the run gets the gateway operations and the dispatch sink the said's
+/// (high-water mark); writes nothing before its promotion. §12: the run gets the gateway operations and the dispatch sink the said's
 /// normal turn would get, so its tool set is the same.
 pub(crate) async fn start_provisional<R: AgentRuntime>(
     state: &Arc<ExtgateState>,
@@ -29,47 +25,21 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
     instance_id: &str,
     provisional: &Provisional,
 ) -> Result<(), GateError> {
-    let binding_id = provisional.binding_id.as_str();
-    {
-        let reg = state.lock_registry()?;
-        match reg.get(instance_id) {
-            Some(live) if live.acknowledged.contains(binding_id) => {}
-            Some(_) => {
-                drop(reg);
-                return binding_said_error(state, instance_id, binding_id).map(|_| ());
-            }
-            None => return Err(GateError::new(ErrorCode::InstanceUnknown)),
-        }
+    if !state.lock_registry()?.is_live(instance_id) {
+        return Err(GateError::new(ErrorCode::InstanceUnknown));
     }
-    let (row, session_id, high_water) = {
-        let conn = state
+    let (row, high_water) = {
+        let mut conn = state
             .db
             .lock()
             .map_err(|e| GateError::store_logged("provisional.db_lock", e))?;
-        let Some(row) = load_origin_row(&conn, instance_id, binding_id)? else {
-            drop(conn);
-            return binding_said_error(state, instance_id, binding_id).map(|_| ());
-        };
-        let session_id =
-            match opencrab_db::queries::canonical_session_id(&conn, binding_id, &row.address) {
-                Ok(Some(id)) => id,
-                Ok(None) => {
-                    return Err(GateError::store_logged(
-                        "provisional.session_missing",
-                        format!("no session for binding={binding_id}"),
-                    ))
-                }
-                Err(error) => {
-                    return Err(GateError::store_logged("provisional.session_lookup", error))
-                }
-            };
-        if !channel_whitelisted(&conn, &row.agent_id, instance_id, &row.address) {
-            return Ok(());
-        }
-        let high_water = opencrab_db::queries::session_log_high_water(&conn, &session_id)
+        let row = resolve(&mut conn, instance_id, &provisional.session_key, None)?;
+        let high_water = opencrab_db::queries::session_log_high_water(&conn, &row.session_id)
             .map_err(|e| GateError::store_logged("provisional.high_water", e))?;
-        (row, session_id, high_water)
+        (row, high_water)
     };
+    let session_id = row.session_id.clone();
+    let binding_id = row.row_id.as_str();
 
     let inputs = ProvisionalInputs {
         author_id: provisional.author_id.clone(),
@@ -79,7 +49,7 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
         agent_prelude: provisional.agent_prelude.clone(),
         text: provisional.text.clone(),
     };
-    let pending = pending_rows(&row.agent_id, &session_id, &row.address, &inputs);
+    let pending = pending_rows(&row.agent_id, &session_id, &row.session_key, &inputs);
     let caller = asserted_caller(&inputs.caller);
     // §13: the said's normal turn builds this system prompt for the same agent and caller.
     let (system, name) = runtime.build_agent_context(&row.agent_id, &caller);
@@ -189,11 +159,11 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
 fn pending_rows(
     agent_id: &str,
     session_id: &str,
-    address: &str,
+    session_key: &str,
     inputs: &ProvisionalInputs,
 ) -> Vec<SessionLogRow> {
     let now = chrono::Utc::now().to_rfc3339();
-    let meta = inbound_speech_metadata(address, inputs.author_label.as_deref(), &inputs.caller);
+    let meta = inbound_speech_metadata(session_key, inputs.author_label.as_deref(), &inputs.caller);
     let mut rows = vec![SessionLogRow {
         id: None,
         agent_id: agent_id.to_string(),

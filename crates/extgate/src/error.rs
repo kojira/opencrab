@@ -1,4 +1,4 @@
-//! V3 §5.4 の 25 code + DI 拡張 §10.4 の 4 code = 29 code。これ以外を追加しない。
+//! V3 §5.4 の 24 code + DI 拡張 §10.4 の 4 code = 28 code。これ以外を追加しない。
 
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -22,7 +22,6 @@ pub enum ErrorCode {
     InstanceDisabled,
     BindingClosed,
     BindingConflict,
-    AddressInUse,
     InstanceActive,
     InstanceNotReady,
     StoreError,
@@ -57,7 +56,6 @@ impl ErrorCode {
             Self::InstanceDisabled => "instance_disabled",
             Self::BindingClosed => "binding_closed",
             Self::BindingConflict => "binding_conflict",
-            Self::AddressInUse => "address_in_use",
             Self::InstanceActive => "instance_active",
             Self::InstanceNotReady => "instance_not_ready",
             Self::StoreError => "store_error",
@@ -91,7 +89,6 @@ impl ErrorCode {
             "instance_disabled" => Self::InstanceDisabled,
             "binding_closed" => Self::BindingClosed,
             "binding_conflict" => Self::BindingConflict,
-            "address_in_use" => Self::AddressInUse,
             "instance_active" => Self::InstanceActive,
             "instance_not_ready" => Self::InstanceNotReady,
             "store_error" => Self::StoreError,
@@ -126,7 +123,6 @@ impl ErrorCode {
             | Self::InstanceDisabled
             | Self::BindingClosed
             | Self::BindingConflict
-            | Self::AddressInUse
             | Self::InstanceActive
             | Self::InstanceNotReady => StatusCode::CONFLICT,
             Self::StoreError => StatusCode::INTERNAL_SERVER_ERROR,
