@@ -56,9 +56,10 @@ class GatewayBoundaryMutationTests(unittest.TestCase):
         guard = source.index("if empty_new_database {")
         transaction = source.index("let tx = conn.unchecked_transaction()?;", guard)
         drop = source.index("for table in migrations::LEGACY_GATEWAY_SETTINGS_TABLES", transaction)
-        # D-1098: the same loop also drops the gate-admin credential tables.
-        self.assertIn(".chain(migrations::GATE_ADMIN_TABLES)", source[drop : drop + 160])
-        commit = source.index("tx.commit()?;", drop)
+        # D-1098: the gate-admin credential tables go through the same function as v64, which
+        # also removes their triggers (a populated database otherwise fails the DROP).
+        gate_admin = source.index("migrations::drop_gate_admin_tables(&tx)?;", drop)
+        commit = source.index("tx.commit()?;", gate_admin)
         end = source.index("return Ok(());", commit)
         self.assertLess(guard, transaction)
         self.assertLess(transaction, drop)
