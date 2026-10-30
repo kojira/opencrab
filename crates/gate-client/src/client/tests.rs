@@ -19,6 +19,7 @@
         };
         let client = InstanceClient::blank(
             "instance".into(),
+            "agent".into(),
             "author".into(),
             SayPolicy::AcceptToLiveQueue,
             Some(operations.clone()),
@@ -36,7 +37,7 @@
         );
         let valid = Invoke {
             id: "call".into(),
-            binding_id: "binding".into(),
+            session_key: "address".into(),
             declaration_digest: digest,
             operation: "quasar.synthetic-v7".into(),
             dispatch: "background".into(),
@@ -66,6 +67,7 @@
         ] {
             let client = InstanceClient::blank(
                 "instance".into(),
+                "agent".into(),
                 "author".into(),
                 SayPolicy::AcceptToLiveQueue,
                 None,
@@ -75,9 +77,6 @@
             {
                 let mut inner = client.inner.lock().await;
                 inner.closed = false;
-                inner
-                    .acknowledged
-                    .insert("address".into(), "binding".into());
                 inner.pending_turn.insert(
                     "binding".into(),
                     PendingTurn {
@@ -91,7 +90,7 @@
                 &client,
                 Say {
                     id: "say:malformed".into(),
-                    binding_id: "binding".into(),
+                    session_key: "address".into(),
                     payload,
                 },
                 0,
@@ -123,6 +122,7 @@
     async fn plain_say_gets_no_reply_origin_from_the_pending_turn() {
         let client = InstanceClient::blank(
             "instance".into(),
+            "agent".into(),
             "author".into(),
             SayPolicy::AcceptToLiveQueue,
             None,
@@ -132,9 +132,6 @@
         {
             let mut inner = client.inner.lock().await;
             inner.closed = false;
-            inner
-                .acknowledged
-                .insert("address".into(), "binding".into());
             inner.pending_turn.insert(
                 "binding".into(),
                 PendingTurn {
@@ -149,7 +146,7 @@
             &client,
             Say {
                 id: "say:plain".into(),
-                binding_id: "binding".into(),
+                session_key: "address".into(),
                 payload: serde_json::json!({"text": "plain"}),
             },
             0,
@@ -171,6 +168,7 @@
     async fn completed_target_and_completed_no_reply_are_exclusive() {
         let client = InstanceClient::blank(
             "instance".into(),
+            "agent".into(),
             "author".into(),
             SayPolicy::AcceptToLiveQueue,
             None,
@@ -180,14 +178,11 @@
         {
             let mut inner = client.inner.lock().await;
             inner.closed = false;
-            inner
-                .acknowledged
-                .insert("address".into(), "binding".into());
         }
         handle_activity(
             &client,
             Activity {
-                binding_id: "binding".into(),
+                session_key: "address".into(),
                 activity_id: "activity".into(),
                 state: "started".into(),
                 origin: None,
@@ -200,7 +195,7 @@
         handle_activity(
             &client,
             Activity {
-                binding_id: "binding".into(),
+                session_key: "address".into(),
                 activity_id: "activity".into(),
                 state: "ended".into(),
                 origin: None,
@@ -231,6 +226,7 @@
 async fn command_timeout_removes_pending_and_ignores_late_reply() {
     let client = InstanceClient::blank(
         "instance".to_string(),
+        "agent".to_string(),
         "author".to_string(),
         SayPolicy::AcceptToLiveQueue,
         None,
@@ -242,9 +238,6 @@ async fn command_timeout_removes_pending_and_ignores_late_reply() {
     {
         let mut inner = client.inner.lock().await;
         inner.closed = false;
-        inner
-            .acknowledged
-            .insert("address".to_string(), "binding".to_string());
     }
 
     let outcome = client
@@ -268,6 +261,7 @@ async fn command_timeout_removes_pending_and_ignores_late_reply() {
             ok: true,
             seq: None,
             result: Some(serde_json::json!({})),
+            session_id: None,
             code: None,
             detail: None,
             message: None,

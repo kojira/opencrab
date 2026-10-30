@@ -5,7 +5,6 @@ use serde_json::json;
 use tokio::net::UnixListener;
 
 const ADDRESS: &str = "test:partial";
-const BINDING: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const STREAM: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 async fn read(core: &mut UnixStream) -> Value {
@@ -23,6 +22,7 @@ async fn bound_client() -> (tempfile::TempDir, Arc<InstanceClient>, UnixStream) 
     let listener = UnixListener::bind(&socket).unwrap();
     let client = Arc::new(InstanceClient::blank(
         "instance".into(),
+        "agent".into(),
         "author".into(),
         SayPolicy::AcceptToLiveQueue,
         None,
@@ -31,7 +31,7 @@ async fn bound_client() -> (tempfile::TempDir, Arc<InstanceClient>, UnixStream) 
     ));
     let task = {
         let client = client.clone();
-        tokio::spawn(async move { attach(&client, &socket, 1, &"0".repeat(64)).await })
+        tokio::spawn(async move { attach(&client, &socket).await })
     };
     let (mut core, _) = listener.accept().await.unwrap();
     let hello = read(&mut core).await;
@@ -39,20 +39,13 @@ async fn bound_client() -> (tempfile::TempDir, Arc<InstanceClient>, UnixStream) 
         .await
         .unwrap();
     task.await.unwrap().unwrap();
-    write_json(
-        &mut core,
-        &json!({"id":"bind", "m":"bind", "binding_id": BINDING, "address": ADDRESS}),
-    )
-    .await
-    .unwrap();
-    assert_eq!(read(&mut core).await, json!({"id":"bind", "m":"ok"}));
     (dir, client, core)
 }
 
 async fn partial(core: &mut UnixStream, text: &str) {
     write_json(
         core,
-        &json!({"m":"partial", "binding_id": BINDING, "stream_id": STREAM, "text": text}),
+        &json!({"m":"partial", "session": ADDRESS, "stream_id": STREAM, "text": text}),
     )
     .await
     .unwrap();
@@ -61,7 +54,7 @@ async fn partial(core: &mut UnixStream, text: &str) {
 async fn say(core: &mut UnixStream, id: &str, payload: Value) -> Value {
     write_json(
         core,
-        &json!({"id": id, "m":"say", "binding_id": BINDING, "payload": payload}),
+        &json!({"id": id, "m":"say", "session": ADDRESS, "payload": payload}),
     )
     .await
     .unwrap();

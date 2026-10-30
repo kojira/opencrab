@@ -1,6 +1,6 @@
 //! D-1091: `hello` に gateway 自身の instance 用の環境変数（名前→値）を載せる。
 //!
-//! 「その binding が誰のアカウントか」を知っているのは gateway だけなので、gateway が宣言する。
+//! 「その instance が誰のアカウントか」を知っているのは gateway だけなので、gateway が宣言する。
 //! core は名前も値も解釈せず、`execute_shell` の子へそのまま渡す。空なら従来と同じ frame。
 
 use serde_json::{json, Value};
@@ -16,8 +16,7 @@ use crate::wire::RuntimeCapabilities;
 pub fn hello_frame_with_capabilities_and_env(
     id: &str,
     instance_id: &str,
-    revision: u64,
-    config_digest: &str,
+    agent_id: &str,
     operations: Option<&Value>,
     capabilities: RuntimeCapabilities,
     run_env: &std::collections::BTreeMap<String, String>,
@@ -27,8 +26,7 @@ pub fn hello_frame_with_capabilities_and_env(
         "m": "hello",
         "protocol": 3,
         "instance_id": instance_id,
-        "revision": revision,
-        "config_digest": config_digest,
+        "agent_id": agent_id,
         "operation_protocol": 1,
         "final_delivery": capabilities.final_delivery.as_str(),
         "operations": operations.cloned().unwrap_or_else(|| json!([])),

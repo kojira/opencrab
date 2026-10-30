@@ -24,6 +24,11 @@ pub(super) fn parse_response(obj: &Value, m: &str) -> Result<WireResponse, Frame
             ok: true,
             seq,
             result: obj.get("result").cloned(),
+            session_id: obj
+                .get("session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             code: None,
             detail: None,
             message: None,
@@ -48,6 +53,7 @@ pub(super) fn parse_response(obj: &Value, m: &str) -> Result<WireResponse, Frame
             ok: false,
             seq: None,
             result: None,
+            session_id: None,
             code: Some(code),
             detail,
             message,

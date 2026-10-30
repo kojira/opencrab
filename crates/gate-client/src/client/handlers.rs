@@ -1,9 +1,5 @@
 async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> bool {
     match msg {
-        CoreMsg::Bind(bind) => {
-            handle_bind(client, bind, generation).await;
-            false
-        }
         CoreMsg::Say(say) => handle_say(client, say, generation).await,
         CoreMsg::Activity(activity) => handle_activity(client, activity, generation).await,
         CoreMsg::ToolActivity(activity) => {
@@ -60,7 +56,7 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) ->
     }
     tracing::info!(
         instance_id = %client.instance_id,
-        binding_id = %inv.binding_id,
+        session = %inv.session_key,
         operation = %inv.operation,
         "invoke"
     );
@@ -78,7 +74,7 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) ->
         return false;
     };
     match handler
-        .handle(&inv.id, &inv.binding_id, &inv.operation, &inv.payload)
+        .handle(&inv.id, &inv.session_key, &inv.operation, &inv.payload)
         .await
     {
         InvokeOutcome::Ok(result) => {
@@ -89,7 +85,7 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) ->
                 if inner.closed || inner.generation != generation {
                     return true;
                 }
-                if let Some(turn) = inner.pending_turn.get_mut(&inv.binding_id) {
+                if let Some(turn) = inner.pending_turn.get_mut(&inv.session_key) {
                     turn.saw_utterance = true;
                 }
             }
@@ -109,42 +105,10 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) ->
     }
 }
 
-async fn handle_bind(client: &InstanceClient, bind: Bind, generation: u64) {
-    tracing::info!(
-        instance_id = %client.instance_id,
-        binding_id = %bind.binding_id,
-        address = %bind.address,
-        "bind"
-    );
-    let mut inner = client.inner.lock().await;
-    if inner.closed {
-        return;
-    }
-    if let Some(existing) = inner.acknowledged.get(&bind.address) {
-        if existing != &bind.binding_id {
-            drop(inner);
-            close_all(client, "binding_conflict", generation).await;
-            return;
-        }
-    }
-    inner
-        .remembered
-        .insert(bind.address.clone(), bind.binding_id.clone());
-    inner
-        .acknowledged
-        .insert(bind.address.clone(), bind.binding_id);
-    inner
-        .live
-        .entry(bind.address)
-        .or_insert_with(LiveQueue::new);
-    drop(inner);
-    let _ = send_frame(client, ok_frame(&bind.id)).await;
-}
-
 async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool {
     tracing::info!(
         instance_id = %client.instance_id,
-        binding_id = %say.binding_id,
+        session = %say.session_key,
         "say"
     );
     if client.say_policy == SayPolicy::RejectExternal {
@@ -166,16 +130,8 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
     if inner.closed {
         return true;
     }
-    let address = inner
-        .acknowledged
-        .iter()
-        .find(|(_, bid)| *bid == &say.binding_id)
-        .map(|(a, _)| a.clone());
-    let Some(address) = address else {
-        drop(inner);
-        let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
-        return false;
-    };
+    // D-1099: the say names the session by its key; the gateway owns what that key means.
+    let address = say.session_key.clone();
     // D-1093: 返信先は payload に明示された reply_target だけ。進行中ターンの発端 said から
     // 推測しない（地の文の say は返信先を持たない）。
     let reply_origin = explicit_reply_target;
@@ -194,7 +150,7 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
         return false;
     }
-    if let Some(turn) = inner.pending_turn.get_mut(&say.binding_id) {
+    if let Some(turn) = inner.pending_turn.get_mut(&say.session_key) {
         turn.saw_utterance = true;
     }
     drop(inner);
@@ -210,17 +166,10 @@ async fn handle_activity(client: &InstanceClient, activity: Activity, generation
     if inner.closed {
         return true;
     }
-    let address = inner
-        .acknowledged
-        .iter()
-        .find(|(_, bid)| *bid == &activity.binding_id)
-        .map(|(a, _)| a.clone());
-    let Some(address) = address else {
-        return false;
-    };
+    let address = activity.session_key.clone();
 
     if activity.state == "ended" {
-        let legacy_turn = inner.pending_turn.remove(&activity.binding_id);
+        let legacy_turn = inner.pending_turn.remove(&activity.session_key);
         let has_completed_target = activity.completed_target.is_some();
         let mut events = vec![LiveEvent::Activity {
             activity_id: activity.activity_id,
@@ -280,7 +229,7 @@ async fn handle_activity(client: &InstanceClient, activity: Activity, generation
     if activity.state == "started" {
         inner
             .pending_turn
-            .entry(activity.binding_id)
+            .entry(activity.session_key)
             .or_insert_with(|| PendingTurn {
                 saw_utterance: false,
                 reply_origin: ReplyOrigin::None,
@@ -289,14 +238,11 @@ async fn handle_activity(client: &InstanceClient, activity: Activity, generation
     false
 }
 
-/// D-1087: ツール活動を、その binding を ack 済みの address の live queue へ積む。
+/// D-1087: ツール活動を、そのセッションキーの live queue へ積む。
 ///
-/// id を持たない通知なので応答しない。binding が未 ack（別 gateway の担当・切断）なら捨てる。
-/// 見ない consumer は無視してよく、core の挙動は変わらない。
+/// id を持たない通知なので応答しない。見ない consumer は無視してよく、core の挙動は変わらない。
 async fn handle_tool_activity(client: &InstanceClient, activity: ToolActivity) {
-    let Some(address) = acknowledged_address(client, &activity.binding_id).await else {
-        return;
-    };
+    let address = activity.session_key.clone();
     push_live(
         client,
         &address,
@@ -319,9 +265,7 @@ async fn handle_tool_activity(client: &InstanceClient, activity: ToolActivity) {
 
 /// D-1087: サブタスク走行のライフサイクルを live queue へ積む（応答しない）。
 async fn handle_subtask_lifecycle(client: &InstanceClient, lifecycle: SubtaskLifecycle) {
-    let Some(address) = acknowledged_address(client, &lifecycle.binding_id).await else {
-        return;
-    };
+    let address = lifecycle.session_key.clone();
     push_live(
         client,
         &address,
@@ -339,29 +283,18 @@ async fn handle_subtask_lifecycle(client: &InstanceClient, lifecycle: SubtaskLif
     .await;
 }
 
-/// binding を ack している address。無ければ None。
-async fn acknowledged_address(client: &InstanceClient, binding_id: &str) -> Option<String> {
-    let inner = client.inner.lock().await;
-    if inner.closed {
-        return None;
-    }
-    inner
-        .acknowledged
-        .iter()
-        .find(|(_, bid)| *bid == binding_id)
-        .map(|(a, _)| a.clone())
-}
-
 /// live queue へ 1 件積む。溢れたら best-effort で捨てる（partial と同じ扱い）。
 async fn push_live(client: &InstanceClient, address: &str, event: LiveEvent) {
     let mut inner = client.inner.lock().await;
     if inner.closed {
         return;
     }
-    if let Some(queue) = inner.live.get_mut(address) {
-        if !queue.try_push(event) {
-            tracing::debug!(%address, "activity live event dropped: queue full");
-        }
+    let queue = inner
+        .live
+        .entry(address.to_string())
+        .or_insert_with(LiveQueue::new);
+    if !queue.try_push(event) {
+        tracing::debug!(%address, "activity live event dropped: queue full");
     }
 }
 
@@ -370,36 +303,24 @@ async fn handle_turn_failed(client: &InstanceClient, tf: TurnFailed) {
     if inner.closed {
         return;
     }
-    let address = inner
-        .acknowledged
-        .iter()
-        .find(|(_, bid)| *bid == &tf.binding_id)
-        .map(|(a, _)| a.clone());
-    let Some(address) = address else {
-        return;
-    };
-    let q = inner.live.entry(address).or_insert_with(LiveQueue::new);
+    let q = inner
+        .live
+        .entry(tf.session_key).or_insert_with(LiveQueue::new);
     let _ = q.try_push(LiveEvent::TurnFailed {
         reply_origin: tf.origin,
     });
 }
 
-/// D-1083: core→gate partial text. It has no id, so nothing is written back; an unacknowledged
-/// binding or a full live queue drops it without closing the connection.
+/// D-1083: core→gate partial text. It has no id, so nothing is written back; a full live queue
+/// drops it without closing the connection.
 async fn handle_partial(client: &InstanceClient, partial: Partial) {
     let mut inner = client.inner.lock().await;
     if inner.closed {
         return;
     }
-    let Some(address) = inner
-        .acknowledged
-        .iter()
-        .find(|(_, bid)| *bid == &partial.binding_id)
-        .map(|(a, _)| a.clone())
-    else {
-        return;
-    };
-    let q = inner.live.entry(address).or_insert_with(LiveQueue::new);
+    let q = inner
+        .live
+        .entry(partial.session_key).or_insert_with(LiveQueue::new);
     let _ = q.try_push(LiveEvent::Partial {
         stream_id: partial.stream_id,
         text: partial.text,
@@ -407,22 +328,15 @@ async fn handle_partial(client: &InstanceClient, partial: Partial) {
     });
 }
 
-/// D-1085: core→gate provisional result. Id-less like a partial; dropped for an unacknowledged
-/// binding.
+/// D-1085: core→gate provisional result. Id-less like a partial.
 async fn handle_provisional_result(client: &InstanceClient, result: ProvisionalResult) {
     let mut inner = client.inner.lock().await;
     if inner.closed {
         return;
     }
-    let Some(address) = inner
-        .acknowledged
-        .iter()
-        .find(|(_, bid)| *bid == &result.binding_id)
-        .map(|(a, _)| a.clone())
-    else {
-        return;
-    };
-    let q = inner.live.entry(address).or_insert_with(LiveQueue::new);
+    let q = inner
+        .live
+        .entry(result.session_key).or_insert_with(LiveQueue::new);
     let _ = q.try_push(LiveEvent::ProvisionalResult {
         provisional_id: result.provisional_id,
         promoted: result.promoted,
@@ -455,6 +369,23 @@ async fn handle_response(client: &InstanceClient, resp: WireResponse, generation
         return;
     };
     let outcome = match pending.kind {
+        PendingKind::Open => {
+            if resp.ok {
+                match resp.session_id {
+                    Some(session_id) => SaidOutcome::Opened { session_id },
+                    None => {
+                        drop(inner);
+                        close_all(client, "response_invalid", generation).await;
+                        return;
+                    }
+                }
+            } else {
+                SaidOutcome::WireErr {
+                    code: resp.code.unwrap_or_else(|| "bad_request".into()),
+                    detail: resp.detail,
+                }
+            }
+        }
         PendingKind::Hello | PendingKind::Command => {
             if resp.ok && resp.seq.is_none() {
                 SaidOutcome::Accepted { seq: 0 }
@@ -499,10 +430,6 @@ async fn close_all(client: &InstanceClient, code: &str, generation: u64) {
     inner.closed = true;
     if let Some(stop) = inner.stop.take() {
         let _ = stop.send(());
-    }
-    let drained: Vec<(String, String)> = inner.acknowledged.drain().collect();
-    for (address, binding_id) in drained {
-        inner.remembered.insert(address, binding_id);
     }
     for (_, pending) in inner.pending_said.drain() {
         let _ = pending.reply.send(SaidOutcome::Disconnected);

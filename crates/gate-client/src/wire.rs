@@ -96,12 +96,13 @@ impl Default for RuntimeCapabilities {
     }
 }
 
-pub fn hello_frame(id: &str, instance_id: &str, revision: u64, config_digest: &str) -> Value {
+/// D-1099: `hello` names the instance and the agent it speaks for. Core finds or creates the
+/// instance; nothing else is registered.
+pub fn hello_frame(id: &str, instance_id: &str, agent_id: &str) -> Value {
     hello_frame_with_capabilities(
         id,
         instance_id,
-        revision,
-        config_digest,
+        agent_id,
         None,
         RuntimeCapabilities::default(),
     )
@@ -110,15 +111,13 @@ pub fn hello_frame(id: &str, instance_id: &str, revision: u64, config_digest: &s
 pub fn hello_frame_with_operations(
     id: &str,
     instance_id: &str,
-    revision: u64,
-    config_digest: &str,
+    agent_id: &str,
     operations: Option<&Value>,
 ) -> Value {
     hello_frame_with_capabilities(
         id,
         instance_id,
-        revision,
-        config_digest,
+        agent_id,
         operations,
         RuntimeCapabilities::default(),
     )
@@ -127,16 +126,14 @@ pub fn hello_frame_with_operations(
 pub fn hello_frame_with_capabilities(
     id: &str,
     instance_id: &str,
-    revision: u64,
-    config_digest: &str,
+    agent_id: &str,
     operations: Option<&Value>,
     capabilities: RuntimeCapabilities,
 ) -> Value {
     hello_env::hello_frame_with_capabilities_and_env(
         id,
         instance_id,
-        revision,
-        config_digest,
+        agent_id,
         operations,
         capabilities,
         &std::collections::BTreeMap::new(),
@@ -190,35 +187,30 @@ pub(crate) fn runtime_declaration_digest_from_value(
     Some(hex_lower(&Sha256::digest(bytes)))
 }
 
-pub fn create_binding_frame(
-    id: &str,
-    binding_id: &str,
-    address: &str,
-    session_theme: &str,
-) -> Value {
-    json!({
-        "id": id,
-        "m": "create_binding",
-        "binding_id": binding_id,
-        "address": address,
-        "session_theme": session_theme,
-    })
+/// D-1099: `open` — ask core for the session of a key before its first said. Answered with
+/// `ok{session_id}`. Idempotent.
+pub fn open_frame(id: &str, session_key: &str, title: Option<&str>) -> Value {
+    let mut frame = json!({"id": id, "m": "open", "session": session_key});
+    if let Some(title) = title {
+        frame["title"] = json!(title);
+    }
+    frame
 }
 
 pub fn said_frame(
     id: &str,
-    binding_id: &str,
+    session_key: &str,
     origin: &str,
     author_id: &str,
     text: &str,
     attachments: &[Attachment],
 ) -> Value {
-    said_frame_with_author_label(id, binding_id, origin, author_id, None, text, attachments)
+    said_frame_with_author_label(id, session_key, origin, author_id, None, text, attachments)
 }
 
 pub fn said_frame_with_author_label(
     id: &str,
-    binding_id: &str,
+    session_key: &str,
     origin: &str,
     author_id: &str,
     author_label: Option<&str>,
@@ -227,7 +219,7 @@ pub fn said_frame_with_author_label(
 ) -> Value {
     said_frame_with_context(
         id,
-        binding_id,
+        session_key,
         origin,
         author_id,
         author_label,
@@ -245,6 +237,9 @@ pub struct SaidContext {
     pub system_context: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_target: Option<String>,
+    /// D-1099: the opaque key other messages use to point at this one (their `reply_target`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
     pub live_inbound_scope: LiveInboundScope,
     /// D-1081: kind of turn this said starts. Sent only when not `Default`.
     #[serde(skip_serializing_if = "TurnModelProfile::is_default")]
@@ -278,7 +273,7 @@ pub enum LiveInboundScope {
 #[allow(clippy::too_many_arguments)]
 pub fn said_frame_with_context(
     id: &str,
-    binding_id: &str,
+    session_key: &str,
     origin: &str,
     author_id: &str,
     author_label: Option<&str>,
@@ -289,7 +284,7 @@ pub fn said_frame_with_context(
     let mut frame = json!({
         "id": id,
         "m": "said",
-        "binding_id": binding_id,
+        "session": session_key,
         "origin": origin,
         "author_id": author_id,
         "text": text,
@@ -306,6 +301,9 @@ pub fn said_frame_with_context(
         }
         if let Some(target) = &context.reply_target {
             frame["reply_target"] = json!(target);
+        }
+        if let Some(reference) = &context.reference {
+            frame["ref"] = json!(reference);
         }
         frame["live_inbound_scope"] =
             serde_json::to_value(context.live_inbound_scope).expect("scope serializes");
@@ -329,7 +327,7 @@ pub fn ok_frame(id: &str) -> Value {
 
 pub fn command_frame(
     id: &str,
-    binding_id: &str,
+    session_key: &str,
     caller: &SaidCaller,
     name: &str,
     args: &Value,
@@ -337,7 +335,7 @@ pub fn command_frame(
     json!({
         "m": "command",
         "id": id,
-        "binding_id": binding_id,
+        "session": session_key,
         "caller": caller,
         "name": name,
         "args": args,
@@ -379,22 +377,16 @@ pub enum Attachment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bind {
-    pub id: String,
-    pub binding_id: String,
-    pub address: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Say {
     pub id: String,
-    pub binding_id: String,
+    /// The gateway's session key (D-1099).
+    pub session_key: String,
     pub payload: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Activity {
-    pub binding_id: String,
+    pub session_key: String,
     pub activity_id: String,
     pub state: String,
     /// #964: 次の LLM request に新しく含める投稿の origin。core は state="read" にだけ載せる。
@@ -414,7 +406,7 @@ pub struct Activity {
 /// write 0・keep で素通しする。error 本文は載せない（多エージェント相互反応ループ防止・#668）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnFailed {
-    pub binding_id: String,
+    pub session_key: String,
     pub origin: String,
 }
 
@@ -423,7 +415,7 @@ pub struct TurnFailed {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invoke {
     pub id: String,
-    pub binding_id: String,
+    pub session_key: String,
     pub declaration_digest: String,
     pub operation: String,
     pub dispatch: String,
@@ -438,6 +430,8 @@ pub struct WireResponse {
     pub ok: bool,
     pub seq: Option<Option<i64>>,
     pub result: Option<Value>,
+    /// D-1099: the core session a said's or `open`'s key resolved to.
+    pub session_id: Option<String>,
     pub code: Option<String>,
     pub detail: Option<String>,
     pub message: Option<String>,
@@ -445,7 +439,6 @@ pub struct WireResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreMsg {
-    Bind(Bind),
     Say(Say),
     Activity(Activity),
     ToolActivity(activity::ToolActivity),
@@ -524,17 +517,6 @@ pub fn parse_digest(raw: &str) -> Result<String, FrameError> {
     Ok(raw.to_string())
 }
 
-pub fn config_bytes(author_id: &str) -> Vec<u8> {
-    serde_json::to_vec(&json!({"author_id": author_id}))
-        .expect("author_id string is JSON-encodable")
-}
-
-pub fn config_digest(author_id: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let hash = Sha256::digest(config_bytes(author_id));
-    hex_lower(&hash)
-}
-
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -557,14 +539,6 @@ fn parse_core_msg(obj: &Value) -> CoreMsg {
         }
     };
     match m.as_str() {
-        "bind" => match parse_bind(obj) {
-            Ok(b) => CoreMsg::Bind(b),
-            Err(_) => CoreMsg::Invalid {
-                id: opt_id(obj),
-                code: "bad_request",
-                m,
-            },
-        },
         "say" => match parse_say(obj) {
             Ok(s) => CoreMsg::Say(s),
             Err(_) => CoreMsg::Invalid {
@@ -642,20 +616,9 @@ fn parse_core_msg(obj: &Value) -> CoreMsg {
     }
 }
 
-fn parse_bind(obj: &Value) -> Result<Bind, FrameError> {
-    let id = parse_request_id(&require_str(obj, "id")?)?;
-    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
-    let address = nonempty_str(obj, "address")?;
-    Ok(Bind {
-        id,
-        binding_id,
-        address,
-    })
-}
-
 fn parse_say(obj: &Value) -> Result<Say, FrameError> {
     let id = parse_request_id(&require_str(obj, "id")?)?;
-    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
+    let session_key = nonempty_str(obj, "session")?;
     let payload = obj.get("payload").cloned().ok_or(FrameError::BadRequest)?;
     if !payload.is_object() {
         return Err(FrameError::BadRequest);
@@ -663,14 +626,14 @@ fn parse_say(obj: &Value) -> Result<Say, FrameError> {
     say_reply_target(&payload)?;
     Ok(Say {
         id,
-        binding_id,
+        session_key,
         payload,
     })
 }
 
 fn parse_invoke(obj: &Value) -> Result<Invoke, FrameError> {
     let id = parse_request_id(&require_str(obj, "id")?)?;
-    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
+    let session_key = nonempty_str(obj, "session")?;
     let declaration_digest = parse_digest(&require_str(obj, "declaration_digest")?)?;
     let operation = nonempty_str(obj, "operation")?;
     if obj.get("invocation_protocol").and_then(Value::as_u64) != Some(1) {
@@ -697,7 +660,7 @@ fn parse_invoke(obj: &Value) -> Result<Invoke, FrameError> {
     };
     Ok(Invoke {
         id,
-        binding_id,
+        session_key,
         declaration_digest,
         operation,
         dispatch,
@@ -708,7 +671,7 @@ fn parse_invoke(obj: &Value) -> Result<Invoke, FrameError> {
 }
 
 fn parse_activity(obj: &Value) -> Result<Activity, FrameError> {
-    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
+    let session_key = nonempty_str(obj, "session")?;
     let activity_id = parse_uuid(&require_str(obj, "activity_id")?)?;
     let state = nonempty_str(obj, "state")?;
     // #930: read state を additive に受理（started/ended に加える）。origin つきで 👀 を付ける。
@@ -742,7 +705,7 @@ fn parse_activity(obj: &Value) -> Result<Activity, FrameError> {
         Some(_) => return Err(FrameError::BadRequest),
     };
     Ok(Activity {
-        binding_id,
+        session_key,
         activity_id,
         state,
         origin,
@@ -752,9 +715,12 @@ fn parse_activity(obj: &Value) -> Result<Activity, FrameError> {
 }
 
 fn parse_turn_failed(obj: &Value) -> Result<TurnFailed, FrameError> {
-    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
+    let session_key = nonempty_str(obj, "session")?;
     let origin = nonempty_str(obj, "origin")?;
-    Ok(TurnFailed { binding_id, origin })
+    Ok(TurnFailed {
+        session_key,
+        origin,
+    })
 }
 
 /// say payload の text。欠落・非 string・空は None（V3: external_rejected、外部 I/O 0）。

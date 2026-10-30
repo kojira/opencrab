@@ -2,13 +2,13 @@
 
 use serde_json::Value;
 
-use super::{nonempty_str, parse_uuid, require_str, FrameError};
+use super::{nonempty_str, parse_uuid, FrameError};
 
 /// Cumulative released text of one partial stream. The frame has no `id`, so the gateway never
 /// replies to it. A later partial or the say carrying the same `stream_id` supersedes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Partial {
-    pub binding_id: String,
+    pub session_key: String,
     pub stream_id: String,
     pub text: String,
     /// D-1085: set when the partial comes from a provisional run (not a turn yet).
@@ -22,7 +22,7 @@ pub(super) fn parse_partial(obj: &Value) -> Result<Partial, FrameError> {
         Some(_) => return Err(FrameError::BadRequest),
     };
     Ok(Partial {
-        binding_id: parse_uuid(&require_str(obj, "binding_id")?)?,
+        session_key: nonempty_str(obj, "session")?,
         stream_id: nonempty_str(obj, "stream_id")?,
         text: nonempty_str(obj, "text")?,
         provisional_id,

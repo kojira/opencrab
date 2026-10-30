@@ -17,9 +17,9 @@ impl InstanceClient {
         address: &str,
         request: &ProvisionalRequest,
     ) -> Result<(), ProvisionalError> {
-        let binding_id = self.provisional_binding(address).await?;
+        self.provisional_ready().await?;
         let id = self.next_id();
-        self.provisional_request(&id, provisional_frame(&id, &binding_id, request))
+        self.provisional_request(&id, provisional_frame(&id, address, request))
             .await
     }
 
@@ -29,12 +29,9 @@ impl InstanceClient {
         address: &str,
         provisional_id: &str,
     ) -> Result<(), ProvisionalError> {
-        let binding_id = self.provisional_binding(address).await?;
+        self.provisional_ready().await?;
         let id = self.next_id();
-        self.provisional_request(
-            &id,
-            provisional_cancel_frame(&id, &binding_id, provisional_id),
-        )
+        self.provisional_request(&id, provisional_cancel_frame(&id, address, provisional_id))
         .await
     }
 
@@ -46,22 +43,17 @@ impl InstanceClient {
         address: &str,
         delivered: Option<&str>,
     ) -> Result<(), ProvisionalError> {
-        let binding_id = self.provisional_binding(address).await?;
+        self.provisional_ready().await?;
         let id = self.next_id();
-        self.provisional_request(&id, interrupt_frame(&id, &binding_id, delivered))
+        self.provisional_request(&id, interrupt_frame(&id, address, delivered))
             .await
     }
 
-    async fn provisional_binding(&self, address: &str) -> Result<String, ProvisionalError> {
-        let inner = self.inner.lock().await;
-        if inner.closed {
+    async fn provisional_ready(&self) -> Result<(), ProvisionalError> {
+        if self.inner.lock().await.closed {
             return Err(ProvisionalError::NotReady);
         }
-        inner
-            .acknowledged
-            .get(address)
-            .cloned()
-            .ok_or(ProvisionalError::NotReady)
+        Ok(())
     }
 
     async fn provisional_request(&self, id: &str, frame: Value) -> Result<(), ProvisionalError> {
@@ -80,7 +72,10 @@ impl InstanceClient {
         match tokio::time::timeout(SAID_TIMEOUT, rx).await {
             Ok(Ok(SaidOutcome::Accepted { .. })) => Ok(()),
             Ok(Ok(SaidOutcome::WireErr { code, .. })) => Err(ProvisionalError::Rejected { code }),
-            Ok(Ok(SaidOutcome::NotAdmitted | SaidOutcome::Disconnected)) | Ok(Err(_)) => {
+            Ok(Ok(
+                SaidOutcome::NotAdmitted | SaidOutcome::Disconnected | SaidOutcome::Opened { .. },
+            ))
+            | Ok(Err(_)) => {
                 Err(ProvisionalError::Disconnected)
             }
             Err(_) => {

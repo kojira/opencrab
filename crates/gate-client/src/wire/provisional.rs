@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use super::{parse_uuid, require_str, FrameError, SaidCaller};
+use super::{nonempty_str, parse_uuid, require_str, FrameError, SaidCaller};
 
 /// The inputs of a provisional run. The committed said must repeat them exactly (`author_id`,
 /// `author_label`, `caller`, `system_context`, `agent_prelude`, `text`, realtime profile) to be
@@ -18,11 +18,11 @@ pub struct ProvisionalRequest {
     pub text: String,
 }
 
-pub fn provisional_frame(id: &str, binding_id: &str, request: &ProvisionalRequest) -> Value {
+pub fn provisional_frame(id: &str, session_key: &str, request: &ProvisionalRequest) -> Value {
     let mut frame = json!({
         "id": id,
         "m": "provisional",
-        "binding_id": binding_id,
+        "session": session_key,
         "provisional_id": request.provisional_id,
         "author_id": request.author_id,
         "caller": request.caller,
@@ -41,19 +41,19 @@ pub fn provisional_frame(id: &str, binding_id: &str, request: &ProvisionalReques
     frame
 }
 
-pub fn provisional_cancel_frame(id: &str, binding_id: &str, provisional_id: &str) -> Value {
+pub fn provisional_cancel_frame(id: &str, session_key: &str, provisional_id: &str) -> Value {
     json!({
         "id": id,
         "m": "provisional_cancel",
-        "binding_id": binding_id,
+        "session": session_key,
         "provisional_id": provisional_id,
     })
 }
 
-/// D-1096: stop the binding session's running turn. `delivered` is the part of the agent's last
+/// D-1096: stop the session's running turn. `delivered` is the part of the agent's last
 /// utterance that reached the other side (`Some("")`: none of it); core records it.
-pub fn interrupt_frame(id: &str, binding_id: &str, delivered: Option<&str>) -> Value {
-    let mut frame = json!({"id": id, "m": "interrupt", "binding_id": binding_id});
+pub fn interrupt_frame(id: &str, session_key: &str, delivered: Option<&str>) -> Value {
+    let mut frame = json!({"id": id, "m": "interrupt", "session": session_key});
     if let Some(delivered) = delivered {
         frame["delivered"] = json!(delivered);
     }
@@ -64,14 +64,14 @@ pub fn interrupt_frame(id: &str, binding_id: &str, delivered: Option<&str>) -> V
 /// `provisional_id` reuses that run (`promoted`) or runs a normal turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisionalResult {
-    pub binding_id: String,
+    pub session_key: String,
     pub provisional_id: String,
     pub promoted: bool,
 }
 
 pub(super) fn parse_provisional_result(obj: &Value) -> Result<ProvisionalResult, FrameError> {
     Ok(ProvisionalResult {
-        binding_id: parse_uuid(&require_str(obj, "binding_id")?)?,
+        session_key: nonempty_str(obj, "session")?,
         provisional_id: parse_uuid(&require_str(obj, "provisional_id")?)?,
         promoted: obj
             .get("promoted")

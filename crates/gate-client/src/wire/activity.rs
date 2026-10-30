@@ -6,12 +6,12 @@
 
 use serde_json::Value;
 
-use super::{nonempty_str, parse_uuid, require_str, FrameError};
+use super::{nonempty_str, FrameError};
 
 /// ツール実行 1 件の活動通知。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolActivity {
-    pub binding_id: String,
+    pub session_key: String,
     /// 同じターンの `activity` frame と同じ値。
     pub activity_id: String,
     pub call_id: String,
@@ -36,7 +36,7 @@ pub struct ToolActivity {
 /// サブタスク走行 1 件のライフサイクル通知。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtaskLifecycle {
-    pub binding_id: String,
+    pub session_key: String,
     /// subtask の ID。
     pub run_id: String,
     /// 走行自身のセッション ID（run の相関キー。宛先ではない）。
@@ -89,7 +89,7 @@ pub(super) fn parse_tool_activity(obj: &Value) -> Result<ToolActivity, FrameErro
         Some(value) => Some(value.clone()),
     };
     Ok(ToolActivity {
-        binding_id: parse_uuid(&require_str(obj, "binding_id")?)?,
+        session_key: super::nonempty_str(obj, "session")?,
         activity_id: nonempty_str(obj, "activity_id")?,
         call_id: nonempty_str(obj, "call_id")?,
         sub_session_id: opt_str(obj, "sub_session_id")?,
@@ -106,7 +106,7 @@ pub(super) fn parse_tool_activity(obj: &Value) -> Result<ToolActivity, FrameErro
 
 pub(super) fn parse_subtask_lifecycle(obj: &Value) -> Result<SubtaskLifecycle, FrameError> {
     Ok(SubtaskLifecycle {
-        binding_id: parse_uuid(&require_str(obj, "binding_id")?)?,
+        session_key: super::nonempty_str(obj, "session")?,
         run_id: nonempty_str(obj, "run_id")?,
         sub_session_id: opt_str(obj, "sub_session_id")?,
         status: nonempty_str(obj, "status")?,

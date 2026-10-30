@@ -1,5 +1,5 @@
-//! 1 instance = 1 UDS connection。hello / bind ack / said / say / activity だけ。
-//! 切断後は指数 backoff で再接続し、hello 再送で open binding を replay する。
+//! 1 instance = 1 UDS connection。hello / said / say / activity だけ。
+//! 切断後は指数 backoff で再接続する。セッションはキーで指定し、事前登録はない（D-1099）。
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -14,10 +14,10 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use super::wire::{
-    command_frame, create_binding_frame, err_frame, hello_frame_with_capabilities_and_env,
-    interrupt_frame, invoke_ok_frame, ok_frame, parse_frame_bytes, provisional_cancel_frame,
+    command_frame, err_frame, hello_frame_with_capabilities_and_env, interrupt_frame,
+    invoke_ok_frame, ok_frame, open_frame, parse_frame_bytes, provisional_cancel_frame,
     provisional_frame, read_frame, said_frame_with_context, say_reply_target, say_stream_id,
-    say_text, write_json, Activity, Attachment, Bind, CoreMsg, FrameError, Invoke, Partial,
+    say_text, write_json, Activity, Attachment, CoreMsg, FrameError, Invoke, Partial,
     ProvisionalRequest, ProvisionalResult, SaidCaller, SaidContext, Say, SubtaskLifecycle,
     ToolActivity, TurnFailed, WireResponse,
 };
