@@ -80,17 +80,40 @@ fn seed_generic_alias_binding(
     opencrab_db::queries::insert_session_in_tx(&tx, session_id, "alias", "2026-01-01T00:00:00Z")
         .unwrap();
     opencrab_db::queries::insert_agent_session_in_tx(&tx, agent_id, session_id).unwrap();
-    opencrab_db::queries::create_gate_binding_in_tx(
-        &tx,
-        &binding_id,
-        &instance_id,
-        session_id,
-        "alias",
-        1,
-    )
-    .unwrap();
+    insert_gate_record(&tx, &binding_id, &instance_id, session_id, session_id);
     tx.commit().unwrap();
     (instance_id, binding_id)
+}
+
+/// Core's internal record of a gateway session key (a `gate_bindings` row).
+fn insert_gate_record(
+    tx: &rusqlite::Transaction<'_>,
+    row_id: &str,
+    instance_id: &str,
+    session_key: &str,
+    session_id: &str,
+) {
+    tx.execute(
+        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at, closed_at, session_id)
+         VALUES (?1, ?2, ?3, 1, NULL, ?4)",
+        rusqlite::params![row_id, instance_id, session_key, session_id],
+    )
+    .unwrap();
+}
+
+/// A session owned by `agent_id` whose gateway record is `row_id`.
+fn insert_owned_gate_session(
+    tx: &rusqlite::Transaction<'_>,
+    agent_id: &str,
+    row_id: &str,
+    instance_id: &str,
+    session_key: &str,
+    session_id: &str,
+) {
+    opencrab_db::queries::insert_session_in_tx(tx, session_id, session_key, "2026-01-01T00:00:00Z")
+        .unwrap();
+    opencrab_db::queries::insert_agent_session_in_tx(tx, agent_id, session_id).unwrap();
+    insert_gate_record(tx, row_id, instance_id, session_key, session_id);
 }
 
 // ---- ビジーループ回避（A1・#6） ----

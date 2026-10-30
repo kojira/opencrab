@@ -124,15 +124,14 @@ async fn s3_scheduler_fans_authentic_exact_and_global_sources_to_canonical_desti
         // The exact source reuses an existing address-named session. The global-address source has
         // no exact session and therefore uses the binding's canonical physical session.
         let tx = conn.transaction().unwrap();
-        opencrab_db::queries::create_gate_binding_in_tx(
+        insert_owned_gate_session(
             &tx,
+            AGENT_UUID,
             GLOBAL_BINDING,
             &instance_id,
             GLOBAL_ADDRESS,
-            "global fallback",
-            2,
-        )
-        .unwrap();
+            &global_session,
+        );
         tx.commit().unwrap();
 
         let exact_session: String = conn
@@ -203,15 +202,14 @@ fn persisted_physical_session_still_admits_schedule() {
     let binding_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     let session_id = format!("extgate-{binding_id}");
     let tx = conn.transaction().unwrap();
-    opencrab_db::queries::create_gate_binding_in_tx(
+    insert_owned_gate_session(
         &tx,
+        AGENT_UUID,
         binding_id,
         &instance_id,
         "unclaimed-address",
-        "physical",
-        2,
-    )
-    .unwrap();
+        &session_id,
+    );
     tx.commit().unwrap();
     opencrab_db::queries::insert_agent_schedule(
         &conn,

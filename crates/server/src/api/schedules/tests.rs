@@ -59,13 +59,10 @@ fn state_with_alias(session_id: &str) -> AppState {
     opencrab_db::queries::insert_session_in_tx(&tx, session_id, "alias", "2026-01-01T00:00:00Z")
         .unwrap();
     opencrab_db::queries::insert_agent_session_in_tx(&tx, AGENT, session_id).unwrap();
-    opencrab_db::queries::create_gate_binding_in_tx(
-        &tx,
-        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        session_id,
-        "alias",
-        1,
+    tx.execute(
+        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at, closed_at, session_id)
+         VALUES ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'alias', 1, NULL, ?1)",
+        [session_id],
     )
     .unwrap();
     tx.commit().unwrap();
