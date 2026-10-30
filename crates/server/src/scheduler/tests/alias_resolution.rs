@@ -259,17 +259,13 @@ fn rebuild_requires_persisted_alias_for_schedule_without_writes() {
     );
     assert_eq!(conn.total_changes(), changes, "rebuild must be read-only");
 
+    // D-1099: a closed record still names its session (the gateway owns attachment).
     conn.execute(
         "UPDATE gate_bindings SET closed_at = 2 WHERE binding_id = ?1",
         [&binding_id],
     )
     .unwrap();
-    assert!(rebuild_entries(&router, &conn, &HashMap::new()).is_empty());
-    conn.execute(
-        "UPDATE gate_bindings SET closed_at = NULL WHERE binding_id = ?1",
-        [&binding_id],
-    )
-    .unwrap();
+    assert_eq!(rebuild_entries(&router, &conn, &HashMap::new()).len(), 1);
     conn.execute(
         "UPDATE gate_instances SET deleted_at = 3 WHERE instance_id = ?1",
         [&instance_id],

@@ -371,11 +371,10 @@ mod render_refs_tests {
     #[test]
     fn outgoing_utterance_renders_body_and_relation_without_machine_lines() {
         let target_id = "ab".repeat(32);
-        let target = speech(
-            "me",
-            "pk_other",
-            "元の投稿",
-            Some(&format!("nostr:event:v1:default:{target_id}")),
+        let mut target = speech("me", "pk_other", "元の投稿", Some("opaque-origin-1"));
+        target.metadata_json = Some(
+            serde_json::json!({ "external_origin": "opaque-origin-1", "external_ref": target_id })
+                .to_string(),
         );
         let mut my_reply = speech("me", "me", "そうだね", None);
         my_reply.metadata_json = Some(
@@ -409,15 +408,14 @@ mod render_refs_tests {
         assert!(o_reaction.contains("🫧"), "本文が残る: {o_reaction}");
     }
 
-    // row295c 6b: reply_target が記録されていれば会話内の e 番号へ解決する。
+    // row295c 6b: reply_target が gateway の external_ref と一致すれば会話内の e 番号へ解決する。
     #[test]
     fn reply_target_resolves_to_e_number_when_recorded() {
         let target_id = "cc".repeat(32);
-        let target = speech(
-            "me",
-            "pk_a",
-            "元投稿",
-            Some(&format!("nostr:event:v1:default:{target_id}")),
+        let mut target = speech("me", "pk_a", "元投稿", Some("opaque-origin-a"));
+        target.metadata_json = Some(
+            serde_json::json!({ "external_origin": "opaque-origin-a", "external_ref": target_id })
+                .to_string(),
         );
         let mut reply = speech(
             "me",

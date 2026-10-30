@@ -85,10 +85,10 @@ fn v64_drops_gate_admin_tables_and_keeps_instances_and_bindings() {
     .unwrap();
     conn.execute_batch("PRAGMA user_version = 63;").unwrap();
 
-    initialize(&conn).expect("upgrade 63 -> 64");
+    initialize(&conn).expect("upgrade 63 -> latest");
     initialize(&conn).expect("re-run is a no-op");
 
-    assert_eq!(schema_version(&conn).unwrap(), 64);
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
     for table in migrations::GATE_ADMIN_TABLES {
         assert!(
             !table_exists(&conn, table).unwrap(),

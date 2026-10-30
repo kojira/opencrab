@@ -251,7 +251,7 @@ mod tests {
                 TranscriptSource::new("test-in", "test-out"),
                 &discord_inbound(Some("https://cdn/avatar.png"), &images)
             ),
-            r#"{"session_key":"222","image_urls":["https://cdn/a.png","https://cdn/b.png"],"source":"test-in","user_avatar_url":"https://cdn/avatar.png","user_name":"エージェントC"}"#
+            r#"{"image_urls":["https://cdn/a.png","https://cdn/b.png"],"session_key":"222","source":"test-in","user_avatar_url":"https://cdn/avatar.png","user_name":"エージェントC"}"#
         );
     }
 
