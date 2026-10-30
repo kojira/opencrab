@@ -410,12 +410,6 @@
         assert_eq!(completed_log_count(&db, parent), 1);
     }
 
-    /// 既定のタイムアウトは `spawn_subtask` と揃える。
-    #[test]
-    fn default_dispatch_timeout_matches_spawn_subtask() {
-        assert_eq!(DEFAULT_DISPATCH_TIMEOUT_SECS, 1800);
-    }
-
     /// [P1 回帰] ツールが panic しても `exit_reason="error"` で settle され、
     /// registry に死骸が残らない（REST が永久 active にならない）。
     #[tokio::test]

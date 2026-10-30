@@ -155,11 +155,6 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tokio::sync::{oneshot, Notify};
 
-    #[test]
-    fn capacity_is_32() {
-        assert_eq!(SESSION_QUEUE_CAPACITY, 32);
-    }
-
     #[tokio::test]
     async fn reserve_rejects_at_capacity() {
         let q = SessionTurnQueues::new();

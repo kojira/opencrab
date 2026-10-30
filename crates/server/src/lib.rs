@@ -269,35 +269,6 @@ macro_rules! mount_route {
     };
 }
 
-macro_rules! describe_route {
-    ($routes:ident, $path:literal, $($method:ident => $handler:expr),+ $(,)?) => {{
-        let mut methods = vec![$(stringify!($method).to_ascii_uppercase()),+];
-        methods.sort();
-        $routes.push(HttpRouteDescriptor {
-            path: $path.to_string(),
-            methods,
-            activation: "always".to_string(),
-            source: "opencrab_server::create_router".to_string(),
-        });
-    }};
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-pub struct HttpRouteDescriptor {
-    pub path: String,
-    pub methods: Vec<String>,
-    pub activation: String,
-    pub source: String,
-}
-
-/// Production router が mount する宣言そのものから得る read-only inventory。
-pub fn production_route_inventory() -> Vec<HttpRouteDescriptor> {
-    let mut routes = Vec::new();
-    production_routes!(describe_route, routes);
-    routes.sort_by(|a, b| a.path.cmp(&b.path));
-    routes
-}
-
 pub fn create_router(state: AppState) -> Router {
     let mut router = Router::new();
     production_routes!(mount_route, router);

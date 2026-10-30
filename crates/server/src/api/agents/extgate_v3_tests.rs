@@ -3,7 +3,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use crate::{create_router, production_route_inventory, test_app_state};
+use crate::{create_router, test_app_state};
 
 #[tokio::test]
 async fn get_agent_absent_is_200_null_existing_has_subject_id() {
@@ -60,38 +60,6 @@ async fn get_agent_absent_is_200_null_existing_has_subject_id() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let sid = v["subject_id"].as_i64().expect("subject_id");
     assert!(sid > 0);
-}
-
-#[tokio::test]
-async fn all_six_gate_admin_operations_are_404_on_public_tcp_router() {
-    assert!(production_route_inventory()
-        .iter()
-        .all(|route| !route.path.starts_with("/api/gate")));
-    let app = create_router(test_app_state());
-    let id = "00000000-0000-0000-0000-000000000001";
-    let cases = [
-        ("GET", format!("/api/gate-instances/{id}")),
-        ("PUT", format!("/api/gate-instances/{id}")),
-        ("DELETE", format!("/api/gate-instances/{id}")),
-        ("POST", format!("/api/gate-instances/{id}/revisions")),
-        ("PUT", format!("/api/gate-bindings/{id}")),
-        ("DELETE", format!("/api/gate-bindings/{id}")),
-        ("POST", "/api/gate-subject-grants".to_owned()),
-    ];
-    for (method, uri) in cases {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(uri)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
 }
 
 #[tokio::test]

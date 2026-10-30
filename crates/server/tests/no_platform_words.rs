@@ -119,7 +119,11 @@ fn production_code_names_no_platform() {
     let mut files = Vec::new();
     rust_files(&crates, &mut files);
     let test_modules = test_module_paths(&files);
-    files.retain(|file| !test_modules.iter().any(|t| file == t || file.starts_with(t)));
+    files.retain(|file| {
+        !test_modules
+            .iter()
+            .any(|t| file == t || file.starts_with(t))
+    });
     let mut hits = Vec::new();
     for file in files {
         let text = std::fs::read_to_string(&file).unwrap();
@@ -135,7 +139,10 @@ fn production_code_names_no_platform() {
             // `#[cfg(test)]` and the attributes after it mark one test-only item.
             if trimmed.starts_with("#[cfg(test)]") {
                 let mut item = number + 1;
-                while lines.get(item).is_some_and(|l| l.trim_start().starts_with("#[")) {
+                while lines
+                    .get(item)
+                    .is_some_and(|l| l.trim_start().starts_with("#["))
+                {
                     item += 1;
                 }
                 // An inline test module runs to the end of the file in practice.
@@ -159,7 +166,12 @@ fn production_code_names_no_platform() {
             }
             for word in WORDS {
                 if code.contains(word) {
-                    hits.push(format!("{}:{}: {}", file.display(), number + 1, line.trim()));
+                    hits.push(format!(
+                        "{}:{}: {}",
+                        file.display(),
+                        number + 1,
+                        line.trim()
+                    ));
                 }
             }
         }
