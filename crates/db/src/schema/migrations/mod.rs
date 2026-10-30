@@ -24,6 +24,8 @@ mod v64;
 use super::Migration;
 
 pub(super) use v63::LEGACY_GATEWAY_SETTINGS_TABLES;
+pub(super) use v64::drop_gate_admin_tables;
+#[cfg(test)]
 pub(super) use v64::GATE_ADMIN_TABLES;
 
 pub(super) static MIGRATION_GROUPS: &[&[Migration]] = &[
