@@ -51,10 +51,4 @@ pub use task_ledger::*;
 pub use tool_logs::*;
 
 #[cfg(test)]
-#[path = "tests/legacy_channel_helpers.rs"]
-mod v50_fixture_readback;
-#[cfg(test)]
-pub use v50_fixture_readback::{get_channel_config, get_channel_config_for_agent};
-
-#[cfg(test)]
 mod tests;
