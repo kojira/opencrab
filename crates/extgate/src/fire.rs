@@ -1,43 +1,28 @@
-//! Generic binding/session timed-turn sink.
+//! Generic session timed-turn sink.
 
 use std::sync::Arc;
 
 use opencrab_actions::{AgentRuntime, TimedFireRequest, TimedFireSink};
 
 use crate::completion::{run_v3_said_less_turn, ExtgateCompletionSink};
-use crate::inbound::{resolve_binding_context, BindingContext};
 use crate::registry::ExtgateState;
 
+/// D-1099: the session's gateway record, if its instance is live. The gateway owns the session
+/// key; core only needs the instance to be connected.
 fn resolve_live_binding(
     state: &ExtgateState,
     binding_id: &str,
     session_id: &str,
     expected_agent_id: &str,
-) -> Option<BindingContext> {
-    let ctx = {
+) -> Option<opencrab_db::queries::GateSession> {
+    let found = {
         let conn = state.db.lock().ok()?;
-        let (stored_session_id, closed_at): (String, Option<i64>) = conn
-            .query_row(
-                "SELECT session_id, closed_at FROM gate_bindings WHERE binding_id = ?1",
-                [binding_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok()?;
-        if closed_at.is_some() || stored_session_id != session_id {
-            return None;
-        }
-        let ctx = resolve_binding_context(&conn, binding_id)?;
-        if ctx.agent_id != expected_agent_id {
-            return None;
-        }
-        ctx
+        opencrab_db::queries::gate_session_by_row(&conn, binding_id).ok()??
     };
-    let registry = state.registry.lock().ok()?;
-    let live = registry.get(&ctx.instance_id)?;
-    if !live.acknowledged.contains(binding_id) {
+    if found.session_id != session_id || found.agent_id != expected_agent_id {
         return None;
     }
-    Some(ctx)
+    state.registry.lock().ok()?.is_live(&found.instance_id).then_some(found)
 }
 
 pub struct ExtgateTimedFireSink<R: AgentRuntime> {

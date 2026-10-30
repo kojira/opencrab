@@ -71,7 +71,6 @@ pub async fn close_live(
                     remove_staged_files(&staged_files);
                     invokes.push((call_id, reply));
                 }
-                Pending::Bind { .. } => {}
             }
         }
         (says, invokes, entry.writer)

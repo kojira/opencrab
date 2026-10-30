@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use opencrab_core::EngineResult;
 
 use crate::transcript::{
-    InboundMessageRecord, InteractionRecord, OutboundReplyRecord, TranscriptSource,
+    InboundMessageRecord, OutboundReplyRecord, TranscriptSource,
 };
 use crate::RunRequest;
 
@@ -175,13 +175,6 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// 記録しない由来は `None`）。
     fn record_outbound_reply(&self, source: TranscriptSource, record: &OutboundReplyRecord<'_>);
 
-    /// A2UI インタラクション応答をセッションログへ記録する（best-effort）。
-    fn record_interaction_response(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-        record: &InteractionRecord<'_>,
-    );
 
     /// セッションが無ければ作成し、あれば metadata 未設定時のみ補完する（best-effort）。
     ///
@@ -200,24 +193,4 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// セッションの theme を返す（無ければ None）。
     fn session_theme(&self, session_id: &str) -> Option<String>;
 
-    /// pending interaction のステータスを更新する（best-effort）。
-    fn mark_interaction_status(
-        &self,
-        interaction_id: &str,
-        status: &str,
-        response_json: Option<&str>,
-        responder_id: Option<&str>,
-    );
-
-    /// 前プロセスから残った pending interaction を**期限切れとして閉じる**（プロセス起動時）。
-    ///
-    /// メモリ上の登録簿は再起動で消えるため、`pending` のまま残った行はどこへも応答を
-    /// 返せない。無言で放置せず閉じ、何を閉じたかをログに残す（#196）。
-    fn cleanup_stale_interactions(&self);
-
-    /// 指定エージェント分だけ pending interaction を閉じる（per-agent ゲートウェイ起動時）。
-    ///
-    /// per-agent ゲートウェイは実行中にも再起動できるため、全件を閉じると同時に動いて
-    /// いる**別エージェントの生きた保留対話**まで落としてしまう（#196）。
-    fn cleanup_stale_interactions_for_agent(&self, agent_id: &str);
 }

@@ -269,7 +269,7 @@ async fn profile_turn_built(
         sender_id: "u1",
         sender_name: "",
         avatar_url: None,
-        channel_id: None,
+        session_key: None,
         pubkey: None,
         text: "hi",
         image_urls: &[],

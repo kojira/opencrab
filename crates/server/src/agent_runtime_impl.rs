@@ -618,16 +618,6 @@ impl AgentRuntime for AppState {
         }
     }
 
-    fn record_interaction_response(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-        record: &opencrab_actions::InteractionRecord<'_>,
-    ) {
-        if let Ok(conn) = self.db.lock() {
-            crate::transcript::record_interaction_response(&conn, agent_id, session_id, record);
-        }
-    }
 
     fn ensure_session(
         &self,
@@ -679,42 +669,6 @@ impl AgentRuntime for AppState {
             .map(|s| s.theme)
     }
 
-    fn mark_interaction_status(
-        &self,
-        interaction_id: &str,
-        status: &str,
-        response_json: Option<&str>,
-        responder_id: Option<&str>,
-    ) {
-        if let Ok(conn) = self.db.lock() {
-            opencrab_db::queries::update_pending_interaction_status(
-                &conn,
-                interaction_id,
-                status,
-                response_json,
-                responder_id,
-            )
-            .ok();
-        }
-    }
-
-    fn cleanup_stale_interactions(&self) {
-        let Ok(conn) = self.db.lock() else { return };
-        match opencrab_db::queries::cleanup_stale_pending_interactions(&conn) {
-            Ok(closed) => log_closed_interactions(&closed, None),
-            Err(e) => tracing::warn!("cleanup_stale_pending_interactions failed: {e}"),
-        }
-    }
-
-    fn cleanup_stale_interactions_for_agent(&self, agent_id: &str) {
-        let Ok(conn) = self.db.lock() else { return };
-        match opencrab_db::queries::cleanup_stale_pending_interactions_for_agent(&conn, agent_id) {
-            Ok(closed) => log_closed_interactions(&closed, Some(agent_id)),
-            Err(e) => {
-                tracing::warn!(agent_id = %agent_id, "cleanup_stale_pending_interactions failed: {e}")
-            }
-        }
-    }
 }
 
 /// 閉じた保留対話を 1 件ずつ残す（#196）。
@@ -737,27 +691,3 @@ mod realtime_turn_test;
 #[path = "agent_runtime_impl/session_effort_test.rs"]
 mod session_effort_test;
 
-fn log_closed_interactions(
-    closed: &[opencrab_db::queries::ClosedInteraction],
-    scope: Option<&str>,
-) {
-    if closed.is_empty() {
-        return;
-    }
-    for c in closed {
-        tracing::info!(
-            interaction_id = %c.id,
-            agent_id = %c.agent_id,
-            session_id = %c.session_id,
-            platform = %c.platform,
-            channel_id = %c.channel_id,
-            surface_id = %c.surface_id,
-            "Closed stale pending interaction as timed out (no in-memory registration to resume)"
-        );
-    }
-    tracing::info!(
-        count = closed.len(),
-        scope = scope.unwrap_or("all-agents"),
-        "Cleaned up stale pending interactions"
-    );
-}

@@ -20,7 +20,7 @@ fn insert_user_speech(conn: &rusqlite::Connection, text: &str) {
                 sender_id: USER,
                 sender_name: "owner",
                 avatar_url: None,
-                channel_id: Some("222"),
+                session_key: Some("222"),
                 pubkey: None,
                 text,
                 image_urls: &[],

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::protocol::{activity_frame, ended_activity_frame, turn_failed_frame, write_json};
 use crate::registry::ExtgateState;
 
+/// `binding_id` is core's internal record of the session; the frame carries the gateway's key.
 pub async fn emit_activity(
     state: &Arc<ExtgateState>,
     instance_id: &str,
@@ -14,22 +15,13 @@ pub async fn emit_activity(
     // #915: ended で 🏁 を付ける say delivery_id / reply call_id。無ければ field を送らない。
     completed_target: Option<&str>,
 ) {
-    let writer = {
-        let Ok(reg) = state.lock_registry() else {
-            return;
-        };
-        let Some(live) = reg.get(instance_id) else {
-            return;
-        };
-        if !live.acknowledged.contains(binding_id) {
-            return;
-        }
-        live.writer.clone()
+    let Some((writer, session_key)) = state.live_route(instance_id, binding_id) else {
+        return;
     };
     let _ = write_json(
         &writer,
         &activity_frame(
-            binding_id,
+            &session_key,
             activity_id,
             activity_state,
             origin,
@@ -49,44 +41,26 @@ pub async fn emit_ended_activity(
     completed_target: Option<&str>,
     silent_origins: &[String],
 ) {
-    let writer = {
-        let Ok(reg) = state.lock_registry() else {
-            return;
-        };
-        let Some(live) = reg.get(instance_id) else {
-            return;
-        };
-        if !live.acknowledged.contains(binding_id) {
-            return;
-        }
-        live.writer.clone()
+    let Some((writer, session_key)) = state.live_route(instance_id, binding_id) else {
+        return;
     };
     let _ = write_json(
         &writer,
-        &ended_activity_frame(binding_id, activity_id, completed_target, silent_origins),
+        &ended_activity_frame(&session_key, activity_id, completed_target, silent_origins),
     )
     .await;
 }
 
 /// R3(❌): ターン失敗（DeliveryEffect::Failed）を発端 origin つきで gateway へ通知する。
-/// emit_activity と同じ writer 解決経路（未 ack binding は write 0）。応答は返らない。
+/// 応答は返らない。
 pub async fn emit_turn_failed(
     state: &Arc<ExtgateState>,
     instance_id: &str,
     binding_id: &str,
     origin: &str,
 ) {
-    let writer = {
-        let Ok(reg) = state.lock_registry() else {
-            return;
-        };
-        let Some(live) = reg.get(instance_id) else {
-            return;
-        };
-        if !live.acknowledged.contains(binding_id) {
-            return;
-        }
-        live.writer.clone()
+    let Some((writer, session_key)) = state.live_route(instance_id, binding_id) else {
+        return;
     };
-    let _ = write_json(&writer, &turn_failed_frame(binding_id, origin)).await;
+    let _ = write_json(&writer, &turn_failed_frame(&session_key, origin)).await;
 }

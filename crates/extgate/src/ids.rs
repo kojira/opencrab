@@ -75,7 +75,3 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-/// bind の request id。
-pub fn bind_request_id(binding_id: &str) -> String {
-    format!("bind:{binding_id}")
-}

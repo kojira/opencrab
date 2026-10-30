@@ -7,7 +7,7 @@ use crate::protocol::{Said, SaidAttachment, SaidCaller};
 use crate::registry::ExtgateState;
 use opencrab_core::conversation::OWNER_SPEAKER_METADATA;
 
-use super::binding::OriginRow;
+use super::session::OriginRow;
 
 pub(super) fn existing_seq(
     tx: &Transaction<'_>,
@@ -49,14 +49,15 @@ pub(crate) fn seq_for_origin(state: &ExtgateState, binding_id: &str, origin: &st
 /// The metadata every inbound speech row starts with. Shared with the provisional run's
 /// not-yet-recorded user line (D-1085).
 pub(crate) fn inbound_speech_metadata(
-    address: &str,
+    session_key: &str,
     author_label: Option<&str>,
     caller: &SaidCaller,
 ) -> serde_json::Value {
     let mut meta = serde_json::json!({
         "source": TranscriptSource::new("external", "external_response").inbound(),
         "user_name": author_label.unwrap_or(""),
-        "channel_id": address,
+        // D-1099: the gateway's opaque key of this session (older rows: `channel_id`).
+        "session_key": session_key,
     });
     // D-1056: オーナーの発言は会話履歴の話者表示（`uN|name|owner`）で示す。記録時点の caller で
     // 固定し、過去行の表示が後から変わらないようにする（プロンプトキャッシュの prefix 安定）。
@@ -75,7 +76,7 @@ pub(super) fn record_inbound(
     content: &str,
 ) -> Result<i64, GateError> {
     let mut meta =
-        inbound_speech_metadata(&row.address, said.author_label.as_deref(), &said.caller);
+        inbound_speech_metadata(&row.session_key, said.author_label.as_deref(), &said.caller);
     let image_urls: Vec<String> = said
         .image_urls()
         .into_iter()
@@ -115,6 +116,11 @@ pub(super) fn record_inbound(
     // 漏れた既存バグであり、DI 原則（core に個別 gateway 語彙を持ち込まない）に反する。剥がして
     // Discord 等の全 kind で e番号が付くようにする（統括裁定 2026-08-31）。
     meta["external_origin"] = serde_json::json!(said.origin);
+    // D-1099: the opaque key other messages use to point at this one (`reply_target`). Core
+    // matches it as given and never parses `origin`.
+    if let Some(reference) = &said.reference {
+        meta["external_ref"] = serde_json::json!(reference);
+    }
     // Gatewayが供給した外部reply参照はopaque値として保存し、coreでは解釈しない。
     if let Some(reply_target) = &said.reply_target {
         meta["reply_target"] = serde_json::json!(reply_target);
@@ -168,21 +174,3 @@ pub fn record_agent_prelude(
         .map_err(|e| GateError::store_logged("said.agent_prelude_insert", e))
 }
 
-/// 当該 agent/instance/address の open binding exact 1 行だけ true。
-pub fn channel_whitelisted(
-    conn: &Connection,
-    agent_id: &str,
-    instance_id: &str,
-    address: &str,
-) -> bool {
-    let result = conn.query_row(
-        "SELECT COUNT(*) FROM gate_bindings b
-         JOIN gate_instances i ON i.instance_id = b.instance_id
-         JOIN agents a ON a.subject_id = i.subject_id
-         WHERE a.agent_id = ?1 AND b.instance_id = ?2 AND b.address = ?3
-           AND b.closed_at IS NULL AND i.deleted_at IS NULL",
-        params![agent_id, instance_id, address],
-        |r| r.get::<_, i64>(0),
-    );
-    matches!(result, Ok(1))
-}

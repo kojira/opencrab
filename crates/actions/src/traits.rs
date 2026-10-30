@@ -51,9 +51,8 @@ pub enum SideEffect {
 
 /// 呼び出し元の識別子。
 ///
-/// 実体は [`opencrab_core::caller::CallerIdentity`]。A2UI の保留状態
-/// （`opencrab_core::a2ui::PendingInteraction`）が「その UI を描いた run の
-/// 呼び出し元」を持つため core 側に置いてある（core は actions に依存できない）。
+/// 実体は [`opencrab_core::caller::CallerIdentity`]（core は actions に依存できないため
+/// 共通の型は core 側にある）。
 /// `opencrab_actions::CallerIdentity` の参照パスは従来どおり。
 pub use opencrab_core::caller::CallerIdentity;
 

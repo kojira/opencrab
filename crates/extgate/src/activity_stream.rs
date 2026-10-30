@@ -38,7 +38,8 @@ pub struct ActivityEmitter {
     tx: mpsc::UnboundedSender<Queued>,
     /// いま流れているターンの activity id（`activity` フレームと同じ値）。
     activity_id: Arc<Mutex<String>>,
-    binding_id: Arc<str>,
+    /// The gateway's key of this session (D-1099).
+    session_key: Arc<str>,
 }
 
 impl ActivityEmitter {
@@ -50,12 +51,13 @@ impl ActivityEmitter {
         binding_id: String,
         activity_id: String,
     ) -> Arc<Self> {
+        let session_key = state.session_key_for_row(&binding_id).unwrap_or_default();
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(write_frames(state, instance_id, rx));
         Arc::new(Self {
             tx,
             activity_id: Arc::new(Mutex::new(activity_id)),
-            binding_id: Arc::from(binding_id.as_str()),
+            session_key: Arc::from(session_key.as_str()),
         })
     }
 
@@ -79,7 +81,7 @@ impl ActivityEmitter {
     /// サブタスク走行のライフサイクル 1 件を流す。
     pub fn lifecycle(&self, ev: &SubtaskLifecycleEvent<'_>) {
         let frame = subtask_lifecycle_frame(
-            &self.binding_id,
+            &self.session_key,
             ev.subtask_id,
             ev.sub_session_id,
             ev.status.as_str(),
@@ -116,7 +118,7 @@ impl ToolEventSink for ActivityEmitter {
     fn on_event(&self, event: &ToolEvent<'_>) {
         let terminal = !matches!(event.status, ToolEventStatus::Started);
         let frame = tool_activity_frame(
-            &self.binding_id,
+            &self.session_key,
             &self.activity_id(),
             event.tool_call_id,
             // 入れ子の走行だけが run の相関キーを運ぶ（親ターンの session は run のキーではない）。
@@ -164,10 +166,6 @@ async fn write_frames(
             let Some(live) = reg.get(&instance_id) else {
                 continue;
             };
-            let binding_id = frame["binding_id"].as_str().unwrap_or_default();
-            if !live.acknowledged.contains(binding_id) {
-                continue;
-            }
             live.writer.clone()
         };
         // 失敗は走行を壊さない（観測の欠落だけ）。1 件ごとに記録する。
@@ -184,7 +182,6 @@ async fn write_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use std::time::Duration;
 
     use crate::operations::FinalDelivery;
@@ -195,9 +192,7 @@ mod tests {
 
     /// A state whose live registry holds one binding, plus the read half that sees what the
     /// emitter writes. `_live` keeps the peer open so writes do not fail with EOF.
-    async fn state_with_writer(
-        acknowledged: bool,
-    ) -> (
+    async fn state_with_writer() -> (
         Arc<ExtgateState>,
         Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
         tokio::net::unix::OwnedReadHalf,
@@ -212,13 +207,7 @@ mod tests {
             "instance-1".to_string(),
             LiveEntry {
                 identity: 1,
-                revision: 1,
                 writer: Arc::clone(&writer),
-                acknowledged: if acknowledged {
-                    HashSet::from([BINDING.to_string()])
-                } else {
-                    HashSet::new()
-                },
                 pending: Default::default(),
                 declarations: Arc::new(Vec::new()),
                 declaration_digest: String::new(),
@@ -261,7 +250,7 @@ mod tests {
     /// A frame written by the queue arrives as one LF-terminated JSON line, after `flush`.
     #[tokio::test]
     async fn flush_completes_after_the_frames_ahead_are_written() {
-        let (state, writer, mut observer, _live) = state_with_writer(true).await;
+        let (state, writer, mut observer, _live) = state_with_writer().await;
         let emitter = ActivityEmitter::spawn(
             Arc::clone(&state),
             "instance-1".into(),
@@ -293,7 +282,7 @@ mod tests {
     /// 同じ `sub_session_id`（run の相関キー）を運ぶ。親ターン（depth 0）では field ごと省く。
     #[tokio::test]
     async fn tool_activity_carries_the_run_session_key_only_for_nested_runs() {
-        let (state, _writer, mut observer, _live) = state_with_writer(true).await;
+        let (state, _writer, mut observer, _live) = state_with_writer().await;
         let emitter = ActivityEmitter::spawn(
             Arc::clone(&state),
             "instance-1".into(),
@@ -338,28 +327,6 @@ mod tests {
         assert!(
             second.get("sub_session_id").is_none(),
             "親ターンは run key を運ばない: {second}"
-        );
-    }
-
-    /// No acknowledged binding: frames are dropped and nothing blocks or panics.
-    #[tokio::test]
-    async fn frames_without_an_acknowledged_binding_are_inert() {
-        let (state, _writer, mut observer, _live) = state_with_writer(false).await;
-        let emitter = ActivityEmitter::spawn(
-            Arc::clone(&state),
-            "instance-1".into(),
-            BINDING.into(),
-            "activity-1".into(),
-        );
-        emitter.push(lifecycle_frame("run-1"));
-        tokio::time::timeout(Duration::from_secs(5), emitter.flush())
-            .await
-            .expect("flush with an unreachable gateway");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), read_line(&mut observer))
-                .await
-                .is_err(),
-            "nothing is written for an unacknowledged binding"
         );
     }
 

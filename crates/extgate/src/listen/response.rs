@@ -41,52 +41,6 @@ pub(crate) async fn handle_response(
         return Err(());
     };
     match pending {
-        Pending::Bind { binding_id, .. } => {
-            if resp.ok {
-                if resp.seq.is_some() {
-                    close_live(
-                        state,
-                        Some(instance_id),
-                        Some(identity),
-                        ErrorCode::ResponseInvalid,
-                        Some(&resp.id),
-                        Some(writer),
-                    )
-                    .await;
-                    return Err(());
-                }
-                let mut reg = match state.lock_registry() {
-                    Ok(g) => g,
-                    Err(_) => return Err(()),
-                };
-                if let Some(live) = reg.get_mut(instance_id) {
-                    live.acknowledged.insert(binding_id);
-                }
-                Ok(())
-            } else if resp.code == Some(ErrorCode::BindFailed) {
-                close_live(
-                    state,
-                    Some(instance_id),
-                    Some(identity),
-                    ErrorCode::BindFailed,
-                    None,
-                    None,
-                )
-                .await;
-                Err(())
-            } else {
-                close_live(
-                    state,
-                    Some(instance_id),
-                    Some(identity),
-                    ErrorCode::ResponseInvalid,
-                    Some(&resp.id),
-                    Some(writer),
-                )
-                .await;
-                Err(())
-            }
-        }
         Pending::Say { delivery_id } => {
             if resp.ok {
                 if resp.seq.is_some() {

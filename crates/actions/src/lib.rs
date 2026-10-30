@@ -1,4 +1,3 @@
-pub mod a2ui;
 pub mod agent_runtime;
 pub mod bridge;
 pub mod common;
@@ -29,7 +28,6 @@ pub mod workspace;
 pub mod run_request;
 pub mod session_inbound;
 
-pub use a2ui::{send_ui, send_ui_definition};
 pub use agent_runtime::AgentRuntime;
 pub use bridge::{
     tool_policy, BridgedExecutor, EffectiveToolDefinition, ExecutorRuntimeState,
@@ -51,10 +49,8 @@ pub use run_request::{
     LiveInboundScope, RunRequest, LIGHTWEIGHT_TURN_TOOLS, PROVISIONAL_READ_ONLY_TOOLS,
 };
 pub use session_inbound::{
-    accept_inbound, consecutive_trust_groups, delivery_effect, plan_record_only_flags,
-    prepare_session_inbound, prepare_session_inbound_write, run_provisional_turn, run_session_turn,
-    start_session_turn, AdmittedInbound, DeliveryEffect, InboundAgentDrop, InboundDrop,
-    InboundLookups, InboundMessageDrop, InboundWork, NormalizedInbound, NormalizedInboundEvent,
+    delivery_effect, prepare_session_inbound, prepare_session_inbound_write, run_provisional_turn,
+    run_session_turn, start_session_turn, DeliveryEffect, NormalizedInbound,
     PrepareSessionInboundError,
 };
 pub use session_runtime::{SessionLocks, SessionRuntime};
@@ -81,7 +77,7 @@ pub use tools::{register_tools_from_config, ShellToolConfig, ToolsConfig};
 pub use traits::CallerIdentity;
 pub use traits::*;
 pub use transcript::{
-    AgentReplyContext, InboundMessageRecord, InteractionRecord, OutboundReplyRecord,
+    AgentReplyContext, InboundMessageRecord, OutboundReplyRecord,
     TranscriptSource,
 };
 

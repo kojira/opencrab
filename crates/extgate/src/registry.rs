@@ -1,12 +1,11 @@
 //! process-local live registry。startup は空。DB から復元しない。
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 #[cfg(any(test, feature = "extgate-probe"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
 
 use opencrab_db::Db;
 use tokio::net::unix::OwnedWriteHalf;
@@ -21,9 +20,7 @@ use crate::turn_queue::SessionTurnQueues;
 /// hello 済みで未 close の接続。
 pub struct LiveEntry {
     pub identity: u64,
-    pub revision: u64,
     pub writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
-    pub acknowledged: HashSet<String>,
     pub pending: HashMap<String, Pending>,
     /// hello で宣言された immutable な能力 snapshot（DI 拡張 §4.1）。欠落=能力ゼロ。
     pub declarations: Arc<Vec<GatewayOperationDeclaration>>,
@@ -47,10 +44,6 @@ impl LiveEntry {
 }
 
 pub enum Pending {
-    Bind {
-        binding_id: String,
-        started: Instant,
-    },
     Say {
         delivery_id: String,
     },
@@ -58,6 +51,7 @@ pub enum Pending {
     /// `invoke_and_wait` へ terminal outcome を届ける oneshot（handle_response / close が送る）。
     Invoke {
         call_id: String,
+        /// Core's internal record of the session key (never on the wire).
         binding_id: String,
         operation: String,
         reply: oneshot::Sender<OperationOutcome>,
@@ -79,10 +73,6 @@ pub enum Pending {
 }
 
 impl Pending {
-    pub fn is_bind(&self) -> bool {
-        matches!(self, Self::Bind { .. })
-    }
-
     pub fn is_say(&self) -> bool {
         matches!(self, Self::Say { .. })
     }
@@ -97,7 +87,6 @@ impl Pending {
 
     pub fn binding_id(&self) -> Option<&str> {
         match self {
-            Self::Bind { binding_id, .. } => Some(binding_id),
             Self::Invoke { binding_id, .. } => Some(binding_id),
             Self::Utterance { binding_id, .. } => Some(binding_id),
             Self::Say { .. } => None,
@@ -108,7 +97,7 @@ impl Pending {
         match self {
             Self::Say { delivery_id } => Some(delivery_id),
             Self::Utterance { delivery_id, .. } => Some(delivery_id),
-            Self::Bind { .. } | Self::Invoke { .. } => None,
+            Self::Invoke { .. } => None,
         }
     }
 }
@@ -162,15 +151,6 @@ impl Registry {
             .collect()
     }
 
-    /// live かつ acknowledged binding を 1 件以上持つ instance_id 群（platform 非依存）。
-    /// 「専用 V3 gateway が実際に受信できる状態」を表す。二重受信防止 lever の liveness 判定に使う。
-    pub fn live_instances_with_ack(&self) -> Vec<String> {
-        self.live
-            .iter()
-            .filter(|(_, e)| !e.acknowledged.is_empty())
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
 }
 
 /// conformance 用の計測と failure injection。本番 state には載せない。
@@ -179,14 +159,9 @@ impl Registry {
 pub struct GateProbe {
     pub accept_inbound_count: AtomicUsize,
     pub start_session_turn_count: AtomicUsize,
-    pub lookup_resolve_count: AtomicUsize,
-    pub lookup_dm_any_count: AtomicUsize,
-    pub lookup_dm_count: AtomicUsize,
-    pub lookup_wl_count: AtomicUsize,
     pub fail_reply_log: AtomicBool,
     pub fail_delivery_insert: AtomicBool,
     pub fail_say_write: AtomicBool,
-    pub whitelist_override: Mutex<Option<bool>>,
     pub turn_queue_dropped: AtomicUsize,
 }
 
@@ -231,6 +206,8 @@ pub struct ExtgateState {
     pub provisionals: crate::provisional::ProvisionalRegistry,
     /// D-1096: the running said turn of each session (for `interrupt`).
     pub running_turns: crate::interrupt::RunningTurns,
+    /// D-1099: internal row id → the gateway's session key (immutable pairs; filled on first use).
+    session_keys: Mutex<HashMap<String, String>>,
     #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
 }
@@ -253,6 +230,7 @@ impl ExtgateState {
             folded_seqs: Mutex::new(HashMap::new()),
             provisionals: crate::provisional::ProvisionalRegistry::new(),
             running_turns: crate::interrupt::RunningTurns::new(),
+            session_keys: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
         }
@@ -291,6 +269,41 @@ impl ExtgateState {
                 }
             }
         }
+    }
+
+    /// D-1099: the gateway's session key of an internal row id, for addressing outbound frames.
+    /// The pair never changes, so it is cached after the first lookup.
+    pub fn session_key_for_row(&self, row_id: &str) -> Option<String> {
+        if let Some(key) = self.session_keys.lock().ok()?.get(row_id) {
+            return Some(key.clone());
+        }
+        let key: String = {
+            let conn = self.db.lock().ok()?;
+            conn.query_row(
+                "SELECT address FROM gate_bindings WHERE binding_id = ?1",
+                [row_id],
+                |row| row.get(0),
+            )
+            .ok()?
+        };
+        if let Ok(mut cache) = self.session_keys.lock() {
+            cache.insert(row_id.to_string(), key.clone());
+        }
+        Some(key)
+    }
+
+    /// D-1099: the writer of a live instance and the session key of `row_id`. Outbound frames go
+    /// to the instance whenever it is live; the gateway decides what to do with the session.
+    pub fn live_route(
+        &self,
+        instance_id: &str,
+        row_id: &str,
+    ) -> Option<(Arc<tokio::sync::Mutex<OwnedWriteHalf>>, String)> {
+        let writer = {
+            let reg = self.registry.lock().ok()?;
+            reg.get(instance_id)?.writer.clone()
+        };
+        Some((writer, self.session_key_for_row(row_id)?))
     }
 
     pub fn set_attachment_inbox_root(&self, root: PathBuf) {
@@ -338,39 +351,6 @@ impl ExtgateState {
             Err(_) => return false,
         };
         hook.map(|h| h(name)).unwrap_or(false)
-    }
-
-    /// 専用 V3 gateway（`kind_id`）が当該 `agent_id` を実際に受信できる状態か（platform 非依存）。
-    ///
-    /// live かつ acknowledged binding を 1 件以上持つ instance のうち、`kind_id` が一致し subject が
-    /// この agent に対応するものがあれば true。DESIGN-DISCORD-GATE §8.1 の二重受信防止 lever
-    /// （共有 message_loop の `served_by_dedicated_gateway`）の liveness 側に使う汎用クエリで、
-    /// core に platform 語彙を持ち込まない（`kind_id` は runtime 値の引数）。
-    ///
-    /// registry / DB のロック失敗は false（fail-open。true に倒すと共有側が黙って引き下がって
-    /// 「どの gateway からも応答しない」を作りうるため、不明は共有側が続ける側へ倒す）。
-    pub fn agent_has_live_gateway(&self, agent_id: &str, kind_id: &str) -> bool {
-        let instances = match self.registry.lock() {
-            Ok(reg) => reg.live_instances_with_ack(),
-            Err(_) => return false,
-        };
-        if instances.is_empty() {
-            return false;
-        }
-        let conn = match self.db.lock() {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        instances.iter().any(|instance_id| {
-            conn.query_row(
-                "SELECT 1 FROM gate_instances i JOIN agents a ON a.subject_id = i.subject_id \
-                 WHERE i.instance_id = ?1 AND i.kind_id = ?2 AND a.agent_id = ?3 \
-                   AND i.deleted_at IS NULL",
-                rusqlite::params![instance_id, kind_id, agent_id],
-                |_| Ok(()),
-            )
-            .is_ok()
-        })
     }
 
     pub fn lock_registry(&self) -> Result<MutexGuard<'_, Registry>, GateError> {

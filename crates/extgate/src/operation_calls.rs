@@ -92,7 +92,7 @@ async fn invoke_and_wait_checked(
 ) -> Result<Value, InvokeError> {
     // Outbox copies are removed on every return until the pending entry owns them.
     let mut staged = StagedFilesGuard(staged_files);
-    // §10.6 step 1: live + acknowledged binding + live declaration を再検査。
+    // §10.6 step 1: the instance is live and declares the operation (D-1099: no session check).
     let (writer, declaration, declaration_digest) = {
         let reg = state
             .lock_registry()
@@ -100,9 +100,6 @@ async fn invoke_and_wait_checked(
         let live = reg
             .get(instance_id)
             .ok_or_else(|| InvokeError::new(ErrorCode::NotConnected))?;
-        if !live.acknowledged.contains(binding_id) {
-            return Err(InvokeError::new(ErrorCode::NotConnected));
-        }
         if expected_digest.is_some_and(|digest| digest != live.declaration_digest) {
             return Err(InvokeError::new(ErrorCode::OperationRejected));
         }
@@ -117,6 +114,9 @@ async fn invoke_and_wait_checked(
         )
     };
 
+    let session_key = state
+        .session_key_for_row(binding_id)
+        .ok_or_else(|| InvokeError::new(ErrorCode::StoreError))?;
     let call_id = Uuid::new_v4().to_string();
     let now = now_nanos();
     let payload_text =
@@ -129,22 +129,6 @@ async fn invoke_and_wait_checked(
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
-        let open = tx.query_row(
-            "SELECT instance_id, closed_at FROM gate_bindings WHERE binding_id = ?1",
-            params![binding_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
-        );
-        match open {
-            Ok((inst, None)) if inst == instance_id => {}
-            Ok(_) => {
-                let _ = tx.rollback();
-                return Err(InvokeError::new(ErrorCode::BindingClosed));
-            }
-            Err(_) => {
-                let _ = tx.rollback();
-                return Err(InvokeError::new(ErrorCode::StoreError));
-            }
-        }
         tx.execute(
             "INSERT INTO gateway_operation_calls
                (call_id, binding_id, operation, payload_json, result_json, state, error, created_at, updated_at)
@@ -185,7 +169,7 @@ async fn invoke_and_wait_checked(
         &writer,
         &invoke_frame(
             &call_id,
-            binding_id,
+            &session_key,
             &declaration_digest,
             &declaration,
             None,
@@ -228,7 +212,7 @@ async fn invoke_and_wait_checked(
 ///
 /// `speech_body` は永続する発話本文（本文や絵文字など・空可）。`utterance_kind` は関係注記の
 /// 種別（発話 op 名。既知名 → 本文/種別/対象の写像は `opencrab_gateway::utterance_body`）。
-/// `reply_target_id` は会話内 e 番号解決用の 64hex（metadata）、`reply_target_origin` は ❌ 付与用
+/// `reply_target_id` は会話内 e 番号解決用の対象（受信の ref か origin。不透明）、`reply_target_origin` は ❌ 付与用
 /// の発端 origin。
 #[allow(clippy::too_many_arguments)]
 pub async fn invoke_utterance(
@@ -321,7 +305,7 @@ async fn invoke_utterance_checked(
 ) -> Result<(), InvokeError> {
     // Outbox copies are removed on every return until the pending entry owns them.
     let mut staged = StagedFilesGuard(staged_files);
-    // live + acknowledged binding + live declaration を再検査（invoke_and_wait と同じ）。
+    // §10.6 step 1: the instance is live and declares the operation (D-1099: no session check).
     let (writer, declaration, declaration_digest) = {
         let reg = state
             .lock_registry()
@@ -329,9 +313,6 @@ async fn invoke_utterance_checked(
         let live = reg
             .get(instance_id)
             .ok_or_else(|| InvokeError::new(ErrorCode::NotConnected))?;
-        if !live.acknowledged.contains(binding_id) {
-            return Err(InvokeError::new(ErrorCode::NotConnected));
-        }
         if expected_digest.is_some_and(|digest| digest != live.declaration_digest) {
             return Err(InvokeError::new(ErrorCode::OperationRejected));
         }
@@ -346,6 +327,9 @@ async fn invoke_utterance_checked(
         )
     };
 
+    let session_key = state
+        .session_key_for_row(binding_id)
+        .ok_or_else(|| InvokeError::new(ErrorCode::StoreError))?;
     let call_id = provided_call_id
         .filter(|s| !s.is_empty())
         .map(str::to_string)
@@ -391,22 +375,6 @@ async fn invoke_utterance_checked(
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
-        let open = tx.query_row(
-            "SELECT instance_id, closed_at FROM gate_bindings WHERE binding_id = ?1",
-            params![binding_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
-        );
-        match open {
-            Ok((inst, None)) if inst == instance_id => {}
-            Ok(_) => {
-                let _ = tx.rollback();
-                return Err(InvokeError::new(ErrorCode::BindingClosed));
-            }
-            Err(_) => {
-                let _ = tx.rollback();
-                return Err(InvokeError::new(ErrorCode::StoreError));
-            }
-        }
         // 発話本文を speech として永続（撃ちっぱなしでも「言った」ことは残る＝復唱の抑止源）。
         opencrab_db::queries::insert_session_log(
             &tx,
@@ -462,7 +430,7 @@ async fn invoke_utterance_checked(
         &writer,
         &invoke_frame(
             &call_id,
-            binding_id,
+            &session_key,
             &declaration_digest,
             &declaration,
             None,

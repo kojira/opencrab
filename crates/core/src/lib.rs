@@ -12,7 +12,6 @@
 //! - **Agent**: The combined agent struct.
 //! - **Engine**: LLM-driven action loop for executing skills.
 
-pub mod a2ui;
 pub mod agent;
 pub mod caller;
 pub mod context_budget;
@@ -62,8 +61,3 @@ pub use soul::{Soul, ThinkingStyle};
 pub use workspace::{FileEntry, Workspace};
 
 // A2UI types
-pub use a2ui::{
-    build_confirmation_components, A2uiAction, A2uiComponent, A2uiComponentType, A2uiSurface,
-    A2uiUserAction, PendingInteraction, PendingInteractionRegistry, PendingUiSurface, RenderError,
-    RenderTarget, RenderedMessage, UiRenderer, UiResponseEvent, UiResponseSink, UserActionResponse,
-};

@@ -1,16 +1,12 @@
 //! UDS listen と接続状態機械。PRE_HELLO / RUNNING / CLOSED のみ。
 
 mod activity;
-mod bind;
-mod create_binding;
 mod hello;
 mod interrupt;
-mod provision;
 mod provisional;
 mod response;
 
 pub use activity::{emit_activity, emit_ended_activity, emit_turn_failed};
-pub use bind::{enqueue_bind, wait_bind_ack, EnqueueBindOutcome};
 
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::PermissionsExt;
@@ -27,14 +23,13 @@ use crate::close::{close_all_lives, close_live};
 use crate::commands::{CommandContext, CommandError};
 use crate::error::{ErrorCode, GateError};
 use crate::ids::now_nanos;
-use crate::inbound::process_said;
+use crate::inbound::{process_said, resolve};
 use crate::protocol::{
-    command_err_frame, command_ok_frame, err_frame, ok_said_frame, read_frame, write_json, Command,
-    FrameError, InboundMsg, SaidCaller,
+    command_err_frame, command_ok_frame, err_frame, ok_open_frame, ok_said_frame, read_frame,
+    write_json, Command, FrameError, InboundMsg, Open, SaidCaller,
 };
 use crate::registry::ExtgateState;
 
-use create_binding::handle_create_binding;
 use hello::handle_hello;
 use response::handle_response;
 
@@ -280,24 +275,7 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
                 Err(()) => Err(()),
             }
         }
-        // D-1098: one `provision` before `hello`, answered, then the connection closes.
-        (ConnState::PreHello, InboundMsg::Provision(request)) => {
-            let _ = provision::handle_provision(state, writer, request).await;
-            Err(())
-        }
-        (ConnState::Running, InboundMsg::Provision(request)) => {
-            close_live(
-                state,
-                instance_id.as_deref(),
-                Some(identity),
-                ErrorCode::ProtocolOrder,
-                Some(&request.id),
-                Some(writer),
-            )
-            .await;
-            Err(())
-        }
-        (ConnState::PreHello, InboundMsg::CreateBinding(request)) => {
+        (ConnState::PreHello, InboundMsg::Open(request)) => {
             close_live(
                 state,
                 None,
@@ -394,7 +372,7 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
             Err(())
         }
         (ConnState::PreHello, InboundMsg::Invalid { id, code, m }) => {
-            let reason = if m == "hello" || m == "provision" {
+            let reason = if m == "hello" {
                 code
             } else {
                 ErrorCode::ProtocolOrder
@@ -422,21 +400,9 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
             .await;
             Err(())
         }
-        (ConnState::Running, InboundMsg::CreateBinding(request)) => {
+        (ConnState::Running, InboundMsg::Open(request)) => {
             let inst = instance_id.as_deref().expect("running has instance");
-            let result = handle_create_binding(state, writer, inst, request).await;
-            if result.is_err() {
-                close_live(
-                    state,
-                    Some(inst),
-                    Some(identity),
-                    ErrorCode::StoreError,
-                    None,
-                    None,
-                )
-                .await;
-            }
-            result
+            handle_open(state, writer, inst, identity, &request).await
         }
         (ConnState::Running, InboundMsg::Command(command)) => {
             let inst = instance_id.as_deref().expect("running has instance");
@@ -459,7 +425,7 @@ async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
             let inst = instance_id.as_deref().expect("running has instance");
             match process_said(state, inst, &said, runtime) {
                 Ok(out) => {
-                    if write_json(writer, &ok_said_frame(&said.id, out.seq))
+                    if write_json(writer, &ok_said_frame(&said.id, out.seq, &out.session_id))
                         .await
                         .is_err()
                     {
@@ -605,65 +571,40 @@ async fn handle_command<R: ModelAdministration>(
     let outcome = if !matches!(command.caller, SaidCaller::Owner) {
         Err(CommandError::forbidden())
     } else {
-        let acknowledged = state
+        // D-1099: the command target is the key's core session (resolved, never a client value).
+        let target = match state.db.lock() {
+            Ok(mut conn) => resolve(&mut conn, instance_id, &command.session_key, None)
+                .map(|row| (row.agent_id, row.session_id)),
+            Err(_) => Err(crate::error::GateError::store()),
+        };
+        let live = state
             .lock_registry()
             .ok()
-            .and_then(|registry| {
-                registry.get(instance_id).map(|live| {
-                    live.identity == identity && live.acknowledged.contains(&command.binding_id)
-                })
-            })
+            .and_then(|registry| registry.get(instance_id).map(|live| live.identity == identity))
             .unwrap_or(false);
-        if !acknowledged {
-            Err(CommandError::binding_not_found())
-        } else {
-            // D-1080: the command target is the binding's canonical session (stored or the
-            // existing canonical resolver for legacy rows), never an address or a client value.
-            let target = match state.db.lock() {
-                Ok(conn) => conn
-                    .query_row(
-                        "SELECT a.agent_id, b.address
-                         FROM gate_bindings b
-                         JOIN gate_instances i ON i.instance_id = b.instance_id
-                         JOIN agents a ON a.subject_id = i.subject_id
-                         WHERE b.binding_id = ?1 AND b.instance_id = ?2
-                           AND b.closed_at IS NULL AND i.deleted_at IS NULL",
-                        rusqlite::params![command.binding_id, instance_id],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        match target {
+            Ok(_) if !live => Err(CommandError::binding_not_found()),
+            Ok((agent_id, session_id)) => {
+                state
+                    .commands
+                    .dispatch(
+                        &command.name,
+                        CommandContext {
+                            agent_id: &agent_id,
+                            session_id: &session_id,
+                            caller: &command.caller,
+                            models: runtime,
+                        },
+                        &command.args,
                     )
-                    .and_then(|(agent_id, address)| {
-                        opencrab_db::queries::canonical_session_id(
-                            &conn,
-                            &command.binding_id,
-                            &address,
-                        )
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?
-                        .map(|session_id| (agent_id, session_id))
-                        .ok_or(rusqlite::Error::QueryReturnedNoRows)
-                    }),
-                Err(_) => Err(rusqlite::Error::InvalidQuery),
-            };
-            match target {
-                Ok((agent_id, session_id)) => {
-                    state
-                        .commands
-                        .dispatch(
-                            &command.name,
-                            CommandContext {
-                                agent_id: &agent_id,
-                                session_id: &session_id,
-                                caller: &command.caller,
-                                models: runtime,
-                            },
-                            &command.args,
-                        )
-                        .await
-                }
-                Err(rusqlite::Error::QueryReturnedNoRows) => Err(CommandError::binding_not_found()),
-                Err(error) => {
-                    tracing::error!(error = %error, "model command binding lookup failed");
-                    Err(CommandError::internal())
-                }
+                    .await
+            }
+            Err(error) if error.code == ErrorCode::InstanceUnknown => {
+                Err(CommandError::binding_not_found())
+            }
+            Err(error) => {
+                tracing::error!(code = error.code.as_str(), "model command session lookup failed");
+                Err(CommandError::internal())
             }
         }
     };
@@ -673,6 +614,54 @@ async fn handle_command<R: ModelAdministration>(
         Err(error) => command_err_frame(&command.id, error.code, &error.message),
     };
     write_json(writer, &response).await.map_err(|_| ())
+}
+
+/// D-1099: `open` — the core session of a key, created when new. Idempotent.
+async fn handle_open(
+    state: &Arc<ExtgateState>,
+    writer: &Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    instance_id: &str,
+    identity: u64,
+    request: &Open,
+) -> Result<(), ()> {
+    let resolved = match state.db.lock() {
+        Ok(mut conn) => resolve(
+            &mut conn,
+            instance_id,
+            &request.session_key,
+            request.title.as_deref(),
+        ),
+        Err(_) => Err(crate::error::GateError::store()),
+    };
+    let frame = match resolved {
+        Ok(row) => ok_open_frame(&request.id, &row.session_id),
+        Err(e) if e.code == ErrorCode::StoreError => {
+            close_live(
+                state,
+                Some(instance_id),
+                Some(identity),
+                ErrorCode::StoreError,
+                Some(&request.id),
+                Some(writer),
+            )
+            .await;
+            return Err(());
+        }
+        Err(e) => err_frame(&request.id, e.code, e.detail.as_deref()),
+    };
+    if write_json(writer, &frame).await.is_err() {
+        close_live(
+            state,
+            Some(instance_id),
+            Some(identity),
+            ErrorCode::Disconnect,
+            None,
+            None,
+        )
+        .await;
+        return Err(());
+    }
+    Ok(())
 }
 
 pub fn recover_now(conn: &mut Connection) -> Result<(), GateError> {

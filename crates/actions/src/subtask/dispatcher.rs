@@ -68,13 +68,10 @@ impl ActionExecutor for SharedExecutor {
 /// 1. **制御系**（`spawn_subtask` / `cancel_subtask` / `report_progress` / `steer_subtask`）:
 ///    それ自体が subtask ライフサイクルを操作する（`steer_subtask` は走行中サブへ追加指示を
 ///    差し込む / #647）ため background 化しない。
-/// 2. **配送系**（Discord 送信・A2UI 送信・VC 参加/退出・peer review 依頼・Nostr 送信）:
+/// 2. **配送系**（gateway の送信・VC 参加/退出など）:
 ///    「送る」こと自体が応答であり、background 化して完了で再注入する意味がない。加えて
-///    gateway が「明示送信したか」を親ターンの終わりに見て暗黙返信を抑制する場合
-///    （Nostr）、background 化は**二重投稿**を生む。`send_ui` はさらに**ユーザーの応答を
-///    待機する** pending interaction を張るため、background 化すると (a) UI 投稿と本文
-///    返信の順序が入れ替わり、(b) エージェントは `spawned` しか見えずインタラクション
-///    ID を扱えず、(c) クリックによる resume と subtask 決着の resume で返信が 2 通になる。
+///    gateway が「明示送信したか」を親ターンの終わりに見て暗黙返信を抑制する場合、
+///    background 化は**二重投稿**を生む。
 /// 3. **同ターン結果依存**: 戻り値（URL / ID）をそのターンの後続処理や応答本文に使う用法が
 ///    通常のもの（`ensure_webhook` / `ensure_subtask_webhook` / `discord_create_webhook` /
 ///    `discord_create_channel` / `nostr_upload`）。background 化すると値の代わりに

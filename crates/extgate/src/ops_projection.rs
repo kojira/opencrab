@@ -218,7 +218,8 @@ impl GatewayActions for ExtgateOpsGatewayActions {
         // データなし）を返す——engine 側で機械行にせず本文だけ会話へ残す（C6）。
         if matches!(declaration.policy.dispatch, OperationDispatch::Utterance) {
             let (body, kind, target_origin) = opencrab_gateway::utterance_body(name, &payload);
-            let target_id = target_origin.as_deref().and_then(event_id_from_origin);
+            // D-1099: the target is recorded as given (opaque); refs match it to an e number.
+            let target_id = target_origin.clone();
             return match invoke_utterance_for_digest(
                 &self.state,
                 &self.instance_id,
@@ -274,15 +275,5 @@ impl GatewayActions for ExtgateOpsGatewayActions {
                 error: Some(e.code.as_str().to_string()),
             },
         }
-    }
-}
-
-/// origin（`…:<lane>:<64hex>`）末尾の 64hex を取り出す（platform SDK 名に非依存）。
-fn event_id_from_origin(origin: &str) -> Option<String> {
-    let last = origin.rsplit(':').next()?;
-    if last.len() == 64 && last.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Some(last.to_ascii_lowercase())
-    } else {
-        None
     }
 }

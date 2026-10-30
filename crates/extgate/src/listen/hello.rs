@@ -1,19 +1,26 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 use crate::close::close_live;
-use crate::error::{ErrorCode, GateError};
+use crate::error::ErrorCode;
+use crate::ids::now_nanos;
 use crate::operations::{
     runtime_declaration_digest, validate_operations, validate_runtime_compatibility, FinalDelivery,
     GatewayOperationDeclaration,
 };
-use crate::protocol::{bind_frame, ok_frame, write_json};
-use crate::registry::{ExtgateState, LiveEntry, Pending};
+use crate::protocol::{ok_frame, write_json};
+use crate::registry::{ExtgateState, LiveEntry};
 
-const BIND_TIMEOUT: Duration = Duration::from_secs(60);
+/// Stored for a generic instance created by `hello`. Core never reads these columns (D-1099).
+const NEUTRAL_KIND: &str = "gateway";
+const NEUTRAL_CONFIG_B64: &str = "e30=";
+const NEUTRAL_CONFIG_DIGEST: &str =
+    "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
 
+/// D-1099: `hello` names the instance and the agent it speaks for. Core finds or creates the
+/// instance and accepts the connection; nothing is checked against stored gateway state and no
+/// session is registered beforehand.
 pub(crate) async fn handle_hello(
     state: &Arc<ExtgateState>,
     writer: &Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
@@ -40,83 +47,51 @@ pub(crate) async fn handle_hello(
         if reg.is_live(&hello.instance_id) {
             Err(ErrorCode::InstanceActive)
         } else {
-            match inspect_instance(&state.db, &hello.instance_id) {
+            match ensure_instance(&state.db, &hello.instance_id, &hello.agent_id) {
                 Err(code) => Err(code),
-                Ok(inspected) if !inspected.enabled => Err(ErrorCode::InstanceDisabled),
-                Ok(inspected) if inspected.revision != hello.revision => {
-                    Err(ErrorCode::RevisionMismatch)
-                }
-                Ok(inspected) if inspected.config_digest != hello.config_digest => {
-                    Err(ErrorCode::ConfigDigestMismatch)
-                }
-                // 宣言検証を hello 検査と同じ lock 下で完了させる（§4.1）。永続 digest との
-                // 照合は撤去済み（#894）。
-                Ok(_) => match validate_hello_declarations(
+                Ok(()) => match validate_hello_declarations(
                     state,
                     &hello.operations,
                     &hello.final_delivery,
                 ) {
                     Err(code) => Err(code),
                     Ok((declarations, declaration_digest, final_delivery)) => {
-                        match open_bindings(&state.db, &hello.instance_id) {
-                            Err(_) => Err(ErrorCode::StoreError),
-                            Ok(bindings) => {
-                                let mut pending = std::collections::HashMap::new();
-                                let started = std::time::Instant::now();
-                                for (binding_id, _) in &bindings {
-                                    pending.insert(
-                                        crate::ids::bind_request_id(binding_id),
-                                        Pending::Bind {
-                                            binding_id: binding_id.clone(),
-                                            started,
-                                        },
-                                    );
-                                }
-                                reg.insert(
-                                    hello.instance_id.clone(),
-                                    LiveEntry {
-                                        identity,
-                                        revision: hello.revision,
-                                        writer: Arc::clone(writer),
-                                        acknowledged: std::collections::HashSet::new(),
-                                        pending,
-                                        declarations: Arc::new(declarations),
-                                        declaration_digest,
-                                        final_delivery,
-                                        run_env: hello.run_env.clone(),
-                                    },
-                                );
-                                Ok(bindings)
-                            }
-                        }
+                        reg.insert(
+                            hello.instance_id.clone(),
+                            LiveEntry {
+                                identity,
+                                writer: Arc::clone(writer),
+                                pending: std::collections::HashMap::new(),
+                                declarations: Arc::new(declarations),
+                                declaration_digest,
+                                final_delivery,
+                                run_env: hello.run_env.clone(),
+                            },
+                        );
+                        Ok(())
                     }
                 },
             }
         }
     };
-    let bindings = match registered {
-        Ok(b) => b,
-        Err(code) => {
-            // fail-loud（#894）: hello 拒否は従来 err_frame を送るだけでサーバ側に理由が
-            // 残らなかった。理由コード＋instance_id を WARN し、config_digest 不一致等の
-            // 拒否を可視化する。
-            tracing::warn!(
-                instance_id = %hello.instance_id,
-                reason = code.as_str(),
-                "gate hello rejected"
-            );
-            close_live(
-                state,
-                None,
-                Some(identity),
-                code,
-                Some(&hello.id),
-                Some(writer),
-            )
-            .await;
-            return Err(());
-        }
-    };
+    if let Err(code) = registered {
+        // fail-loud（#894）: the reason and instance are logged so a refusal is visible.
+        tracing::warn!(
+            instance_id = %hello.instance_id,
+            reason = code.as_str(),
+            "gate hello rejected"
+        );
+        close_live(
+            state,
+            None,
+            Some(identity),
+            code,
+            Some(&hello.id),
+            Some(writer),
+        )
+        .await;
+        return Err(());
+    }
 
     if write_json(writer, &ok_frame(&hello.id)).await.is_err() {
         close_live(
@@ -130,106 +105,64 @@ pub(crate) async fn handle_hello(
         .await;
         return Err(());
     }
-    for (binding_id, address) in &bindings {
-        if write_json(writer, &bind_frame(binding_id, address))
-            .await
-            .is_err()
-        {
-            close_live(
-                state,
-                Some(&hello.instance_id),
-                Some(identity),
-                ErrorCode::BindFailed,
-                None,
-                None,
-            )
-            .await;
-            return Err(());
-        }
-        spawn_bind_timeout(
-            Arc::clone(state),
-            hello.instance_id.clone(),
-            binding_id.clone(),
-            identity,
-        );
-    }
     Ok(hello.instance_id)
 }
 
-pub(crate) fn spawn_bind_timeout(
-    state: Arc<ExtgateState>,
-    instance_id: String,
-    binding_id: String,
-    identity: u64,
-) {
-    tokio::spawn(async move {
-        tokio::time::sleep(BIND_TIMEOUT).await;
-        let still = {
-            let Ok(reg) = state.lock_registry() else {
-                return;
-            };
-            match reg.get(&instance_id) {
-                Some(e) if e.identity == identity => e
-                    .pending
-                    .get(&crate::ids::bind_request_id(&binding_id))
-                    .is_some_and(Pending::is_bind),
-                _ => false,
-            }
-        };
-        if still {
-            close_live(
-                &state,
-                Some(&instance_id),
-                Some(identity),
-                ErrorCode::BindFailed,
-                None,
-                None,
+/// Finds the instance, or creates it for the agent. An existing instance must speak for the same
+/// agent (`instance_conflict` otherwise); an unknown agent is `subject_unknown`.
+fn ensure_instance(
+    db: &opencrab_db::Db,
+    instance_id: &str,
+    agent_id: &str,
+) -> Result<(), ErrorCode> {
+    let mut conn = db.lock().map_err(|_| ErrorCode::StoreError)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| ErrorCode::StoreError)?;
+    let subject_id: i64 = tx
+        .query_row(
+            "SELECT subject_id FROM agents WHERE agent_id = ?1 AND subject_id IS NOT NULL",
+            [agent_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| ErrorCode::StoreError)?
+        .ok_or(ErrorCode::SubjectUnknown)?;
+    let existing: Option<(i64, Option<i64>)> = tx
+        .query_row(
+            "SELECT subject_id, deleted_at FROM gate_instances WHERE instance_id = ?1",
+            [instance_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| ErrorCode::StoreError)?;
+    match existing {
+        Some((stored, None)) if stored == subject_id => {}
+        Some(_) => return Err(ErrorCode::InstanceConflict),
+        None => {
+            let now = now_nanos();
+            tx.execute(
+                "INSERT INTO gate_instances (
+                    instance_id, kind_id, subject_id, revision, enabled,
+                    config_b64, config_digest, created_at, updated_at, deleted_at
+                 ) VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6, ?6, NULL)",
+                params![
+                    instance_id,
+                    NEUTRAL_KIND,
+                    subject_id,
+                    NEUTRAL_CONFIG_B64,
+                    NEUTRAL_CONFIG_DIGEST,
+                    now
+                ],
             )
-            .await;
+            .map_err(|_| ErrorCode::StoreError)?;
         }
-    });
-}
-
-struct InstanceSnap {
-    enabled: bool,
-    revision: u64,
-    config_digest: String,
-}
-
-fn inspect_instance(db: &opencrab_db::Db, instance_id: &str) -> Result<InstanceSnap, ErrorCode> {
-    let conn = db.lock().map_err(|_| ErrorCode::StoreError)?;
-    // operation_declaration_digest 列は残すが読まない（照合撤去・#894）。
-    match conn.query_row(
-        "SELECT enabled, revision, config_digest, config_b64, deleted_at
-         FROM gate_instances WHERE instance_id = ?1",
-        params![instance_id],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, Option<i64>>(4)?,
-            ))
-        },
-    ) {
-        Err(rusqlite::Error::QueryReturnedNoRows) => Err(ErrorCode::InstanceUnknown),
-        Err(_) => Err(ErrorCode::StoreError),
-        Ok((_, _, _, _, Some(_))) => Err(ErrorCode::InstanceUnknown),
-        Ok((enabled, revision, digest, _config_b64, None)) => Ok(InstanceSnap {
-            enabled: enabled == 1,
-            revision: u64::try_from(revision).map_err(|_| ErrorCode::StoreError)?,
-            config_digest: digest,
-        }),
     }
+    tx.commit().map_err(|_| ErrorCode::StoreError)
 }
 
 /// hello の宣言を検証し、live snapshot 用の宣言配列と（informational な）canonical digest を返す
-/// （DI-03）。**永続 digest との照合・永続化は撤去した**（#894）。core は hello ごとに宣言を
-/// fresh parse して projection に使うので、永続照合は drift を防がず、宣言の説明文を編集する
-/// たびに既存 instance の hello を `operation_declaration_mismatch` で殺すだけだった。digest は
-/// live entry の情報用にだけ計算し、DB へは書かない（列は残すが未使用・revision/config_digest は
-/// 従来どおり照合する）。
+/// （DI-03）。永続 digest との照合はしない（#894）。
 ///
 /// - reserved collision → `bad_request`（DI-03）
 /// - 他の宣言不正 → `operation_declaration_invalid`（DI-22）
@@ -247,26 +180,13 @@ fn validate_hello_declarations(
     Ok((decls, digest, final_delivery))
 }
 
-fn open_bindings(
-    db: &opencrab_db::Db,
-    instance_id: &str,
-) -> Result<Vec<(String, String)>, GateError> {
-    let conn = db.lock().map_err(|_| GateError::store())?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT binding_id, address FROM gate_bindings
-             WHERE instance_id = ?1 AND closed_at IS NULL
-             ORDER BY binding_id ASC",
-        )
-        .map_err(|_| GateError::store())?;
-    let rows = stmt
-        .query_map(params![instance_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
-        .map_err(|_| GateError::store())?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|_| GateError::store())?);
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn neutral_digest_is_the_digest_of_the_neutral_config() {
+        assert_eq!(
+            crate::ids::config_digest_from_b64(super::NEUTRAL_CONFIG_B64).unwrap(),
+            super::NEUTRAL_CONFIG_DIGEST
+        );
     }
-    Ok(out)
 }

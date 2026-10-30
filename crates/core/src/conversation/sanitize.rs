@@ -294,7 +294,7 @@ pub(super) fn inbound_relation_annotation(
     // 対象ノートは受信メタの reply_target（row295c 6b）→ 会話内 e 番号。会話に無い（旧行の
     // 未記録・窓外）対象は `→外部`。
     let target = reply_target_of(log)
-        .and_then(|t| refs.event_num_by_id(&t))
+        .and_then(|t| refs.event_num_by_target(&t))
         .map(|n| format!("e{n}"))
         .unwrap_or_else(|| "外部".to_string());
     Some(format!("({relation}→{target})"))
@@ -303,7 +303,7 @@ pub(super) fn inbound_relation_annotation(
 /// エージェント**自身の発話クラス** op（reply/reaction/repost）の speech ログに関係注記を付ける
 /// （DESIGN-RESUME-SETTLE §3.3.1 C6・発話クラス化）。撃ちっぱなし配送で永続した発話は
 /// tool_call/tool_result の機械行を持たず「本文＋関係注記」だけで残る。注記の種別は metadata の
-/// `utterance_kind`、対象ノートは `reply_target`（64hex）→ 会話内 e 番号（無ければ `→外部`）。
+/// `utterance_kind`、対象は `reply_target`（受信の ref か origin）→ 会話内 e 番号（無ければ `→外部`）。
 /// 受信転記（`inbound_relation_annotation`）とは metadata 由来かで区別し、二重付与しない。
 pub(super) fn outgoing_relation_annotation(
     log: &opencrab_db::queries::SessionLogRow,
@@ -318,7 +318,7 @@ pub(super) fn outgoing_relation_annotation(
         _ => return None,
     };
     let target = reply_target_of(log)
-        .and_then(|t| refs.event_num_by_id(&t))
+        .and_then(|t| refs.event_num_by_target(&t))
         .map(|n| format!("e{n}"))
         .unwrap_or_else(|| "外部".to_string());
     Some(format!("({relation}→{target})"))
@@ -334,11 +334,8 @@ fn meta_line_label(trimmed: &str) -> Option<&str> {
     Some(&after[..end])
 }
 
-/// 生の長い識別子の bech32 HRP。長い順に試す（`nprofile1` が `npub1` より先）。
-const BECH32_HRPS: &[&str] = &["nprofile1", "nevent1", "naddr1", "npub1", "note1", "nsec1"];
-
-/// 行内の生の長い識別子（bech32・64hex）を短縮する。英数の連続を 1 トークンとして境界で切り、
-/// 通常語や短い hash は温存する。
+/// 行内の生の長い識別子を短縮する。英数の連続を 1 トークンとして境界で切り、通常語や短い hash は
+/// 温存する。どの platform の識別子形式も知らない汎用判定（D-1099）。
 fn elide_raw_identifiers(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut token = String::new();
@@ -359,25 +356,19 @@ fn elide_raw_identifiers(line: &str) -> String {
     out
 }
 
+/// Shortest token treated as a raw identifier. Long enough to spare words and short hashes
+/// (git short-sha), short enough to catch 32-hex ids and encoded keys.
+const MIN_IDENTIFIER_CHARS: usize = 32;
+
 fn elide_identifier_token(tok: &str) -> String {
-    for hrp in BECH32_HRPS {
-        if let Some(body) = tok.strip_prefix(hrp) {
-            if body.len() >= 30
-                && body
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-            {
-                return format!("<{}…>", hrp.trim_end_matches('1'));
-            }
-        }
-    }
-    // 生 hex 識別子（pubkey/event_id=64hex・ダッシュ無し UUID/subtask=32hex 等）。短い hash や
-    // git short-sha を巻き込まないよう 32 桁以上に限る（row318: 32hex 変種も長物ゼロの対象）。
-    if tok.len() >= 32
-        && tok
-            .chars()
-            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
-    {
+    // 長い英数トークンで、数字を含み、小文字・数字だけ（または大文字 hex）なら識別子とみなす。
+    let long = tok.len() >= MIN_IDENTIFIER_CHARS;
+    let has_digit = tok.bytes().any(|b| b.is_ascii_digit());
+    let identifier_chars = tok
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        || tok.bytes().all(|b| b.is_ascii_hexdigit());
+    if long && has_digit && identifier_chars {
         return "<id…>".to_string();
     }
     tok.to_string()
