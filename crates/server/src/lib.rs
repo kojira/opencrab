@@ -27,17 +27,6 @@ pub mod skill_consolidation;
 pub mod subtask_registries;
 pub mod subtask_spawn;
 pub mod system_actions;
-
-#[cfg(feature = "baseline-l1")]
-#[doc(hidden)]
-#[path = "../tests/baseline_support/l1.rs"]
-pub mod baseline_l1;
-
-#[cfg(feature = "baseline-l2")]
-#[doc(hidden)]
-#[path = "../tests/baseline_support/l2.rs"]
-pub mod baseline_l2;
-
 pub mod transcript;
 
 /// per-agent MCP 接続マネージャの共有ハンドル。
@@ -164,9 +153,9 @@ impl AppState {
 
 /// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件、gateway マネージャ無し）。
 ///
-/// crate 内のユニットテストと L1 採取器で共用。`AppState` にフィールドが増えたときの
+/// crate 内のユニットテストで共用。`AppState` にフィールドが増えたときの
 /// 追随箇所を 1 つに保つ（テスト／採取器ごとの構造体リテラル複製を避ける）。
-#[cfg(any(test, feature = "baseline-l1"))]
+#[cfg(test)]
 pub(crate) fn test_app_state() -> AppState {
     let conn = opencrab_db::init_memory().unwrap();
     // #628: 本番（main.rs）と同じ transport descriptor を生存非依存で登録する（源は 1 本化・
