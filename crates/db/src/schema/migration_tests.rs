@@ -14,6 +14,7 @@ include!("tests/api_principals_migration_v56.rs");
 include!("tests/unified_triggers_migration_v57.rs");
 include!("tests/memory_index_period_reparent_migration_v59.rs");
 include!("tests/s10_fresh_gateway_boundary.rs");
+include!("tests/gate_admin_drop_migration_v64.rs");
 include!("tests/impressions_migration_v21.rs");
 include!("tests/late_version_migrations_v41_v42_v46.rs");
 include!("tests/legacy_foundation_migrations.rs");
