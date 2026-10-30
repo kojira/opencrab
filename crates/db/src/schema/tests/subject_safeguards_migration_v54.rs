@@ -16,6 +16,9 @@ fn s2_populated_upgrade_preserves_positive_subject_ids_and_associations_byte_for
          DROP TABLE IF EXISTS subject_association_grants;
          DROP TABLE subject_tombstones;
          DROP TABLE subject_id_allocator;
+         DROP INDEX IF EXISTS idx_gate_bindings_open_session_key;
+         DROP INDEX IF EXISTS idx_gate_bindings_open_session_key_lookup;
+         ALTER TABLE gate_bindings RENAME COLUMN session_key TO address;
          ALTER TABLE gate_bindings DROP COLUMN session_id;
          ALTER TABLE gate_instances DROP COLUMN association_grandfathered;
          INSERT INTO agents (agent_id, name, persona_name, subject_id)
@@ -122,7 +125,10 @@ fn s2_pre_schema_snapshot_restores_byte_identical_fixture() {
              DROP TABLE IF EXISTS subject_association_grants;
              DROP TABLE subject_tombstones;
              DROP TABLE subject_id_allocator;
-             ALTER TABLE gate_bindings DROP COLUMN session_id;
+             DROP INDEX IF EXISTS idx_gate_bindings_open_session_key;
+         DROP INDEX IF EXISTS idx_gate_bindings_open_session_key_lookup;
+         ALTER TABLE gate_bindings RENAME COLUMN session_key TO address;
+         ALTER TABLE gate_bindings DROP COLUMN session_id;
              ALTER TABLE gate_instances DROP COLUMN association_grandfathered;
              INSERT INTO agents (agent_id, name, persona_name, subject_id)
                  VALUES ('rollback-agent', 'Rollback', 'p', 71);

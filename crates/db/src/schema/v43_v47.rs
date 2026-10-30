@@ -76,9 +76,6 @@ CREATE TABLE IF NOT EXISTS gate_bindings (
   closed_at INTEGER
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_gate_bindings_open_address
-ON gate_bindings(instance_id, address) WHERE closed_at IS NULL;
-
 CREATE TABLE IF NOT EXISTS external_origins (
   binding_id TEXT NOT NULL REFERENCES gate_bindings(binding_id) ON DELETE RESTRICT,
   origin TEXT NOT NULL CHECK(length(origin) > 0),
@@ -105,7 +102,16 @@ CREATE TABLE IF NOT EXISTS deliveries (
   )
 );
 "#,
-    )
+    )?;
+    // v65 renames the column to `session_key` (with its own index); a re-run on such a database
+    // leaves it alone.
+    if column_exists(conn, "gate_bindings", "address")? {
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_gate_bindings_open_address
+             ON gate_bindings(instance_id, address) WHERE closed_at IS NULL;",
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn migrate_v47_gateway_operations(conn: &Connection) -> rusqlite::Result<()> {

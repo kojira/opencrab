@@ -104,7 +104,8 @@ fn v64_drops_populated_gate_admin_tables_with_triggers_and_rotation() {
         .filter(|name: &String| !migrations::GATE_ADMIN_TABLES.contains(&name.as_str()))
         .collect();
 
-    initialize(&conn).expect("upgrade a populated 63 database to 64");
+    run_migrations(&conn, MIGRATIONS.into_iter().filter(|m| m.version <= 64))
+        .expect("upgrade a populated 63 database to 64");
 
     assert_eq!(schema_version(&conn).unwrap(), 64);
     for table in migrations::GATE_ADMIN_TABLES {
