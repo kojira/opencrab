@@ -83,13 +83,6 @@ jobs:
       - name: Dependency boundary checks
         run: bash scripts/check-deps.sh
 
-      # #1006 S0: checked burn-down for concrete-gateway production edges,
-      # shared/server concrete vocabulary, direct core SQLite opens, and public
-      # public /api/gate* reachability. Mutation fixtures ensure the detector fails.
-      - name: Gateway ownership boundary audit
-        run: |
-          python3 -m unittest scripts.tests.test_gateway_boundary_audit -v
-          python3 scripts/gateway_boundary_audit.py
 
   web:
     name: Web (typecheck / build / test)

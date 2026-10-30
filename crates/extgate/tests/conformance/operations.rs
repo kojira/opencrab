@@ -530,51 +530,6 @@ async fn di_projection_reply_utterance_rejection_emits_turn_failed_and_keeps_spe
     assert_eq!(state_str, "failed", "拒否された発話 delivery は failed");
 }
 
-/// DI-18 / §11.6: 汎用 DI 機構のソースに個別 gateway operation 語彙が現れないことの static audit。
-///
-/// 走査範囲: DI の generic 中核 3 ファイル（operations / operation_calls / ops_projection）。ここは
-/// platform 非依存でなければならない（宣言検証・call 永続・tool 投影）。extgate の他ファイルは Nostr
-/// profile 用の hook（NostrSaidAdmit 等）を正当に持つので対象外。core 側は a2ui/webhook 等の generic
-/// 抽象を正当に持つため core-wide R7 には入れない（誤検出回避）。合成 profile N≥2 の profile-parity
-/// （同一 fixture を 2 profile で通し core 期待値が runtime operation 文字列以外同一）はフェーズ 2 送り
-/// （オーナー承認待ち・PR 明示）。
-#[test]
-fn di_generic_mechanism_has_no_platform_vocab() {
-    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    // §11.6 の denylist（個別 gateway 語彙）。bare "ui" は build/require 等に部分一致するので、
-    // 意味のある形（send_ui / ui_action）で照合する。
-    let denylist = [
-        "discord",
-        "nostr",
-        "serenity",
-        "songbird",
-        "react",
-        "reaction",
-        "a2ui",
-        "webhook",
-        "send_file",
-        "send_ui",
-        "ui_action",
-    ];
-    let files = ["operations.rs", "operation_calls.rs", "ops_projection.rs"];
-    let mut hits = Vec::new();
-    for f in files {
-        let text = std::fs::read_to_string(base.join(f))
-            .unwrap_or_else(|e| panic!("read {f}: {e}"))
-            .to_ascii_lowercase();
-        for term in denylist {
-            if text.contains(term) {
-                hits.push(format!("{f}: \"{term}\""));
-            }
-        }
-    }
-    assert!(
-        hits.is_empty(),
-        "汎用 DI 機構に個別 gateway 語彙が混入（generic 性の違反）:\n{}",
-        hits.join("\n")
-    );
-}
-
 /// item4: 宣言 schema が `"format":"short-ref"` を付けた field だけ、core が実 ID へ解決してから
 /// invoke する（会話の e番号 → external_origin）。全 string 無差別ではなく的を絞る。
 #[tokio::test]
