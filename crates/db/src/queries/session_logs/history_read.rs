@@ -35,7 +35,7 @@ fn resolve_around_window(
     let lo: Option<i64> = conn.query_row(
         &format!(
             "SELECT MIN(id) FROM (SELECT id FROM memory_sessions
-         WHERE agent_id = ?1 AND id <= ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}
+         WHERE agent_id = ?1 AND id <= ?2 AND {EXCLUDE_HEARTBEAT_ECHO_SQL}
          ORDER BY id DESC LIMIT ?3)"
         ),
         params![agent_id, center_id, radius + 1],
@@ -44,7 +44,7 @@ fn resolve_around_window(
     let hi: Option<i64> = conn.query_row(
         &format!(
             "SELECT MAX(id) FROM (SELECT id FROM memory_sessions
-         WHERE agent_id = ?1 AND id >= ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}
+         WHERE agent_id = ?1 AND id >= ?2 AND {EXCLUDE_HEARTBEAT_ECHO_SQL}
          ORDER BY id ASC LIMIT ?3)"
         ),
         params![agent_id, center_id, radius + 1],
@@ -107,7 +107,7 @@ pub fn read_my_history(
     }
     // #425: エコー行（表示専用）は read_my_history の内容・range_total から除外する
     // （記憶系のあらゆる経路で不可視。パラメータを持たない述語なので where へ連結する）。
-    where_parts.push(EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL.to_string());
+    where_parts.push(EXCLUDE_HEARTBEAT_ECHO_SQL.to_string());
     let base_where = where_parts.join(" AND ");
 
     let range_total: i64 = {

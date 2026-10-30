@@ -473,7 +473,7 @@ fn legacy_record(h: &Harness, row_id: &str, instance_id: &str, key: &str, sessio
         .unwrap();
     }
     conn.execute(
-        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at, closed_at, session_id)
+        "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at, closed_at, session_id)
          VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
         rusqlite::params![row_id, instance_id, key, now_nanos(), session_id],
     )

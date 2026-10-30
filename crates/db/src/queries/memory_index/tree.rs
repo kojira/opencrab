@@ -490,7 +490,7 @@ pub fn get_session_logs_by_id_range(
     let mut stmt = conn.prepare(&format!(
         "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
          FROM memory_sessions WHERE agent_id = ?1 AND id >= ?2 AND id <= ?3
-           AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL} ORDER BY id ASC"
+           AND {EXCLUDE_HEARTBEAT_ECHO_SQL} ORDER BY id ASC"
     ))?;
     let rows = stmt.query_map(params![agent_id, from_id, to_id], |row| {
         Ok(SessionLogRow {
@@ -552,7 +552,7 @@ pub fn get_unindexed_log_count(conn: &Connection, agent_id: &str) -> Result<i64>
     let count: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM memory_sessions
-         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_ECHO_SQL}"
         ),
         params![agent_id, last_id],
         |row| row.get(0),

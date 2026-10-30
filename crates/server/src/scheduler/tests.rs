@@ -94,7 +94,7 @@ fn insert_gate_record(
     session_id: &str,
 ) {
     tx.execute(
-        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at, closed_at, session_id)
+        "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at, closed_at, session_id)
          VALUES (?1, ?2, ?3, 1, NULL, ?4)",
         rusqlite::params![row_id, instance_id, session_key, session_id],
     )

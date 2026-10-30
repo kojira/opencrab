@@ -112,8 +112,7 @@ pub struct GatewayCallContext {
     ///
     /// `RunRequest.reply_target`（#167）と**同じ不透明トークン**をツール実行の文脈まで
     /// 運ぶ。宛先を引数で受けるアクションが、引数省略時のフォールバックとして使う。
-    /// トークンの解釈は各 gateway の責務（Discord は
-    /// channel id の数値文字列、Nostr は返信先イベント id）。
+    /// トークンの解釈は各 gateway の責務（core は中身を読まない）。
     ///
     /// 既定 `None`（後方互換 — 宛先を明示するツール呼び出しは従来どおり動く）。
     /// `None` かつ引数も無い場合は空文字で送らず明示エラーにする（fail-closed）。

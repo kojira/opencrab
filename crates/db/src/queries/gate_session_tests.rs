@@ -70,7 +70,7 @@ fn a_migrated_row_keeps_its_session() {
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at, closed_at, session_id)
+        "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at, closed_at, session_id)
          VALUES ('11111111-1111-4111-8111-111111111111', ?1, 'room-1', 1, NULL, 'extgate-old')",
         [INSTANCE],
     )
@@ -86,7 +86,7 @@ fn a_closed_row_still_leads_to_its_session() {
     let mut conn = crate::init_memory().unwrap();
     seed(&conn);
     conn.execute(
-        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at, closed_at, session_id)
+        "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at, closed_at, session_id)
          VALUES ('22222222-2222-4222-8222-222222222222', ?1, 'room-2', 1, 5, 'room-2')",
         [INSTANCE],
     )

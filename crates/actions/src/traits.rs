@@ -43,7 +43,6 @@ impl ActionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SideEffect {
-    MessageSent { channel: String, content: String },
     SkillAcquired { skill_id: String },
     FileWritten { path: String },
     LlmSwitched { purpose: String, model: String },

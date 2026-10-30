@@ -77,7 +77,7 @@ pub fn find_gate_session(
     let row: Option<(String, Option<String>)> = conn
         .query_row(
             "SELECT binding_id, session_id FROM gate_bindings
-             WHERE instance_id = ?1 AND address = ?2
+             WHERE instance_id = ?1 AND session_key = ?2
              ORDER BY closed_at IS NOT NULL, created_at DESC, binding_id
              LIMIT 1",
             params![instance_id, session_key],
@@ -139,7 +139,7 @@ pub fn resolve_gate_session_in_tx(
     }
     let row_id = new_row_id(instance_id, session_key);
     tx.execute(
-        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at, closed_at, session_id)
+        "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at, closed_at, session_id)
          VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
         params![row_id, instance_id, session_key, now, session_id],
     )?;
@@ -156,7 +156,7 @@ pub fn resolve_gate_session_in_tx(
 pub fn gate_session_by_row(conn: &Connection, row_id: &str) -> Result<Option<GateSession>> {
     let row: Option<(String, String, Option<String>)> = conn
         .query_row(
-            "SELECT instance_id, address, session_id FROM gate_bindings WHERE binding_id = ?1",
+            "SELECT instance_id, session_key, session_id FROM gate_bindings WHERE binding_id = ?1",
             [row_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -201,7 +201,7 @@ pub fn gate_session_for_session_id(
             "SELECT b.binding_id FROM gate_bindings b
              JOIN gate_instances i ON i.instance_id = b.instance_id
              WHERE i.deleted_at IS NULL
-               AND (b.session_id = ?1 OR b.address = ?1 OR b.binding_id = ?2)
+               AND (b.session_id = ?1 OR b.session_key = ?1 OR b.binding_id = ?2)
              ORDER BY b.closed_at IS NOT NULL, b.created_at DESC, b.binding_id",
         )?;
         let physical = session_id.strip_prefix("extgate-").unwrap_or("");

@@ -73,12 +73,10 @@ impl ActionExecutor for SharedExecutor {
 ///    gateway が「明示送信したか」を親ターンの終わりに見て暗黙返信を抑制する場合、
 ///    background 化は**二重投稿**を生む。
 /// 3. **同ターン結果依存**: 戻り値（URL / ID）をそのターンの後続処理や応答本文に使う用法が
-///    通常のもの（`ensure_webhook` / `ensure_subtask_webhook` / `discord_create_webhook` /
-///    `discord_create_channel` / `nostr_upload`）。background 化すると値の代わりに
+///    通常のもの（gateway が宣言する作成系・アップロード系の操作）。background 化すると値の代わりに
 ///    `spawned` が返るだけなので、用法そのものが壊れる。
-/// 4. **run 内共有状態を書くツール**（`select_llm` / `discord_channel_config` /
-///    `nostr_switch_identity`）: `ActionContext` の `model_override` / `current_purpose`、
-///    チャンネルの writable、以後の送信 identity のように、走行中の run（や同ターンの配送）
+/// 4. **run 内共有状態を書くツール**（`select_llm` など）: `ActionContext` の
+///    `model_override` / `current_purpose` のように、走行中の run（や同ターンの配送）
 ///    が参照している状態を書き換える。background 化すると (a) そのターンには効かず、
 ///    (b) 書き込みが engine の次イテレーションや配送と競合して「いつのターンから効くか」が
 ///    非決定になる。制御の効き方を保つため inline に残す。

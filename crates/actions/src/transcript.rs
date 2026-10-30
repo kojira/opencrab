@@ -39,7 +39,7 @@ impl TranscriptSource {
 /// ゲートウェイから受信した発言の記録内容。
 ///
 /// `session_key` / `pubkey` は **metadata のキー名そのもの**。`session_key` は gateway が決める
-/// 不透明なセッションキー（D-1099。旧行は `channel_id`）。
+/// 不透明なセッションキー（D-1099。旧行は別名のキーで記録されている）。
 /// `None` のキーは metadata に出さない ＝ 移設前の各サイトの形がそのまま再現される。
 #[derive(Debug, Clone)]
 pub struct InboundMessageRecord<'a> {

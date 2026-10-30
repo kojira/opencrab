@@ -60,7 +60,7 @@ fn state_with_alias(session_id: &str) -> AppState {
         .unwrap();
     opencrab_db::queries::insert_agent_session_in_tx(&tx, AGENT, session_id).unwrap();
     tx.execute(
-        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at, closed_at, session_id)
+        "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at, closed_at, session_id)
          VALUES ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'alias', 1, NULL, ?1)",
         [session_id],
     )

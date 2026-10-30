@@ -78,7 +78,7 @@ async fn d1099_said_with_a_new_key_creates_its_session_and_returns_it() {
     assert_eq!(recorded, "room-new");
     let (instance, key): (String, String) = conn
         .query_row(
-            "SELECT instance_id, address FROM gate_bindings WHERE session_id='room-new'",
+            "SELECT instance_id, session_key FROM gate_bindings WHERE session_id='room-new'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -200,7 +200,7 @@ async fn d1099_open_is_idempotent() {
     let conn = h.state.db.lock().unwrap();
     let (rows, theme): (i64, String) = conn
         .query_row(
-            "SELECT (SELECT COUNT(*) FROM gate_bindings WHERE address='room-open'),
+            "SELECT (SELECT COUNT(*) FROM gate_bindings WHERE session_key='room-open'),
                     (SELECT theme FROM sessions WHERE id='room-open')",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),

@@ -1,7 +1,7 @@
 //! 定時実行（#455）の CRUD API（設計 §7.4）。
 //!
 //! `GET/POST /api/agents/{id}/schedules`, `PATCH/DELETE /api/schedules/{sid}`。
-//! **既存のダッシュボード系エージェント設定 API（`channel_configs` 等）と同じ認証層の内側**
+//! **既存のダッシュボード系エージェント設定 API と同じ認証層の内側**
 //! に置く（新しい認可ゲートは足さない・設計 §10.2）。この CRUD（owner/dashboard 用）と、
 //! **エージェント自身が触るツール**（`crate::agent_schedule` の `set_my_schedule` /
 //! `get_my_schedules`・オーナー裁定 2026-08-09 で §7.4 の「ツールを追加しない」を撤回）は
@@ -18,7 +18,7 @@
 //!
 //! # 発火先の制約
 //! `session_id` は**そのエージェントの発火経路を持つセッション**（登録済み transport のセッション。
-//! 例: gatewayが発行したopaque address）に限る
+//! 例: gateway が決めた不透明なセッションキー）に限る
 //! （transport 登録簿の `resolve_target` が `Some`・#628）。列挙を固定せず、transport を足しても
 //! 腐らない中立表現にする。「登録できたのに永遠に発火しない行」や他エージェントのセッションを作らせない。
 

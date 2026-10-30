@@ -56,7 +56,7 @@ pub(crate) fn inbound_speech_metadata(
     let mut meta = serde_json::json!({
         "source": TranscriptSource::new("external", "external_response").inbound(),
         "user_name": author_label.unwrap_or(""),
-        // D-1099: the gateway's opaque key of this session (older rows: `channel_id`).
+        // D-1099: the gateway's opaque key of this session (older rows used another key name).
         "session_key": session_key,
     });
     // D-1056: オーナーの発言は会話履歴の話者表示（`uN|name|owner`）で示す。記録時点の caller で

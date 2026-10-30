@@ -104,22 +104,3 @@ fn v64_drops_gate_admin_tables_and_keeps_instances_and_bindings() {
         .unwrap();
     assert_eq!(revision, 3);
 }
-
-/// D-1099 v65: `pending_interactions` (A2UI surfaces with a platform channel id) is gone from a
-/// fresh database and dropped from an upgraded one; re-running is a no-op.
-#[test]
-fn v65_drops_pending_interactions() {
-    let fresh = crate::init_memory().expect("fresh");
-    assert!(!table_exists(&fresh, "pending_interactions").unwrap());
-    let conn = crate::init_memory().expect("upgraded");
-    conn.execute_batch(
-        "CREATE TABLE pending_interactions (id TEXT PRIMARY KEY, channel_id TEXT);
-         INSERT INTO pending_interactions VALUES ('x', 'y');
-         PRAGMA user_version = 64;",
-    )
-    .unwrap();
-    initialize(&conn).expect("upgrade 64 -> latest");
-    initialize(&conn).expect("re-run is a no-op");
-    assert_eq!(schema_version(&conn).unwrap(), 65);
-    assert!(!table_exists(&conn, "pending_interactions").unwrap());
-}

@@ -30,6 +30,11 @@ CONCRETE_VOCABULARY = re.compile(
     r"nostr(?:[_-]?gateway)?)",
     re.IGNORECASE,
 )
+# D-1099: channels and addresses are gateway concepts; core speaks only of sessions. Matched on
+# the snake_case-normalized line, after removing the standard library's message-passing
+# constructors (`mpsc::channel`, `oneshot::channel`, ...), which are unrelated.
+GATEWAY_PLACE_VOCABULARY = re.compile(r"(?:^|[^a-z])(?:channel|address)(?:es|s)?(?:$|[^a-z])")
+STD_MESSAGE_CHANNEL = re.compile(r"(?:(?:mpsc|oneshot|watch|broadcast)::)?(?:unbounded_)?channel\b(?=\s*(?:::<[^>]*>)?\s*\()")
 SCHEMA_IDENTIFIERS = re.compile(
     r"(?:agent_(?:discord|nostr)_config|channel_config(?:s)?|trusted_user(?:s)?|session_watch(?:es)?)",
     re.IGNORECASE,
@@ -321,7 +326,9 @@ def _shared_source_findings(path: str, text: str) -> list[Finding]:
             rule = "shared-gateway-name-branch"
         elif SCHEMA_IDENTIFIERS.search(normalized):
             rule = "shared-concrete-schema"
-        elif CONCRETE_VOCABULARY.search(code):
+        elif CONCRETE_VOCABULARY.search(code) or GATEWAY_PLACE_VOCABULARY.search(
+            STD_MESSAGE_CHANNEL.sub("", normalized)
+        ):
             rule = "shared-concrete-vocabulary"
         else:
             continue

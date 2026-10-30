@@ -109,8 +109,8 @@ fn every_row(
 async fn s3_scheduler_fans_authentic_exact_and_global_sources_to_canonical_destinations() {
     const EXACT_BINDING: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const GLOBAL_BINDING: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-    const EXACT_ADDRESS: &str = "opaque-exact-address";
-    const GLOBAL_ADDRESS: &str = "opaque-global-address";
+    const EXACT_KEY: &str = "opaque-exact-key";
+    const GLOBAL_KEY: &str = "opaque-global-key";
 
     let mock = Arc::new(crate::bin_test_support::FixedTextMock::new("NO_REPLY"));
     let state = crate::bin_test_support::app_state_with_agent(mock, AGENT_UUID);
@@ -118,10 +118,10 @@ async fn s3_scheduler_fans_authentic_exact_and_global_sources_to_canonical_desti
     {
         let mut conn = state.db.lock().unwrap();
         let (instance_id, exact_binding) =
-            seed_generic_alias_binding(&mut conn, AGENT_UUID, EXACT_ADDRESS);
+            seed_generic_alias_binding(&mut conn, AGENT_UUID, EXACT_KEY);
         assert_eq!(exact_binding, EXACT_BINDING);
 
-        // The exact source reuses an existing address-named session. The global-address source has
+        // The exact source reuses an existing key-named session. The global-key source has
         // no exact session and therefore uses the binding's canonical physical session.
         let tx = conn.transaction().unwrap();
         insert_owned_gate_session(
@@ -129,7 +129,7 @@ async fn s3_scheduler_fans_authentic_exact_and_global_sources_to_canonical_desti
             AGENT_UUID,
             GLOBAL_BINDING,
             &instance_id,
-            GLOBAL_ADDRESS,
+            GLOBAL_KEY,
             &global_session,
         );
         tx.commit().unwrap();
@@ -148,11 +148,11 @@ async fn s3_scheduler_fans_authentic_exact_and_global_sources_to_canonical_desti
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(exact_session, EXACT_ADDRESS);
+        assert_eq!(exact_session, EXACT_KEY);
         assert_eq!(global_fallback_session, global_session);
 
         let old_anchor = (Utc::now() - Duration::hours(1)).to_rfc3339();
-        for session_id in [EXACT_ADDRESS, global_session.as_str()] {
+        for session_id in [EXACT_KEY, global_session.as_str()] {
             opencrab_db::queries::insert_agent_schedule(
                 &conn,
                 &every_row(AGENT_UUID, session_id, "run", Some(old_anchor.clone())),
@@ -186,7 +186,7 @@ async fn s3_scheduler_fans_authentic_exact_and_global_sources_to_canonical_desti
     let mut actual = destinations.lock().unwrap().clone();
     actual.sort();
     let mut expected = vec![
-        (EXACT_BINDING.to_string(), EXACT_ADDRESS.to_string()),
+        (EXACT_BINDING.to_string(), EXACT_KEY.to_string()),
         (GLOBAL_BINDING.to_string(), global_session),
     ];
     expected.sort();
@@ -207,7 +207,7 @@ fn persisted_physical_session_still_admits_schedule() {
         AGENT_UUID,
         binding_id,
         &instance_id,
-        "unclaimed-address",
+        "unclaimed-key",
         &session_id,
     );
     tx.commit().unwrap();
@@ -292,7 +292,7 @@ fn rebuild_requires_persisted_alias_for_schedule_without_writes() {
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at)
+        "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at)
          VALUES ('dddddddd-dddd-4ddd-8ddd-dddddddddddd',
                  'cccccccc-cccc-4ccc-8ccc-cccccccccccc', ?1, 4)",
         [session_id],

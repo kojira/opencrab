@@ -202,7 +202,7 @@ fn uuid_len_at(b: &[u8]) -> Option<usize> {
         }
     }
     // 直後が英数なら、より長い hex トークンの一部＝UUID ではない。ダッシュは許す
-    // （`nostr-<uuid>-<channel>` のような dashed session id 内に埋まった UUID も剥がす・row295d 変種）。
+    // （`<prefix>-<uuid>-<suffix>` のような dashed session id 内に埋まった UUID も剥がす・row295d 変種）。
     if matches!(b.get(pos), Some(c) if c.is_ascii_alphanumeric()) {
         return None;
     }

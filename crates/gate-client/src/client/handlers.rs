@@ -131,13 +131,13 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         return true;
     }
     // D-1099: the say names the session by its key; the gateway owns what that key means.
-    let address = say.session_key.clone();
+    let session_key = say.session_key.clone();
     // D-1093: 返信先は payload に明示された reply_target だけ。進行中ターンの発端 said から
     // 推測しない（地の文の say は返信先を持たない）。
     let reply_origin = explicit_reply_target;
     let q = inner
         .live
-        .entry(address.clone())
+        .entry(session_key.clone())
         .or_insert_with(LiveQueue::new);
     let accepted = q.try_push(LiveEvent::Message {
         delivery_id: say.id.clone(),
@@ -166,7 +166,7 @@ async fn handle_activity(client: &InstanceClient, activity: Activity, generation
     if inner.closed {
         return true;
     }
-    let address = activity.session_key.clone();
+    let session_key = activity.session_key.clone();
 
     if activity.state == "ended" {
         let legacy_turn = inner.pending_turn.remove(&activity.session_key);
@@ -201,7 +201,7 @@ async fn handle_activity(client: &InstanceClient, activity: Activity, generation
         }
         let accepted = inner
             .live
-            .entry(address)
+            .entry(session_key)
             .or_insert_with(LiveQueue::new)
             .try_push_batch(events);
         if !accepted {
@@ -214,7 +214,7 @@ async fn handle_activity(client: &InstanceClient, activity: Activity, generation
 
     let accepted = inner
         .live
-        .entry(address)
+        .entry(session_key)
         .or_insert_with(LiveQueue::new)
         .try_push(LiveEvent::Activity {
             activity_id: activity.activity_id,
@@ -242,10 +242,10 @@ async fn handle_activity(client: &InstanceClient, activity: Activity, generation
 ///
 /// id を持たない通知なので応答しない。見ない consumer は無視してよく、core の挙動は変わらない。
 async fn handle_tool_activity(client: &InstanceClient, activity: ToolActivity) {
-    let address = activity.session_key.clone();
+    let session_key = activity.session_key.clone();
     push_live(
         client,
-        &address,
+        &session_key,
         LiveEvent::ToolActivity {
             activity_id: activity.activity_id,
             call_id: activity.call_id,
@@ -265,10 +265,10 @@ async fn handle_tool_activity(client: &InstanceClient, activity: ToolActivity) {
 
 /// D-1087: サブタスク走行のライフサイクルを live queue へ積む（応答しない）。
 async fn handle_subtask_lifecycle(client: &InstanceClient, lifecycle: SubtaskLifecycle) {
-    let address = lifecycle.session_key.clone();
+    let session_key = lifecycle.session_key.clone();
     push_live(
         client,
-        &address,
+        &session_key,
         LiveEvent::SubtaskLifecycle {
             run_id: lifecycle.run_id,
             sub_session_id: lifecycle.sub_session_id,
@@ -284,17 +284,17 @@ async fn handle_subtask_lifecycle(client: &InstanceClient, lifecycle: SubtaskLif
 }
 
 /// live queue へ 1 件積む。溢れたら best-effort で捨てる（partial と同じ扱い）。
-async fn push_live(client: &InstanceClient, address: &str, event: LiveEvent) {
+async fn push_live(client: &InstanceClient, session_key: &str, event: LiveEvent) {
     let mut inner = client.inner.lock().await;
     if inner.closed {
         return;
     }
     let queue = inner
         .live
-        .entry(address.to_string())
+        .entry(session_key.to_string())
         .or_insert_with(LiveQueue::new);
     if !queue.try_push(event) {
-        tracing::debug!(%address, "activity live event dropped: queue full");
+        tracing::debug!(%session_key, "activity live event dropped: queue full");
     }
 }
 

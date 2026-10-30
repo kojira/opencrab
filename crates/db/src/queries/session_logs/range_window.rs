@@ -33,7 +33,7 @@ pub fn log_range_meta(
         &format!(
             "SELECT COUNT(*), MIN(id), MAX(id), MIN(created_at), MAX(created_at)
          FROM memory_sessions WHERE agent_id = ?1 AND id >= ?2 AND id <= ?3
-           AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+           AND {EXCLUDE_HEARTBEAT_ECHO_SQL}"
         ),
         params![agent_id, lo, hi],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
@@ -90,7 +90,7 @@ pub fn declare_window(
     let total_remaining: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM memory_sessions
-         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_ECHO_SQL}"
         ),
         params![agent_id, cursor_id],
         |r| r.get(0),
@@ -98,7 +98,7 @@ pub fn declare_window(
 
     let mut stmt = conn.prepare(&format!(
         "SELECT id, session_id, created_at FROM memory_sessions
-         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}
+         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_ECHO_SQL}
          ORDER BY id ASC LIMIT ?3"
     ))?;
     let rows: Vec<(i64, String, String)> = stmt
@@ -156,7 +156,7 @@ pub fn nth_log_id_after(
     let nth = conn.query_row(
         &format!(
             "SELECT id FROM memory_sessions
-             WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}
+             WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_ECHO_SQL}
              ORDER BY id ASC LIMIT 1 OFFSET ?3"
         ),
         params![agent_id, cursor_id, offset],
@@ -171,7 +171,7 @@ pub fn nth_log_id_after(
     let last: Option<i64> = conn.query_row(
         &format!(
             "SELECT MAX(id) FROM memory_sessions
-         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_ECHO_SQL}"
         ),
         params![agent_id, cursor_id],
         |r| r.get(0),

@@ -92,7 +92,7 @@ async fn attach(
         Err(_) => {
             tracing::warn!(
                 instance_id = %client.instance_id,
-                reason = "channel_closed",
+                reason = "hello_reply_dropped",
                 "hello failed"
             );
             Err(FrameError::Io)

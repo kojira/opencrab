@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS agent_heartbeat_config (
 
 /// セッション単位のハートビート設定（統合スケジューラ / #439 × #456 の PR1）。
 ///
-/// agent スコープと channel スコープの二本立てを **セッション単位の 1 テーブル**へ
+/// agent スコープと会話スコープの二本立てを **セッション単位の 1 テーブル**へ
 /// 畳んだ後継。`session_id` は不透明な文字列であり、形式を固定しない。
 /// 発火先は各 transport の descriptor が `session_id` から導くので**列に持たない**（特定
 /// transport 前提の列を一般化テーブルへ持ち込まない・#628）。

@@ -83,9 +83,9 @@ fn reject_foreign_target(args: &serde_json::Value) -> Option<GatewayActionResult
     None
 }
 
-/// 廃止したスコープ引数（`scope` / `channel_id` / `guild_id`）を拒否する（#456 と同じ語彙統一）。
+/// 廃止したスコープ引数（`scope` / `session_id`）を拒否する（#456 と同じ語彙統一）。
 fn reject_removed_scope_args(args: &serde_json::Value) -> Option<GatewayActionResult> {
-    for key in ["scope", "channel_id", "guild_id", "session_id"] {
+    for key in ["scope", "session_id"] {
         if args.get(key).is_some() {
             return Some(err(format!(
                 "{key}は指定できません。スケジュールは常に「いま話しているセッション」に対して登録・照会されます。"

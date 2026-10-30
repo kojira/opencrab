@@ -271,7 +271,7 @@ impl ExtgateState {
         }
     }
 
-    /// D-1099: the gateway's session key of an internal row id, for addressing outbound frames.
+    /// D-1099: the gateway's session key of an internal row id, for naming outbound frames.
     /// The pair never changes, so it is cached after the first lookup.
     pub fn session_key_for_row(&self, row_id: &str) -> Option<String> {
         if let Some(key) = self.session_keys.lock().ok()?.get(row_id) {
@@ -280,7 +280,7 @@ impl ExtgateState {
         let key: String = {
             let conn = self.db.lock().ok()?;
             conn.query_row(
-                "SELECT address FROM gate_bindings WHERE binding_id = ?1",
+                "SELECT session_key FROM gate_bindings WHERE binding_id = ?1",
                 [row_id],
                 |row| row.get(0),
             )

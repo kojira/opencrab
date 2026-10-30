@@ -430,7 +430,7 @@ impl InstanceClient {
     /// out correlations are removed and a late response is ignored.
     pub async fn command(
         &self,
-        address: &str,
+        session_key: &str,
         caller: &SaidCaller,
         name: &str,
         args: &Value,
@@ -454,7 +454,7 @@ impl InstanceClient {
             .insert(id.clone(), PendingCommand { reply: tx });
         if !send_frame(
             self,
-            command_frame(&id, address, caller, name, args),
+            command_frame(&id, session_key, caller, name, args),
         )
         .await
         {
@@ -476,25 +476,25 @@ impl InstanceClient {
 
     pub async fn post_said(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         text: &str,
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
-        self.post_said_with_author(address, origin, &self.author_id, text, attachments)
+        self.post_said_with_author(session_key, origin, &self.author_id, text, attachments)
             .await
     }
 
     pub async fn post_said_with_author(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         author_id: &str,
         text: &str,
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
         self.post_said_with_author_label(
-            address,
+            session_key,
             origin,
             author_id,
             None,
@@ -506,7 +506,7 @@ impl InstanceClient {
 
     pub async fn post_said_with_author_label(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         author_id: &str,
         author_label: Option<&str>,
@@ -514,7 +514,7 @@ impl InstanceClient {
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
         self.post_said_inner(
-            address,
+            session_key,
             origin,
             author_id,
             author_label,
@@ -529,14 +529,14 @@ impl InstanceClient {
     /// Platform-neutral contextを伴うSaid。個別gatewayの判断結果はこの汎用形で渡す。
     pub async fn post_said_with_self_context(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         context: &SaidContext,
         text: &str,
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
         self.post_said_with_context(
-            address,
+            session_key,
             origin,
             &self.author_id,
             None,
@@ -551,7 +551,7 @@ impl InstanceClient {
     #[allow(clippy::too_many_arguments)]
     pub async fn post_said_with_context(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         author_id: &str,
         author_label: Option<&str>,
@@ -560,7 +560,7 @@ impl InstanceClient {
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
         self.post_said_inner(
-            address,
+            session_key,
             origin,
             author_id,
             author_label,
@@ -578,14 +578,14 @@ impl InstanceClient {
     /// 次の origin を送れる。ターン中の `CompletedNoReply` 追跡は activity started が立てる。
     pub async fn post_said_receipt(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         author_id: &str,
         text: &str,
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
         self.post_said_receipt_with_author_label(
-            address,
+            session_key,
             origin,
             author_id,
             None,
@@ -597,7 +597,7 @@ impl InstanceClient {
 
     pub async fn post_said_receipt_with_author_label(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         author_id: &str,
         author_label: Option<&str>,
@@ -605,7 +605,7 @@ impl InstanceClient {
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
         self.post_said_inner(
-            address,
+            session_key,
             origin,
             author_id,
             author_label,
@@ -620,7 +620,7 @@ impl InstanceClient {
     #[allow(clippy::too_many_arguments)]
     async fn post_said_inner(
         &self,
-        address: &str,
+        session_key: &str,
         origin: &str,
         author_id: &str,
         author_label: Option<&str>,
@@ -636,11 +636,11 @@ impl InstanceClient {
             }
             inner
                 .live
-                .entry(address.to_string())
+                .entry(session_key.to_string())
                 .or_insert_with(LiveQueue::new);
             let entry = inner
                 .pending_turn
-                .entry(address.to_string())
+                .entry(session_key.to_string())
                 .or_insert_with(|| PendingTurn {
                     saw_utterance: false,
                     reply_origin: ReplyOrigin::None,
@@ -668,7 +668,7 @@ impl InstanceClient {
         }
         let frame = said_frame_with_context(
             &id,
-            address,
+            session_key,
             origin,
             author_id,
             author_label,
@@ -678,13 +678,13 @@ impl InstanceClient {
         );
         tracing::info!(
             instance_id = %self.instance_id,
-            session = %address,
+            session = %session_key,
             origin,
             "said"
         );
         if !send_frame(self, frame).await {
             let mut inner = self.inner.lock().await;
-            inner.pending_turn.remove(address);
+            inner.pending_turn.remove(session_key);
             inner.pending_said.remove(&id);
             return Ok(SaidOutcome::Disconnected);
         }
@@ -692,11 +692,11 @@ impl InstanceClient {
             Ok(Ok(outcome)) => {
                 if !occupy_until_turn_ends || !matches!(outcome, SaidOutcome::Accepted { .. }) {
                     let mut inner = self.inner.lock().await;
-                    inner.pending_turn.remove(address);
+                    inner.pending_turn.remove(session_key);
                 }
                 tracing::info!(
                     instance_id = %self.instance_id,
-                    session = %address,
+                    session = %session_key,
                     "said ack"
                 );
                 Ok(outcome)
@@ -709,11 +709,11 @@ impl InstanceClient {
         }
     }
 
-    pub async fn next_live(&self, address: &str) -> Option<LiveEvent> {
+    pub async fn next_live(&self, session_key: &str) -> Option<LiveEvent> {
         let rx = {
             let mut inner = self.inner.lock().await;
             if inner.closed {
-                if let Some(q) = inner.live.get_mut(address) {
+                if let Some(q) = inner.live.get_mut(session_key) {
                     if let Some(ev) = q.subscribe() {
                         return Some(ev);
                     }
@@ -723,7 +723,7 @@ impl InstanceClient {
                     detail: None,
                 });
             }
-            if let Some(q) = inner.live.get_mut(address) {
+            if let Some(q) = inner.live.get_mut(session_key) {
                 if let Some(ev) = q.subscribe() {
                     return Some(ev);
                 }
@@ -731,7 +731,7 @@ impl InstanceClient {
             let (tx, rx) = oneshot::channel();
             let q = inner
                 .live
-                .entry(address.to_string())
+                .entry(session_key.to_string())
                 .or_insert_with(LiveQueue::new);
             q.waiters.push(tx);
             rx

@@ -207,7 +207,7 @@ async fn startup_recover_stale_sending() {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at)
+            "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at)
              VALUES ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb','aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','a',1)",
             [],
         )

@@ -192,7 +192,7 @@ impl IndexBuilder {
             let material_logs: Vec<&opencrab_db::queries::SessionLogRow> = session_logs
                 .iter()
                 .filter(|l| {
-                    !opencrab_db::queries::is_heartbeat_channel_echo(l.metadata_json.as_deref())
+                    !opencrab_db::queries::is_heartbeat_echo(l.metadata_json.as_deref())
                 })
                 .filter(|l| !is_heartbeat_noise(l, agent_id))
                 .collect();
