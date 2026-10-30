@@ -11,51 +11,22 @@ fn timed_fire_request(binding_id: &str, session_id: &str, agent_id: &str) -> Tim
     }
 }
 
-async fn wait_registry_absent(h: &Harness, instance_id: &str) {
-    for _ in 0..80 {
-        if h
-            .state
-            .lock_registry()
-            .unwrap()
-            .get(instance_id)
-            .is_none()
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    panic!("live instance remained registered");
-}
 
-async fn wait_binding_acknowledged(h: &Harness, instance_id: &str, binding_id: &str) {
-    for _ in 0..80 {
-        if h
-            .state
-            .lock_registry()
-            .unwrap()
-            .get(instance_id)
-            .is_some_and(|entry| entry.acknowledged.contains(binding_id))
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    panic!("binding acknowledgement was not registered");
-}
+/// D-1099: nothing to acknowledge; a live instance is enough.
+async fn wait_binding_acknowledged(_h: &Harness, _instance_id: &str, _binding_id: &str) {}
 
 #[tokio::test]
 async fn s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_continuation() {
     let h = Harness::start().await;
     let session_id = "opaque-automatic-continuation";
     let instance_id = uuid();
-    let binding_id = uuid();
     insert_named_session(&h, session_id);
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, session_id).await;
+    let binding_id_key: String = (session_id).to_string();
 
     let mut stream = h.connect().await;
-    hello_ok(&mut stream, &instance_id, 1).await;
-    assert_eq!(ack_bind(&mut stream).await, binding_id);
+    hello_ok(&mut stream, &instance_id).await;
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_binding_acknowledged(&h, &instance_id, &binding_id).await;
 
     // The accepted hello snapshot is automatic. Mutating the legacy config after acceptance must
@@ -89,7 +60,7 @@ async fn s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_co
         "agent-1",
     ));
     let say = read_until(&mut stream, |frame| frame["m"] == "say").await;
-    assert_eq!(say["binding_id"], binding_id);
+    assert_eq!(say["session"], session_id);
     assert_eq!(say["payload"]["text"], "hello from agent");
     write_frame(&mut stream, &json!({"id": say["id"], "m": "ok"})).await;
 
@@ -105,81 +76,41 @@ async fn s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_co
     assert_eq!(say_count, 1, "automatic continuation emitted duplicate say frames");
 }
 
+/// D-1099: a timed fire reaches the session's gateway once its instance is live, under the key;
+/// nothing is sent while it is disconnected, and a fire for another agent is refused.
 #[tokio::test]
-async fn s3_timed_continuation_routes_generic_binding_session_once_after_reconnect_ack() {
+async fn s3_timed_continuation_routes_the_session_once_when_its_instance_is_live() {
     let h = Harness::start().await;
     let alias = "opaque-timed-fire-session";
     let instance_id = uuid();
-    let binding_id = uuid();
     insert_named_session(&h, alias);
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, alias).await;
+    let binding_id = session_row(&h, &instance_id, alias).row_id;
     let sink = ExtgateTimedFireSink::new(Arc::clone(&h.state), h.runtime.clone());
 
-    let mut first = h.connect().await;
-    hello_ok(&mut first, &instance_id, 1).await;
-    let bind = read_frame(&mut first).await;
-    assert_eq!(bind["m"], "bind");
-    assert_eq!(bind["binding_id"], binding_id);
-
-    sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "agent-1"));
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
-    assert!(read_frame_opt(&mut first).await.is_none());
-
-    drop(first);
-    wait_registry_absent(&h, &instance_id).await;
+    // Not connected: nothing runs.
     sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "agent-1"));
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
 
-    let mut reconnected = h.connect().await;
-    hello_ok(&mut reconnected, &instance_id, 1).await;
-    assert_eq!(ack_bind(&mut reconnected).await, binding_id);
-    wait_binding_acknowledged(&h, &instance_id, &binding_id).await;
+    let mut connected = h.connect().await;
+    hello_ok(&mut connected, &instance_id).await;
 
     sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "other-agent"));
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
-    assert!(read_frame_opt(&mut reconnected).await.is_none());
+    assert!(read_frame_opt(&mut connected).await.is_none());
 
-    h.state
-        .db
-        .lock()
-        .unwrap()
-        .execute(
-            "UPDATE gate_bindings SET closed_at = ?1 WHERE binding_id = ?2",
-            rusqlite::params![now_nanos(), binding_id],
-        )
-        .unwrap();
     sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "agent-1"));
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
-    assert!(read_frame_opt(&mut reconnected).await.is_none());
-
-    h.state
-        .db
-        .lock()
-        .unwrap()
-        .execute(
-            "UPDATE gate_bindings SET closed_at = NULL WHERE binding_id = ?1",
-            [&binding_id],
-        )
-        .unwrap();
-    sink.fire_timed_turn(timed_fire_request(&binding_id, alias, "agent-1"));
-    let say = read_until(&mut reconnected, |frame| frame["m"] == "say").await;
-    assert_eq!(say["binding_id"], binding_id);
+    let say = read_until(&mut connected, |frame| frame["m"] == "say").await;
+    assert_eq!(say["session"], alias);
     assert_eq!(say["payload"]["text"], "hello from agent");
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 1);
-    write_frame(
-        &mut reconnected,
-        &json!({"id": say["id"], "m": "ok"}),
-    )
-    .await;
+    write_frame(&mut connected, &json!({"id": say["id"], "m": "ok"})).await;
 
     let mut say_count = 1;
     for _ in 0..4 {
-        let Some(frame) = read_frame_opt(&mut reconnected).await else {
+        let Some(frame) = read_frame_opt(&mut connected).await else {
             break;
         };
         if frame["m"] == "say" {
@@ -197,13 +128,12 @@ async fn same_session_timed_fires_run_as_separate_serialized_turns() {
     *h.runtime.reply.lock().unwrap() = "NO_REPLY".into();
     let session_id = "opaque-concurrent-triggers";
     let instance_id = uuid();
-    let binding_id = uuid();
     insert_named_session(&h, session_id);
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, session_id).await;
+    let binding_id_key: String = (session_id).to_string();
     let mut stream = h.connect().await;
-    hello_ok(&mut stream, &instance_id, 1).await;
-    assert_eq!(ack_bind(&mut stream).await, binding_id);
+    hello_ok(&mut stream, &instance_id).await;
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_binding_acknowledged(&h, &instance_id, &binding_id).await;
 
     let (release_tx, release_rx) = oneshot::channel();

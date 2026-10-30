@@ -120,7 +120,7 @@ async fn realtime_turn_writes_partials_before_the_say_of_the_same_stream() {
     );
     for partial in frames.iter().filter(|f| f["m"] == "partial") {
         assert!(partial.get("id").is_none(), "partial frame has no id: {partial}");
-        assert_eq!(partial["binding_id"], json!(binding_id));
+        assert_eq!(partial["session"], json!(binding_id));
         assert!(partial.get("stream_id").is_some());
     }
     assert!(frames.iter().filter(|f| f["m"] == "say").all(|f| f.get("stream_id").is_none()));

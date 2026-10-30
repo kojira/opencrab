@@ -15,26 +15,13 @@ fn ops_reply() -> Value {
     }])
 }
 
-async fn wait_acked(h: &Harness, instance_id: &str, binding_id: &str) {
-    for _ in 0..200 {
-        let acked = h
-            .state
-            .lock_registry()
-            .unwrap()
-            .get(instance_id)
-            .is_some_and(|e| e.acknowledged.contains(binding_id));
-        if acked {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    panic!("binding {binding_id} not acknowledged in time");
-}
+/// D-1099: nothing to acknowledge; a live instance is enough.
+async fn wait_acked(_h: &Harness, _instance_id: &str, _binding_id: &str) {}
 
 async fn hello_with_ops(
     s: &mut UnixStream,
     instance_id: &str,
-    revision: u64,
+    _revision: u64,
     ops: &Value,
 ) -> Value {
     write_frame(
@@ -43,8 +30,7 @@ async fn hello_with_ops(
             "id": "h1", "m": "hello", "protocol": 3,
             "operation_protocol": 1,
             "final_delivery": "automatic",
-            "operations": [], "instance_id": instance_id,
-            "revision": revision, "config_digest": config_digest(), "operations": ops,
+            "instance_id": instance_id, "agent_id": "agent-1", "operations": ops,
         }),
     )
     .await;
@@ -148,16 +134,14 @@ async fn di_hello_invalid_operations_rejected() {
 async fn di_invoke_round_trip_success() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-di").await;
+    let binding_id_key: String = ("chan-di").to_string();
     let mut s = h.connect().await;
     assert_eq!(
         hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await["m"],
         "ok"
     );
-    let acked = ack_bind(&mut s).await;
-    assert_eq!(acked, binding_id);
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_acked(&h, &instance_id, &binding_id).await;
 
     // core 側で invoke を発行（背景 subtask 相当）。
@@ -211,15 +195,14 @@ async fn di_invoke_round_trip_success() {
 async fn di_invoke_round_trip_rejected() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-di2").await;
+    let binding_id_key: String = ("chan-di2").to_string();
     let mut s = h.connect().await;
     assert_eq!(
         hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await["m"],
         "ok"
     );
-    assert_eq!(ack_bind(&mut s).await, binding_id);
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_acked(&h, &instance_id, &binding_id).await;
 
     let state = Arc::clone(&h.state);
@@ -266,15 +249,14 @@ async fn di_invoke_round_trip_rejected() {
 async fn di_invoke_undeclared_operation_is_unknown() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-di3").await;
+    let binding_id_key: String = ("chan-di3").to_string();
     let mut s = h.connect().await;
     assert_eq!(
         hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await["m"],
         "ok"
     );
-    assert_eq!(ack_bind(&mut s).await, binding_id);
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_acked(&h, &instance_id, &binding_id).await;
     // "repost" は宣言していない。
     let out = invoke_and_wait(&h.state, &instance_id, &binding_id, "repost", &json!({})).await;
@@ -294,76 +276,20 @@ async fn di_invoke_undeclared_operation_is_unknown() {
     assert_eq!(count, 0, "未宣言 invoke は call row 0");
 }
 
-// ===== DI 拡張 改訂ラン: revision digest リセット / indeterminate / recover / option-B 継ぎ目 =====
-
-async fn post_revision(h: &Harness, instance_id: &str, expected: u64) -> u64 {
-    let current: i64 = h
-        .state
-        .db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT revision FROM gate_instances WHERE instance_id=?1",
-            [instance_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(u64::try_from(current).unwrap(), expected);
-    revise_instance(h, instance_id, true, config_b64())
-}
-
-/// DI-04: revision を上げると宣言 digest が未確立化し、別宣言の hello が通る（mismatch にならない）。
-#[tokio::test]
-async fn di_revision_bump_reestablishes_declaration() {
-    let h = Harness::start().await;
-    let instance_id = uuid();
-    put_instance(&h, &instance_id, true).await;
-    // rev1: reply 宣言で digest 確立。
-    let mut s1 = h.connect().await;
-    assert_eq!(
-        hello_with_ops(&mut s1, &instance_id, 1, &ops_reply()).await["m"],
-        "ok"
-    );
-    drop(s1);
-    // 切断が registry に反映される（live でなくなる）まで待つ。live 中は revision POST が
-    // instance_active（409）で弾かれる。
-    for _ in 0..200 {
-        if !h.state.lock_registry().unwrap().is_live(&instance_id) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    // revision POST（rev2・digest を NULL 化）。
-    let new_rev = post_revision(&h, &instance_id, 1).await;
-    assert_eq!(new_rev, 2);
-    // rev2 で別宣言（reaction）→ mismatch にならず ok（新 revision で再確立）。
-    let other = json!([{
-        "name": "reaction", "description": "d", "input_schema": {"type": "object"},
-        "output_schema": null, "callback_schema": null,
-        "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
-        "dispatch": "utterance", "sub_engine": "not_exposed",
-        "sharing": "conversation_bound", "effect": "utterance"
-    }]);
-    let mut s2 = h.connect().await;
-    let resp = hello_with_ops(&mut s2, &instance_id, 2, &other).await;
-    assert_eq!(resp["m"], "ok", "revision を上げれば別宣言が通る: {resp:?}");
-}
-
 /// invoke 中に gateway が切断すると call は indeterminate、invoke_and_wait は Err（§5.3・不明を
 /// 確定拒否へ捏造しない）。
 #[tokio::test]
 async fn di_invoke_indeterminate_on_gateway_disconnect() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-di-disc").await;
+    let binding_id_key: String = ("chan-di-disc").to_string();
     let mut s = h.connect().await;
     assert_eq!(
         hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await["m"],
         "ok"
     );
-    assert_eq!(ack_bind(&mut s).await, binding_id);
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_acked(&h, &instance_id, &binding_id).await;
 
     let state = Arc::clone(&h.state);
@@ -414,9 +340,8 @@ async fn di_invoke_indeterminate_on_gateway_disconnect() {
 async fn di_recover_stale_calls_marks_indeterminate() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-recover").await;
+    let binding_id = session_row(&h, &instance_id, "chan-recover").row_id;
     // 'sending' の call を直に入れる（前プロセスの残骸相当）。
     {
         let conn = h.state.db.lock().unwrap();
@@ -458,18 +383,17 @@ async fn di_recover_stale_calls_marks_indeterminate() {
 async fn di_projection_reply_is_utterance_fire_and_forget() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-proj").await;
+    let binding_id_key: String = ("chan-proj").to_string();
     let mut s = h.connect().await;
     assert_eq!(
         hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await["m"],
         "ok"
     );
-    assert_eq!(ack_bind(&mut s).await, binding_id);
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_acked(&h, &instance_id, &binding_id).await;
 
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id_key.clone();
     let ops = ExtgateOpsGatewayActions::for_binding(
         Arc::clone(&h.state),
         &instance_id,
@@ -532,18 +456,17 @@ async fn di_projection_reply_is_utterance_fire_and_forget() {
 async fn di_projection_reply_utterance_rejection_emits_turn_failed_and_keeps_speech() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-fail").await;
+    let binding_id_key: String = ("chan-fail").to_string();
     let mut s = h.connect().await;
     assert_eq!(
         hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await["m"],
         "ok"
     );
-    assert_eq!(ack_bind(&mut s).await, binding_id);
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_acked(&h, &instance_id, &binding_id).await;
 
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id_key.clone();
     let ops = ExtgateOpsGatewayActions::for_binding(
         Arc::clone(&h.state),
         &instance_id,
@@ -658,10 +581,9 @@ fn di_generic_mechanism_has_no_platform_vocab() {
 async fn di_short_ref_resolution_targets_declared_fields() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-ref").await;
-    let session_id = session_id_for_binding(&binding_id);
+    let binding_id_key: String = ("chan-ref").to_string();
+    let session_id = binding_id_key.clone();
     let origin = format!("nostr:event:v1:default:{}", "ab".repeat(32));
     // 受信イベントを 1 件記録（初出順で e1 になる）。
     {
@@ -691,7 +613,7 @@ async fn di_short_ref_resolution_targets_declared_fields() {
         hello_with_ops(&mut s, &instance_id, 1, &ops).await["m"],
         "ok"
     );
-    assert_eq!(ack_bind(&mut s).await, binding_id);
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_acked(&h, &instance_id, &binding_id).await;
 
     let proj = ExtgateOpsGatewayActions::for_binding(

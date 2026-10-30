@@ -1,14 +1,5 @@
 // Conformance harness waits (split out of support.rs for the file-size limit).
 
-async fn wait_client_bound(client: &InstanceClient, address: &str, binding_id: &str) {
-    for _ in 0..80 {
-        if client.binding_for_address(address).await.as_deref() == Some(binding_id) {
-            return;
-        }
-        tokio::time::advance(Duration::from_millis(5)).await;
-    }
-    panic!("bind ack");
-}
 /// live entry が消える（切断が反映される）まで待つ。
 async fn wait_not_live(h: &Harness, instance_id: &str) {
     for _ in 0..200 {
@@ -39,23 +30,6 @@ fn insert_named_session(h: &Harness, id: &str) {
         },
     )
     .unwrap();
-}
-
-/// The bind of `binding_id` is acknowledged in the live registry.
-async fn wait_acknowledged(h: &Harness, instance_id: &str, binding_id: &str) {
-    for _ in 0..50 {
-        let acked = h
-            .state
-            .lock_registry()
-            .unwrap()
-            .get(instance_id)
-            .is_some_and(|e| e.acknowledged.contains(binding_id));
-        if acked {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    panic!("bind not acknowledged: {binding_id}");
 }
 
 /// D-1085 §12: a run's declared gateway operation names and whether it has a dispatch sink.

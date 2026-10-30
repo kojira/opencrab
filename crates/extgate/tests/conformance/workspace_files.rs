@@ -57,17 +57,16 @@ async fn file_fixture(configure_outbox: bool) -> FileFixture {
         h.state.set_attachment_outbox_root(outbox.clone());
     }
     let instance_id = uuid();
-    let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-files").await;
+    let binding_id_key: String = ("chan-files").to_string();
     let mut s = h.connect().await;
     assert_eq!(
         hello_with_ops(&mut s, &instance_id, 1, &ops_with_workspace_files()).await["m"],
         "ok"
     );
-    assert_eq!(ack_bind(&mut s).await, binding_id);
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_acked(&h, &instance_id, &binding_id).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id_key.clone();
     let proj = ExtgateOpsGatewayActions::for_binding(
         Arc::clone(&h.state),
         &instance_id,

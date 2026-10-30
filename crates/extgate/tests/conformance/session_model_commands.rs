@@ -262,7 +262,7 @@ async fn send_command(
         &json!({
             "m": "command",
             "id": id,
-            "binding_id": binding_id,
+            "session": binding_id,
             "caller": caller,
             "name": name,
             "args": args,
@@ -277,7 +277,7 @@ async fn session_model_commands_change_only_the_bound_session() {
     let h = Harness::start().await;
     insert_named_session(&h, "other-session");
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
 
     let set = send_command(
         &mut s,
@@ -341,7 +341,7 @@ async fn session_model_commands_change_only_the_bound_session() {
 async fn session_model_commands_reject_non_owner_unknown_and_closed_bindings() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
 
     let co_agent = send_command(
         &mut s,
@@ -393,7 +393,7 @@ async fn session_model_commands_reject_non_owner_unknown_and_closed_bindings() {
 async fn session_model_set_does_not_wait_for_the_running_turn() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     let (release_tx, release_rx) = oneshot::channel();
     *h.runtime.hold_rx.lock().unwrap() = Some(release_rx);
     let entered = h.runtime.turn_entered.notified();
@@ -404,7 +404,7 @@ async fn session_model_set_does_not_wait_for_the_running_turn() {
         &json!({
             "id": "s-1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "o-1",
             "author_id": "u",
             "text": "first",
@@ -437,7 +437,7 @@ async fn session_model_set_does_not_wait_for_the_running_turn() {
         &json!({
             "id": "s-2",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "o-2",
             "author_id": "u",
             "text": "second",
@@ -462,7 +462,7 @@ fn stored_realtime_model(h: &Harness, session_id: &str) -> Option<String> {
 async fn realtime_profile_commands_change_only_the_realtime_slot() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     let owner = || json!({"role": "owner"});
 
     let set = send_command(
@@ -555,7 +555,7 @@ async fn session_reasoning_effort_commands_change_only_the_bound_session_slot() 
     let h = Harness::start().await;
     insert_named_session(&h, "other-session");
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     let owner = || json!({"role": "owner"});
 
     let list = send_command(&mut s, "e-list0", &binding_id, owner(), "list_session_reasoning_efforts", json!({})).await;

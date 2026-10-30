@@ -1,28 +1,4 @@
-const TOOL_DRIVEN_B64: &str = "eyJkZWxpdmVyeV9tb2RlIjoidG9vbF9kcml2ZW4ifQ==";
-
-fn tool_driven_digest() -> String {
-    opencrab_extgate::ids::config_digest_from_b64(TOOL_DRIVEN_B64).unwrap()
-}
-
-async fn put_instance_config(h: &Harness, instance_id: &str, config_b64: &str) -> Value {
-    put_instance(h, instance_id, true).await;
-    if config_b64 != self::config_b64() {
-        // Re-declare the config as `provision` would, keeping revision 1 for the hello below.
-        let conn = h.state.db.lock().unwrap();
-        conn.execute(
-            "UPDATE gate_instances SET config_b64=?2, config_digest=?3 WHERE instance_id=?1",
-            rusqlite::params![
-                instance_id,
-                config_b64,
-                opencrab_extgate::ids::config_digest_from_b64(config_b64).unwrap()
-            ],
-        )
-        .unwrap();
-    }
-    json!({"instance_id": instance_id, "revision": 1})
-}
-
-async fn hello_ok_digest(s: &mut UnixStream, instance_id: &str, revision: u64, digest: &str) {
+async fn hello_ok_operation_driven(s: &mut UnixStream, instance_id: &str) {
     write_frame(
         s,
         &json!({
@@ -33,8 +9,7 @@ async fn hello_ok_digest(s: &mut UnixStream, instance_id: &str, revision: u64, d
             "final_delivery": "operation_driven",
             "operations": ops_reply(),
             "instance_id": instance_id,
-            "revision": revision,
-            "config_digest": digest,
+            "agent_id": "agent-1",
         }),
     )
     .await;
@@ -47,31 +22,15 @@ async fn hello_ok_digest(s: &mut UnixStream, instance_id: &str, revision: u64, d
 async fn operation_driven_inbound_plain_text_is_delivered_without_operation_call() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
-    put_instance_config(&h, &instance_id, TOOL_DRIVEN_B64).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-1").await;
+    let binding_id = "chan-1".to_string();
     let mut s = h.connect().await;
-    hello_ok_digest(&mut s, &instance_id, 1, &tool_driven_digest()).await;
-    let acked = ack_bind(&mut s).await;
-    assert_eq!(acked, binding_id);
-    for _ in 0..50 {
-        let acked = h
-            .state
-            .lock_registry()
-            .unwrap()
-            .get(&instance_id)
-            .is_some_and(|e| e.acknowledged.contains(&binding_id));
-        if acked {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    hello_ok_operation_driven(&mut s, &instance_id).await;
     write_frame(
         &mut s,
         &json!({
             "id": "s1",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "td1",
             "author_id": "u1",
             "text": "ask",

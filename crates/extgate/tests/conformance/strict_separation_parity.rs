@@ -14,8 +14,7 @@ async fn strict_separation_hello_has_no_delivery_guarantee_contract() {
             "final_delivery": "automatic",
             "operations": [],
             "instance_id": instance_id,
-            "revision": 1,
-            "config_digest": config_digest(),
+            "agent_id": "agent-1",
         }),
     )
     .await;
@@ -33,7 +32,7 @@ async fn strict_separation_co_agent_admission_uses_the_historical_role_snapshot(
         &json!({
             "id": "strict-co-agent",
             "m": "said",
-            "binding_id": binding_id,
+            "session": binding_id,
             "origin": "strict-origin",
             "author_id": "external-co-agent",
             "caller": {"role": "co_agent", "agent_id": "peer-agent"},

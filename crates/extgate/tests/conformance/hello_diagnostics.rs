@@ -96,13 +96,12 @@ async fn wait_for_log(
     false
 }
 
-/// operations 付き hello を生ストリームで送り、応答フレームを返す。config_digest は明示する。
+/// operations 付き hello を生ストリームで送り、応答フレームを返す。`agent_id` は明示する。
 async fn hello_ops_raw(
     s: &mut UnixStream,
     id: &str,
     instance_id: &str,
-    revision: u64,
-    config_digest_val: &str,
+    agent_id: &str,
     operations: Value,
 ) -> Value {
     write_frame(
@@ -113,10 +112,8 @@ async fn hello_ops_raw(
             "protocol": 3,
             "operation_protocol": 1,
             "final_delivery": "automatic",
-            "operations": [],
             "instance_id": instance_id,
-            "revision": revision,
-            "config_digest": config_digest_val,
+            "agent_id": agent_id,
             "operations": operations,
         }),
     )
@@ -150,8 +147,7 @@ async fn hello_accepts_description_change_without_mismatch() {
         &mut s1,
         "h1",
         &instance_id,
-        1,
-        &config_digest(),
+        "agent-1",
         ops_one("string", "旧い説明文"),
     )
     .await;
@@ -165,8 +161,7 @@ async fn hello_accepts_description_change_without_mismatch() {
         &mut s2,
         "h2",
         &instance_id,
-        1,
-        &config_digest(),
+        "agent-1",
         ops_one("string", "全然違う新しい説明文"),
     )
     .await;
@@ -186,8 +181,7 @@ async fn hello_accepts_schema_change_and_reflects_new_declaration() {
         &mut s1,
         "h1",
         &instance_id,
-        1,
-        &config_digest(),
+        "agent-1",
         ops_one("string", "説明"),
     )
     .await;
@@ -201,8 +195,7 @@ async fn hello_accepts_schema_change_and_reflects_new_declaration() {
         &mut s2,
         "h2",
         &instance_id,
-        1,
-        &config_digest(),
+        "agent-1",
         ops_one("number", "説明"),
     )
     .await;
@@ -224,39 +217,30 @@ async fn hello_accepts_schema_change_and_reflects_new_declaration() {
     drop(s2);
 }
 
+/// fail-loud（#894）: a refused hello is logged with its reason. D-1099: the only refusal left for
+/// a well-formed hello is an instance that already speaks for another agent.
 #[tokio::test]
-async fn hello_config_digest_mismatch_logs_server_warn() {
+async fn hello_instance_conflict_logs_server_warn() {
     let logs = install_log_capture();
     let h = Harness::start().await;
     let instance_id = uuid();
     put_instance(&h, &instance_id, true).await;
+    add_agent(&h, "agent-2");
 
-    // 妥当形式（64 桁 hex）だが値の違う config_digest → config_digest_mismatch で拒否。
-    let wrong = "a".repeat(64);
-    assert_ne!(wrong, config_digest(), "誤 digest が偶然一致");
     let mut s = h.connect().await;
-    let resp = hello_ops_raw(
-        &mut s,
-        "h1",
-        &instance_id,
-        1,
-        &wrong,
-        ops_one("string", "x"),
-    )
-    .await;
-    assert_eq!(resp["m"], "err", "config_digest 不一致は拒否のはず: {resp}");
-    assert_eq!(resp["code"], "config_digest_mismatch");
+    let resp = hello_ops_raw(&mut s, "h1", &instance_id, "agent-2", ops_one("string", "x")).await;
+    assert_eq!(resp["m"], "err", "an instance of another agent is refused: {resp}");
+    assert_eq!(resp["code"], "instance_conflict");
 
-    // fail-loud: サーバは拒否理由コード＋instance_id を WARN する。
     let found = wait_for_log(&logs, |l| {
         l.target.contains("extgate::listen")
-            && l.fields.get("reason").map(String::as_str) == Some("config_digest_mismatch")
+            && l.fields.get("reason").map(String::as_str) == Some("instance_conflict")
             && l.fields.get("instance_id").map(String::as_str) == Some(instance_id.as_str())
     })
     .await;
     assert!(
         found,
-        "server WARN(reason=config_digest_mismatch, instance_id) が無い: logs={:?}",
+        "server WARN(reason=instance_conflict, instance_id) が無い: logs={:?}",
         snapshot_logs(&logs)
     );
 }
@@ -266,34 +250,28 @@ async fn client_hello_failure_logs_reason_code() {
     let logs = install_log_capture();
     let h = Harness::start().await;
     let instance_id = uuid();
-    put_instance(&h, &instance_id, true).await;
 
-    // 実 gate-client を誤 config_digest で hello → サーバは config_digest_mismatch を err_frame
-    // で返し接続を閉じる。client は EOF を disconnect に潰さず真コードを reason= で報告する。
-    // config_digest は 64 桁小文字 hex（parse_digest）でないと frame 検証で bad_request になるので、
-    // 形式は妥当で値だけ実 config_digest と異なる digest を使う。
-    let wrong_digest = "a".repeat(64);
-    assert_ne!(wrong_digest, config_digest(), "誤 digest が偶然一致");
+    // 実 gate-client が未知の agent で hello → サーバは subject_unknown を err_frame で返し接続を閉じる。
+    // client は EOF を disconnect に潰さず真コードを reason= で報告する。
     let res = InstanceClient::connect(
         &h.sock,
         instance_id.clone(),
-        1,
-        "agent-1".to_string(),
-        wrong_digest,
+        "nobody".to_string(),
+        "author".to_string(),
     )
     .await;
-    assert!(res.is_err(), "誤 config_digest の hello は失敗するはず");
+    assert!(res.is_err(), "unknown agent の hello は失敗するはず");
 
     let found = wait_for_log(&logs, |l| {
         l.target.contains("gate_client::client")
             && l.message.contains("hello failed")
-            && l.fields.get("reason").map(String::as_str) == Some("config_digest_mismatch")
+            && l.fields.get("reason").map(String::as_str) == Some("subject_unknown")
             && l.fields.get("instance_id").map(String::as_str) == Some(instance_id.as_str())
     })
     .await;
     assert!(
         found,
-        "client WARN 'hello failed reason=config_digest_mismatch' が無い: logs={:?}",
+        "client WARN 'hello failed reason=subject_unknown' が無い: logs={:?}",
         snapshot_logs(&logs)
     );
 }

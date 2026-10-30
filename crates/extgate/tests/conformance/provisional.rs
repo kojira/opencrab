@@ -32,7 +32,7 @@ const PROVISIONAL_ID: &str = "0b7f2c1e-4a6d-4c1b-9f3e-2d8a5b6c7e10";
 
 fn provisional_frame(id: &str, binding_id: &str, provisional_id: &str, text: &str) -> Value {
     json!({
-        "id": id, "m": "provisional", "binding_id": binding_id,
+        "id": id, "m": "provisional", "session": binding_id,
         "provisional_id": provisional_id, "author_id": "u1",
         "caller": {"role": "owner"}, "model_profile": "realtime",
         "system_context": "（音声）", "text": text
@@ -41,7 +41,7 @@ fn provisional_frame(id: &str, binding_id: &str, provisional_id: &str, text: &st
 
 fn committed_said(id: &str, binding_id: &str, provisional_id: &str, text: &str) -> Value {
     json!({
-        "id": id, "m": "said", "binding_id": binding_id,
+        "id": id, "m": "said", "session": binding_id,
         "origin": format!("o-{id}"), "author_id": "u1",
         "caller": {"role": "owner"}, "model_profile": "realtime",
         "system_context": "（音声）", "provisional_id": provisional_id,
@@ -181,7 +181,7 @@ async fn provisional_cancel_aborts_the_run() {
     start_streaming_provisional(&h, &mut s, &binding_id, "（音声）今日は").await;
     write_frame(
         &mut s,
-        &json!({"id": "c1", "m": "provisional_cancel", "binding_id": binding_id,
+        &json!({"id": "c1", "m": "provisional_cancel", "session": binding_id,
                 "provisional_id": PROVISIONAL_ID}),
     )
     .await;
@@ -193,7 +193,7 @@ async fn provisional_cancel_aborts_the_run() {
     // Idempotent.
     write_frame(
         &mut s,
-        &json!({"id": "c2", "m": "provisional_cancel", "binding_id": binding_id,
+        &json!({"id": "c2", "m": "provisional_cancel", "session": binding_id,
                 "provisional_id": PROVISIONAL_ID}),
     )
     .await;
@@ -207,7 +207,7 @@ async fn said_with_same_inputs_promotes_the_provisional_run() {
     let h = Harness::start().await;
     *h.runtime.reply.lock().unwrap() = "はい。".into();
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     start_streaming_provisional(&h, &mut s, &binding_id, "（音声）今日は").await;
 
     write_frame(&mut s, &committed_said("v1", &binding_id, PROVISIONAL_ID, "（音声）今日は")).await;
@@ -216,7 +216,7 @@ async fn said_with_same_inputs_promotes_the_provisional_run() {
 
     assert_eq!(
         result,
-        json!({"m": "provisional_result", "binding_id": binding_id,
+        json!({"m": "provisional_result", "session": binding_id,
                "provisional_id": PROVISIONAL_ID, "promoted": true})
     );
     assert_eq!(h.runtime.provisional_runs.lock().unwrap().len(), 1, "one LLM call in total");
@@ -258,7 +258,7 @@ async fn said_with_other_text_falls_back_to_the_normal_turn() {
 async fn said_after_history_moved_falls_back_to_the_normal_turn() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     start_streaming_provisional(&h, &mut s, &binding_id, "（音声）今日は").await;
     {
         let conn = h.state.db.lock().unwrap();
@@ -393,13 +393,9 @@ async fn agent_prelude_must_match_for_promotion() {
 async fn provisional_run_has_the_normal_turn_tool_sources() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
-    put_instance_config(&h, &instance_id, TOOL_DRIVEN_B64).await;
-    put_binding(&h, &binding_id, &instance_id, "chan-1").await;
+    let binding_id = "chan-1".to_string();
     let mut s = h.connect().await;
-    hello_ok_digest(&mut s, &instance_id, 1, &tool_driven_digest()).await;
-    assert_eq!(ack_bind(&mut s).await, binding_id);
-    wait_acknowledged(&h, &instance_id, &binding_id).await;
+    hello_ok_operation_driven(&mut s, &instance_id).await;
     start_streaming_provisional(&h, &mut s, &binding_id, "（音声）今日は").await;
 
     write_frame(&mut s, &committed_said("v1", &binding_id, PROVISIONAL_ID, "（音声）今日はいい天気")).await;
@@ -516,7 +512,7 @@ async fn promoted_provisional_says_its_held_continuation_speech_then_the_answer(
     let h = Harness::start().await;
     *h.runtime.reply.lock().unwrap() = "見つけた。".into();
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     start_speaking_provisional(&h, &mut s, &binding_id, "（音声）探して").await;
     assert!(agent_speech(&h, &session_id).is_empty(), "nothing recorded before the said");
 
@@ -539,7 +535,7 @@ async fn unpromoted_provisional_drops_its_held_continuation_speech() {
     let h = Harness::start().await;
     *h.runtime.reply.lock().unwrap() = "見つけた。".into();
     let (mut s, _, binding_id) = ready_pair(&h).await;
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id.clone();
     start_speaking_provisional(&h, &mut s, &binding_id, "（音声）探して").await;
 
     write_frame(&mut s, &committed_said("v1", &binding_id, PROVISIONAL_ID, "（音声）別の話")).await;

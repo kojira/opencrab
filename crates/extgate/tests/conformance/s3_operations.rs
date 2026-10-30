@@ -3,7 +3,6 @@
 async fn s3_hello_with_capabilities(
     stream: &mut UnixStream,
     instance_id: &str,
-    config_digest: &str,
     operations: &Value,
     final_delivery: &str,
 ) -> Value {
@@ -15,8 +14,7 @@ async fn s3_hello_with_capabilities(
             "protocol": 3,
             "operation_protocol": 1,
             "instance_id": instance_id,
-            "revision": 1,
-            "config_digest": config_digest,
+            "agent_id": "agent-1",
             "final_delivery": final_delivery,
             "operations": operations,
         }),
@@ -35,7 +33,6 @@ async fn s3_hello_final_delivery_is_not_config_authority() {
     let operation_driven = s3_hello_with_capabilities(
         &mut stream,
         &instance_id,
-        &config_digest(),
         &ops_reply(),
         "operation_driven",
     )
@@ -48,9 +45,8 @@ async fn s3_hello_final_delivery_is_not_config_authority() {
 async fn s3_projection_rejects_stale_live_declaration_digest_before_db_and_wire() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "s3-stale-projection").await;
+    let binding_id_key: String = ("s3-stale-projection").to_string();
     let declaration = |caller: &str| {
         json!([{
             "name": "quasar.synthetic-v7",
@@ -71,13 +67,13 @@ async fn s3_projection_rejects_stale_live_declaration_digest_before_db_and_wire(
         hello_with_ops(&mut first, &instance_id, 1, &declaration("owner")).await["m"],
         "ok"
     );
-    assert_eq!(ack_bind(&mut first).await, binding_id);
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_acked(&h, &instance_id, &binding_id).await;
     let projected = ExtgateOpsGatewayActions::for_binding(
         Arc::clone(&h.state),
         &instance_id,
         &binding_id,
-        &session_id_for_binding(&binding_id),
+        &binding_id_key,
         "agent-1",
     )
     .unwrap();
@@ -89,7 +85,7 @@ async fn s3_projection_rejects_stale_live_declaration_digest_before_db_and_wire(
         hello_with_ops(&mut second, &instance_id, 1, &declaration("guest")).await["m"],
         "ok"
     );
-    assert_eq!(ack_bind(&mut second).await, binding_id);
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_acked(&h, &instance_id, &binding_id).await;
 
     let result = tokio::time::timeout(
@@ -125,9 +121,8 @@ async fn s3_projection_rejects_stale_live_declaration_digest_before_db_and_wire(
 async fn s3_arbitrary_synthetic_operation_projects_and_authorizes_from_metadata() {
     let h = Harness::start().await;
     let instance_id = uuid();
-    let binding_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    put_binding(&h, &binding_id, &instance_id, "s3-synthetic").await;
+    let binding_id_key: String = ("s3-synthetic").to_string();
     let declarations = json!([{
         "name": "quasar.synthetic-v7",
         "description": "synthetic metadata-only operation",
@@ -145,10 +140,10 @@ async fn s3_arbitrary_synthetic_operation_projects_and_authorizes_from_metadata(
         hello_with_ops(&mut s, &instance_id, 1, &declarations).await["m"],
         "ok"
     );
-    assert_eq!(ack_bind(&mut s).await, binding_id);
+    let binding_id = session_row(&h, &instance_id, &binding_id_key).row_id;
     wait_acked(&h, &instance_id, &binding_id).await;
 
-    let session_id = session_id_for_binding(&binding_id);
+    let session_id = binding_id_key.clone();
     let projected = ExtgateOpsGatewayActions::for_binding(
         Arc::clone(&h.state),
         &instance_id,

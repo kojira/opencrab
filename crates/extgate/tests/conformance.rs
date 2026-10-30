@@ -2,12 +2,10 @@
 
 include!("conformance/support.rs");
 include!("conformance/support_wait.rs");
-include!("conformance/liveness.rs");
 include!("conformance/wire_protocol.rs");
 include!("conformance/said_ingress.rs");
 include!("conformance/delivery.rs");
 include!("conformance/turn_outcomes.rs");
-include!("conformance/session_binding.rs");
 include!("conformance/delivery_modes.rs");
 include!("conformance/timed_fire.rs");
 include!("conformance/turn_queue.rs");
@@ -26,5 +24,4 @@ include!("conformance/agent_prelude.rs");
 include!("conformance/provisional.rs");
 include!("conformance/no_implicit_reply.rs");
 include!("conformance/interrupt.rs");
-include!("conformance/provision.rs");
-include!("conformance/provision_existing.rs");
+include!("conformance/session_keys.rs");
