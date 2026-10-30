@@ -23,7 +23,11 @@ fn seed(conn: &Connection) {
     )
     .unwrap();
     let subject: i64 = conn
-        .query_row("SELECT subject_id FROM agents WHERE agent_id='a1'", [], |r| r.get(0))
+        .query_row(
+            "SELECT subject_id FROM agents WHERE agent_id='a1'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     conn.execute(
         "INSERT INTO gate_instances

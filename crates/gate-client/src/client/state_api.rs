@@ -212,6 +212,7 @@ impl InstanceClient {
     }
 
     /// D-1091: [`Self::blank`] plus the environment the gateway declares for this instance.
+    #[allow(clippy::too_many_arguments)]
     fn blank_with_env(
         instance_id: String,
         agent_id: String,

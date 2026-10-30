@@ -78,9 +78,9 @@ impl TimedFireRouter {
                 binding_id: found.row_id,
                 session_id: session_id.to_string(),
             }),
-            GateSessionLookup::Match(_) | GateSessionLookup::NotFound | GateSessionLookup::Ambiguous => {
-                None
-            }
+            GateSessionLookup::Match(_)
+            | GateSessionLookup::NotFound
+            | GateSessionLookup::Ambiguous => None,
         }
     }
 

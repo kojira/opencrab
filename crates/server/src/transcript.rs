@@ -33,8 +33,7 @@
 //! この不変条件が守られている限り web は無変更で動く。
 
 use opencrab_actions::transcript::{
-    AgentReplyContext, InboundMessageRecord, OutboundReplyRecord,
-    TranscriptSource,
+    AgentReplyContext, InboundMessageRecord, OutboundReplyRecord, TranscriptSource,
 };
 use opencrab_db::queries::{insert_session_log_best_effort, SessionLogRow};
 use rusqlite::Connection;
@@ -157,8 +156,6 @@ pub fn record_rest_agent_reply(
         },
     );
 }
-
-/// A2UI インタラクション応答の記録。
 
 /// 受信発話の `metadata_json`。
 ///

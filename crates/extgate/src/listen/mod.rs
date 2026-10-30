@@ -580,7 +580,11 @@ async fn handle_command<R: ModelAdministration>(
         let live = state
             .lock_registry()
             .ok()
-            .and_then(|registry| registry.get(instance_id).map(|live| live.identity == identity))
+            .and_then(|registry| {
+                registry
+                    .get(instance_id)
+                    .map(|live| live.identity == identity)
+            })
             .unwrap_or(false);
         match target {
             Ok(_) if !live => Err(CommandError::binding_not_found()),
@@ -603,7 +607,10 @@ async fn handle_command<R: ModelAdministration>(
                 Err(CommandError::binding_not_found())
             }
             Err(error) => {
-                tracing::error!(code = error.code.as_str(), "model command session lookup failed");
+                tracing::error!(
+                    code = error.code.as_str(),
+                    "model command session lookup failed"
+                );
                 Err(CommandError::internal())
             }
         }

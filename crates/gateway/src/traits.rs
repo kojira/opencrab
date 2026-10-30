@@ -200,7 +200,6 @@ pub trait GatewayActions: Send + Sync {
         args: &serde_json::Value,
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult;
-
 }
 
 /// ツール定義が自ら名乗る分類。

@@ -16,8 +16,8 @@ use crate::protocol::Said;
 use crate::registry::ExtgateState;
 
 use super::asserted_caller;
-use super::session::OriginRow;
 use super::record::seq_for_origin;
+use super::session::OriginRow;
 use crate::provisional::{promote, ProvisionalInputs};
 
 /// D-1085: a promoted provisional run had no read origin, so a silent result names the said's

@@ -77,8 +77,7 @@ pub use tools::{register_tools_from_config, ShellToolConfig, ToolsConfig};
 pub use traits::CallerIdentity;
 pub use traits::*;
 pub use transcript::{
-    AgentReplyContext, InboundMessageRecord, OutboundReplyRecord,
-    TranscriptSource,
+    AgentReplyContext, InboundMessageRecord, OutboundReplyRecord, TranscriptSource,
 };
 
 // 画像生成（D-1076）。境界監査の行番号ベースラインをずらさないよう末尾に置く。

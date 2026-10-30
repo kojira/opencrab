@@ -173,4 +173,3 @@ pub fn record_agent_prelude(
     insert_session_log(conn, &agent_prelude_row(session_id, agent_id, prelude))
         .map_err(|e| GateError::store_logged("said.agent_prelude_insert", e))
 }
-

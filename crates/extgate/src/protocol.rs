@@ -792,7 +792,6 @@ pub use provisional::{provisional_result_frame, Provisional, ProvisionalCancel};
 mod interrupt;
 pub use interrupt::Interrupt;
 
-
 #[cfg(test)]
 #[path = "protocol/activity_tests.rs"]
 mod activity_tests;

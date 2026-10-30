@@ -25,9 +25,7 @@ use async_trait::async_trait;
 
 use opencrab_core::EngineResult;
 
-use crate::transcript::{
-    InboundMessageRecord, OutboundReplyRecord, TranscriptSource,
-};
+use crate::transcript::{InboundMessageRecord, OutboundReplyRecord, TranscriptSource};
 use crate::RunRequest;
 
 /// ゲートウェイ非依存なエージェント実行・セッション管理の境界。
@@ -175,7 +173,6 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// 記録しない由来は `None`）。
     fn record_outbound_reply(&self, source: TranscriptSource, record: &OutboundReplyRecord<'_>);
 
-
     /// セッションが無ければ作成し、あれば metadata 未設定時のみ補完する（best-effort）。
     ///
     /// `mode` は作成するセッションの mode 列（`"discord"` / `"nostr"` 等）。どのゲートウェイ
@@ -192,5 +189,4 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
 
     /// セッションの theme を返す（無ければ None）。
     fn session_theme(&self, session_id: &str) -> Option<String>;
-
 }

@@ -205,8 +205,8 @@ pub fn gate_session_for_session_id(
              ORDER BY b.closed_at IS NOT NULL, b.created_at DESC, b.binding_id",
         )?;
         let physical = session_id.strip_prefix("extgate-").unwrap_or("");
-        let rows = statement
-            .query_map(params![session_id, physical], |row| row.get::<_, String>(0))?;
+        let rows =
+            statement.query_map(params![session_id, physical], |row| row.get::<_, String>(0))?;
         for row in rows {
             candidates.push(row?);
         }

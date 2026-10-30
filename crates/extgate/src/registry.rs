@@ -150,7 +150,6 @@ impl Registry {
             .map(|(id, e)| (id.clone(), e.identity))
             .collect()
     }
-
 }
 
 /// conformance 用の計測と failure injection。本番 state には載せない。

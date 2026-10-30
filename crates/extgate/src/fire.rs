@@ -22,7 +22,12 @@ fn resolve_live_binding(
     if found.session_id != session_id || found.agent_id != expected_agent_id {
         return None;
     }
-    state.registry.lock().ok()?.is_live(&found.instance_id).then_some(found)
+    state
+        .registry
+        .lock()
+        .ok()?
+        .is_live(&found.instance_id)
+        .then_some(found)
 }
 
 pub struct ExtgateTimedFireSink<R: AgentRuntime> {

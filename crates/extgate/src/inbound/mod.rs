@@ -17,10 +17,10 @@ mod session;
 mod turn;
 
 use attachments::{materialize, promote_local_files, remove_local_files, remove_promoted_files};
-pub(crate) use record::{agent_prelude_row, inbound_speech_metadata, seq_for_origin};
 pub use record::record_agent_prelude;
-pub(crate) use session::{resolve, resolve_in_tx};
+pub(crate) use record::{agent_prelude_row, inbound_speech_metadata, seq_for_origin};
 use record::{existing_seq, next_seq, record_inbound};
+pub(crate) use session::{resolve, resolve_in_tx};
 use turn::enqueue_turn;
 
 pub struct SaidOutcome {
@@ -86,11 +86,13 @@ pub fn process_said<R: AgentRuntime>(
     let materialized = materialize(state, said)?;
     let said = &materialized;
     // The gateway decided who may speak here; core records what it was given.
-    let recorded_rows = record_inbound(&tx, &session_id, &row, said, &said.text)
-        .and_then(|said_row| match &said.agent_prelude {
-            Some(prelude) => record_agent_prelude(&tx, &session_id, &row.agent_id, prelude)
-                .map(|prelude_row| (said_row, Some(prelude_row))),
-            None => Ok((said_row, None)),
+    let recorded_rows =
+        record_inbound(&tx, &session_id, &row, said, &said.text).and_then(|said_row| {
+            match &said.agent_prelude {
+                Some(prelude) => record_agent_prelude(&tx, &session_id, &row.agent_id, prelude)
+                    .map(|prelude_row| (said_row, Some(prelude_row))),
+                None => Ok((said_row, None)),
+            }
         });
     let recorded_rows = match recorded_rows {
         Ok(ids) => ids,

@@ -618,7 +618,6 @@ impl AgentRuntime for AppState {
         }
     }
 
-
     fn ensure_session(
         &self,
         session_id: &str,
@@ -668,7 +667,6 @@ impl AgentRuntime for AppState {
             })
             .map(|s| s.theme)
     }
-
 }
 
 /// 閉じた保留対話を 1 件ずつ残す（#196）。
@@ -690,4 +688,3 @@ mod realtime_turn_test;
 #[cfg(test)]
 #[path = "agent_runtime_impl/session_effort_test.rs"]
 mod session_effort_test;
-

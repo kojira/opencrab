@@ -92,7 +92,6 @@ pub enum AgentReplyContext {
     SubtaskCompleted,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
