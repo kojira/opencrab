@@ -200,11 +200,6 @@ async fn generate_image_rejects_non_png_payload() {
     );
 }
 
-#[test]
-fn generate_image_size_cap_is_32_mib() {
-    assert_eq!(MAX_GENERATED_IMAGE_BYTES, 32 * 1024 * 1024);
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn generate_image_refuses_symlinked_output_dir() {

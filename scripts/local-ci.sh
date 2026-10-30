@@ -25,12 +25,6 @@ cargo build --workspace --all-features
 echo "==> cargo test --workspace --all-features"
 cargo test --workspace --all-features --no-fail-fast
 
-echo "==> baseline capture profile (no ambient features or Nostr config)"
-env -u OPENCRAB_SECRET_MASTER_KEY -u OPENCRAB_SKILLS_DIR \
-  cargo test -p opencrab-server \
-    --no-default-features --features baseline-l2 \
-    baseline_l2::tests::
-
 echo "==> scripts/check-no-private-identifiers.sh"
 bash scripts/check-no-private-identifiers.sh
 

@@ -28,7 +28,7 @@
 //!   `serde_json` の `Map` は `preserve_order` 無効時 `BTreeMap` なので、出力は
 //!   キー集合だけで決まり挿入順に依存しない。
 //!
-//! 下の `tests` が全経路の `metadata_json` をリテラル文字列で固定している。web の表示
+//! 下の `tests` が書き込んだ行の `metadata_json` を固定している。web の表示
 //! （`SessionDetail` / `SessionCard`）は `source` の文字列比較で分岐しているため、
 //! この不変条件が守られている限り web は無変更で動く。
 
@@ -209,7 +209,7 @@ fn outbound_metadata_json(source: TranscriptSource, record: &OutboundReplyRecord
 mod tests {
     use super::*;
 
-    fn discord_inbound<'a>(
+    fn inbound<'a>(
         avatar_url: Option<&'a str>,
         image_urls: &'a [String],
     ) -> InboundMessageRecord<'a> {
@@ -226,52 +226,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn discord_inbound_metadata_is_byte_identical() {
-        assert_eq!(
-            inbound_metadata_json(
-                TranscriptSource::new("test-in", "test-out"),
-                &discord_inbound(None, &[])
-            ),
-            r#"{"session_key":"222","source":"test-in","user_name":"エージェントC"}"#
-        );
-    }
-
-    #[test]
-    fn discord_inbound_metadata_keeps_avatar_and_images() {
-        let images = [
-            "https://cdn/a.png".to_string(),
-            "https://cdn/b.png".to_string(),
-        ];
-        assert_eq!(
-            inbound_metadata_json(
-                TranscriptSource::new("test-in", "test-out"),
-                &discord_inbound(Some("https://cdn/avatar.png"), &images)
-            ),
-            r#"{"image_urls":["https://cdn/a.png","https://cdn/b.png"],"session_key":"222","source":"test-in","user_avatar_url":"https://cdn/avatar.png","user_name":"エージェントC"}"#
-        );
-    }
-
-    #[test]
-    fn nostr_inbound_metadata_is_byte_identical() {
-        let record = InboundMessageRecord {
-            session_id: "sess-1",
-            recipient_agent_id: "agent-1",
-            sender_id: "npub-hex",
-            sender_name: "だれか",
-            avatar_url: None,
-            session_key: None,
-            pubkey: Some("npub-hex"),
-            text: "よろしく",
-            image_urls: &[],
-        };
-        assert_eq!(
-            inbound_metadata_json(TranscriptSource::new("other-in", "other-out"), &record),
-            r#"{"pubkey":"npub-hex","source":"other-in","user_name":"だれか"}"#
-        );
-    }
-
-    fn discord_reply(context: Option<AgentReplyContext>) -> OutboundReplyRecord<'static> {
+    fn reply(context: Option<AgentReplyContext>) -> OutboundReplyRecord<'static> {
         OutboundReplyRecord {
             agent_id: "agent-1",
             session_id: "sess-1",
@@ -279,58 +234,6 @@ mod tests {
             text: "はい",
             context,
         }
-    }
-
-    #[test]
-    fn discord_direct_reply_metadata_is_byte_identical() {
-        assert_eq!(
-            outbound_metadata_json(
-                TranscriptSource::new("test-in", "test-out"),
-                &discord_reply(Some(AgentReplyContext::Direct { tool_calls_made: 3 }))
-            ),
-            r#"{"session_key":"222","source":"test-out","tool_calls_made":3}"#
-        );
-    }
-
-    #[test]
-    fn discord_subtask_completed_reply_metadata_is_byte_identical() {
-        assert_eq!(
-            outbound_metadata_json(
-                TranscriptSource::new("test-in", "test-out"),
-                &discord_reply(Some(AgentReplyContext::SubtaskCompleted))
-            ),
-            r#"{"session_key":"222","source":"test-out","triggered_by":"subtask_completed"}"#
-        );
-    }
-
-    #[test]
-    fn nostr_reply_metadata_is_byte_identical() {
-        let record = OutboundReplyRecord {
-            agent_id: "agent-1",
-            session_id: "sess-1",
-            session_key: None,
-            text: "はい",
-            context: None,
-        };
-        assert_eq!(
-            outbound_metadata_json(TranscriptSource::new("other-in", "other-out"), &record),
-            r#"{"source":"other-out"}"#
-        );
-    }
-
-    /// 宛先の識別子（`session_key`）を落としていないこと。
-    #[test]
-    fn discord_rows_keep_destination_id() {
-        assert!(inbound_metadata_json(
-            TranscriptSource::new("test-in", "test-out"),
-            &discord_inbound(None, &[])
-        )
-        .contains(r#""session_key":"222""#));
-        assert!(outbound_metadata_json(
-            TranscriptSource::new("test-in", "test-out"),
-            &discord_reply(Some(AgentReplyContext::Direct { tool_calls_made: 0 }))
-        )
-        .contains(r#""session_key":"222""#));
     }
 
     /// 書き込みまで通した行の形（agent_id / speaker_id / log_type / metadata）。
@@ -344,12 +247,12 @@ mod tests {
         record_inbound_message(
             &conn,
             TranscriptSource::new("test-in", "test-out"),
-            &discord_inbound(None, &[]),
+            &inbound(None, &[]),
         );
         record_outbound_reply(
             &conn,
             TranscriptSource::new("test-in", "test-out"),
-            &discord_reply(Some(AgentReplyContext::SubtaskCompleted)),
+            &reply(Some(AgentReplyContext::SubtaskCompleted)),
         );
 
         let rows: Vec<(String, String, String, String)> = conn

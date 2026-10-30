@@ -27,17 +27,6 @@ pub mod skill_consolidation;
 pub mod subtask_registries;
 pub mod subtask_spawn;
 pub mod system_actions;
-
-#[cfg(feature = "baseline-l1")]
-#[doc(hidden)]
-#[path = "../tests/baseline_support/l1.rs"]
-pub mod baseline_l1;
-
-#[cfg(feature = "baseline-l2")]
-#[doc(hidden)]
-#[path = "../tests/baseline_support/l2.rs"]
-pub mod baseline_l2;
-
 pub mod transcript;
 
 /// per-agent MCP 接続マネージャの共有ハンドル。
@@ -164,9 +153,9 @@ impl AppState {
 
 /// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件、gateway マネージャ無し）。
 ///
-/// crate 内のユニットテストと L1 採取器で共用。`AppState` にフィールドが増えたときの
+/// crate 内のユニットテストで共用。`AppState` にフィールドが増えたときの
 /// 追随箇所を 1 つに保つ（テスト／採取器ごとの構造体リテラル複製を避ける）。
-#[cfg(any(test, feature = "baseline-l1"))]
+#[cfg(test)]
 pub(crate) fn test_app_state() -> AppState {
     let conn = opencrab_db::init_memory().unwrap();
     // #628: 本番（main.rs）と同じ transport descriptor を生存非依存で登録する（源は 1 本化・
@@ -278,35 +267,6 @@ macro_rules! mount_route {
             axum::routing::$first_method($first_handler)$(.$method($handler))*,
         );
     };
-}
-
-macro_rules! describe_route {
-    ($routes:ident, $path:literal, $($method:ident => $handler:expr),+ $(,)?) => {{
-        let mut methods = vec![$(stringify!($method).to_ascii_uppercase()),+];
-        methods.sort();
-        $routes.push(HttpRouteDescriptor {
-            path: $path.to_string(),
-            methods,
-            activation: "always".to_string(),
-            source: "opencrab_server::create_router".to_string(),
-        });
-    }};
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-pub struct HttpRouteDescriptor {
-    pub path: String,
-    pub methods: Vec<String>,
-    pub activation: String,
-    pub source: String,
-}
-
-/// Production router が mount する宣言そのものから得る read-only inventory。
-pub fn production_route_inventory() -> Vec<HttpRouteDescriptor> {
-    let mut routes = Vec::new();
-    production_routes!(describe_route, routes);
-    routes.sort_by(|a, b| a.path.cmp(&b.path));
-    routes
 }
 
 pub fn create_router(state: AppState) -> Router {

@@ -25,3 +25,7 @@ web/blob-report/
 .web.pid
 .server.log
 .web.log
+
+# Python bytecode
+__pycache__/
+*.pyc

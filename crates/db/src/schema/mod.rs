@@ -18,9 +18,6 @@ use sql::{
 use v37_v42::{migrate_v37_session_heartbeat, migrate_v38_align_schedule_vocab};
 use v43_v47::{migrate_v43_transplant_schema, migrate_v44_extgate, migrate_v47_gateway_operations};
 
-#[cfg(test)]
-use v43_v47::expected_v43_user_tables;
-
 /// スキーマのバージョン管理は `PRAGMA user_version` で行う。
 ///
 /// 既存の冪等 `migrate()`（version 1 baseline）を凍結し、以降のスキーマ変更は
@@ -211,18 +208,6 @@ fn initialize_historical(conn: &Connection) -> rusqlite::Result<()> {
         tx.commit()?;
     }
     run_migrations(conn, historical_migrations())
-}
-
-#[cfg(test)]
-fn init_historical_schema_fixture() -> rusqlite::Result<Connection> {
-    let conn = Connection::open_in_memory()?;
-    conn.execute_batch(
-        "PRAGMA foreign_keys=ON;
-         CREATE TABLE historical_fixture_marker (id INTEGER);",
-    )?;
-    initialize_historical(&conn)?;
-    conn.execute_batch("DROP TABLE historical_fixture_marker")?;
-    Ok(conn)
 }
 
 #[cfg(test)]
