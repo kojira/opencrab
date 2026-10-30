@@ -276,6 +276,6 @@ async fn interrupt_with_a_malformed_field_is_bad_request() {
     frame["delivered"] = json!(42);
     write_frame(&mut s, &frame).await;
     assert_eq!(read_said_response(&mut s, "i1").await["code"], "bad_request");
-    write_frame(&mut s, &json!({"id": "i2", "m": "interrupt", "session": "not-a-uuid"})).await;
+    write_frame(&mut s, &json!({"id": "i2", "m": "interrupt", "session": ""})).await;
     assert_eq!(read_said_response(&mut s, "i2").await["code"], "bad_request");
 }

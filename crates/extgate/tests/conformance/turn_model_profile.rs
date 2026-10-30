@@ -105,12 +105,13 @@ async fn queued_realtime_said_starts_its_own_turn_and_a_folded_one_does_not() {
 #[tokio::test]
 async fn subtask_resume_inherits_the_realtime_profile_and_timed_fire_uses_default() {
     let h = Harness::start().await;
-    let (mut s, _, binding_id) = ready_pair(&h).await;
+    let (mut s, instance_id, binding_id) = ready_pair(&h).await;
     let session_id = binding_id.clone();
 
     write_frame(&mut s, &said_frame_with_profile("v1", &binding_id, "o-v1", Some("realtime"))).await;
     assert_eq!(read_said_response(&mut s, "v1").await["m"], "ok");
     wait_turns(&h, 1).await;
+    let row_id = session_row(&h, &instance_id, &binding_id).row_id;
     let sink = h.runtime.last_sink.lock().unwrap().clone().expect("turn sink");
     settle_completed(
         &h.runtime.subtask_registry_for(&session_id),
@@ -134,7 +135,7 @@ async fn subtask_resume_inherits_the_realtime_profile_and_timed_fire_uses_defaul
 
     opencrab_extgate::ExtgateTimedFireSink::new(Arc::clone(&h.state), h.runtime.clone())
         .fire_timed_turn(opencrab_actions::TimedFireRequest {
-            binding_id: binding_id.clone(),
+            binding_id: row_id,
             session_id: session_id.clone(),
             agent_id: "agent-1".into(),
             prompt: "timed fire".into(),

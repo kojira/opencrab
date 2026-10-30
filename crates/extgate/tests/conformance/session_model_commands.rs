@@ -337,10 +337,13 @@ async fn session_model_commands_change_only_the_bound_session() {
     assert_eq!(stored_agent_model(&h), None);
 }
 
+/// Only the owner may administer models. D-1099: a key names a session (created when new), so
+/// there is no "unknown binding" any more; a command on a new key targets that new session.
 #[tokio::test]
-async fn session_model_commands_reject_non_owner_unknown_and_closed_bindings() {
+async fn session_model_commands_reject_non_owner() {
     let h = Harness::start().await;
-    let (mut s, _, binding_id) = ready_pair(&h).await;
+    let (mut s, instance_id, binding_id) = ready_pair(&h).await;
+    session_row(&h, &instance_id, &binding_id);
     let session_id = binding_id.clone();
 
     let co_agent = send_command(
@@ -353,37 +356,6 @@ async fn session_model_commands_reject_non_owner_unknown_and_closed_bindings() {
     )
     .await;
     assert_eq!(co_agent["code"], "forbidden");
-
-    let unknown = send_command(
-        &mut s,
-        "cmd-unknown",
-        &uuid(),
-        json!({"role": "owner"}),
-        "set_session_model",
-        json!({"model": "gpt-5"}),
-    )
-    .await;
-    assert_eq!(unknown["code"], "binding_not_found");
-
-    h.state
-        .db
-        .lock()
-        .unwrap()
-        .execute(
-            "UPDATE gate_bindings SET closed_at = 1 WHERE binding_id = ?1",
-            [&binding_id],
-        )
-        .unwrap();
-    let closed = send_command(
-        &mut s,
-        "cmd-closed",
-        &binding_id,
-        json!({"role": "owner"}),
-        "set_session_model",
-        json!({"model": "gpt-5"}),
-    )
-    .await;
-    assert_eq!(closed["code"], "binding_not_found");
     assert_eq!(stored_session_model(&h, &session_id), None);
     assert_eq!(stored_agent_model(&h), None);
 }
