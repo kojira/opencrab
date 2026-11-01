@@ -172,7 +172,8 @@ pub const PROVISIONAL_READ_ONLY_TOOLS: &[&str] = &[
 ];
 
 /// D-1085 §13.1: the tools of a lightweight turn besides the operations its gateway declares
-/// (see [`RunRequest::as_lightweight`]): memory reads, subtasks and loading tool schemas. Web
+/// (see [`RunRequest::as_lightweight`]): memory reads, subtasks, loading tool schemas, and the
+/// owner's instructions update and shell (D-1109). Web
 /// search is a provider option and follows the agent setting.
 pub const LIGHTWEIGHT_TURN_TOOLS: &[&str] = &[
     "search_memory_index",
@@ -183,6 +184,9 @@ pub const LIGHTWEIGHT_TURN_TOOLS: &[&str] = &[
     "cancel_subtask",
     "steer_subtask",
     "describe_tools",
+    // D-1109: the owner asks for these in VC too. Both stay owner-only at dispatch.
+    "update_instructions",
+    "execute_shell",
 ];
 
 impl RunRequest {
