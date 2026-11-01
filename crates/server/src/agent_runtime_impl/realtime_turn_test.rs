@@ -431,6 +431,10 @@ async fn realtime_turn_tools_are_the_gateway_operations_and_the_lightweight_allo
         .collect();
     expected.sort();
     assert_eq!(offered(&requests[1]), expected);
+    // D-1109: the owner can have the instructions changed or a command run in VC too.
+    for name in ["update_instructions", "execute_shell"] {
+        assert!(expected.iter().any(|n| n == name), "{name}: {expected:?}");
+    }
     let default = offered(&requests[0]);
     assert!(default.len() > expected.len(), "{default:?}");
     assert!(
@@ -586,6 +590,35 @@ async fn agent_prelude_is_the_agent_line_after_the_said_in_both_histories() {
             "PRELUDE-UN",
             "{profile:?}: nothing after the prelude: {history}"
         );
+    }
+}
+
+/// D-1109: in a realtime turn the owner's request to change the instructions is carried out; the
+/// same call in a turn for anyone else is refused and the instructions stay as they were.
+#[tokio::test]
+async fn realtime_turn_updates_instructions_for_the_owner_only() {
+    for (caller, expected) in [
+        (CallerIdentity::Owner, "NEW-RULE"),
+        (CallerIdentity::Agent, "INSTRUCTIONS-BODY"),
+    ] {
+        let f = fixture();
+        *f.script.lock().unwrap() = vec![tool_call_message(
+            "c1",
+            "update_instructions",
+            serde_json::json!({"instructions": "NEW-RULE"}),
+        )];
+        *f.reply.lock().unwrap() = "NO_REPLY".to_string();
+        let turn_caller = caller.clone();
+        profile_turn_built(&f, TurnModelProfile::Realtime, move |mut req| {
+            req.caller = turn_caller;
+            req
+        })
+        .await;
+        let conn = f.state.db.lock().unwrap();
+        let agent = opencrab_db::queries::get_agent(&conn, "a1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(agent.instructions, expected, "{caller:?}");
     }
 }
 
