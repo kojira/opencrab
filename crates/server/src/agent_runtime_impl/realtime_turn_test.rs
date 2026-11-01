@@ -413,6 +413,23 @@ fn function_names(request: &ChatRequest) -> Vec<String> {
 #[tokio::test]
 async fn realtime_turn_tools_are_the_gateway_operations_and_the_lightweight_allowlist() {
     let f = fixture();
+    // execute_shell exists only when the shell tool is configured.
+    {
+        let mut cfg = f.state.tools_config.write().unwrap();
+        cfg.enabled = true;
+        cfg.shell = Some(opencrab_actions::tools::ShellToolConfig {
+            enabled: true,
+            allowed_commands: vec!["echo".to_string()],
+            timeout_secs: 30,
+            max_timeout_secs: 300,
+            working_dir: None,
+            inherit_env: false,
+            allowed_env_vars: Vec::new(),
+            max_output_bytes: 1024,
+            commands: Vec::new(),
+            run_env: std::collections::BTreeMap::new(),
+        });
+    }
     let (ops, _) = recording_ops();
     profile_turn_with(&f, TurnModelProfile::Default, Some(ops.clone())).await;
     profile_turn_with(&f, TurnModelProfile::Realtime, Some(ops)).await;
