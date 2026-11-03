@@ -1,6 +1,6 @@
-use opencrab_llm_types::{Message, MessageContent, Role};
+use opencrab_llm_types::Message;
 
-use super::{silent_origins::SilentOriginTracker, turn_budget::append_bounded_history_block};
+use super::silent_origins::SilentOriginTracker;
 use crate::context_budget::TokenLedger;
 use crate::FoldedInbound;
 
@@ -21,22 +21,8 @@ pub(super) fn append(
             "injecting newly arrived user speech into the running turn"
         );
     }
-    // 履歴の後ろにツール往復が並んでいれば、新着はその後ろ（末尾）へ置く。履歴の中へ
-    // 差し込むと、ツール呼び出しより前に見えて時系列が逆転する。
-    let tool_exchange_follows = messages
-        .iter()
-        .any(|m| m.role == Role::Tool || m.tool_calls.is_some());
-    if tool_exchange_follows || !append_bounded_history_block(messages, ledger, &text) {
-        messages.push(Message {
-            role: Role::User,
-            content: Some(MessageContent::Text(text.clone())),
-            name: None,
-            function_call: None,
-            tool_calls: None,
-            tool_call_id: None,
-        });
-        ledger.record(format!("live:{}", messages.len()), &text);
-    }
+    // D-1111: appended at the end in arrival order (the one turn-view writer).
+    super::turn_view::inbound(messages, ledger, &text);
     if let Some(origin) = origin {
         if !silent_origins.was_read(&origin) && !pending_read_origins.contains(&origin) {
             pending_read_origins.push(origin);

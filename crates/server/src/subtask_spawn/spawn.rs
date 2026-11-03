@@ -110,11 +110,7 @@ pub async fn spawn_subtask(
         };
         opencrab_db::queries::insert_session(&conn, &session).ok();
 
-        let log = opencrab_db::queries::SessionLogRow {
-            id: None,
-            agent_id: agent_id.clone(),
-            session_id: parent_session_id.clone(),
-            log_type: "system".to_string(),
+        let spawned = opencrab_core::history::Event::System {
             content: json!({
                 "type": "subtask_spawned",
                 "subtask_id": subtask_id,
@@ -123,11 +119,9 @@ pub async fn spawn_subtask(
             })
             .to_string(),
             speaker_id: None,
-            turn_number: None,
-            metadata_json: None,
-            created_at: None,
+            metadata: None,
         };
-        opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
+        opencrab_core::history::record_best_effort(&conn, &agent_id, &parent_session_id, &spawned);
 
         sub_system_prompt(&conn, &agent_id, &subtask_id, depth)
     };

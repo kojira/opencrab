@@ -20,6 +20,7 @@ pub mod conversation;
 pub mod engine;
 pub mod evaluator;
 pub mod heartbeat;
+pub mod history;
 pub mod identity;
 pub mod import;
 pub mod impression_section;

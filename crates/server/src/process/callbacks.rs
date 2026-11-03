@@ -166,7 +166,7 @@ impl TurnLogWriter {
 
     fn insert(&self, row: &opencrab_db::queries::SessionLogRow, what: &str) {
         if let Ok(conn) = self.db.lock() {
-            if let Err(e) = opencrab_db::queries::insert_session_log(&conn, row) {
+            if let Err(e) = opencrab_core::history::write_row(&conn, row) {
                 tracing::error!(agent_id = %row.agent_id, session_id = %row.session_id, "Failed to insert {what}: {e}");
             }
         }
@@ -207,18 +207,14 @@ pub(super) fn set_turn_log_callbacks(
                 )
                 .filter(|body| !body.trim().is_empty());
                 if let Some(body) = visible {
-                    let speech_log = opencrab_db::queries::SessionLogRow {
-                        id: None,
-                        agent_id: tc_agent.clone(),
-                        session_id: tc_session.clone(),
-                        log_type: "speech".to_string(),
-                        content: body,
-                        speaker_id: Some(tc_agent.clone()),
-                        turn_number: None,
-                        metadata_json: None,
-                        created_at: None,
+                    let speech = opencrab_core::history::Event::AgentSpeech {
+                        text: &body,
+                        metadata: None,
                     };
-                    tc_writer.write(speech_log, "speech log (with tool_call)");
+                    tc_writer.write(
+                        speech.row(&tc_agent, &tc_session),
+                        "speech log (with tool_call)",
+                    );
                 }
                 // 発話クラス（reply/reaction/repost・§3.3.1 C6）は engine が tool_calls_json から
                 // 除外して渡す。除外の結果ツールが 1 つも残らない（空配列）ターンは、機械行
@@ -260,18 +256,11 @@ pub(super) fn set_turn_log_callbacks(
                         "preserve_arg_call_ids": preserve_ids,
                     })
                 };
-                let log = opencrab_db::queries::SessionLogRow {
-                    id: None,
-                    agent_id: tc_agent.clone(),
-                    session_id: tc_session.clone(),
-                    log_type: "tool_call".to_string(),
-                    content,
-                    speaker_id: Some(tc_agent.clone()),
-                    turn_number: None,
-                    metadata_json: Some(metadata.to_string()),
-                    created_at: None,
+                let call = opencrab_core::history::Event::ToolCall {
+                    content: &content,
+                    metadata,
                 };
-                tc_writer.write(log, "tool_call log");
+                tc_writer.write(call.row(&tc_agent, &tc_session), "tool_call log");
             }
         });
     }
@@ -298,25 +287,15 @@ pub(super) fn set_turn_log_callbacks(
                 );
 
                 {
-                    let log = opencrab_db::queries::SessionLogRow {
-                        id: None,
-                        agent_id: tr_agent.clone(),
-                        session_id: tr_session.clone(),
-                        log_type: "tool_result".to_string(),
-                        content,
-                        speaker_id: Some(tr_agent.clone()),
-                        turn_number: None,
-                        metadata_json: Some(
-                            serde_json::json!({
-                                "tool_call_id": tool_call_id,
-                                "tool_name": tool_name,
-                                "is_error": is_error,
-                            })
-                            .to_string(),
-                        ),
-                        created_at: None,
+                    let result = opencrab_core::history::Event::ToolResult {
+                        content: &content,
+                        metadata: serde_json::json!({
+                            "tool_call_id": tool_call_id,
+                            "tool_name": tool_name,
+                            "is_error": is_error,
+                        }),
                     };
-                    tr_writer.write(log, "tool_result log");
+                    tr_writer.write(result.row(&tr_agent, &tr_session), "tool_result log");
                 }
             },
         );

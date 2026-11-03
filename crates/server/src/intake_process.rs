@@ -35,9 +35,10 @@
 use std::time::Duration;
 
 use opencrab_actions::{CallerIdentity, RunRequest};
+use opencrab_core::history;
 use opencrab_db::queries::{
-    agents_with_unprocessed_inbox, insert_session, insert_session_log, list_unprocessed_inbox,
-    mark_inbox_processed, AgentInboxRow, SessionLogRow, SessionRow,
+    agents_with_unprocessed_inbox, insert_session, list_unprocessed_inbox, mark_inbox_processed,
+    AgentInboxRow, SessionRow,
 };
 use opencrab_server::process::{build_agent_context, run_agent_response};
 use opencrab_server::AppState;
@@ -158,18 +159,12 @@ async fn process_agent_inbox(state: &AppState, stored_agent_id: &str) {
 
     // 監査用にイベントを intake セッションへ system ログとして残す（配送はしない）。
     if let Ok(conn) = state.db.lock() {
-        let log = SessionLogRow {
-            id: None,
-            agent_id: resolved_agent_id.clone(),
-            session_id: session_id.clone(),
-            log_type: "system".to_string(),
+        let note = history::Event::System {
             content: conversation.clone(),
-            speaker_id: Some("intake".to_string()),
-            turn_number: None,
-            metadata_json: None,
-            created_at: None,
+            speaker_id: Some("intake"),
+            metadata: None,
         };
-        if let Err(e) = insert_session_log(&conn, &log) {
+        if let Err(e) = history::record(&conn, &resolved_agent_id, &session_id, &note) {
             tracing::warn!(agent_id = %resolved_agent_id, error = %e, "intake process: 監査ログ記録失敗");
         }
     }
@@ -197,18 +192,11 @@ async fn process_agent_inbox(state: &AppState, stored_agent_id: &str) {
             let session = hook_session.clone();
             Box::pin(async move {
                 if let Ok(conn) = db.lock() {
-                    let log = SessionLogRow {
-                        id: None,
-                        agent_id: agent.clone(),
-                        session_id: session,
-                        log_type: "speech".to_string(),
-                        content: speech,
-                        speaker_id: Some(agent),
-                        turn_number: None,
-                        metadata_json: None,
-                        created_at: None,
+                    let speech = history::Event::AgentSpeech {
+                        text: &speech,
+                        metadata: None,
                     };
-                    let _ = insert_session_log(&conn, &log);
+                    let _ = history::record(&conn, &agent, &session, &speech);
                 }
                 Ok(())
             })
@@ -223,18 +211,11 @@ async fn process_agent_inbox(state: &AppState, stored_agent_id: &str) {
                 if let Some(body) =
                     (!result.response.trim().is_empty()).then(|| result.response.clone())
                 {
-                    let log = SessionLogRow {
-                        id: None,
-                        agent_id: resolved_agent_id.clone(),
-                        session_id: session_id.clone(),
-                        log_type: "speech".to_string(),
-                        content: body,
-                        speaker_id: Some(resolved_agent_id.clone()),
-                        turn_number: None,
-                        metadata_json: None,
-                        created_at: None,
+                    let speech = history::Event::AgentSpeech {
+                        text: &body,
+                        metadata: None,
                     };
-                    let _ = insert_session_log(&conn, &log);
+                    let _ = history::record(&conn, &resolved_agent_id, &session_id, &speech);
                 }
                 // 今回の会話に載せた分（budget 内）だけを処理済みにする。残りは次 tick。
                 for r in included_rows {

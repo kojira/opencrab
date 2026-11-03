@@ -6,18 +6,12 @@ fn insert_event(
     session_id: &str,
     event: serde_json::Value,
 ) {
-    let log = opencrab_db::queries::SessionLogRow {
-        id: None,
-        agent_id: agent_id.to_string(),
-        session_id: session_id.to_string(),
-        log_type: "system".to_string(),
+    let end = opencrab_core::history::Event::System {
         content: event.to_string(),
         speaker_id: None,
-        turn_number: None,
-        metadata_json: None,
-        created_at: None,
+        metadata: None,
     };
-    writer.write(log, "turn end event");
+    writer.write(end.row(agent_id, session_id), "turn end event");
 }
 
 /// 正常な明示終了と、engine 内で判別できた資源切れを会話履歴へ保存する。

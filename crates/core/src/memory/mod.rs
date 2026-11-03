@@ -78,7 +78,7 @@ impl MemoryManager {
         metadata: Option<serde_json::Value>,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
-        let row_id = queries::insert_session_log(
+        let row_id = crate::history::write_row(
             &conn,
             &queries::SessionLogRow {
                 id: None,

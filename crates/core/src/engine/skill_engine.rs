@@ -6,6 +6,7 @@ mod run;
 mod run_helpers;
 mod silent_origins;
 mod turn_budget;
+mod turn_view;
 mod view_images;
 
 use anyhow::Result;

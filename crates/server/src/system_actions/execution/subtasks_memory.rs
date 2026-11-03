@@ -263,11 +263,7 @@ impl SystemGatewayActions {
         // （RFC §1.3）ので、受け口が未配線でも本文自体はここで残る。
         if !parent_session_id.is_empty() {
             if let Ok(conn) = self.state.db.lock() {
-                let log = opencrab_db::queries::SessionLogRow {
-                    id: None,
-                    agent_id: agent_id.clone(),
-                    session_id: parent_session_id.clone(),
-                    log_type: "system".to_string(),
+                let progress = opencrab_core::history::Event::System {
                     content: json!({
                         "type": "subtask_progress",
                         "subtask_id": subtask_id,
@@ -276,11 +272,14 @@ impl SystemGatewayActions {
                     })
                     .to_string(),
                     speaker_id: None,
-                    turn_number: None,
-                    metadata_json: None,
-                    created_at: None,
+                    metadata: None,
                 };
-                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
+                opencrab_core::history::record_best_effort(
+                    &conn,
+                    &agent_id,
+                    &parent_session_id,
+                    &progress,
+                );
             }
         }
 

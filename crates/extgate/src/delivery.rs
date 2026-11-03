@@ -5,7 +5,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use opencrab_actions::{DeliveryEffect, TranscriptSource};
-use opencrab_db::queries::{insert_session_log, SessionLogRow};
+use opencrab_core::history;
+use opencrab_db::queries::SessionLogRow;
 use rusqlite::{params, TransactionBehavior};
 use uuid::Uuid;
 
@@ -120,22 +121,19 @@ pub async fn deliver_intermediate_say(
     .await
 }
 
-/// The memory_sessions speech row a say records.
-pub(crate) fn say_speech_row(agent_id: &str, session_id: &str, body: &str) -> SessionLogRow {
-    SessionLogRow {
-        id: None,
-        agent_id: agent_id.to_string(),
-        session_id: session_id.to_string(),
-        log_type: "speech".to_string(),
-        content: body.to_string(),
-        speaker_id: Some(agent_id.to_string()),
-        turn_number: None,
-        metadata_json: Some(
-            serde_json::json!({"source": TranscriptSource::new("external", "external_response").reply()})
-                .to_string(),
+/// The history event of the agent's speech a say delivers.
+pub(crate) fn say_speech(body: &str) -> history::Event<'_> {
+    history::Event::AgentSpeech {
+        text: body,
+        metadata: Some(
+            serde_json::json!({"source": TranscriptSource::new("external", "external_response").reply()}),
         ),
-        created_at: None,
     }
+}
+
+/// The memory_sessions speech row a say records (held until a provisional run is promoted).
+pub(crate) fn say_speech_row(agent_id: &str, session_id: &str, body: &str) -> SessionLogRow {
+    say_speech(body).row(agent_id, session_id)
 }
 
 /// D-1085 §13.2: delivers a say whose speech row was already recorded (the held continuation
@@ -216,7 +214,7 @@ async fn send_say(
             return Err(GateError::store());
         }
         if record_speech {
-            insert_session_log(&tx, &say_speech_row(agent_id, session_id, body))
+            history::record(&tx, agent_id, session_id, &say_speech(body))
                 .map_err(|_| GateError::store())?;
         }
         #[cfg(any(test, feature = "extgate-probe"))]

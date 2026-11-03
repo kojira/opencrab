@@ -365,7 +365,7 @@ async fn invoke_utterance_checked(
             .collect();
         speech_meta.insert("attachments".to_string(), Value::Array(names));
     }
-    let speech_meta = Value::Object(speech_meta).to_string();
+    let speech_meta = Value::Object(speech_meta);
 
     {
         let mut conn = state
@@ -376,21 +376,12 @@ async fn invoke_utterance_checked(
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
         // 発話本文を speech として永続（撃ちっぱなしでも「言った」ことは残る＝復唱の抑止源）。
-        opencrab_db::queries::insert_session_log(
-            &tx,
-            &opencrab_db::queries::SessionLogRow {
-                id: None,
-                agent_id: agent_id.to_string(),
-                session_id: session_id.to_string(),
-                log_type: "speech".to_string(),
-                content: speech_body.to_string(),
-                speaker_id: Some(agent_id.to_string()),
-                turn_number: None,
-                metadata_json: Some(speech_meta),
-                created_at: None,
-            },
-        )
-        .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
+        let speech = opencrab_core::history::Event::AgentSpeech {
+            text: speech_body,
+            metadata: Some(speech_meta),
+        };
+        opencrab_core::history::record(&tx, agent_id, session_id, &speech)
+            .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
         tx.execute(
             "INSERT INTO deliveries (delivery_id, binding_id, payload_json, state, error, created_at, updated_at)
              VALUES (?1, ?2, ?3, 'sending', NULL, ?4, ?4)",

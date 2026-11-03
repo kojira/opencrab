@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use opencrab_actions::{ToolEvent, ToolEventSink, ToolEventStatus};
-use opencrab_db::queries::{insert_session_log, insert_tool_log, SessionLogRow, ToolLogWrite};
+use opencrab_core::history;
+use opencrab_db::queries::{insert_tool_log, ToolLogWrite};
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
@@ -177,8 +178,8 @@ impl RunningTurn {
             return;
         };
         if !say_recorded && !delivered.is_empty() {
-            let row = crate::delivery::say_speech_row(&self.agent_id, session_id, delivered);
-            if let Err(e) = insert_session_log(&conn, &row) {
+            let speech = crate::delivery::say_speech(delivered);
+            if let Err(e) = history::record(&conn, &self.agent_id, session_id, &speech) {
                 tracing::error!(%session_id, "interrupt: delivered speech row failed: {e}");
             }
         }
@@ -222,18 +223,12 @@ impl ToolEventSink for TrackedTools {
 }
 
 fn insert_cut_note(conn: &rusqlite::Connection, agent_id: &str, session_id: &str, delivered: &str) {
-    let row = SessionLogRow {
-        id: None,
-        agent_id: agent_id.to_string(),
-        session_id: session_id.to_string(),
-        log_type: "system".to_string(),
+    let note = history::Event::System {
         content: serde_json::json!({"type": "delivery_cut", "delivered": delivered}).to_string(),
         speaker_id: None,
-        turn_number: None,
-        metadata_json: None,
-        created_at: None,
+        metadata: None,
     };
-    if let Err(e) = insert_session_log(conn, &row) {
+    if let Err(e) = history::record(conn, agent_id, session_id, &note) {
         tracing::error!(%session_id, "interrupt: delivery cut note failed: {e}");
     }
 }

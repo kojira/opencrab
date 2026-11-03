@@ -35,7 +35,7 @@
 use opencrab_actions::transcript::{
     AgentReplyContext, InboundMessageRecord, OutboundReplyRecord, TranscriptSource,
 };
-use opencrab_db::queries::{insert_session_log_best_effort, SessionLogRow};
+use opencrab_core::history;
 use rusqlite::Connection;
 
 /// 受信発言の記録をあきらめるまでの試行回数（#284 P0-3）。
@@ -66,19 +66,14 @@ pub fn record_inbound_message(
     source: TranscriptSource,
     record: &InboundMessageRecord<'_>,
 ) -> bool {
-    let row = SessionLogRow {
-        id: None,
-        agent_id: record.recipient_agent_id.to_string(),
-        session_id: record.session_id.to_string(),
-        log_type: "speech".to_string(),
-        content: record.text.to_string(),
-        speaker_id: Some(record.sender_id.to_string()),
-        turn_number: None,
-        metadata_json: Some(inbound_metadata_json(source, record)),
-        created_at: None,
-    };
+    let row = history::Event::InboundSpeech {
+        speaker_id: record.sender_id,
+        text: record.text,
+        metadata: Some(inbound_metadata(source, record)),
+    }
+    .row(record.recipient_agent_id, record.session_id);
     for attempt in 1..=INBOUND_RECORD_ATTEMPTS {
-        match opencrab_db::queries::insert_session_log(conn, &row) {
+        match history::write_row(conn, &row) {
             Ok(_) => return true,
             Err(e) => {
                 tracing::warn!(
@@ -108,20 +103,11 @@ pub fn record_outbound_reply(
     source: TranscriptSource,
     record: &OutboundReplyRecord<'_>,
 ) {
-    insert_session_log_best_effort(
-        conn,
-        &SessionLogRow {
-            id: None,
-            agent_id: record.agent_id.to_string(),
-            session_id: record.session_id.to_string(),
-            log_type: "speech".to_string(),
-            content: record.text.to_string(),
-            speaker_id: Some(record.agent_id.to_string()),
-            turn_number: None,
-            metadata_json: Some(outbound_metadata_json(source, record)),
-            created_at: None,
-        },
-    );
+    let speech = history::Event::AgentSpeech {
+        text: record.text,
+        metadata: Some(outbound_metadata(source, record)),
+    };
+    history::record_best_effort(conn, record.agent_id, record.session_id, &speech);
 }
 
 /// REST 経由のエージェント応答（sessions.rs / agents_messages.rs 共通の形）。
@@ -135,32 +121,23 @@ pub fn record_rest_agent_reply(
     iterations: usize,
     tool_calls_made: usize,
 ) {
-    insert_session_log_best_effort(
-        conn,
-        &SessionLogRow {
-            id: None,
-            agent_id: agent_id.to_string(),
-            session_id: session_id.to_string(),
-            log_type: "speech".to_string(),
-            content: text.to_string(),
-            speaker_id: Some(agent_id.to_string()),
-            turn_number: None,
-            metadata_json: Some(
-                serde_json::json!({
-                    "iterations": iterations,
-                    "tool_calls_made": tool_calls_made,
-                })
-                .to_string(),
-            ),
-            created_at: None,
-        },
-    );
+    let speech = history::Event::AgentSpeech {
+        text,
+        metadata: Some(serde_json::json!({
+            "iterations": iterations,
+            "tool_calls_made": tool_calls_made,
+        })),
+    };
+    history::record_best_effort(conn, agent_id, session_id, &speech);
 }
 
 /// 受信発話の `metadata_json`。
 ///
 /// 値があるキーだけ出す（`session_key` / `pubkey` / `user_avatar_url` / `image_urls`）。
-fn inbound_metadata_json(source: TranscriptSource, record: &InboundMessageRecord<'_>) -> String {
+fn inbound_metadata(
+    source: TranscriptSource,
+    record: &InboundMessageRecord<'_>,
+) -> serde_json::Value {
     let mut meta = serde_json::json!({
         "source": source.inbound(),
         "user_name": record.sender_name,
@@ -177,11 +154,14 @@ fn inbound_metadata_json(source: TranscriptSource, record: &InboundMessageRecord
     if !record.image_urls.is_empty() {
         meta["image_urls"] = serde_json::json!(record.image_urls);
     }
-    meta.to_string()
+    meta
 }
 
 /// エージェント応答の `metadata_json`。
-fn outbound_metadata_json(source: TranscriptSource, record: &OutboundReplyRecord<'_>) -> String {
+fn outbound_metadata(
+    source: TranscriptSource,
+    record: &OutboundReplyRecord<'_>,
+) -> serde_json::Value {
     let mut meta = serde_json::json!({ "source": source.reply() });
     if let Some(session_key) = record.session_key {
         meta["session_key"] = serde_json::json!(session_key);
@@ -196,7 +176,7 @@ fn outbound_metadata_json(source: TranscriptSource, record: &OutboundReplyRecord
             meta["triggered_by"] = serde_json::json!("subtask_completed");
         }
     }
-    meta.to_string()
+    meta
 }
 
 /// `metadata_json` のバイト等価をリテラルで固定するスナップショットテスト（#158 S3）。

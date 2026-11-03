@@ -399,7 +399,7 @@
     }
 
     #[tokio::test]
-    async fn all_utterance_tool_continuation_moves_delivered_content_into_bounded_history() {
+    async fn all_utterance_tool_continuation_appends_delivered_content_after_the_utterance() {
         use std::sync::{Arc, Mutex};
 
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -468,12 +468,11 @@
             second[assistant_tool_index + 1].tool_call_id.as_deref(),
             Some("reply-1")
         );
-        let bounded = second
-            .iter()
-            .find(|message| message_plain_text(message).contains("<conversation_history>"))
-            .map(message_plain_text)
-            .expect("one bounded conversation history");
-        assert_canonical_assistant_speech(&bounded, "らぼみ", "返信も続けるね");
+        // D-1111: the text was delivered after the reply ran, so it follows the reply's result.
+        let speech = &second[assistant_tool_index + 2];
+        assert_eq!(speech.role, Role::User, "{second:?}");
+        assert_canonical_assistant_speech(&message_plain_text(speech), "らぼみ", "返信も続けるね");
+        assert_eq!(assistant_tool_index + 3, second.len(), "{second:?}");
     }
 
     #[tokio::test]

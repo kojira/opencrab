@@ -1,5 +1,6 @@
 use opencrab_actions::TranscriptSource;
-use opencrab_db::queries::{insert_session_log, SessionLogRow};
+use opencrab_core::history;
+use opencrab_db::queries::SessionLogRow;
 use rusqlite::{params, Connection, Transaction};
 
 use crate::error::GateError;
@@ -125,41 +126,28 @@ pub(super) fn record_inbound(
     if let Some(reply_target) = &said.reply_target {
         meta["reply_target"] = serde_json::json!(reply_target);
     }
-    insert_session_log(
-        tx,
-        &SessionLogRow {
-            id: None,
-            agent_id: row.agent_id.clone(),
-            session_id: session_id.to_string(),
-            log_type: "speech".to_string(),
-            content: content.to_string(),
-            speaker_id: Some(said.author_id.clone()),
-            turn_number: None,
-            metadata_json: Some(meta.to_string()),
-            created_at: None,
-        },
-    )
-    .map_err(|e| GateError::store_logged("said.session_log_insert", e))
+    let inbound = history::Event::InboundSpeech {
+        speaker_id: &said.author_id,
+        text: content,
+        metadata: Some(meta),
+    };
+    history::record(tx, &row.agent_id, session_id, &inbound)
+        .map_err(|e| GateError::store_logged("said.session_log_insert", e))
 }
 
-/// D-1085: the agent's own speech row of an agent prelude (same shape as a delivered reply).
-pub(crate) fn agent_prelude_row(session_id: &str, agent_id: &str, prelude: &str) -> SessionLogRow {
-    SessionLogRow {
-        id: None,
-        agent_id: agent_id.to_string(),
-        session_id: session_id.to_string(),
-        log_type: "speech".to_string(),
-        content: prelude.to_string(),
-        speaker_id: Some(agent_id.to_string()),
-        turn_number: None,
-        metadata_json: Some(
-            serde_json::json!({
-                "source": TranscriptSource::new("external", "external_response").reply()
-            })
-            .to_string(),
-        ),
-        created_at: None,
+/// D-1085: the agent's own speech of an agent prelude (same shape as a delivered reply).
+fn agent_prelude(prelude: &str) -> history::Event<'_> {
+    history::Event::AgentSpeech {
+        text: prelude,
+        metadata: Some(serde_json::json!({
+            "source": TranscriptSource::new("external", "external_response").reply()
+        })),
     }
+}
+
+/// The prelude's row, for the provisional snapshot (not written there).
+pub(crate) fn agent_prelude_row(session_id: &str, agent_id: &str, prelude: &str) -> SessionLogRow {
+    agent_prelude(prelude).row(agent_id, session_id)
 }
 
 /// D-1085: records `said.agent_prelude` as the agent's own speech and returns the row id.
@@ -170,6 +158,6 @@ pub fn record_agent_prelude(
     agent_id: &str,
     prelude: &str,
 ) -> Result<i64, GateError> {
-    insert_session_log(conn, &agent_prelude_row(session_id, agent_id, prelude))
+    history::record(conn, agent_id, session_id, &agent_prelude(prelude))
         .map_err(|e| GateError::store_logged("said.agent_prelude_insert", e))
 }

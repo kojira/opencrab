@@ -72,7 +72,7 @@ impl HeldSpeech {
                 let row = crate::delivery::say_speech_row(&agent_id, &session_id, &speech);
                 gate.on_promoted(move || match db.lock() {
                     Ok(conn) => {
-                        if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &row) {
+                        if let Err(e) = opencrab_core::history::write_row(&conn, &row) {
                             tracing::error!(%session_id, "held continuation speech row failed: {e}");
                         }
                     }
