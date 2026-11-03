@@ -399,7 +399,7 @@
     }
 
     #[tokio::test]
-    async fn all_utterance_tool_continuation_moves_delivered_content_into_bounded_history() {
+    async fn all_utterance_tool_continuation_appends_delivered_content_after_the_utterance() {
         use std::sync::{Arc, Mutex};
 
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -468,12 +468,11 @@
             second[assistant_tool_index + 1].tool_call_id.as_deref(),
             Some("reply-1")
         );
-        let bounded = second
-            .iter()
-            .find(|message| message_plain_text(message).contains("<conversation_history>"))
-            .map(message_plain_text)
-            .expect("one bounded conversation history");
-        assert_canonical_assistant_speech(&bounded, "らぼみ", "返信も続けるね");
+        // D-1111: the text was delivered after the reply ran, so it follows the reply's result.
+        let speech = &second[assistant_tool_index + 2];
+        assert_eq!(speech.role, Role::User, "{second:?}");
+        assert_canonical_assistant_speech(&message_plain_text(speech), "らぼみ", "返信も続けるね");
+        assert_eq!(assistant_tool_index + 3, second.len(), "{second:?}");
     }
 
     #[tokio::test]
@@ -632,18 +631,19 @@
             assistant_tool_index + 1,
             "native assistant(tool_calls) -> tool adjacency changed: {third:?}"
         );
-        let speech_index = third
-            .iter()
-            .position(|message| {
-                message.role == Role::Assistant
-                    && message.tool_calls.is_none()
-                    && message_plain_text(message) == "結果を確認したよ"
-            })
-            .expect("the speech after the tool result is an assistant message");
+        let speech = &third[tool_result_index + 1];
         assert_eq!(
-            speech_index,
-            tool_result_index + 1,
-            "the speech must come right after the tool result it answers: {third:?}"
+            speech.role,
+            Role::User,
+            "delivered speech is shown as conversation, not as an assistant draft: {third:?}"
+        );
+        assert_canonical_assistant_speech(&message_plain_text(speech), "らぼみ", "結果を確認したよ");
+        assert!(
+            third.iter().all(|message| {
+                message.role != Role::Assistant
+                    || message.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())
+            }),
+            "plain assistant speech must not appear: {third:?}"
         );
         let bounded = third
             .iter()

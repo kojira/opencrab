@@ -68,11 +68,7 @@ pub fn settle_completed(
     // 1. 完了本文を DB へ永続化する（sink 発火より前 = 順序契約）。
     if !ctx.parent_session_id.is_empty() {
         if let Ok(conn) = db.lock() {
-            let log = opencrab_db::queries::SessionLogRow {
-                id: None,
-                agent_id: ctx.agent_id.clone(),
-                session_id: ctx.parent_session_id.clone(),
-                log_type: "system".to_string(),
+            let completed = opencrab_core::history::Event::System {
                 content: serde_json::json!({
                     "type": "subtask_completed",
                     "subtask_id": ctx.subtask_id,
@@ -82,11 +78,14 @@ pub fn settle_completed(
                 })
                 .to_string(),
                 speaker_id: None,
-                turn_number: None,
-                metadata_json: None,
-                created_at: None,
+                metadata: None,
             };
-            opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
+            opencrab_core::history::record_best_effort(
+                &conn,
+                &ctx.agent_id,
+                &ctx.parent_session_id,
+                &completed,
+            );
         }
     }
 

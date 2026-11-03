@@ -1,5 +1,5 @@
 use anyhow::Result;
-use opencrab_llm_types::{Message, MessageContent, Role, ToolCall};
+use opencrab_llm_types::ToolCall;
 
 use super::{
     run_helpers::{
@@ -7,8 +7,8 @@ use super::{
         partition_tool_calls_for_dispatch, InitialTurn,
     },
     silent_origins::SilentOriginTracker,
-    turn_budget::{apply_turn_budget, move_assistant, seat_assistant, seat_tool_result},
-    SkillEngine,
+    turn_budget::{apply_turn_budget, seat_tool_result},
+    turn_view, SkillEngine,
 };
 use crate::engine::types::{ChatRequest, EngineResult, LlmCallLog, LlmExchangeLog};
 
@@ -63,7 +63,6 @@ impl SkillEngine {
         let mut last_generation_had_continuation_speech = false;
         // 配送フックの無い run（subtask 等）は、単独 NO_REPLY で直前の本文を失わない。
         let mut last_undelivered_speech: Option<String> = None;
-        let history_name = self.assistant_history_name.as_deref();
 
         loop {
             iterations += 1;
@@ -373,23 +372,6 @@ impl SkillEngine {
                     });
                 }
 
-                // Add the assistant message with tool calls (arguments already
-                // canonical Strings, so no Value->String conversion needed).
-                let assistant_tool_message_index = messages.len();
-                messages.push(Message {
-                    role: Role::Assistant,
-                    content: content.clone().map(MessageContent::Text),
-                    name: None,
-                    function_call: None,
-                    tool_calls: Some(tool_calls.clone()),
-                    tool_call_id: None,
-                });
-                let assistant_ledger_key = format!("asst:{}", messages.len());
-                turn_ledger.record(
-                    assistant_ledger_key.clone(),
-                    content.as_deref().unwrap_or(""),
-                );
-                apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                 // 発話クラス（reply/reaction/repost・§3.3.1 C6）の tool_call は**機械行を
                 // 永続しない**。発話の本文は配送経路が speech ログとして残す（本文＋関係注記）
                 // ので、ここで永続 tool_call 行から除外する。照会/道具クラスの call は従来どおり。
@@ -403,23 +385,27 @@ impl SkillEngine {
                 let mut holding_delivered = false;
                 if !persisted.is_empty() {
                     if let Some(body) = content.as_deref().filter(|body| !body.trim().is_empty()) {
-                        if let Some(ref cb) = self.on_continuation_speech {
-                            cb(body.to_string()).await.map_err(|e| {
-                                anyhow::anyhow!("holding speech delivery failed: {e:#}")
-                            })?;
-                            silent_origins.resolve_visible();
-                            holding_delivered = true;
-                            move_assistant(
-                                &mut messages,
-                                &mut turn_ledger,
-                                history_name,
-                                body,
-                                assistant_tool_message_index,
-                                &assistant_ledger_key,
-                            )?;
-                        }
+                        // D-1111: the delivered speech came first; then the tool calls.
+                        let view = (&mut messages, &mut turn_ledger, &mut silent_origins);
+                        holding_delivered =
+                            self.deliver_speech("holding speech", body, view).await?;
                     }
                 }
+                // The utterance-only generation's text is delivered after its utterances run
+                // (below); it is appended there, so the tool-call message carries no text.
+                let utterance_text_follows = !termination_requested
+                    && !next_llm_call_needed
+                    && self.on_continuation_speech.is_some();
+                let undelivered_text = (!holding_delivered && !utterance_text_follows)
+                    .then(|| content.clone())
+                    .flatten();
+                turn_view::tool_calls(
+                    &mut messages,
+                    &mut turn_ledger,
+                    undelivered_text,
+                    tool_calls.clone(),
+                );
+                apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                 // Notify on_tool_call callbacks.
                 if !persisted.is_empty() && !self.on_tool_call.is_empty() {
                     let calls_json = serde_json::to_string(&persisted).unwrap_or_default();
@@ -513,8 +499,12 @@ impl SkillEngine {
                         let denied = Self::permission_denied(tool_name);
                         let result_json = serde_json::to_string(&denied)
                             .unwrap_or_else(|_| r#"{"error": "Permission denied"}"#.to_string());
-                        messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
-                        turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
+                        turn_view::tool_result(
+                            &mut messages,
+                            &mut turn_ledger,
+                            &tool_call.id,
+                            &result_json,
+                        );
                         apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
                         // Notify on_tool_result callbacks for denied action.
@@ -552,8 +542,12 @@ impl SkillEngine {
                         // 最小 ack（データを持たない空オブジェクト・capping 不要）。成功/失敗を
                         // 名乗らない——失敗は say と同一経路で ❌/turn_failed に別途表面化する（C9）。
                         let ack = "{}".to_string();
-                        messages.push(Message::tool(tool_call.id.clone(), ack.clone()));
-                        turn_ledger.record(format!("tool:{}", messages.len()), &ack);
+                        turn_view::tool_result(
+                            &mut messages,
+                            &mut turn_ledger,
+                            &tool_call.id,
+                            &ack,
+                        );
                         apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                         tracing::debug!(
                             iteration = iterations,
@@ -605,8 +599,12 @@ impl SkillEngine {
                         },
                     )?;
 
-                    messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
-                    turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
+                    turn_view::tool_result(
+                        &mut messages,
+                        &mut turn_ledger,
+                        &tool_call.id,
+                        &result_json,
+                    );
                     apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                     shown.collect(&result.images);
                     // Notify on_tool_result callbacks.
@@ -652,8 +650,12 @@ impl SkillEngine {
                         });
                         let result_json = serde_json::to_string(&spawned)
                             .unwrap_or_else(|_| r#"{"status":"spawned"}"#.to_string());
-                        messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
-                        turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
+                        turn_view::tool_result(
+                            &mut messages,
+                            &mut turn_ledger,
+                            &tool_call.id,
+                            &result_json,
+                        );
                         apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                         for cb in &self.on_tool_result {
                             cb(
@@ -673,20 +675,14 @@ impl SkillEngine {
                     if let Some(ref c) = content {
                         if !c.trim().is_empty() {
                             last_generation_had_continuation_speech = true;
-                            if let Some(ref cb) = self.on_continuation_speech {
-                                cb(c.clone()).await.map_err(|e| {
-                                    anyhow::anyhow!("continuation speech delivery failed: {e:#}")
-                                })?;
-                                silent_origins.resolve_visible();
-                                move_assistant(
-                                    &mut messages,
-                                    &mut turn_ledger,
-                                    history_name,
+                            if !self
+                                .deliver_speech(
+                                    "continuation speech",
                                     c,
-                                    assistant_tool_message_index,
-                                    &assistant_ledger_key,
-                                )?;
-                            } else {
+                                    (&mut messages, &mut turn_ledger, &mut silent_origins),
+                                )
+                                .await?
+                            {
                                 // 最終EngineResultで上位が配送する本文なので、このrequestはsilentではない。
                                 last_undelivered_speech = Some(c.clone());
                                 silent_origins.resolve_visible();
@@ -707,16 +703,10 @@ impl SkillEngine {
                     // （失敗を隠して次に進まない）。on_response_text は最終・text+tool でも発火する
                     // ため区別できず流用しない（最終二重配送・text+tool 二重保存を避ける）。
                     last_generation_had_continuation_speech = true;
-                    if let Some(ref cb) = self.on_continuation_speech {
-                        cb(c.clone()).await.map_err(|e| {
-                            anyhow::anyhow!("continuation speech delivery failed: {e:#}")
-                        })?;
-                        silent_origins.resolve_visible();
-                    } else {
-                        last_undelivered_speech = Some(c.clone());
-                        silent_origins.resolve_visible();
+                    let view = (&mut messages, &mut turn_ledger, &mut silent_origins);
+                    if let Some(held) = self.speech_or_hold(c, view).await? {
+                        last_undelivered_speech = Some(held);
                     }
-                    seat_assistant(&mut messages, &mut turn_ledger, history_name, c)?;
                     apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                 }
                 continue;
@@ -736,16 +726,10 @@ impl SkillEngine {
                 if let Some(ref speech) = content {
                     if !speech.trim().is_empty() {
                         last_generation_had_continuation_speech = true;
-                        if let Some(ref cb) = self.on_continuation_speech {
-                            cb(speech.clone()).await.map_err(|e| {
-                                anyhow::anyhow!("continuation speech delivery failed: {e:#}")
-                            })?;
-                            silent_origins.resolve_visible();
-                        } else {
-                            last_undelivered_speech = Some(speech.clone());
-                            silent_origins.resolve_visible();
+                        let view = (&mut messages, &mut turn_ledger, &mut silent_origins);
+                        if let Some(held) = self.speech_or_hold(speech, view).await? {
+                            last_undelivered_speech = Some(held);
                         }
-                        seat_assistant(&mut messages, &mut turn_ledger, history_name, speech)?;
                     }
                 }
                 for folded in late_inbound {

@@ -77,33 +77,24 @@ pub(super) fn prepare_loop_restart(
             let _ = opencrab_db::queries::update_task_status(&conn, agent_id, task.id, "abandoned");
             // 台帳セクションは active タスクしか描画しない → session_logs 側にも
             // 残して、次ターンの会話から見えるようにする（詳細は get_task で辿れる）。
-            opencrab_db::queries::insert_session_log_best_effort(
-                &conn,
-                &opencrab_db::queries::SessionLogRow {
-                    id: None,
-                    agent_id: agent_id.to_string(),
-                    session_id: session_id.to_string(),
-                    log_type: "task_event".to_string(),
-                    content: format!(
-                        "Task #{} was abandoned automatically: the run hit the iteration \
-                         limit again right after an automatic restart. Goal: {}. Renegotiate \
-                         the goal/contract with the user or ask for help before reopening \
-                         (full history: get_task).",
-                        task.id,
-                        task.goal.chars().take(200).collect::<String>(),
-                    ),
-                    speaker_id: Some("system".to_string()),
-                    turn_number: None,
-                    metadata_json: Some(
-                        serde_json::json!({
-                            "task_id": task.id,
-                            "event": "abandoned_by_loop_restart",
-                        })
-                        .to_string(),
-                    ),
-                    created_at: None,
-                },
+            let content = format!(
+                "Task #{} was abandoned automatically: the run hit the iteration \
+                 limit again right after an automatic restart. Goal: {}. Renegotiate \
+                 the goal/contract with the user or ask for help before reopening \
+                 (full history: get_task).",
+                task.id,
+                task.goal.chars().take(200).collect::<String>(),
             );
+            let abandoned = opencrab_core::history::Event::Typed {
+                log_type: "task_event",
+                content: &content,
+                speaker_id: Some("system"),
+                metadata: Some(serde_json::json!({
+                    "task_id": task.id,
+                    "event": "abandoned_by_loop_restart",
+                })),
+            };
+            opencrab_core::history::record_best_effort(&conn, agent_id, session_id, &abandoned);
         }
         return None;
     }

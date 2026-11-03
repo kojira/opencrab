@@ -293,21 +293,14 @@ fn record_rest_continuation_error(
         );
         return;
     };
-    let row = opencrab_db::queries::SessionLogRow {
-        id: None,
-        agent_id: agent_id.to_string(),
-        session_id: session_id.to_string(),
-        log_type: "system".to_string(),
+    let note = opencrab_core::history::Event::System {
         content: format!("{error_name}: {detail}"),
-        speaker_id: Some(agent_id.to_string()),
-        turn_number: None,
-        metadata_json: Some(
-            serde_json::json!({ "error_name": error_name, "entrypoint": "rest_continuation" })
-                .to_string(),
+        speaker_id: Some(agent_id),
+        metadata: Some(
+            serde_json::json!({ "error_name": error_name, "entrypoint": "rest_continuation" }),
         ),
-        created_at: None,
     };
-    if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &row) {
+    if let Err(e) = opencrab_core::history::record(&conn, agent_id, session_id, &note) {
         tracing::error!(
             session_id = %session_id,
             error_name,
@@ -399,19 +392,13 @@ pub async fn send_agent_message(
 
     // 3. Log user message.
     {
-        let log = opencrab_db::queries::SessionLogRow {
-            id: None,
-            agent_id: id.clone(),
-            session_id: session_id.clone(),
-            log_type: "speech".to_string(),
-            content: req.content.clone(),
-            speaker_id: Some(user_id.to_string()),
-            turn_number: None,
-            metadata_json: None,
-            created_at: None,
+        let inbound = opencrab_core::history::Event::InboundSpeech {
+            speaker_id: user_id,
+            text: &req.content,
+            metadata: None,
         };
         let conn = state.db.lock().unwrap();
-        if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
+        if let Err(e) = opencrab_core::history::record(&conn, &id, &session_id, &inbound) {
             return Json(serde_json::json!({"error": format!("Failed to log message: {}", e)}))
                 .into_response();
         }

@@ -37,19 +37,19 @@ impl Action for GenerateInnerVoiceAction {
 
         // セッションログに記録
         if let Some(session_id) = &ctx.session_id {
-            let log = opencrab_db::queries::SessionLogRow {
-                id: None,
-                agent_id: ctx.agent_id.clone(),
-                session_id: session_id.clone(),
-                log_type: "inner_voice".to_string(),
-                content: thought.to_string(),
-                speaker_id: Some(ctx.agent_id.clone()),
-                turn_number: None,
-                metadata_json: None,
-                created_at: None,
+            let inner_voice = opencrab_core::history::Event::Typed {
+                log_type: "inner_voice",
+                content: thought,
+                speaker_id: Some(&ctx.agent_id),
+                metadata: None,
             };
             if let Ok(conn) = ctx.db.lock() {
-                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
+                opencrab_core::history::record_best_effort(
+                    &conn,
+                    &ctx.agent_id,
+                    session_id,
+                    &inner_voice,
+                );
             }
         }
 

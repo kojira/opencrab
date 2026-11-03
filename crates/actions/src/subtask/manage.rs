@@ -139,15 +139,11 @@ pub fn cancel_subtask(
                             completed.len()
                         )
                     };
-                    let log = opencrab_db::queries::SessionLogRow {
-                        id: None,
-                        agent_id: subtask.agent_id.clone(),
-                        session_id: parent.clone(),
-                        log_type: "tool_cancelled".to_string(),
-                        content,
+                    let cancelled = opencrab_core::history::Event::Typed {
+                        log_type: "tool_cancelled",
+                        content: &content,
                         speaker_id: None,
-                        turn_number: None,
-                        metadata_json: Some(
+                        metadata: Some(
                             // `task` は旧 Discord 実装のキー、`label` / `completed_calls`
                             // は neutral 実装のキー。統合後は**両方**載せる（どちらの
                             // 読み手も壊さない）。`tool_name` は固定値ではなく
@@ -158,12 +154,15 @@ pub fn cancel_subtask(
                                 "task": task_description,
                                 "label": subtask.label,
                                 "completed_calls": completed,
-                            })
-                            .to_string(),
+                            }),
                         ),
-                        created_at: None,
                     };
-                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
+                    opencrab_core::history::record_best_effort(
+                        &conn,
+                        &subtask.agent_id,
+                        &parent,
+                        &cancelled,
+                    );
                     // #553: subtask セッションの死活を永続化する（cancelled）。settle_completed
                     // の終端化と対をなす。sub-session 行が無ければ 0 行更新で無害。
                     let _ = opencrab_db::queries::set_session_status(
@@ -362,24 +361,16 @@ fn record_steer(
         );
         return false;
     };
-    let log = opencrab_db::queries::SessionLogRow {
-        id: None,
-        agent_id: sub_agent_id.to_string(),
-        session_id: sub_session_id.to_string(),
-        log_type: STEER_LOG_TYPE.to_string(),
-        content: message.to_string(),
+    let steer = opencrab_core::history::Event::Typed {
+        log_type: STEER_LOG_TYPE,
+        content: message,
         speaker_id: None,
-        turn_number: None,
-        metadata_json: Some(
-            serde_json::json!({
-                "subtask_id": subtask_id,
-                "from_session": from_session,
-            })
-            .to_string(),
-        ),
-        created_at: None,
+        metadata: Some(serde_json::json!({
+            "subtask_id": subtask_id,
+            "from_session": from_session,
+        })),
     };
-    match opencrab_db::queries::insert_session_log(&conn, &log) {
+    match opencrab_core::history::record(&conn, sub_agent_id, sub_session_id, &steer) {
         Ok(_) => true,
         Err(e) => {
             tracing::warn!(
