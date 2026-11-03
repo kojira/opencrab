@@ -632,18 +632,19 @@
             assistant_tool_index + 1,
             "native assistant(tool_calls) -> tool adjacency changed: {third:?}"
         );
-        let speech_index = third
-            .iter()
-            .position(|message| {
-                message.role == Role::Assistant
-                    && message.tool_calls.is_none()
-                    && message_plain_text(message) == "結果を確認したよ"
-            })
-            .expect("the speech after the tool result is an assistant message");
+        let speech = &third[tool_result_index + 1];
         assert_eq!(
-            speech_index,
-            tool_result_index + 1,
-            "the speech must come right after the tool result it answers: {third:?}"
+            speech.role,
+            Role::User,
+            "delivered speech is shown as conversation, not as an assistant draft: {third:?}"
+        );
+        assert_canonical_assistant_speech(&message_plain_text(speech), "らぼみ", "結果を確認したよ");
+        assert!(
+            third.iter().all(|message| {
+                message.role != Role::Assistant
+                    || message.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())
+            }),
+            "plain assistant speech must not appear: {third:?}"
         );
         let bounded = third
             .iter()
