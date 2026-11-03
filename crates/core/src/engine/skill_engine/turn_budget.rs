@@ -304,13 +304,21 @@ pub(super) fn move_assistant(
 }
 
 /// Seat visible speech in the canonical boundary, falling back to a provider assistant message.
+///
+/// D-1110: once a native tool exchange follows the boundary, the speech goes after it as an
+/// assistant message (as live inbound does). Inside the boundary it would precede the tool
+/// result it answers, and the model would see that result as still unanswered.
 pub(super) fn seat_assistant(
     messages: &mut Vec<Message>,
     ledger: &mut crate::context_budget::TokenLedger,
     assistant_name: Option<&str>,
     speech: &str,
 ) -> Result<()> {
-    if !append_assistant_history(messages, ledger, assistant_name, speech)? {
+    let tool_exchange_follows = messages
+        .iter()
+        .any(|m| m.role == Role::Tool || m.tool_calls.is_some());
+    if tool_exchange_follows || !append_assistant_history(messages, ledger, assistant_name, speech)?
+    {
         messages.push(Message {
             role: Role::Assistant,
             content: Some(MessageContent::Text(speech.to_string())),
