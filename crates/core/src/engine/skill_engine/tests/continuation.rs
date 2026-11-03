@@ -574,8 +574,12 @@
         assert_eq!(requests.lock().unwrap().len(), 1);
     }
 
+    /// D-1110: speech given after a tool result must be seen AFTER that result in the next
+    /// request. Seating it inside `<conversation_history>` (which precedes the native tool
+    /// messages) left the tool result as the newest unanswered item, so the model answered it
+    /// again on every call (QC: 18 identical posts after `send_ui`).
     #[tokio::test]
-    async fn native_tool_result_then_plain_continuation_keeps_roles_and_bounded_speech() {
+    async fn native_tool_result_then_plain_continuation_puts_speech_after_the_result() {
         use std::sync::{Arc, Mutex};
 
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -628,25 +632,29 @@
             assistant_tool_index + 1,
             "native assistant(tool_calls) -> tool adjacency changed: {third:?}"
         );
-        assert!(
-            third.iter().all(|message| {
-                message.role != Role::Assistant
-                    || message.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())
-            }),
-            "plain assistant speech escaped the boundary: {third:?}"
+        let speech_index = third
+            .iter()
+            .position(|message| {
+                message.role == Role::Assistant
+                    && message.tool_calls.is_none()
+                    && message_plain_text(message) == "結果を確認したよ"
+            })
+            .expect("the speech after the tool result is an assistant message");
+        assert_eq!(
+            speech_index,
+            tool_result_index + 1,
+            "the speech must come right after the tool result it answers: {third:?}"
         );
         let bounded = third
             .iter()
             .find(|message| message_plain_text(message).contains("<conversation_history>"))
             .map(message_plain_text)
             .expect("one bounded conversation history");
-        assert_eq!(bounded.matches("結果を確認したよ").count(), 1);
-        assert!(
-            bounded.find("道具で確認して").unwrap() < bounded.find("結果を確認したよ").unwrap(),
-            "{bounded}"
+        assert_eq!(
+            bounded.matches("結果を確認したよ").count(),
+            0,
+            "the speech must not be seated before the tool exchange: {bounded}"
         );
-        assert_canonical_assistant_speech(&bounded, "らぼみ", "結果を確認したよ");
-        assert!(!bounded.contains("[assistant]:"), "noncanonical header: {bounded}");
     }
 
     #[tokio::test]
