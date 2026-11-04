@@ -47,7 +47,7 @@ pub async fn list_model_pricing(
     // server-global なので、掛け算に必要な片方として比を同じレスポンスに載せる（#484 / #826-A）。
     Ok(Json(json!({
         "models": rows,
-        "compaction_ratio": state.compaction_ratio,
+        "compaction_ratio": state.config().llm.compaction_ratio,
     })))
 }
 

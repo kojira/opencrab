@@ -14,8 +14,8 @@ use super::call_contexts::agent_ctx;
 /// 区別できる構成が必要。
 pub(crate) fn state_with_shell(initial: &[&str]) -> AppState {
     let state = crate::test_app_state();
-    {
-        let mut cfg = state.tools_config.write().unwrap();
+    state.config.update(|c| {
+        let cfg = &mut c.tools;
         cfg.enabled = true;
         cfg.shell = Some(opencrab_actions::tools::ShellToolConfig {
             enabled: true,
@@ -29,16 +29,15 @@ pub(crate) fn state_with_shell(initial: &[&str]) -> AppState {
             commands: Vec::new(),
             run_env: std::collections::BTreeMap::new(),
         });
-    }
+    });
     state
 }
 
-/// 走行中の実行許可設定（`AppState.tools_config`）に載っているコマンド一覧。
+/// 走行中の実行許可設定（live config の `[tools]`）に載っているコマンド一覧。
 pub(crate) fn live_allowed_commands(state: &AppState) -> Vec<String> {
     state
-        .tools_config
-        .read()
-        .unwrap()
+        .config()
+        .tools
         .shell
         .as_ref()
         .map(|s| s.allowed_commands.clone())
@@ -98,8 +97,8 @@ pub(crate) fn shell_ctx() -> (tempfile::TempDir, opencrab_actions::ActionContext
 /// （構造化）で 10 個を与えるので、そちら側も再現できないと #300 を覆えない。
 pub(crate) fn state_with_shell_commands(structured: &[&str], plain: &[&str]) -> AppState {
     let state = state_with_shell(plain);
-    {
-        let mut cfg = state.tools_config.write().unwrap();
+    state.config.update(|c| {
+        let cfg = &mut c.tools;
         let shell = cfg.shell.as_mut().unwrap();
         shell.commands = structured
             .iter()
@@ -110,7 +109,7 @@ pub(crate) fn state_with_shell_commands(structured: &[&str], plain: &[&str]) -> 
                 description: None,
             })
             .collect();
-    }
+    });
     state
 }
 

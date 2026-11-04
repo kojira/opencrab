@@ -92,7 +92,7 @@ pub async fn maybe_run_memory_condense(state: &AppState, agent_id: &str) -> anyh
     let runner = AppStateTurnRunner { state };
     run_condense(
         &state.db,
-        &state.memory_condense,
+        &state.config().memory_condense,
         &state.index_build_inflight,
         agent_id,
         &runner,

@@ -1,62 +1,30 @@
 use crate::{intake_process, scheduler};
-use opencrab_server::{config::AppConfig, AppState};
+use opencrab_server::AppState;
 
 /// Starts the transport-independent maintenance, intake, scheduler, self-check,
 /// and configuration-watcher tasks in their required startup order.
 #[allow(clippy::let_and_return)] // Keep the original watcher binding and its main-lifetime handoff.
 pub(super) fn spawn_background_tasks(
     state: &AppState,
-    cfg: &AppConfig,
     _gate_socket: &Option<std::path::PathBuf>,
 ) -> std::thread::JoinHandle<()> {
+    // Every loop below reads its settings (enabled / interval / retention ...) from the live
+    // config on every tick (D-1113), so they are always started and editing the config file
+    // turns them on or off without a restart.
+
     // メモリインデックスのアイドル時メンテナンス（増分ビルドの取りこぼし回収 /
-    // キーワードバックフィル / 月次ロールアップ）。全エージェントを毎 tick 巡回。
-    if cfg.agent.memory_maintenance_enabled {
-        opencrab_server::memory_maintenance::spawn_memory_maintenance_loop(
-            state.clone(),
-            cfg.agent.memory_maintenance_interval_secs,
-        );
-    }
+    // キーワードバックフィル / 月次ロールアップ / sleep）。全エージェントを毎 tick 巡回。
+    opencrab_server::memory_maintenance::spawn_memory_maintenance_loop(state.clone());
 
     // 古い llm_logs の zip アーカイブ（#337）。メンテナンスループが per-agent かつ
     // 高頻度（既定 600 秒）なのに対し、こちらは全 llm_logs を対象にした日次の重い I/O
-    // なので別ループにする。出力先は未指定なら DB ファイルの親 + `archive`（DB と同じ
-    // ボリューム = 内蔵ディスクに置かない方針）へ導出する。
-    if cfg.llm_log_archive.enabled {
-        let archive_dir = if cfg.llm_log_archive.dir.trim().is_empty() {
-            std::path::Path::new(&cfg.database.path)
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
-                .join("archive")
-        } else {
-            std::path::PathBuf::from(&cfg.llm_log_archive.dir)
-        };
-        opencrab_server::llm_log_archive::spawn_llm_log_archive_loop(
-            state.db.clone(),
-            archive_dir,
-            cfg.llm_log_archive.retention_days,
-            cfg.llm_log_archive.interval_secs,
-        );
-    }
+    // なので別ループにする。
+    opencrab_server::llm_log_archive::spawn_llm_log_archive_loop(state.clone());
 
     // 退避ファイル（workspace/tmp）の掃除（#711）。退避経路は書くだけで消す実装が無く、
     // ファイルが無限に増える。全エージェントの `workspace/tmp/` を日次で巡回し、mtime が
     // 保持日数より古い**通常ファイルのみ**を個別 remove_file で消す（グロブ・再帰なし）。
-    // 発火判定用マーカーは DB ファイルの親（DB と同じボリューム = 内蔵ディスクに置かない）
-    // 直下に置き、どのエージェントの tmp とも混ざらないようにする。
-    if cfg.offload_cleanup.enabled {
-        let marker_dir = std::path::Path::new(&cfg.database.path)
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .to_path_buf();
-        opencrab_server::offload_cleanup::spawn_offload_cleanup_loop(
-            state.db.clone(),
-            cfg.agent.workspace_path.clone(),
-            marker_dir,
-            cfg.offload_cleanup.retention_days,
-            cfg.offload_cleanup.interval_secs,
-        );
-    }
+    opencrab_server::offload_cleanup::spawn_offload_cleanup_loop(state.clone());
 
     // 外部イベント受信（webhook intake / #454）。
     //
@@ -87,14 +55,8 @@ pub(super) fn spawn_background_tasks(
         });
     }
 
-    let _watcher_handle = opencrab_server::hot_reload::start_config_watcher(
-        "config",
-        state.db.clone(),
-        // #412: 「default_model が変わったか」の基準。稼働中の実効 spec そのものを渡す
-        // （上の `format!("{provider}:{model}")` と同じ形でないと永久に不一致になる）。
-        state.default_model.clone(),
-        state.tools_config.clone(),
-    );
+    let _watcher_handle =
+        opencrab_server::hot_reload::start_config_watcher("config", state.clone());
 
     _watcher_handle
 }

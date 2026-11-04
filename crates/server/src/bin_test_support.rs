@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use opencrab_llm::message::{ChatRequest, ChatResponse, Choice, FinishReason, Message, Usage};
 use opencrab_llm::router::LlmRouter;
 use opencrab_llm::traits::{LlmProvider, ModelInfo};
-use opencrab_server::{config, subtask_registries, AppState, SharedLlmRouter};
+use opencrab_server::AppState;
 
 /// 常に固定テキストを返す最小 mock。生成回数も数える。
 pub(crate) struct FixedTextMock {
@@ -117,38 +117,7 @@ pub(crate) fn app_state_with_agent(provider: Arc<dyn LlmProvider>, agent_id: &st
     router.add_provider(provider);
     router.set_default_provider("mock");
 
-    let timed_fire_router = opencrab_actions::TimedFireRouter::new();
-
-    AppState {
-        db,
-        llm_router: SharedLlmRouter::new(router),
-        llm_config: Arc::new(toml::from_str("").unwrap()),
-        subtask_auto_dispatch: true,
-        workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
-        #[cfg(any())]
-        nostr_master_key: None,
-        default_model: "mock:gpt-4o".to_string(),
-        tools_config: Arc::new(std::sync::RwLock::new(
-            opencrab_actions::tools::ToolsConfig::default(),
-        )),
-        compaction_ratio: 0.5,
-        evaluator: config::EvaluatorConfig::default(),
-        skill_consolidation: config::SkillConsolidationConfig::default(),
-        category_maintenance: config::CategoryMaintenanceConfig::default(),
-        memory_organize: config::MemoryOrganizeConfig::default(),
-        memory_declare: config::MemoryDeclareConfig::default(),
-        memory_condense: config::MemoryCondenseConfig::default(),
-        loop_restart_enabled: false,
-        index_build_inflight: Arc::new(dashmap::DashMap::new()),
-        intake: Arc::new(config::IntakeConfig::default()),
-        intake_wake: Arc::new(tokio::sync::Notify::new()),
-        mcp_manager: None,
-        subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
-        session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
-        timed_fire_router: Arc::new(timed_fire_router),
-        progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
-        scheduler_wake: Arc::new(tokio::sync::Notify::new()),
-    }
+    AppState::new(db, router, opencrab_server::test_config("mock", "gpt-4o"))
 }
 
 /// 指定セッションの「`content='NO_REPLY'` の agent speech 行」数（#899 の観測点）。

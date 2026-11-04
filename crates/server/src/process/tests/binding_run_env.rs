@@ -41,14 +41,14 @@ fn owner_context(
 /// Build a turn executor for `run_env` and run `printenv <name>` through it.
 async fn printenv_with_run_env(run_env: BTreeMap<String, String>) -> (bool, String) {
     let state = crate::test_app_state();
-    {
-        let mut tools = state.tools_config.write().unwrap();
+    state.config.update(|c| {
+        let tools = &mut c.tools;
         tools.enabled = true;
         tools.shell = Some(opencrab_actions::tools::ShellToolConfig {
             enabled: true,
             ..Default::default()
         });
-    }
+    });
     {
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::add_agent_allowed_command(&conn, AGENT, "printenv", "test").unwrap();

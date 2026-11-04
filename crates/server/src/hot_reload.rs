@@ -1,8 +1,10 @@
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+
+use crate::config::AppConfig;
+use crate::AppState;
 
 /// 再読み込みした設定を適用してよいか検証する（#412）。
 ///
@@ -12,25 +14,16 @@ use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 /// リロードは丸ごと捨て、プロセスは旧設定のまま走り続ける。
 ///
 /// **検証するのは spec が実際に変わったときだけ。** 方針は「設定する時に弾く」であって、
-/// 変えていないものを理由に弾くのはそれより広い。ホットリロードは `default_model` を
-/// 適用しない（`state.default_model` は起動時に一度組み立てられるきり）ので、無条件に
-/// 検証すると**リロードが適用しない値を根拠に、モデルと無関係な tools の編集まで
-/// 巻き添えで捨てる**ことになる。
+/// 変えていないものを理由に弾くのはそれより広い（モデルと無関係な編集まで巻き添えで捨てない）。
 ///
-/// `running_default_model` は稼働中の実効 spec（`AppState.default_model`）。
-/// 組み立て方は `main.rs` 側と**同じ `format!("{provider}:{model}")`** で、片方だけ
-/// 分離した形になっていると永久に不一致になる。ホットリロードでは更新されない値
-/// なので、比較対象は常に「いまプロセスが実際に使っているモデル」になる。
-///
-/// 「変わったか」の比較は `model_pricing` を引くキーと**同じ正規化**を通す
-/// （[`crate::process::normalize_model_spec`]）。両端の空白が付いた / 外れただけで
-/// 「変わった」と判定すると、同じモデルを指しているのに検証が走る。
+/// `running_default_model` は稼働中の実効 spec（[`AppState::default_model`]）。「変わったか」の
+/// 比較は `model_pricing` を引くキーと**同じ正規化**を通す（[`crate::process::normalize_model_spec`]）。
 fn validate_reloaded_config(
     db: &opencrab_db::Db,
     running_default_model: &str,
-    cfg: &crate::config::AppConfig,
+    cfg: &AppConfig,
 ) -> Result<(), String> {
-    let spec = format!("{}:{}", cfg.llm.default_provider, cfg.llm.default_model);
+    let spec = crate::config::default_model_spec(&cfg.llm);
     if crate::process::normalize_model_spec(&spec)
         == crate::process::normalize_model_spec(running_default_model)
     {
@@ -41,19 +34,59 @@ fn validate_reloaded_config(
     crate::process::ensure_model_max_output_tokens_registered(&conn, &spec)
 }
 
+/// Keys a running process cannot change: the HTTP port is bound, the gate socket is listening
+/// and the DB is open. A reload that changes one of them still applies everything else and
+/// logs which key needs a restart (D-1113).
+fn restart_only_changes(running: &AppConfig, next: &AppConfig) -> Vec<&'static str> {
+    let mut keys = Vec::new();
+    if running.gateway.rest.port != next.gateway.rest.port {
+        keys.push("[gateway.rest] port");
+    }
+    if running.gate.listen_socket != next.gate.listen_socket {
+        keys.push("[gate] listen_socket");
+    }
+    if running.database.path != next.database.path {
+        keys.push("[database] path");
+    }
+    keys
+}
+
+/// The one reload path (D-1113): parse the file the same way startup does, validate it (#412),
+/// and on success make it the live config of `state`. A rejected file changes nothing. When
+/// `[llm]` changed, the LLM router is rebuilt from it (with the dashboard overrides), exactly
+/// as a dashboard provider change does.
+pub fn apply_config_text(state: &AppState, raw: &str) -> Result<(), String> {
+    let next = crate::config::parse_config(raw).map_err(|e| format!("{e:#}"))?;
+    let running = state.config();
+    validate_reloaded_config(&state.db, &state.default_model(), &next)?;
+    let llm_changed = format!("{:?}", running.llm) != format!("{:?}", next.llm);
+    let router = if llm_changed {
+        Some(
+            crate::config::build_effective_llm_router(&state.db, &next.llm)
+                .map_err(|e| format!("{e:#}"))?,
+        )
+    } else {
+        None
+    };
+    for key in restart_only_changes(&running, &next) {
+        tracing::warn!(
+            key,
+            "config reload: this key cannot change while the server runs; the old value stays until a restart"
+        );
+    }
+    state.config.replace(next);
+    if let Some(router) = router {
+        state.llm_router.swap(router);
+        tracing::info!("config reload: LLM router rebuilt from the new [llm]");
+    }
+    Ok(())
+}
+
 /// Start a background file watcher on the config directory.
 ///
-/// When any file in the directory changes, the watcher re-parses the config
-/// and live-updates the shared `ToolsConfig`.
-///
-/// `running_default_model` は起動時に決まった実効モデル spec。ここで差し替えたい
-/// わけではなく、**「変わったか」の基準**としてだけ使う（[`validate_reloaded_config`]）。
-pub fn start_config_watcher(
-    config_dir: impl AsRef<Path>,
-    db: opencrab_db::Db,
-    running_default_model: String,
-    tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
-) -> JoinHandle<()> {
+/// When a `.toml` file in the directory changes, [`apply_config_text`] makes it the live
+/// config: every setting in the file takes effect without a restart (D-1113).
+pub fn start_config_watcher(config_dir: impl AsRef<Path>, state: AppState) -> JoinHandle<()> {
     let config_dir = config_dir.as_ref().to_path_buf();
 
     std::thread::spawn(move || {
@@ -111,34 +144,13 @@ pub fn start_config_watcher(
                     }
                 };
 
-                let expanded = crate::config::expand_env_vars(&raw);
-
-                let cfg: crate::config::AppConfig = match toml::from_str(&expanded) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!("Failed to parse config file {:?}: {}", path, e);
-                        continue;
-                    }
-                };
-
-                // #412: 検証に落ちた設定は**一切適用しない**。tools を
-                // 触らずに次のイベントを待つ（旧設定のまま動き続ける）。
-                if let Err(e) = validate_reloaded_config(&db, &running_default_model, &cfg) {
-                    tracing::error!(
+                // #412: 検証に落ちた設定は**一切適用しない**（旧設定のまま動き続ける）。
+                match apply_config_text(&state, &raw) {
+                    Ok(()) => tracing::info!("Config hot-reloaded from {:?}", path),
+                    Err(e) => tracing::error!(
                         "Config reload rejected for {:?}; keeping the previous config: {e}",
                         path
-                    );
-                    continue;
-                }
-
-                match tools_config.write() {
-                    Ok(mut guard) => {
-                        *guard = cfg.tools;
-                        tracing::info!("Tools config hot-reloaded from {:?}", path);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to acquire write lock for tools_config: {}", e);
-                    }
+                    ),
                 }
             }
         }
@@ -188,8 +200,7 @@ mod reload_validation_tests {
 
     /// **本題**: default_model を変えていないリロードは、そのモデルが未登録でも通る。
     ///
-    /// ホットリロードは `default_model` を適用しない。適用しない値を根拠に、
-    /// モデルと無関係な tools の編集まで捨てるのは「設定する時に弾く」より広い。
+    /// 変えていない値を根拠に、モデルと無関係な編集まで捨てるのは「設定する時に弾く」より広い。
     #[test]
     fn unchanged_default_model_passes_even_when_unregistered() {
         let db = empty_db();
@@ -237,7 +248,7 @@ mod reload_validation_tests {
     }
 }
 
-/// watcher 本体の振る舞い（#412）: 拒否したリロードが `tools_config` に
+/// watcher 本体の振る舞い（#412）: 拒否したリロードが live config に
 /// **到達しない**こと。
 ///
 /// 検証の単体テストだけでは「Err を返す」までしか押さえられず、呼び出し側が
@@ -248,11 +259,8 @@ mod reload_validation_tests {
 mod watcher_rejection_tests {
     use super::start_config_watcher;
     use std::path::Path;
-    use std::sync::{Arc, RwLock};
     use std::time::{Duration, Instant};
 
-    /// 稼働中の実効 spec。これと同じなら「変えていない」。
-    const RUNNING: &str = "p1:m1";
     /// 正常な変更が反映されるまでの待ち上限。遅いマシンでも落ちないよう長めに取る。
     const APPLY_WAIT: Duration = Duration::from_secs(20);
     /// 拒否されたはずの変更が現れないことを見る観測窓。陽性対照が直前にこの経路の
@@ -304,15 +312,18 @@ mod watcher_rejection_tests {
         std::fs::write(&path, config_text("p1", "m1", false)).unwrap();
 
         // `model_pricing` は空。よって「変えたら拒否 / 変えなければ通る」の両方が出る。
-        let db = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
-        let tools_config = Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default()));
-        let _handle =
-            start_config_watcher(dir.path(), db, RUNNING.to_string(), tools_config.clone());
+        let state = crate::AppState::new(
+            opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap()),
+            opencrab_llm::router::LlmRouter::new(),
+            crate::test_config("p1", "m1"),
+        );
+        let _handle = start_config_watcher(dir.path(), state.clone());
+        let tools_enabled = || state.config().tools.enabled;
 
         // 陽性対照（前）: default_model を変えない編集は適用される（watcher が生きている証拠）。
         assert!(
             poll_with_rewrites(&path, &config_text("p1", "m1", true), APPLY_WAIT, || {
-                tools_config.read().unwrap().enabled
+                tools_enabled()
             }),
             "default_model を変えない編集は適用されるはず（watcher が動いていない）"
         );
@@ -323,9 +334,9 @@ mod watcher_rejection_tests {
                 &path,
                 &config_text("p1", "m2", false),
                 REJECT_WINDOW,
-                || !tools_config.read().unwrap().enabled
+                || !tools_enabled()
             ),
-            "拒否したリロードが tools_config へ到達した"
+            "拒否したリロードが live config へ到達した"
         );
 
         // 陽性対照（後）: 窓の**あと**にも適用が通ること。前の対照だけだと、窓の途中で
@@ -333,9 +344,149 @@ mod watcher_rejection_tests {
         // ここが通れば、窓のあいだ watcher は生きていたことになる。
         assert!(
             poll_with_rewrites(&path, &config_text("p1", "m1", false), APPLY_WAIT, || {
-                !tools_config.read().unwrap().enabled
+                !tools_enabled()
             }),
             "陰性の窓のあとも watcher は生きているはず（窓の間に止まっていた）"
+        );
+    }
+}
+
+/// D-1113: every setting in the config file takes effect without a restart, through the one
+/// reload path the watcher uses ([`super::apply_config_text`]).
+#[cfg(test)]
+mod live_config_tests {
+    use super::apply_config_text;
+
+    fn state() -> crate::AppState {
+        crate::AppState::new(
+            opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap()),
+            opencrab_llm::router::LlmRouter::new(),
+            crate::test_config("p1", "m1"),
+        )
+    }
+
+    fn register(state: &crate::AppState, provider: &str, model: &str) {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::upsert_model_pricing(
+            &conn,
+            &opencrab_db::queries::ModelPricingRow {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                input_price_per_1m: 0.0,
+                output_price_per_1m: 0.0,
+                context_window: Some(200_000),
+                max_output_tokens: Some(4_096),
+                cached_input_price_per_1m: None,
+                cache_write_price_per_1m: None,
+            },
+        )
+        .unwrap();
+    }
+
+    const LLM: &str = "[llm]\ndefault_provider = \"p1\"\ndefault_model = \"m1\"\n";
+
+    /// Turning sleep's declare run off in the file stops the next maintenance tick from running
+    /// it, with no restart; turning it back on runs it again.
+    #[tokio::test]
+    async fn d1113_memory_declare_enabled_follows_the_file_without_restart() {
+        let state = state();
+        let agent = "agent-live";
+        apply_config_text(
+            &state,
+            &format!("{LLM}[memory_declare]\nenabled = true\nmin_new_logs = 1\n"),
+        )
+        .unwrap();
+        assert!(state.config().memory_declare.enabled);
+        apply_config_text(&state, &format!("{LLM}[memory_declare]\nenabled = false\n")).unwrap();
+        assert!(!state.config().memory_declare.enabled);
+        // The declare run reads the live value: disabled means no run at all.
+        assert!(
+            !crate::memory_declare::maybe_run_memory_declare(&state, agent)
+                .await
+                .unwrap()
+        );
+        apply_config_text(&state, &format!("{LLM}[memory_declare]\nenabled = true\n")).unwrap();
+        assert!(state.config().memory_declare.enabled);
+    }
+
+    /// Changing the maintenance interval changes the wait before the next tick.
+    #[test]
+    fn d1113_maintenance_interval_follows_the_file() {
+        let state = state();
+        apply_config_text(
+            &state,
+            &format!("{LLM}[agent]\nmemory_maintenance_interval_secs = 90\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::memory_maintenance::maintenance_interval(&state.config().agent),
+            std::time::Duration::from_secs(90)
+        );
+        apply_config_text(
+            &state,
+            &format!("{LLM}[agent]\nmemory_maintenance_interval_secs = 600\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::memory_maintenance::maintenance_interval(&state.config().agent),
+            std::time::Duration::from_secs(600)
+        );
+    }
+
+    /// A file that does not parse, or that points the default model at an unregistered model,
+    /// changes nothing.
+    #[test]
+    fn d1113_invalid_file_changes_nothing() {
+        let state = state();
+        apply_config_text(&state, &format!("{LLM}[memory_declare]\nenabled = true\n")).unwrap();
+        assert!(apply_config_text(&state, "[memory_declare\nenabled = false").is_err());
+        assert!(apply_config_text(
+            &state,
+            "[llm]\ndefault_provider = \"p1\"\ndefault_model = \"unregistered\"\n[memory_declare]\nenabled = false\n"
+        )
+        .is_err());
+        assert!(state.config().memory_declare.enabled);
+        assert_eq!(state.default_model(), "p1:m1");
+    }
+
+    /// A changed `[llm]` default model is the model the next turn resolves to.
+    #[test]
+    fn d1113_default_model_follows_the_file() {
+        let state = state();
+        register(&state, "p1", "m2");
+        apply_config_text(
+            &state,
+            "[llm]\ndefault_provider = \"p1\"\ndefault_model = \"m2\"\n",
+        )
+        .unwrap();
+        assert_eq!(state.default_model(), "p1:m2");
+        let conn = state.db.lock().unwrap();
+        assert_eq!(
+            opencrab_db::queries::effective_model_for_agent(
+                &conn,
+                "no-such-agent",
+                &state.default_model()
+            )
+            .unwrap(),
+            "p1:m2"
+        );
+    }
+
+    /// Keys a running process cannot change are reported, and everything else still applies.
+    #[test]
+    fn d1113_restart_only_keys_are_named() {
+        let running = crate::test_config("p1", "m1");
+        let mut next = running.clone();
+        next.gateway.rest.port = 9999;
+        next.gate.listen_socket = "/tmp/other.sock".into();
+        next.database.path = "other.db".into();
+        assert_eq!(
+            super::restart_only_changes(&running, &next),
+            vec![
+                "[gateway.rest] port",
+                "[gate] listen_socket",
+                "[database] path"
+            ]
         );
     }
 }

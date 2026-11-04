@@ -43,7 +43,7 @@ pub async fn receive_hook(
     body: Bytes,
 ) -> StatusCode {
     // 1. source の共有 secret。未設定（または空）なら存在を秘匿して 404。
-    let Some(secret) = state.intake.secret_for(&source).map(str::to_owned) else {
+    let Some(secret) = state.config().intake.secret_for(&source).map(str::to_owned) else {
         return StatusCode::NOT_FOUND;
     };
 
@@ -129,24 +129,25 @@ mod tests {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     use crate::config::{IntakeConfig, IntakeRoute};
 
     const SECRET: &str = "s3cr3t";
 
     fn state_with_route() -> AppState {
-        let mut state = crate::test_app_state();
+        let state = crate::test_app_state();
         let mut secrets = HashMap::new();
         secrets.insert("sample-source".to_string(), SECRET.to_string());
-        state.intake = Arc::new(IntakeConfig {
-            secrets,
-            routes: vec![IntakeRoute {
-                source: "sample-source".to_string(),
-                event_type: "comment.created".to_string(),
-                agent_id: "agent_alpha".to_string(),
-            }],
-            ..IntakeConfig::default()
+        state.config.update(|c| {
+            c.intake = IntakeConfig {
+                secrets,
+                routes: vec![IntakeRoute {
+                    source: "sample-source".to_string(),
+                    event_type: "comment.created".to_string(),
+                    agent_id: "agent_alpha".to_string(),
+                }],
+                ..IntakeConfig::default()
+            }
         });
         state
     }

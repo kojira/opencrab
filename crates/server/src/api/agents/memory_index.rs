@@ -48,8 +48,8 @@ pub async fn trigger_memory_index_build(
     let llm_router = state.llm_router.clone();
     let model = {
         let conn = state.db.lock().unwrap();
-        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
-            .unwrap_or_else(|_| state.default_model.clone())
+        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model())
+            .unwrap_or_else(|_| state.default_model())
     };
 
     let config = {
@@ -171,8 +171,8 @@ pub async fn rebuild_memory_index(
     let llm_router = state.llm_router.clone();
     let model = {
         let conn = state.db.lock().unwrap();
-        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
-            .unwrap_or_else(|_| state.default_model.clone())
+        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model())
+            .unwrap_or_else(|_| state.default_model())
     };
 
     let config = {
@@ -231,8 +231,8 @@ pub async fn merge_memory_index_topics(
     let llm_router = state.llm_router.clone();
     let model = {
         let conn = state.db.lock().unwrap();
-        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
-            .unwrap_or_else(|_| state.default_model.clone())
+        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model())
+            .unwrap_or_else(|_| state.default_model())
     };
 
     let (persona_name, personality) = {

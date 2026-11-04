@@ -62,30 +62,9 @@ impl SharedLlmRouter {
 pub struct AppState {
     pub db: opencrab_db::Db,
     pub llm_router: SharedLlmRouter,
-    /// 起動時に読んだ TOML の [llm] 設定（DB オーバーライド適用前の土台）。
-    /// プロバイダー設定変更時のルーター再構築に使う。
-    pub llm_config: Arc<config::LlmConfig>,
-    pub workspace_base: String,
-    pub default_model: String,
-    pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
-    /// コンパクション比率: context_window のうち会話履歴に使う割合 (0.0-1.0, デフォルト 0.5)。
-    pub compaction_ratio: f64,
-    /// evaluator（契約に対する独立 rubric 評価）の設定。
-    /// #291 で対話ターンからの呼び出しを撤去したため現在は未参照。
-    /// スリープ側へ評価を移す配線（別 issue）で使う。
-    pub evaluator: config::EvaluatorConfig,
-    /// スリープ時スキル棚卸し（自己 curation ループ）の設定。
-    pub skill_consolidation: config::SkillConsolidationConfig,
-    /// 記憶カテゴリ層（#313/#344）の sleep 中自動割当の設定。既定オフ（#345）。
-    pub category_maintenance: config::CategoryMaintenanceConfig,
-    /// スリープ整理ラン（#313 段階3 / #361）の設定。既定オフ（opt-in / #346）。
-    pub memory_organize: config::MemoryOrganizeConfig,
-    /// スリープ宣言ラン（#384 / #376 段階2）の設定。既定オフ（opt-in / #346）。
-    pub memory_declare: config::MemoryDeclareConfig,
-    /// スリープ凝縮ラン（#411 / 記憶の 3 段目）の設定。既定 ON（#457。`enabled=false` で opt-out 可）。
-    pub memory_condense: config::MemoryCondenseConfig,
-    /// ループ再起動 v1（#52）: 反復上限停止 + active タスク残存時の1回自動再実行。
-    pub loop_restart_enabled: bool,
+    /// The config file, live: the hot-reload watcher swaps it whole when `config/*.toml`
+    /// changes, so every reader sees the current value at the point of use (D-1113).
+    pub config: LiveConfig,
     /// エージェント単位のインデックスビルド in-flight フラグ（post-run トリガーと
     /// メンテナンスループの二重 LLM 支出防止）。
     pub index_build_inflight: memory_maintenance::IndexBuildInflight,
@@ -111,15 +90,6 @@ pub struct AppState {
     /// デバウンスが毎回リセットされ全ての進捗報告が発火する。プロセス寿命の共有状態
     /// である `AppState` に置いて、gateway の生成を跨いで間引きが効くようにする。
     pub progress_debounce: Arc<subtask_registries::ProgressDebounce>,
-    /// 非ブロック dispatch の kill switch（`[subtask] auto_dispatch` / 既定 true）。
-    /// `false` にすると全ツールが inline 実行に戻る（#152 導入前の挙動）。
-    pub subtask_auto_dispatch: bool,
-    /// 外部イベント受信（webhook intake / issue #454）の設定。
-    ///
-    /// webhook ハンドラ（source→secret の解決 / ルーティング）と、受信箱の消化・catch-up
-    /// ループが参照する。秘密（source secret / Bearer）を含むため、ログや API 応答へ
-    /// そのまま出さないこと。
-    pub intake: Arc<config::IntakeConfig>,
     /// 受信箱消化ループ（`intake_process`）の起床通知（#499）。
     ///
     /// `scheduler_wake` と同じ `Notify` パターン。webhook（`POST /api/hooks/{source}`）で
@@ -139,15 +109,70 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The one way an `AppState` is built (bootstrap and every test helper). Everything that
+    /// comes from the config file lives in `config`; the rest is process-lifetime runtime state.
+    pub fn new(db: opencrab_db::Db, llm_router: LlmRouter, config: config::AppConfig) -> Self {
+        Self {
+            db,
+            llm_router: SharedLlmRouter::new(llm_router),
+            config: LiveConfig::new(config),
+            index_build_inflight: Arc::new(dashmap::DashMap::new()),
+            mcp_manager: None,
+            subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
+            session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
+            timed_fire_router: Arc::new(opencrab_actions::TimedFireRouter::new()),
+            progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
+            intake_wake: Arc::new(tokio::sync::Notify::new()),
+            scheduler_wake: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    /// The current config (a snapshot: one turn or tick reads one consistent version).
+    pub fn config(&self) -> Arc<config::AppConfig> {
+        self.config.get()
+    }
+
+    /// The effective default model spec `provider:model` from the current `[llm]`.
+    pub fn default_model(&self) -> String {
+        config::default_model_spec(&self.config().llm)
+    }
+
     /// #826-A: 設定から費目別水位政策を組む。入口固有の再計算はしない。
     pub fn context_budget_policy(&self) -> opencrab_core::context_budget::ContextBudgetPolicy {
+        let llm = &self.config().llm;
         opencrab_core::context_budget::ContextBudgetPolicy {
-            input_high_ratio: self.compaction_ratio,
-            input_low_ratio: self.llm_config.input_low_ratio,
-            absolute_cap_a: self.llm_config.absolute_input_cap,
-            memory_index_token_cap: self.llm_config.memory_index_token_cap,
-            functions_token_cap: self.llm_config.functions_token_cap,
+            input_high_ratio: llm.compaction_ratio,
+            input_low_ratio: llm.input_low_ratio,
+            absolute_cap_a: llm.absolute_input_cap,
+            memory_index_token_cap: llm.memory_index_token_cap,
+            functions_token_cap: llm.functions_token_cap,
         }
+    }
+}
+
+/// The config file as one live value (D-1113): readers take a snapshot with [`LiveConfig::get`];
+/// the hot-reload watcher replaces the whole value with [`LiveConfig::replace`].
+#[derive(Clone)]
+pub struct LiveConfig(Arc<RwLock<Arc<config::AppConfig>>>);
+
+impl LiveConfig {
+    pub fn new(config: config::AppConfig) -> Self {
+        Self(Arc::new(RwLock::new(Arc::new(config))))
+    }
+
+    pub fn get(&self) -> Arc<config::AppConfig> {
+        self.0.read().unwrap().clone()
+    }
+
+    pub fn replace(&self, config: config::AppConfig) {
+        *self.0.write().unwrap() = Arc::new(config);
+    }
+
+    /// Changes a copy of the current config and makes it current (tests and API handlers).
+    pub fn update(&self, change: impl FnOnce(&mut config::AppConfig)) {
+        let mut next = (*self.get()).clone();
+        change(&mut next);
+        self.replace(next);
     }
 }
 
@@ -157,37 +182,21 @@ impl AppState {
 /// 追随箇所を 1 つに保つ（テスト／採取器ごとの構造体リテラル複製を避ける）。
 #[cfg(test)]
 pub(crate) fn test_app_state() -> AppState {
-    let conn = opencrab_db::init_memory().unwrap();
-    // #628: 本番（main.rs）と同じ transport descriptor を生存非依存で登録する（源は 1 本化・
-    // `register_production_descriptors`）。これが無いと schedule ツールが
-    // 発火先を解決できず（登録簿が空）拒否される。
-    let timed_fire_router = opencrab_actions::TimedFireRouter::new();
-    AppState {
-        db: opencrab_db::Db::from_connection(conn),
-        llm_router: SharedLlmRouter::new(LlmRouter::new()),
-        llm_config: Arc::new(toml::from_str("").unwrap()),
-        subtask_auto_dispatch: true,
-        workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
-        default_model: "mock:test".to_string(),
-        tools_config: Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
-        compaction_ratio: 0.5,
-        evaluator: config::EvaluatorConfig::default(),
-        skill_consolidation: config::SkillConsolidationConfig::default(),
-        category_maintenance: config::CategoryMaintenanceConfig::default(),
-        memory_organize: config::MemoryOrganizeConfig::default(),
-        memory_declare: config::MemoryDeclareConfig::default(),
-        memory_condense: config::MemoryCondenseConfig::default(),
-        loop_restart_enabled: false,
-        index_build_inflight: Arc::new(dashmap::DashMap::new()),
-        intake: Arc::new(config::IntakeConfig::default()),
-        intake_wake: Arc::new(tokio::sync::Notify::new()),
-        mcp_manager: None,
-        subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
-        session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
-        timed_fire_router: Arc::new(timed_fire_router),
-        progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
-        scheduler_wake: Arc::new(tokio::sync::Notify::new()),
-    }
+    AppState::new(
+        opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap()),
+        LlmRouter::new(),
+        test_config("mock", "test"),
+    )
+}
+
+/// The config every test state starts from: defaults, the given default model, and the
+/// workspace in the temp dir.
+pub fn test_config(provider: &str, model: &str) -> config::AppConfig {
+    let mut cfg = config::AppConfig::default();
+    cfg.llm.default_provider = provider.to_string();
+    cfg.llm.default_model = model.to_string();
+    cfg.agent.workspace_path = std::env::temp_dir().to_string_lossy().to_string();
+    cfg
 }
 
 /// Router 構築と外形 inventory が共有する production route 宣言。

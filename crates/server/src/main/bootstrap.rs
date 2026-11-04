@@ -120,61 +120,12 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     }
 
     // Build LLM router from config + DB のダッシュボード設定オーバーライド
-    let llm_overrides = {
-        let conn = db.lock().unwrap();
-        opencrab_db::queries::list_llm_provider_overrides(&conn).unwrap_or_default()
-    };
-    let effective_llm = config::apply_llm_overrides(&cfg.llm, &llm_overrides);
-    let llm_router = config::build_llm_router(&effective_llm)?;
+    let llm_router = config::build_effective_llm_router(&db, &cfg.llm)?;
 
-    let default_model = format!("{}:{}", cfg.llm.default_provider, cfg.llm.default_model);
-
-    // NOTE: エージェント個別の許可コマンド（DB管理）はグローバル tools_config に
+    // NOTE: エージェント個別の許可コマンド（DB管理）はグローバル tools 設定に
     // マージしない。全エージェントの許可が混ざり、あるエージェントの許可が他へ漏れるため。
     // 個別コマンドは実行時に run_agent_response 内でそのエージェント分だけ適用する。
-    let tools_cfg = cfg.tools.clone();
-
-    #[allow(unused_mut)]
-    let mut state = AppState {
-        db,
-        llm_router: opencrab_server::SharedLlmRouter::new(llm_router),
-        llm_config: Arc::new(cfg.llm.clone()),
-        // 非ブロック dispatch の kill switch（`[subtask] auto_dispatch` / env 上書き）。
-        subtask_auto_dispatch: cfg.subtask.auto_dispatch,
-        // 純 TOML を保持する（DB オーバーライド適用前の土台）。API の GET は
-        // DB 行が無いときこれを "toml" として返すため、リセット後に古い実効値を
-        // TOML と誤表示しないよう effective ではなく cfg.voice を入れる（レビュー指摘）。
-        workspace_base: cfg.agent.workspace_path.clone(),
-        tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
-        default_model,
-        compaction_ratio: cfg.llm.compaction_ratio,
-        evaluator: cfg.evaluator.clone(),
-        skill_consolidation: cfg.skill_consolidation.clone(),
-        category_maintenance: cfg.category_maintenance.clone(),
-        memory_organize: cfg.memory_organize.clone(),
-        memory_declare: cfg.memory_declare.clone(),
-        memory_condense: cfg.memory_condense.clone(),
-        loop_restart_enabled: cfg.agent.loop_restart_enabled,
-        index_build_inflight: Arc::new(dashmap::DashMap::new()),
-        intake: Arc::new(cfg.intake.clone()),
-        mcp_manager: None,
-        // 受信を持つ transport の登録簿（#191 段階2 PR2）。空で作り、各マネージャの
-        // 生成箇所から後で `register` する（内部可変なので生成順を変えずに済む）。
-        subtask_registries: Arc::new(opencrab_server::subtask_registries::SubtaskRegistries::new()),
-        // #588 Stage 2: プロセス全体で 1 つの per-session 直列化ロック。heartbeat・scheduler・
-        // gateway受信ループが同じ実体を共有し、同一セッションのターンを直列化する。
-        session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
-        progress_debounce: Arc::new(opencrab_server::subtask_registries::ProgressDebounce::new()),
-        // 中央スケジューラの起床通知（#437 / #439）。発火ターン完了と schedule CRUD
-        // から鳴らして即時反映させる。
-        scheduler_wake: Arc::new(tokio::sync::Notify::new()),
-        // 受信箱消化ループの起床通知（#499）。webhook が新規イベントを積んだ直後に鳴らし、
-        // ポーリング間隔を待たずに即消化させる（ポーリングは安全網として残す）。
-        intake_wake: Arc::new(tokio::sync::Notify::new()),
-        // #588 TimedFire: 時刻発火の受け口レジストリ。各ゲートウェイのループが起動時に自分の
-        // 受け口を登録し、scheduler が発火時に per-agent→共有で引く（空で作り後から register）。
-        timed_fire_router: Arc::new(opencrab_actions::TimedFireRouter::new()),
-    };
+    let state = AppState::new(db, llm_router, cfg.clone());
 
     Ok(BootstrapContext {
         cfg,

@@ -106,8 +106,8 @@ fn turn_executor(
     llm_config: LlmConfig,
     workspace_root: &std::path::Path,
 ) -> opencrab_actions::BridgedExecutor {
-    let mut state = crate::test_app_state();
-    state.llm_config = Arc::new(llm_config);
+    let state = crate::test_app_state();
+    state.config.update(|c| c.llm = llm_config);
     crate::api::providers::reload_router(&state).expect("reload_router");
     let context = owner_context(&state, workspace_root);
     build_turn_executor(

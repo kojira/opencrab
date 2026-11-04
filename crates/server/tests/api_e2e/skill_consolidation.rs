@@ -10,40 +10,9 @@ fn state_with_consolidation(
     let mut router = LlmRouter::new();
     router.add_provider(mock as Arc<dyn LlmProvider>);
     router.set_default_provider("mock");
-    AppState {
-        db,
-        llm_router: opencrab_server::SharedLlmRouter::new(router),
-        llm_config: Arc::new(toml::from_str("").unwrap()),
-        subtask_auto_dispatch: true,
-        workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
-#[cfg(any())]
-        nostr_master_key: None,
-        default_model: "mock:gpt-4o".to_string(),
-        tools_config: Arc::new(std::sync::RwLock::new(
-            opencrab_actions::tools::ToolsConfig::default(),
-        )),
-        compaction_ratio: 0.5,
-        evaluator: opencrab_server::config::EvaluatorConfig::default(),
-        skill_consolidation: cfg,
-        category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),
-        memory_organize: opencrab_server::config::MemoryOrganizeConfig::default(),
-        memory_declare: opencrab_server::config::MemoryDeclareConfig::default(),
-        memory_condense: opencrab_server::config::MemoryCondenseConfig::default(),
-        loop_restart_enabled: false,
-        index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
-        intake: std::sync::Arc::new(Default::default()),
-        intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-        mcp_manager: None,
-        subtask_registries: std::sync::Arc::new(
-            opencrab_server::subtask_registries::SubtaskRegistries::new(),
-        ),
-        session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
-        scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-        timed_fire_router: std::sync::Arc::new(opencrab_actions::TimedFireRouter::new()),
-        progress_debounce: std::sync::Arc::new(
-            opencrab_server::subtask_registries::ProgressDebounce::new(),
-        ),
-    }
+    let mut config = opencrab_server::test_config("mock", "gpt-4o");
+    config.skill_consolidation = cfg;
+    AppState::new(db, router, config)
 }
 
 #[tokio::test]

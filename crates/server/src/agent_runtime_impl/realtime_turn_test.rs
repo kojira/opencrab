@@ -414,8 +414,8 @@ fn function_names(request: &ChatRequest) -> Vec<String> {
 async fn realtime_turn_tools_are_the_gateway_operations_and_the_lightweight_allowlist() {
     let f = fixture();
     // execute_shell exists only when the shell tool is configured.
-    {
-        let mut cfg = f.state.tools_config.write().unwrap();
+    f.state.config.update(|c| {
+        let cfg = &mut c.tools;
         cfg.enabled = true;
         cfg.shell = Some(opencrab_actions::tools::ShellToolConfig {
             enabled: true,
@@ -429,7 +429,7 @@ async fn realtime_turn_tools_are_the_gateway_operations_and_the_lightweight_allo
             commands: Vec::new(),
             run_env: std::collections::BTreeMap::new(),
         });
-    }
+    });
     let (ops, _) = recording_ops();
     profile_turn_with(&f, TurnModelProfile::Default, Some(ops.clone())).await;
     profile_turn_with(&f, TurnModelProfile::Realtime, Some(ops)).await;

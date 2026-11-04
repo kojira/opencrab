@@ -84,8 +84,8 @@ pub async fn execute_import_handler(
     let llm_adapter = crate::llm_adapter::LlmRouterAdapter::new(state.llm_router.clone());
     let model = {
         let conn = state.db.lock().unwrap();
-        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
-            .unwrap_or_else(|_| state.default_model.clone())
+        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model())
+            .unwrap_or_else(|_| state.default_model())
     };
 
     let (persona_name, personality) = {
@@ -123,8 +123,12 @@ pub async fn execute_import_handler(
         let llm_clone = state.llm_router.clone();
         let model_clone = {
             let conn = state.db.lock().unwrap();
-            opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
-                .unwrap_or_else(|_| state.default_model.clone())
+            opencrab_db::queries::effective_model_for_agent(
+                &conn,
+                &agent_id,
+                &state.default_model(),
+            )
+            .unwrap_or_else(|_| state.default_model())
         };
         let agent_id_clone = agent_id.clone();
         let daily_persona_name = persona_name.clone();

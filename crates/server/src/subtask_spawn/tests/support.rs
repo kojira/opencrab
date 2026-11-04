@@ -354,8 +354,8 @@ pub(super) async fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
 pub(super) fn state_with_shell_and_capture(seen: Arc<Mutex<Vec<Vec<String>>>>) -> AppState {
     let state = crate::test_app_state();
     insert_agent_x(&state);
-    {
-        let mut cfg = state.tools_config.write().unwrap();
+    state.config.update(|c| {
+        let cfg = &mut c.tools;
         cfg.enabled = true;
         cfg.shell = Some(opencrab_actions::tools::ShellToolConfig {
             enabled: true,
@@ -369,7 +369,7 @@ pub(super) fn state_with_shell_and_capture(seen: Arc<Mutex<Vec<Vec<String>>>>) -
             commands: Vec::new(),
             run_env: std::collections::BTreeMap::new(),
         });
-    }
+    });
     let mut router = opencrab_llm::router::LlmRouter::new();
     router.add_provider(Arc::new(CapturingStub { seen }));
     state.llm_router.swap(router);

@@ -1,11 +1,20 @@
 // ---------- Config loading ----------
 
+/// How often a background loop whose section is disabled rechecks the live config, so
+/// turning it on in the file takes effect without a restart (D-1113).
+pub const DISABLED_LOOP_RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Load config from a TOML file, expanding `${VAR}` placeholders with env vars.
 pub fn load_config(path: &str) -> Result<AppConfig> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file: {}", path))?;
+    parse_config(&raw)
+}
 
-    let expanded = expand_env_vars(&raw);
+/// The one way config text becomes an [`AppConfig`]: startup ([`load_config`]) and the hot
+/// reload watcher both use it, so a reload sees exactly what a restart would.
+pub fn parse_config(raw: &str) -> Result<AppConfig> {
+    let expanded = expand_env_vars(raw);
 
     let mut config: AppConfig =
         toml::from_str(&expanded).with_context(|| "Failed to parse config TOML")?;
@@ -16,6 +25,18 @@ pub fn load_config(path: &str) -> Result<AppConfig> {
     }
 
     Ok(config)
+}
+
+/// The effective default model spec `provider:model` of an `[llm]` section. Every reader
+/// (turns, the startup budget check, the reload validation) builds it here. An empty
+/// `default_provider` means "no default provider": `default_model` is then already a full
+/// `provider:model` spec (see `build_llm_router`).
+pub fn default_model_spec(llm: &LlmConfig) -> String {
+    if llm.default_provider.is_empty() {
+        llm.default_model.clone()
+    } else {
+        format!("{}:{}", llm.default_provider, llm.default_model)
+    }
 }
 
 /// Replace `${VAR_NAME}` patterns with corresponding environment variable values.

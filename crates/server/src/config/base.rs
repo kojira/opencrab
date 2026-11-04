@@ -1,7 +1,7 @@
 
 // ---------- Config structs (match config/default.toml) ----------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     #[serde(default)]
     pub agent: AgentConfig,
@@ -45,6 +45,13 @@ pub struct AppConfig {
     /// External gate V3 UDS listen path。空・欠落は listen しない。
     #[serde(default)]
     pub gate: GateConfig,
+}
+
+impl Default for AppConfig {
+    /// Every section at its serde default (the same as an empty TOML file).
+    fn default() -> Self {
+        toml::from_str("").expect("an empty config is valid")
+    }
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]

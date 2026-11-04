@@ -68,7 +68,7 @@ impl OrganizeTurnRunner for AppStateTurnRunner<'_> {
             opencrab_db::queries::effective_model_for_agent(
                 &conn,
                 &req.agent_id,
-                &self.state.default_model,
+                &self.state.default_model(),
             )?
         };
         crate::process::run_agent_response(self.state, req.with_pinned_model(model)).await
@@ -126,7 +126,7 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
     let runner = AppStateTurnRunner { state };
     run_organize(
         &state.db,
-        &state.memory_organize,
+        &state.config().memory_organize,
         &state.index_build_inflight,
         agent_id,
         &runner,

@@ -121,7 +121,7 @@ pub async fn maybe_run_memory_declare(state: &AppState, agent_id: &str) -> anyho
     let runner = AppStateTurnRunner { state };
     run_declare(
         &state.db,
-        &state.memory_declare,
+        &state.config().memory_declare,
         &state.index_build_inflight,
         agent_id,
         &runner,

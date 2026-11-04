@@ -18,44 +18,16 @@ fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
 fn create_test_state(compaction_ratio: f64) -> (AppState, opencrab_db::Db) {
     let conn = opencrab_db::init_memory().unwrap();
     let db = opencrab_db::Db::from_connection(conn);
-    let state = AppState {
-        db: db.clone(),
-        llm_router: opencrab_server::SharedLlmRouter::new(LlmRouter::new()),
-        // 既定を明示的に置かない（default_provider = ""）。テストの base は provider 未定義で、
-        // provider を DB オーバーライドで足す reload 経路（build_llm_router）が、コード既定の
-        // sentinel "openai" と食い違って default_provider 検証で弾かれるのを避ける（#660）。
-        // 空 default_provider は「既定なし＝未設定」として検証をスキップする正規の状態。
-        llm_config: Arc::new(toml::from_str("default_provider = \"\"").unwrap()),
-        subtask_auto_dispatch: true,
-        workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
-#[cfg(any())]
-        nostr_master_key: None,
-        default_model: "mock:test".to_string(),
-        tools_config: Arc::new(std::sync::RwLock::new(
-            opencrab_actions::tools::ToolsConfig::default(),
-        )),
-        compaction_ratio,
-        evaluator: opencrab_server::config::EvaluatorConfig::default(),
-        skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
-        category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),
-        memory_organize: opencrab_server::config::MemoryOrganizeConfig::default(),
-        memory_declare: opencrab_server::config::MemoryDeclareConfig::default(),
-        memory_condense: opencrab_server::config::MemoryCondenseConfig::default(),
-        loop_restart_enabled: false,
-        index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
-        intake: std::sync::Arc::new(Default::default()),
-        intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-        mcp_manager: None,
-        subtask_registries: std::sync::Arc::new(
-            opencrab_server::subtask_registries::SubtaskRegistries::new(),
-        ),
-        session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
-        scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-        timed_fire_router: std::sync::Arc::new(opencrab_actions::TimedFireRouter::new()),
-        progress_debounce: std::sync::Arc::new(
-            opencrab_server::subtask_registries::ProgressDebounce::new(),
-        ),
-    };
+    let mut cfg = opencrab_server::test_config("mock", "test");
+    // 既定を明示的に置かない（default_provider = ""）。テストの base は provider 未定義で、
+    // provider を DB オーバーライドで足す reload 経路（build_llm_router）が、コード既定の
+    // sentinel "openai" と食い違って default_provider 検証で弾かれるのを避ける（#660）。
+    // 空 default_provider は「既定なし＝未設定」として検証をスキップする正規の状態。
+    // そのとき default_model は provider 付きの完全な spec（既定モデルは "mock:test"）。
+    cfg.llm.default_provider = String::new();
+    cfg.llm.default_model = "mock:test".to_string();
+    cfg.llm.compaction_ratio = compaction_ratio;
+    let state = AppState::new(db.clone(), LlmRouter::new(), cfg);
     (state, db)
 }
 

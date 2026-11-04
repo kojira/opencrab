@@ -92,15 +92,19 @@ impl MaintenanceReport {
 const IDLE_GATE_MINUTES: i64 = 10;
 
 /// メンテナンスループを起動する（プロセス生存期間の常駐タスク）。
-pub fn spawn_memory_maintenance_loop(state: AppState, interval_secs: u64) {
+///
+/// D-1113: `[agent] memory_maintenance_enabled` / `memory_maintenance_interval_secs` and every
+/// sleep section are read from the live config on every tick, so editing the file changes the
+/// next tick without a restart.
+pub fn spawn_memory_maintenance_loop(state: AppState) {
     tokio::spawn(async move {
-        let interval = std::time::Duration::from_secs(interval_secs.max(60));
-        tracing::info!(
-            interval_secs = interval.as_secs(),
-            "memory maintenance loop started"
-        );
+        tracing::info!("memory maintenance loop started");
         loop {
-            tokio::time::sleep(interval).await;
+            let agent_cfg = state.config().agent.clone();
+            tokio::time::sleep(maintenance_interval(&agent_cfg)).await;
+            if !state.config().agent.memory_maintenance_enabled {
+                continue;
+            }
 
             // 毎 tick 全エージェントを列挙（ランタイム作成にも追従）
             let agent_ids: Vec<String> = {
@@ -132,6 +136,12 @@ pub fn spawn_memory_maintenance_loop(state: AppState, interval_secs: u64) {
     });
 }
 
+/// The wait before the next maintenance tick: the configured interval (at least 60 s).
+/// While maintenance is disabled the loop rechecks the config at the same cadence.
+pub fn maintenance_interval(agent: &crate::config::AgentConfig) -> std::time::Duration {
+    std::time::Duration::from_secs(agent.memory_maintenance_interval_secs.max(60))
+}
+
 /// 1 エージェント分のメンテナンス tick。
 ///
 /// LLM コール数の上限: 増分ビルド ≤ バッチ内セッション群数（post-run トリガーと
@@ -142,39 +152,41 @@ pub async fn run_maintenance_tick(
 ) -> anyhow::Result<MaintenanceReport> {
     let mut report = MaintenanceReport::default();
 
-    let (effective_model, persona_name, personality, unindexed, newest_log_at, config) = {
-        let conn = state
-            .db
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
-        let model =
-            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
-                .unwrap_or_else(|_| state.default_model.clone());
-        let (persona_name, personality) = opencrab_db::queries::get_agent(&conn, agent_id)
-            .ok()
-            .flatten()
-            .map(|a| (a.persona_name, a.personality))
-            .unwrap_or_default();
-        let (unindexed, newest_log_at) =
-            opencrab_db::queries::get_unindexed_stats(&conn, agent_id)?;
-        let config =
-            opencrab_db::queries::get_memory_index_config(&conn, agent_id).unwrap_or_else(|_| {
-                opencrab_db::queries::AgentMemoryIndexConfig {
+    let (effective_model, persona_name, personality, unindexed, newest_log_at, config) =
+        {
+            let conn = state
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+            let model = opencrab_db::queries::effective_model_for_agent(
+                &conn,
+                agent_id,
+                &state.default_model(),
+            )
+            .unwrap_or_else(|_| state.default_model());
+            let (persona_name, personality) = opencrab_db::queries::get_agent(&conn, agent_id)
+                .ok()
+                .flatten()
+                .map(|a| (a.persona_name, a.personality))
+                .unwrap_or_default();
+            let (unindexed, newest_log_at) =
+                opencrab_db::queries::get_unindexed_stats(&conn, agent_id)?;
+            let config = opencrab_db::queries::get_memory_index_config(&conn, agent_id)
+                .unwrap_or_else(|_| opencrab_db::queries::AgentMemoryIndexConfig {
                     agent_id: agent_id.to_string(),
                     batch_size: opencrab_db::queries::BATCH_SIZE_DEFAULT,
                     threshold: opencrab_db::queries::THRESHOLD_DEFAULT,
                     updated_at: String::new(),
-                }
-            });
-        (
-            model,
-            persona_name,
-            personality,
-            unindexed,
-            newest_log_at,
-            config,
-        )
-    };
+                });
+            (
+                model,
+                persona_name,
+                personality,
+                unindexed,
+                newest_log_at,
+                config,
+            )
+        };
     let llm = LlmRouterAdapter::new(state.llm_router.clone());
 
     // ① 増分ビルド。閾値未満でも「最新の未処理ログが十分古い = 会話が一段落」なら
@@ -251,7 +263,7 @@ pub async fn run_maintenance_tick(
     // 費用を払い続けないよう、config で丸ごと止められるようにする（既定オフ）。
     // `skill_consolidation` と同じく LLM を消費する自律処理なので同じ opt-in の流儀に揃える。
     // 機能そのものは #313 で作り直す際に参照するので残す（既存データ・スキーマは触らない）。
-    if state.category_maintenance.enabled {
+    if state.config().category_maintenance.enabled {
         match opencrab_core::memory_index::category::maintain_categories(
             &state.db,
             agent_id,

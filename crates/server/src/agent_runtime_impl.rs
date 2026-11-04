@@ -34,7 +34,7 @@ fn resolve_runtime_envelope(
         conn,
         agent_id,
         session_id,
-        default_model: &state.default_model,
+        default_model: &state.default_model(),
         pinned_model: Some(model),
         policy: &state.context_budget_policy(),
         system_prompt,
@@ -58,12 +58,12 @@ impl ModelAdministration for AppState {
         let current_model = configured_model
             .clone()
             .filter(|model| !model.is_empty())
-            .unwrap_or_else(|| self.default_model.clone());
+            .unwrap_or_else(|| self.default_model());
         Ok(ModelSnapshot {
             models,
             configured_model,
             current_model,
-            default_model: self.default_model.clone(),
+            default_model: self.default_model(),
         })
     }
 
@@ -88,7 +88,7 @@ impl ModelAdministration for AppState {
                 models: Vec::new(),
                 configured_model,
                 current_model: model.to_string(),
-                default_model: self.default_model.clone(),
+                default_model: self.default_model(),
             });
         }
 
@@ -130,7 +130,7 @@ impl ModelAdministration for AppState {
             models,
             configured_model: Some(canonical.clone()),
             current_model: canonical,
-            default_model: self.default_model.clone(),
+            default_model: self.default_model(),
         })
     }
 
@@ -147,8 +147,8 @@ impl ModelAdministration for AppState {
             return Ok(ModelSnapshot {
                 models: Vec::new(),
                 configured_model: None,
-                current_model: self.default_model.clone(),
-                default_model: self.default_model.clone(),
+                current_model: self.default_model(),
+                default_model: self.default_model(),
             });
         }
 
@@ -175,8 +175,8 @@ impl ModelAdministration for AppState {
         Ok(ModelSnapshot {
             models,
             configured_model: None,
-            current_model: self.default_model.clone(),
-            default_model: self.default_model.clone(),
+            current_model: self.default_model(),
+            default_model: self.default_model(),
         })
     }
 
@@ -356,7 +356,7 @@ impl AppState {
         conn: &rusqlite::Connection,
         agent_id: &str,
     ) -> Result<String, ModelAdminError> {
-        opencrab_db::queries::effective_model_for_agent(conn, agent_id, &self.default_model)
+        opencrab_db::queries::effective_model_for_agent(conn, agent_id, &self.default_model())
             .map_err(|_| ModelAdminError::Internal)
     }
 
@@ -375,7 +375,7 @@ impl AppState {
             conn,
             agent_id,
             session_id,
-            &self.default_model,
+            &self.default_model(),
         )
         .map_err(|_| ModelAdminError::Internal)?;
         Ok(session_snapshot(models, configured_model, default_model))
@@ -397,7 +397,7 @@ impl AppState {
             conn,
             agent_id,
             session_id,
-            &self.default_model,
+            &self.default_model(),
         )
         .map_err(|_| ModelAdminError::Internal)?;
         let input_high = |model: &str| {
@@ -535,14 +535,14 @@ impl AgentRuntime for AppState {
                 &conn,
                 agent_id,
                 session_id,
-                &self.default_model,
+                &self.default_model(),
             ),
             TurnModelProfile::Realtime => {
                 opencrab_db::queries::effective_realtime_model_for_session(
                     &conn,
                     agent_id,
                     session_id,
-                    &self.default_model,
+                    &self.default_model(),
                 )
             }
         }

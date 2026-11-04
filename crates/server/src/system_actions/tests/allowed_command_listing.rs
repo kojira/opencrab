@@ -133,7 +133,7 @@ async fn manage_allowed_commands_list_returns_the_same_effective_list() {
 #[tokio::test]
 async fn list_is_empty_when_tools_disabled() {
     let state = state_with_shell(&["ls", "cat"]);
-    state.tools_config.write().unwrap().enabled = false;
+    state.config.update(|c| c.tools.enabled = false);
     assert!(
         listed_commands(&state).await.is_empty(),
         "tools.enabled=false でも一覧が空になっていない（#311）"
@@ -145,13 +145,8 @@ async fn list_is_empty_when_tools_disabled() {
 async fn list_is_empty_when_shell_disabled() {
     let state = state_with_shell(&["ls", "cat"]);
     state
-        .tools_config
-        .write()
-        .unwrap()
-        .shell
-        .as_mut()
-        .unwrap()
-        .enabled = false;
+        .config
+        .update(|c| c.tools.shell.as_mut().unwrap().enabled = false);
     assert!(
         listed_commands(&state).await.is_empty(),
         "tools.shell.enabled=false でも一覧が空になっていない（#311）"
@@ -162,11 +157,11 @@ async fn list_is_empty_when_shell_disabled() {
 #[tokio::test]
 async fn list_is_empty_when_shell_absent() {
     let state = state_with_shell(&["ls"]);
-    {
-        let mut cfg = state.tools_config.write().unwrap();
+    state.config.update(|c| {
+        let cfg = &mut c.tools;
         cfg.enabled = true;
         cfg.shell = None;
-    }
+    });
     assert!(
         listed_commands(&state).await.is_empty(),
         "shell 設定が無いのに一覧が空でない（#311）"
@@ -190,7 +185,7 @@ async fn list_returns_commands_when_both_gates_enabled() {
 #[tokio::test]
 async fn manage_allowed_commands_list_is_empty_when_tools_disabled() {
     let state = state_with_shell(&["ls", "cat"]);
-    state.tools_config.write().unwrap().enabled = false;
+    state.config.update(|c| c.tools.enabled = false);
     let actions = SystemGatewayActions::new(state.clone(), None, None, None);
     let r = actions
         .execute(

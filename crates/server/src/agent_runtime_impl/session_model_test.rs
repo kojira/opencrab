@@ -658,10 +658,10 @@ async fn realtime_model_with_lower_input_high_is_rejected_without_writes() {
 
 #[tokio::test]
 async fn realtime_input_high_guard_uses_the_live_policy() {
-    let (mut state, _) = realtime_state();
-    let mut config = (*state.llm_config).clone();
-    config.absolute_input_cap = 1_000_000;
-    state.llm_config = Arc::new(config);
+    let (state, _) = realtime_state();
+    state
+        .config
+        .update(|c| c.llm.absolute_input_cap = 1_000_000);
     state
         .set_session_model("a1", "sess-a", TurnModelProfile::Default, "huge")
         .await

@@ -71,7 +71,7 @@ pub async fn model_choices(
         )
     })?;
     Ok(Json(serde_json::json!({
-        "default_model": state.default_model,
+        "default_model": state.default_model(),
         "choices": choices,
     })))
 }
@@ -172,7 +172,7 @@ mod slash_model_resolution_contract {
 
         assert_eq!(snapshot.models, Vec::<String>::new());
         assert_eq!(snapshot.configured_model, None);
-        assert_eq!(snapshot.current_model, state.default_model);
+        assert_eq!(snapshot.current_model, state.default_model());
     }
 
     #[tokio::test]
