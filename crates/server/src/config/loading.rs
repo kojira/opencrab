@@ -28,9 +28,15 @@ pub fn parse_config(raw: &str) -> Result<AppConfig> {
 }
 
 /// The effective default model spec `provider:model` of an `[llm]` section. Every reader
-/// (turns, the startup budget check, the reload validation) builds it here.
+/// (turns, the startup budget check, the reload validation) builds it here. An empty
+/// `default_provider` means "no default provider": `default_model` is then already a full
+/// `provider:model` spec (see `build_llm_router`).
 pub fn default_model_spec(llm: &LlmConfig) -> String {
-    format!("{}:{}", llm.default_provider, llm.default_model)
+    if llm.default_provider.is_empty() {
+        llm.default_model.clone()
+    } else {
+        format!("{}:{}", llm.default_provider, llm.default_model)
+    }
 }
 
 /// Replace `${VAR_NAME}` patterns with corresponding environment variable values.

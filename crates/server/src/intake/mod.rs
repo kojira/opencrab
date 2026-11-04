@@ -134,7 +134,8 @@ pub fn route_and_enqueue(
     source: &str,
     event: &IntakeEvent,
 ) -> Result<EnqueueOutcome> {
-    let Some(agent_id) = state.config().intake.route_agent(source, &event.event_type) else {
+    let config = state.config();
+    let Some(agent_id) = config.intake.route_agent(source, &event.event_type) else {
         return Ok(EnqueueOutcome::NoRoute);
     };
     let insert = InboxInsert {
@@ -471,14 +472,16 @@ event_type = "comment.created"
     /// notify を外すと (1) が timeout で赤くなる（変異検出）。
     #[tokio::test]
     async fn catchup_notifies_intake_wake_only_when_it_enqueues_new() {
-        let mut state = crate::test_app_state();
-        state.intake = std::sync::Arc::new(crate::config::IntakeConfig {
-            routes: vec![crate::config::IntakeRoute {
-                source: "sample-source".into(),
-                event_type: "comment.created".into(),
-                agent_id: "agent_alpha".into(),
-            }],
-            ..Default::default()
+        let state = crate::test_app_state();
+        state.config.update(|c| {
+            c.intake = crate::config::IntakeConfig {
+                routes: vec![crate::config::IntakeRoute {
+                    source: "sample-source".into(),
+                    event_type: "comment.created".into(),
+                    agent_id: "agent_alpha".into(),
+                }],
+                ..Default::default()
+            }
         });
         let adapter = MockAdapter {
             source: "sample-source".into(),

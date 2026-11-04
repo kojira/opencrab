@@ -81,8 +81,8 @@ const DECLARED_NAME: &str = "OPENCRAB_TEST_BINDING_ACCOUNT";
 fn state_with_printenv_stub(seen: Arc<Mutex<Vec<String>>>) -> AppState {
     let state = crate::test_app_state();
     insert_agent_x(&state);
-    {
-        let mut cfg = state.tools_config.write().unwrap();
+    state.config.update(|c| {
+        let cfg = &mut c.tools;
         cfg.enabled = true;
         cfg.shell = Some(opencrab_actions::tools::ShellToolConfig {
             enabled: true,
@@ -91,7 +91,7 @@ fn state_with_printenv_stub(seen: Arc<Mutex<Vec<String>>>) -> AppState {
             allowed_env_vars: Vec::new(),
             ..Default::default()
         });
-    }
+    });
     let mut router = opencrab_llm::router::LlmRouter::new();
     router.add_provider(Arc::new(PrintenvStub { seen }));
     state.llm_router.swap(router);

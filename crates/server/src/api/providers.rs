@@ -360,7 +360,8 @@ pub async fn reload_providers(
 pub async fn codex_diagnostics(State(state): State<AppState>) -> Json<serde_json::Value> {
     // config の binary_path（空なら PATH 上の "codex"）。サーバーの環境で解決される。
     let configured = state
-        .llm_config
+        .config()
+        .llm
         .providers
         .get("codex")
         .map(|c| c.binary_path.clone())
@@ -410,7 +411,8 @@ async fn run_codex_version(cmd: &str) -> Result<String, String> {
 pub async fn cursor_diagnostics(State(state): State<AppState>) -> Json<serde_json::Value> {
     // config の binary_path（空なら既定の "cursor-agent"）。
     let configured = state
-        .llm_config
+        .config()
+        .llm
         .providers
         .get("cursor")
         .map(|c| c.binary_path.clone())
@@ -557,8 +559,8 @@ pub async fn test_provider_endpoint(
 }
 
 pub(crate) fn reload_router(state: &AppState) -> Result<(), (StatusCode, String)> {
-    let router =
-        crate::config::build_effective_llm_router(&state.db, &state.config().llm).map_err(internal)?;
+    let router = crate::config::build_effective_llm_router(&state.db, &state.config().llm)
+        .map_err(internal)?;
     let names: Vec<String> = router
         .provider_names()
         .iter()

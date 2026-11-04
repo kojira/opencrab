@@ -550,41 +550,7 @@ mod tests {
         let mut router = opencrab_llm::router::LlmRouter::new();
         router.add_provider(mock as std::sync::Arc<dyn opencrab_llm::traits::LlmProvider>);
         router.set_default_provider("mock");
-        let timed = opencrab_actions::TimedFireRouter::new();
-        AppState {
-            db,
-            llm_router: opencrab_server::SharedLlmRouter::new(router),
-            llm_config: std::sync::Arc::new(toml::from_str("").unwrap()),
-            subtask_auto_dispatch: true,
-            workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
-            #[cfg(any())]
-            nostr_master_key: None,
-            default_model: "mock:gpt-4o".to_string(),
-            tools_config: std::sync::Arc::new(std::sync::RwLock::new(
-                opencrab_actions::tools::ToolsConfig::default(),
-            )),
-            compaction_ratio: 0.5,
-            evaluator: opencrab_server::config::EvaluatorConfig::default(),
-            skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
-            category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),
-            memory_organize: opencrab_server::config::MemoryOrganizeConfig::default(),
-            memory_declare: opencrab_server::config::MemoryDeclareConfig::default(),
-            memory_condense: opencrab_server::config::MemoryCondenseConfig::default(),
-            loop_restart_enabled: false,
-            index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
-            intake: std::sync::Arc::new(Default::default()),
-            intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-            mcp_manager: None,
-            subtask_registries: std::sync::Arc::new(
-                opencrab_server::subtask_registries::SubtaskRegistries::new(),
-            ),
-            session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
-            timed_fire_router: std::sync::Arc::new(timed),
-            progress_debounce: std::sync::Arc::new(
-                opencrab_server::subtask_registries::ProgressDebounce::new(),
-            ),
-            scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-        }
+        AppState::new(db, router, opencrab_server::test_config("mock", "gpt-4o"))
     }
 
     #[tokio::test]

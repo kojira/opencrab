@@ -152,39 +152,41 @@ pub async fn run_maintenance_tick(
 ) -> anyhow::Result<MaintenanceReport> {
     let mut report = MaintenanceReport::default();
 
-    let (effective_model, persona_name, personality, unindexed, newest_log_at, config) = {
-        let conn = state
-            .db
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
-        let model =
-            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model())
-                .unwrap_or_else(|_| state.default_model());
-        let (persona_name, personality) = opencrab_db::queries::get_agent(&conn, agent_id)
-            .ok()
-            .flatten()
-            .map(|a| (a.persona_name, a.personality))
-            .unwrap_or_default();
-        let (unindexed, newest_log_at) =
-            opencrab_db::queries::get_unindexed_stats(&conn, agent_id)?;
-        let config =
-            opencrab_db::queries::get_memory_index_config(&conn, agent_id).unwrap_or_else(|_| {
-                opencrab_db::queries::AgentMemoryIndexConfig {
+    let (effective_model, persona_name, personality, unindexed, newest_log_at, config) =
+        {
+            let conn = state
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+            let model = opencrab_db::queries::effective_model_for_agent(
+                &conn,
+                agent_id,
+                &state.default_model(),
+            )
+            .unwrap_or_else(|_| state.default_model());
+            let (persona_name, personality) = opencrab_db::queries::get_agent(&conn, agent_id)
+                .ok()
+                .flatten()
+                .map(|a| (a.persona_name, a.personality))
+                .unwrap_or_default();
+            let (unindexed, newest_log_at) =
+                opencrab_db::queries::get_unindexed_stats(&conn, agent_id)?;
+            let config = opencrab_db::queries::get_memory_index_config(&conn, agent_id)
+                .unwrap_or_else(|_| opencrab_db::queries::AgentMemoryIndexConfig {
                     agent_id: agent_id.to_string(),
                     batch_size: opencrab_db::queries::BATCH_SIZE_DEFAULT,
                     threshold: opencrab_db::queries::THRESHOLD_DEFAULT,
                     updated_at: String::new(),
-                }
-            });
-        (
-            model,
-            persona_name,
-            personality,
-            unindexed,
-            newest_log_at,
-            config,
-        )
-    };
+                });
+            (
+                model,
+                persona_name,
+                personality,
+                unindexed,
+                newest_log_at,
+                config,
+            )
+        };
     let llm = LlmRouterAdapter::new(state.llm_router.clone());
 
     // ① 増分ビルド。閾値未満でも「最新の未処理ログが十分古い = 会話が一段落」なら

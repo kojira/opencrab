@@ -109,8 +109,8 @@
 
     #[tokio::test]
     async fn default_off_is_zero_call_and_writes_nothing() {
-        let mut state = crate::test_app_state();
-        state.memory_organize = cfg(false, 3, 2);
+        let state = crate::test_app_state();
+        state.config.update(|c| c.memory_organize = cfg(false, 3, 2));
         // ゲートが通る材料を揃えても、既定オフなら decide にすら入らない。
         set_watermark(&state, "a1", 1000);
         for i in 0..5 {

@@ -42,40 +42,9 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         .to_string_lossy()
         .to_string();
 
-    let state = AppState {
-        db: db.clone(),
-        llm_router: opencrab_server::SharedLlmRouter::new(router),
-        llm_config: Arc::new(toml::from_str("").unwrap()),
-        subtask_auto_dispatch: true,
-        workspace_base,
-        #[cfg(any())]
-        nostr_master_key: None,
-        default_model: "openrouter:openai/gpt-4o".to_string(),
-        tools_config: Arc::new(std::sync::RwLock::new(
-            opencrab_actions::tools::ToolsConfig::default(),
-        )),
-        compaction_ratio: 0.5,
-        evaluator: opencrab_server::config::EvaluatorConfig::default(),
-        skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
-        category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),
-        memory_organize: opencrab_server::config::MemoryOrganizeConfig::default(),
-        memory_declare: opencrab_server::config::MemoryDeclareConfig::default(),
-        memory_condense: opencrab_server::config::MemoryCondenseConfig::default(),
-        loop_restart_enabled: false,
-        index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
-        intake: std::sync::Arc::new(Default::default()),
-        intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-        mcp_manager: None,
-        subtask_registries: std::sync::Arc::new(
-            opencrab_server::subtask_registries::SubtaskRegistries::new(),
-        ),
-        session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
-        scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-        timed_fire_router: std::sync::Arc::new(opencrab_actions::TimedFireRouter::new()),
-        progress_debounce: std::sync::Arc::new(
-            opencrab_server::subtask_registries::ProgressDebounce::new(),
-        ),
-    };
+    let mut cfg = opencrab_server::test_config("openrouter", "openai/gpt-4o");
+    cfg.agent.workspace_path = workspace_base;
+    let state = AppState::new(db.clone(), router, cfg);
     let app = create_router(state);
     (app, db)
 }

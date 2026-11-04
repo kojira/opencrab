@@ -123,8 +123,12 @@ pub async fn execute_import_handler(
         let llm_clone = state.llm_router.clone();
         let model_clone = {
             let conn = state.db.lock().unwrap();
-            opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model())
-                .unwrap_or_else(|_| state.default_model())
+            opencrab_db::queries::effective_model_for_agent(
+                &conn,
+                &agent_id,
+                &state.default_model(),
+            )
+            .unwrap_or_else(|_| state.default_model())
         };
         let agent_id_clone = agent_id.clone();
         let daily_persona_name = persona_name.clone();

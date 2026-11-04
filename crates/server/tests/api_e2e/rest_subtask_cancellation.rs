@@ -84,7 +84,7 @@ async fn cancel_last_subtask_in_rest_run_with_inner(
         opencrab_actions::CallerIdentity::Agent,
     )
     .with_dispatch(Some(registry.clone()), sink)
-    .with_gateway_actions(make_inner(db.clone(), state.workspace_base.clone()));
+    .with_gateway_actions(make_inner(db.clone(), state.config().agent.workspace_path.clone()));
     opencrab_server::process::run_agent_response(&state, run_req)
         .await
         .expect("停止ターンの run が失敗した");

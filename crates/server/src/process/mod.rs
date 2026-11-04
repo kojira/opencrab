@@ -176,8 +176,10 @@ pub async fn run_agent_response(
     };
 
     // Build workspace path for this agent.
-    let ws_path =
-        opencrab_core::workspace::resolve_agent_workspace(&state.config().agent.workspace_path, agent_id)?;
+    let ws_path = opencrab_core::workspace::resolve_agent_workspace(
+        &state.config().agent.workspace_path,
+        agent_id,
+    )?;
     std::fs::create_dir_all(&ws_path).ok();
     let workspace = opencrab_core::workspace::Workspace::from_root(std::path::Path::new(&ws_path))?;
 
@@ -331,8 +333,10 @@ pub async fn run_agent_response(
 
     // tool_result の退避先（サイズ上限超過分）。inline 経路のログ callback と
     // dispatch 経路（`SubtaskToolDispatcher`）が同じ root を使う。
-    let tool_result_workspace =
-        opencrab_core::workspace::resolve_agent_workspace(&state.config().agent.workspace_path, agent_id)?;
+    let tool_result_workspace = opencrab_core::workspace::resolve_agent_workspace(
+        &state.config().agent.workspace_path,
+        agent_id,
+    )?;
 
     // 合成 executor を 1 つの Arc にまとめ、engine（inline 実行）と dispatcher
     // （background 実行 = RFC #152 S3a 非ブロック）で共有する。dispatch した単一

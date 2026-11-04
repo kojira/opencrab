@@ -261,7 +261,7 @@ mod watcher_rejection_tests {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-        /// 正常な変更が反映されるまでの待ち上限。遅いマシンでも落ちないよう長めに取る。
+    /// 正常な変更が反映されるまでの待ち上限。遅いマシンでも落ちないよう長めに取る。
     const APPLY_WAIT: Duration = Duration::from_secs(20);
     /// 拒否されたはずの変更が現れないことを見る観測窓。陽性対照が直前にこの経路の
     /// 実レイテンシを示しているので、同じ書き直しを数回繰り返せる長さがあれば足りる。
@@ -400,9 +400,11 @@ mod live_config_tests {
         apply_config_text(&state, &format!("{LLM}[memory_declare]\nenabled = false\n")).unwrap();
         assert!(!state.config().memory_declare.enabled);
         // The declare run reads the live value: disabled means no run at all.
-        assert!(!crate::memory_declare::maybe_run_memory_declare(&state, agent)
-            .await
-            .unwrap());
+        assert!(
+            !crate::memory_declare::maybe_run_memory_declare(&state, agent)
+                .await
+                .unwrap()
+        );
         apply_config_text(&state, &format!("{LLM}[memory_declare]\nenabled = true\n")).unwrap();
         assert!(state.config().memory_declare.enabled);
     }
@@ -460,8 +462,12 @@ mod live_config_tests {
         assert_eq!(state.default_model(), "p1:m2");
         let conn = state.db.lock().unwrap();
         assert_eq!(
-            opencrab_db::queries::effective_model_for_agent(&conn, "no-such-agent", &state.default_model())
-                .unwrap(),
+            opencrab_db::queries::effective_model_for_agent(
+                &conn,
+                "no-such-agent",
+                &state.default_model()
+            )
+            .unwrap(),
             "p1:m2"
         );
     }
@@ -476,7 +482,11 @@ mod live_config_tests {
         next.database.path = "other.db".into();
         assert_eq!(
             super::restart_only_changes(&running, &next),
-            vec!["[gateway.rest] port", "[gate] listen_socket", "[database] path"]
+            vec![
+                "[gateway.rest] port",
+                "[gate] listen_socket",
+                "[database] path"
+            ]
         );
     }
 }

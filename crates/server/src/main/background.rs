@@ -55,7 +55,8 @@ pub(super) fn spawn_background_tasks(
         });
     }
 
-    let _watcher_handle = opencrab_server::hot_reload::start_config_watcher("config", state.clone());
+    let _watcher_handle =
+        opencrab_server::hot_reload::start_config_watcher("config", state.clone());
 
     _watcher_handle
 }
