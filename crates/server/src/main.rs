@@ -72,13 +72,13 @@ async fn main() -> anyhow::Result<()> {
             .db
             .lock()
             .map_err(|e| anyhow::anyhow!("db lock failed at startup budget check: {e}"))?;
-        opencrab_server::process::ensure_startup_budget_inputs(&conn, &state.default_model)
+        opencrab_server::process::ensure_startup_budget_inputs(&conn, &state.default_model())
             .map_err(|e| anyhow::anyhow!("context budget fail-loud at startup: {e}"))?;
     }
 
     // The protected router and private socket were prepared synchronously by bootstrap.
     // Only after that security gate succeeds may any runtime/public listener be started.
-    let _watcher_handle = background::spawn_background_tasks(&state, &cfg, &gate_socket);
+    let _watcher_handle = background::spawn_background_tasks(&state, &gate_socket);
 
     // Per-agent MCP 接続マネージャ。enabled なサーバへ起動時に接続する。
     //

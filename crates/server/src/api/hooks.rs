@@ -43,7 +43,7 @@ pub async fn receive_hook(
     body: Bytes,
 ) -> StatusCode {
     // 1. source の共有 secret。未設定（または空）なら存在を秘匿して 404。
-    let Some(secret) = state.intake.secret_for(&source).map(str::to_owned) else {
+    let Some(secret) = state.config().intake.secret_for(&source).map(str::to_owned) else {
         return StatusCode::NOT_FOUND;
     };
 

@@ -15,7 +15,7 @@ pub(crate) fn resolve_run_tools_config(
     state: &AppState,
     agent_id: &str,
 ) -> opencrab_actions::tools::ToolsConfig {
-    let mut tools_cfg = state.tools_config.read().unwrap().clone();
+    let mut tools_cfg = state.config().tools.clone();
     // DB 障害時は設定ファイル分だけで続行する（許可を落とす方向の degrade なので
     // run を止めるより安全）。ただし**黙って**落とさない: per-agent の許可が丸ごと
     // 消えたことは、ログが無いと誰も気づけない。本番の `Db` は r2d2 プールなので

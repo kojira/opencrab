@@ -196,31 +196,34 @@ fn run_tick_if_due(
 /// 日次程度で十分なので `interval_secs` は最低 3600 秒に丸める。同期 DB とディレクトリ走査を
 /// 触るので `spawn_blocking` に載せ、async ランタイムを塞がない。発火判定は永続化した
 /// マーカー起点の経過時間で行うので、**再起動を頻繁に挟んでも発火する**（`LAST_RUN_MARKER`）。
-pub fn spawn_offload_cleanup_loop(
-    db: Db,
-    workspace_template: String,
-    marker_dir: PathBuf,
-    retention_days: i64,
-    interval_secs: u64,
-) {
+/// 発火判定用マーカーは DB ファイルの親（どのエージェントの tmp とも混ざらない）に置く。
+///
+/// D-1113: `[offload_cleanup]` and the workspace template are read from the live config on
+/// every tick, so editing the file takes effect without a restart. While disabled the loop
+/// only rechecks the config.
+pub fn spawn_offload_cleanup_loop(state: crate::AppState) {
     tokio::spawn(async move {
-        let interval_secs = interval_secs.max(3600);
-        let interval = Duration::from_secs(interval_secs);
-        let chrono_interval = chrono::Duration::seconds(interval_secs as i64);
-        tracing::info!(
-            interval_secs,
-            retention_days,
-            workspace_template = %workspace_template,
-            marker_dir = %marker_dir.display(),
-            "offload cleanup loop started"
-        );
+        tracing::info!("offload cleanup loop started");
         // 起動直後の集中 I/O を避けるため**短く**待ってから初回判定に入る。ここを長くすると
         // 高頻度再起動で初回 is_due に到達せず掃除が走らない（STARTUP_SETTLE のコメント参照）。
         tokio::time::sleep(STARTUP_SETTLE).await;
         loop {
-            let db = db.clone();
-            let template = workspace_template.clone();
-            let mdir = marker_dir.clone();
+            let config = state.config();
+            let settings = &config.offload_cleanup;
+            let interval_secs = settings.interval_secs.max(3600);
+            let interval = Duration::from_secs(interval_secs);
+            if !settings.enabled {
+                tokio::time::sleep(crate::config::DISABLED_LOOP_RECHECK).await;
+                continue;
+            }
+            let chrono_interval = chrono::Duration::seconds(interval_secs as i64);
+            let retention_days = settings.retention_days;
+            let db = state.db.clone();
+            let template = config.agent.workspace_path.clone();
+            let mdir = Path::new(&config.database.path)
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
             let res = tokio::task::spawn_blocking(move || {
                 run_tick_if_due(
                     &db,

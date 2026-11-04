@@ -59,7 +59,8 @@ fn provider_entry(
     overrides: &[opencrab_db::queries::LlmProviderOverrideRow],
     active_names: &[&str],
 ) -> serde_json::Value {
-    let toml_cfg = state.llm_config.providers.get(name);
+    let config = state.config();
+    let toml_cfg = config.llm.providers.get(name);
     let ov = overrides.iter().find(|r| r.provider == name);
 
     // 実効 API キーの出所: DB > TOML(env 展開済み) > なし
@@ -133,7 +134,8 @@ pub async fn list_providers(State(state): State<AppState>) -> Json<serde_json::V
 
     // 既知プロバイダー + TOML/DB にだけ存在する名前もすべて列挙
     let mut names: Vec<String> = KNOWN_PROVIDERS.iter().map(|s| s.to_string()).collect();
-    for n in state.llm_config.providers.keys() {
+    let config = state.config();
+    for n in config.llm.providers.keys() {
         if !names.contains(n) {
             names.push(n.clone());
         }
@@ -151,7 +153,7 @@ pub async fn list_providers(State(state): State<AppState>) -> Json<serde_json::V
 
     Json(json!({
         "providers": providers,
-        "default_model": state.default_model,
+        "default_model": state.default_model(),
     }))
 }
 
@@ -457,7 +459,8 @@ async fn run_cursor_version(cmd: &str) -> Result<String, String> {
 /// 担うため、`<binary> --version` だけでは起動可否が分からない。ここでは PATH/バイナリ
 /// 解決の切り分け情報を返し、実際に ACP を話せるかは接続テスト（/test）で確認する。
 pub async fn acp_diagnostics(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let cfg = state.llm_config.providers.get("acp");
+    let config = state.config();
+    let cfg = config.llm.providers.get("acp");
     let configured = cfg
         .map(|c| c.binary_path.clone())
         .filter(|s| !s.is_empty())

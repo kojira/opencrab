@@ -71,13 +71,19 @@ const MIN_INTERVAL_SECS: u64 = 10;
 /// ループは単一タスクなので消化は決して並行しない。処理中に通知が複数来ても `Notify` の permit は
 /// 1 つに畳まれ、現在の処理が終わったあと 1 回だけ再消化される（多重ターンにならない・#499 注意点）。
 pub fn spawn_intake_process_loop(state: AppState) {
-    let interval_secs = state.intake.process_interval_secs.max(MIN_INTERVAL_SECS);
     tokio::spawn(async move {
-        let interval = Duration::from_secs(interval_secs);
         let wake = state.intake_wake.clone();
-        tracing::info!(interval_secs, "intake process loop started");
+        tracing::info!("intake process loop started");
         loop {
             process_all_inboxes(&state).await;
+            // D-1113: the interval is read from the live config on every tick.
+            let interval = Duration::from_secs(
+                state
+                    .config()
+                    .intake
+                    .process_interval_secs
+                    .max(MIN_INTERVAL_SECS),
+            );
             wait_for_tick(interval, &wake).await;
         }
     });

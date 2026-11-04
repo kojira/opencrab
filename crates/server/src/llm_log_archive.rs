@@ -151,27 +151,28 @@ fn run_tick_if_due(
 /// 日次程度で十分なので `interval_secs` は最低 3600 秒に丸める。重い I/O と同期 DB を
 /// 触るので `spawn_blocking` に載せ、async ランタイムを塞がない。発火判定は永続化した
 /// マーカー起点の経過時間で行うので、**再起動を頻繁に挟んでも発火する**（`LAST_RUN_MARKER`）。
-pub fn spawn_llm_log_archive_loop(
-    db: Db,
-    archive_dir: PathBuf,
-    retention_days: i64,
-    interval_secs: u64,
-) {
+///
+/// D-1113: `[llm_log_archive]` (enabled / interval / retention / dir) is read from the live
+/// config on every tick, so editing the file takes effect without a restart. While disabled
+/// the loop only rechecks the config.
+pub fn spawn_llm_log_archive_loop(state: crate::AppState) {
     tokio::spawn(async move {
-        let interval_secs = interval_secs.max(3600);
-        let interval = Duration::from_secs(interval_secs);
-        let chrono_interval = chrono::Duration::seconds(interval_secs as i64);
-        tracing::info!(
-            interval_secs,
-            retention_days,
-            archive_dir = %archive_dir.display(),
-            "llm_log archive loop started"
-        );
+        tracing::info!("llm_log archive loop started");
         // 起動直後の集中 I/O を避けるため少しだけ待ってから初回判定に入る。
         tokio::time::sleep(STARTUP_DELAY).await;
         loop {
-            let db = db.clone();
-            let dir = archive_dir.clone();
+            let config = state.config();
+            let settings = &config.llm_log_archive;
+            let interval_secs = settings.interval_secs.max(3600);
+            let interval = Duration::from_secs(interval_secs);
+            if !settings.enabled {
+                tokio::time::sleep(crate::config::DISABLED_LOOP_RECHECK).await;
+                continue;
+            }
+            let chrono_interval = chrono::Duration::seconds(interval_secs as i64);
+            let retention_days = settings.retention_days;
+            let db = state.db.clone();
+            let dir = archive_dir(&config);
             let res = tokio::task::spawn_blocking(move || {
                 run_tick_if_due(&db, &dir, retention_days, chrono_interval, Utc::now())
             })
@@ -206,6 +207,18 @@ pub fn spawn_llm_log_archive_loop(
             }
         }
     });
+}
+
+/// 出力先。未指定なら DB ファイルの親 + `archive`（DB と同じボリューム = 内蔵ディスクに置かない）。
+fn archive_dir(config: &crate::config::AppConfig) -> PathBuf {
+    if config.llm_log_archive.dir.trim().is_empty() {
+        Path::new(&config.database.path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("archive")
+    } else {
+        PathBuf::from(&config.llm_log_archive.dir)
+    }
 }
 
 /// 保持期間より古い月を書き出して DB から外す（同期）。

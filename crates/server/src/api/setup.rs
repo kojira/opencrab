@@ -105,8 +105,9 @@ pub async fn get_setup_status(State(state): State<AppState>) -> Json<serde_json:
     //   - キー不要プロバイダ（codex / chatgpt / ollama / llamacpp / bonsai）である
     //   - 実効 API キーが設定済み（空でも "dummy" でもない）
     //   - ダッシュボードでオーバーライドが有効化されている
-    let default_provider = state.llm_config.default_provider.as_str();
-    let llm_done = llm_provider_ready(default_provider, &state.llm_config, &overrides);
+    let config = state.config();
+    let default_provider = config.llm.default_provider.as_str();
+    let llm_done = llm_provider_ready(default_provider, &config.llm, &overrides);
 
     let agent_done = agent_count > 0;
 

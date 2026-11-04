@@ -1,5 +1,9 @@
 // ---------- Config loading ----------
 
+/// How often a background loop whose section is disabled rechecks the live config, so
+/// turning it on in the file takes effect without a restart (D-1113).
+pub const DISABLED_LOOP_RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Load config from a TOML file, expanding `${VAR}` placeholders with env vars.
 pub fn load_config(path: &str) -> Result<AppConfig> {
     let raw = std::fs::read_to_string(path)

@@ -17,7 +17,7 @@ fn open_agent_workspace(
     state: &AppState,
     id: &str,
 ) -> Result<opencrab_core::workspace::Workspace, String> {
-    let ws_path = opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, id)
+    let ws_path = opencrab_core::workspace::resolve_agent_workspace(&state.config().agent.workspace_path, id)
         .map_err(|e| e.to_string())?;
     opencrab_core::workspace::Workspace::from_root(&ws_path).map_err(|e| e.to_string())
 }

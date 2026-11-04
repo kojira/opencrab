@@ -134,7 +134,7 @@ pub fn route_and_enqueue(
     source: &str,
     event: &IntakeEvent,
 ) -> Result<EnqueueOutcome> {
-    let Some(agent_id) = state.intake.route_agent(source, &event.event_type) else {
+    let Some(agent_id) = state.config().intake.route_agent(source, &event.event_type) else {
         return Ok(EnqueueOutcome::NoRoute);
     };
     let insert = InboxInsert {
@@ -205,36 +205,33 @@ fn sources_missing_routes<'a>(
 ///
 /// webhook は at-most-once なので、停止中に落ちたイベントはここで補充する（受け入れ基準:
 /// 「停止中に発生したイベントが再起動後の catch-up で処理される」）。**LLM は呼ばない**
-/// （受信箱に積むだけ）。アダプタが 1 つも無ければ即 return する。
+/// （受信箱に積むだけ）。アダプタが 1 つも無い tick は何もしない。
+///
+/// D-1113: sources, routes and the interval are read from the live config on every tick, so
+/// adding a source in the file starts polling it without a restart.
 pub fn spawn_intake_catchup_loop(state: AppState) {
-    let adapters = build_adapters(&state.intake);
-    if adapters.is_empty() {
-        tracing::info!("intake catch-up: source アダプタ未設定のため起動しない");
-        return;
-    }
-    // 最低 60 秒に丸める（設定値はそのまま保持し、ここで床を効かせる / 既存ループと同流儀）。
-    let interval_secs = state.intake.catch_up_interval_secs.max(60);
-    let sources: Vec<String> = adapters.iter().map(|a| a.source().to_string()).collect();
-    // #470-N1: catch-up する source に対応する route（配送先）が 1 件も無いと、取得には成功する
-    // がイベントは NoRoute で捨てられ debug ログにしか出ない。config だけで source を足せるように
-    // した結果 `name` のタイポ（routes.source と不一致）が最も起きやすい運用ミスになり、しかも
-    // silent（外部 API を叩いて取得までは成功するので「設定したのに何も起きない」）。**起動時に
-    // 気づける手段**として warn を出す（error にしない・起動を止めない。route を後から足す運用は
-    // 正当なので、これは制約ではなく情報）。
-    for missing in sources_missing_routes(&state.intake.routes, &sources) {
-        tracing::warn!(
-            source = %missing,
-            "intake catch-up: この source に対応する [[intake.routes]] が無い。取得したイベントは配送先が無く捨てられる（routes.source を name と一致させること）"
-        );
-    }
     tokio::spawn(async move {
-        let interval = std::time::Duration::from_secs(interval_secs);
-        tracing::info!(
-            interval_secs,
-            sources = ?sources,
-            "intake catch-up loop started"
-        );
+        tracing::info!("intake catch-up loop started");
+        let mut warned_sources: Vec<String> = Vec::new();
         loop {
+            let config = state.config();
+            // 最低 60 秒に丸める（設定値はそのまま保持し、ここで床を効かせる / 既存ループと同流儀）。
+            let interval =
+                std::time::Duration::from_secs(config.intake.catch_up_interval_secs.max(60));
+            let adapters = build_adapters(&config.intake);
+            let sources: Vec<String> = adapters.iter().map(|a| a.source().to_string()).collect();
+            // #470-N1: catch-up する source に対応する route（配送先）が 1 件も無いと、取得には成功する
+            // がイベントは NoRoute で捨てられ debug ログにしか出ない。`name` のタイポ（routes.source
+            // と不一致）に気づけるよう warn を出す（制約ではなく情報。source が変わったときだけ）。
+            if sources != warned_sources {
+                for missing in sources_missing_routes(&config.intake.routes, &sources) {
+                    tracing::warn!(
+                        source = %missing,
+                        "intake catch-up: この source に対応する [[intake.routes]] が無い。取得したイベントは配送先が無く捨てられる（routes.source を name と一致させること）"
+                    );
+                }
+                warned_sources = sources;
+            }
             for adapter in &adapters {
                 run_catchup_once(&state, adapter.as_ref()).await;
             }

@@ -40,7 +40,7 @@ pub async fn maybe_run_skill_consolidation(
     state: &AppState,
     agent_id: &str,
 ) -> anyhow::Result<bool> {
-    let cfg = state.skill_consolidation.clone();
+    let cfg = state.config().skill_consolidation.clone();
     if !cfg.enabled {
         return Ok(false);
     }
@@ -263,8 +263,8 @@ fn build_review_packet(
         .map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
 
     let model =
-        opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
-            .unwrap_or_else(|_| state.default_model.clone());
+        opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model())
+            .unwrap_or_else(|_| state.default_model());
     let (persona_name, personality) = opencrab_db::queries::get_agent(&conn, agent_id)
         .ok()
         .flatten()

@@ -35,7 +35,7 @@ pub(super) fn prepare_loop_restart(
     /// v1 の再実行上限（per-task / per-call 共通）。
     const LOOP_RESTART_MAX: i64 = 1;
 
-    if depth != 0 || !state.loop_restart_enabled {
+    if depth != 0 || !state.config().agent.loop_restart_enabled {
         return None;
     }
     if !matches!(result, Ok(er) if er.stopped_by_limit) {
@@ -159,7 +159,7 @@ pub(super) fn prepare_loop_restart(
         conn: &conn,
         agent_id,
         session_id,
-        default_model: &state.default_model,
+        default_model: &state.default_model(),
         pinned_model: Some(turn_model),
         policy: &state.context_budget_policy(),
         system_prompt: &system_prompt,

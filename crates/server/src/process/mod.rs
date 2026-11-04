@@ -177,7 +177,7 @@ pub async fn run_agent_response(
 
     // Build workspace path for this agent.
     let ws_path =
-        opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, agent_id)?;
+        opencrab_core::workspace::resolve_agent_workspace(&state.config().agent.workspace_path, agent_id)?;
     std::fs::create_dir_all(&ws_path).ok();
     let workspace = opencrab_core::workspace::Workspace::from_root(std::path::Path::new(&ws_path))?;
 
@@ -191,7 +191,7 @@ pub async fn run_agent_response(
                 &conn,
                 agent_id,
                 session_id,
-                &state.default_model,
+                &state.default_model(),
             )?
         }
     };
@@ -236,7 +236,7 @@ pub async fn run_agent_response(
     ));
 
     let runtime_info = opencrab_actions::RuntimeInfo {
-        default_model: state.default_model.clone(),
+        default_model: state.default_model(),
         active_model: Some(effective_model.clone()),
         available_providers: state
             .llm_router
@@ -332,7 +332,7 @@ pub async fn run_agent_response(
     // tool_result の退避先（サイズ上限超過分）。inline 経路のログ callback と
     // dispatch 経路（`SubtaskToolDispatcher`）が同じ root を使う。
     let tool_result_workspace =
-        opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, agent_id)?;
+        opencrab_core::workspace::resolve_agent_workspace(&state.config().agent.workspace_path, agent_id)?;
 
     // 合成 executor を 1 つの Arc にまとめ、engine（inline 実行）と dispatcher
     // （background 実行 = RFC #152 S3a 非ブロック）で共有する。dispatch した単一
@@ -404,7 +404,7 @@ pub async fn run_agent_response(
     // 自動 dispatch（非ブロック）フックの注入。depth0 かつ完了再注入 sink が配線
     // されているときだけ有効化する。sink 未配線（REST 一発呼び等）や sub-engine は
     // 従来どおり全ツール inline 実行（後方互換・非破壊）。
-    if depth == 0 && state.subtask_auto_dispatch {
+    if depth == 0 && state.config().subtask.auto_dispatch {
         if let Some(sink) = req.completion_sink.clone() {
             let registry = subtask_registry.clone();
             // inbound の返信先（gateway 不透明 token / #167）を dispatcher へ渡す。
@@ -550,7 +550,7 @@ pub async fn run_agent_response(
                     conn: &conn,
                     agent_id,
                     session_id,
-                    default_model: &state.default_model,
+                    default_model: &state.default_model(),
                     pinned_model: Some(&effective_model),
                     policy: &state.context_budget_policy(),
                     system_prompt,
@@ -674,7 +674,7 @@ pub async fn run_agent_response(
         // The memory index build is agent maintenance: it stays on the agent's model.
         let index_model = {
             let conn = state.db.lock().unwrap();
-            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
+            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model())
         };
         match index_model {
             Ok(index_model) => spawn_background_index_build(state, agent_id, &index_model),

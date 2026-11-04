@@ -25,9 +25,9 @@ impl SystemGatewayActions {
             let effective_model = opencrab_db::queries::effective_model_for_agent(
                 &conn,
                 &ctx.agent_id,
-                &self.state.default_model,
+                &self.state.default_model(),
             )
-            .unwrap_or_else(|_| self.state.default_model.clone());
+            .unwrap_or_else(|_| self.state.default_model());
             (config, persona_name, personality, effective_model)
         };
 
