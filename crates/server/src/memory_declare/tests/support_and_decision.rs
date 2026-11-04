@@ -250,6 +250,25 @@
         assert!(!sp.contains("発話 4"), "生ログ本文がプロンプトに漏れている");
     }
 
+    /// D-1112: the declare run states how a turn ends — the engine's real end signal. Text
+    /// without `NO_REPLY` continues the turn (default-continue), so a run told only to "leave a
+    /// one-liner" repeated it until the iteration cap and never advanced its window.
+    #[test]
+    fn system_prompt_states_how_the_run_ends() {
+        let state = crate::test_app_state();
+        seed_logs(&state, "a1", "s1", 5);
+        let plan = match decide_declare(&state.db, &cfg(true, 3, 2), "a1").unwrap() {
+            DeclareDecision::Run(p) => p,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        let sp = build_system_prompt(&plan);
+        assert!(
+            sp.contains(crate::process::TURN_COMPLETION_RULES),
+            "the turn-completion rule of the conversation prompt is shown"
+        );
+        assert!(!sp.contains("declare_done"), "a tool that does not end the turn is not offered");
+    }
+
     /// #399: 本人が広さを表明済みだと「いまの設定」は自分の値しか出ない。既定を併記して
     /// 「自分の設定が既定より広いか＝自動リセットが自分に掛かるか」を本人が判定できること。
     #[test]

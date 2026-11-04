@@ -590,7 +590,6 @@ fn allowlist_has_core_tools_and_excludes_outward_and_unit_writes() {
         "retract_memory_core",
         "search_memory_index",
         "search_my_history",
-        "declare_done",
     ] {
         assert!(CONDENSE_ALLOWED_TOOLS.contains(&t), "{t} は凝縮ランに要る");
     }
@@ -604,6 +603,8 @@ fn allowlist_has_core_tools_and_excludes_outward_and_unit_writes() {
         "record_memory_unit",
         "retract_memory_unit",
         "plan_next_memory_window",
+        // D-1112: does not end the turn; NO_REPLY does.
+        "declare_done",
     ] {
         assert!(
             !CONDENSE_ALLOWED_TOOLS.contains(&forbidden),
@@ -613,6 +614,20 @@ fn allowlist_has_core_tools_and_excludes_outward_and_unit_writes() {
 }
 
 // --- プロンプト ---
+
+/// D-1112: the condense run states how a turn ends (the conversation prompt's rule).
+#[test]
+fn prompt_states_how_the_run_ends() {
+    let state = crate::test_app_state();
+    seed_units(&state, "a1", 3);
+    let plan = match decide_condense(&state.db, &cfg(true, 1, 1440), "a1").unwrap() {
+        CondenseDecision::Run(p) => p,
+        other => panic!("expected Run, got {other:?}"),
+    };
+    let sp = build_system_prompt(&plan);
+    assert!(sp.contains(crate::process::TURN_COMPLETION_RULES));
+    assert!(!sp.contains("declare_done"));
+}
 
 #[test]
 fn prompt_shows_units_open_axes_and_existing_cores() {

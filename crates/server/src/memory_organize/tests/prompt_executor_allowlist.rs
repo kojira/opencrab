@@ -68,6 +68,16 @@
         assert!(sp.contains("過去の分が混ざっています"));
     }
 
+    /// D-1112: the organize run states how a turn ends (the conversation prompt's rule).
+    #[test]
+    fn system_prompt_states_how_the_run_ends() {
+        let plan = plan_with(vec![topic("id1", "t1", "初めての記憶", "最初の一歩")], vec![]);
+        let sp = build_system_prompt(&plan);
+        assert!(sp.contains(crate::process::TURN_COMPLETION_RULES));
+        assert!(!sp.contains("declare_done"));
+        assert!(!ORGANIZE_ALLOWED_TOOLS.contains(&"declare_done"));
+    }
+
     #[test]
     fn system_prompt_handles_no_tags() {
         let plan = plan_with(
@@ -241,7 +251,6 @@
             "tag_topic",
             "untag_topic",
             "merge_tags",
-            "declare_done",
         ];
 
         // 経路1: 許可リスト定数そのものの内容。

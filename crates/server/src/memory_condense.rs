@@ -64,7 +64,7 @@ const PARTIAL_BACKOFF_BASE_MINUTES: i64 = 10;
 ///
 /// 用途は「自分のユニット（と既存の core）を俯瞰して、原則を core として刻む/更新する」に固定
 /// される。必要なのは**記憶索引の読み取り**（search / retrieve）と**根拠を確かめる生ログ検索**、
-/// **凝縮の記録/更新/取消**、そして**ターンを終える制御**（declare_done）だけ。
+/// **凝縮の記録/更新/取消**だけ。ターンは本文の最終行の `NO_REPLY` で終わる（D-1112）。
 ///
 /// **宣言ラン（[`crate::memory_declare::DECLARE_ALLOWED_TOOLS`]）とは別のリスト**にする:
 /// - `record_memory_unit` / `retract_memory_unit` / `plan_next_memory_window`（生ログを刻む道具）は
@@ -83,8 +83,6 @@ pub const CONDENSE_ALLOWED_TOOLS: &[&str] = &[
     "record_memory_core",
     "update_memory_core",
     "retract_memory_core",
-    // ラン制御（ターンを終える宣言のみ）。宣言ランと共有する既存の口。
-    "declare_done",
 ];
 
 /// このエージェントの凝縮ランを（ゲートを満たせば）実行する。**本番エントリ**。
@@ -562,7 +560,9 @@ fn build_system_prompt(plan: &CondensePlan) -> String {
          # 今回の窓（宣言した記憶 / 時系列・古い→新しい順 / {shown} 件）\n{units_txt}\n\n\
          # すでに刻んだ凝縮（まずここを見て、育てられるものは更新する）\n{cores_txt}",
         shown = plan.window_units.len(),
-    ) + &instructions_section
+    ) + "\n\n"
+        + crate::process::TURN_COMPLETION_RULES
+        + &instructions_section
 }
 
 /// エンジンに渡す「ユーザーターン」。system 側に材料を明示済みなので、ここは着手の合図のみ。
@@ -576,7 +576,8 @@ fn build_task_message() -> String {
      リンクへ託してください。自作の言い回しを鍵括弧で括ったものは具体ではありません。\
      窓の先の分まで焦って束ねないでください。根拠のユニットには必ずリンクさせてください。基本の\
      軸 7 つはそれぞれ一度は目を通し、凝縮したものは刻み、今回は無い軸は最後に「〈軸名〉: 今回は\
-     無い」と一言ずつ書いてください（無いと書くのは失敗ではありません。でっち上げないこと）。"
+     無い」と一言ずつ書いてください（無いと書くのは失敗ではありません。でっち上げないこと）。\
+     書き終えたら、その最終行に `NO_REPLY` だけを書いてランを終えてください。"
         .to_string()
 }
 

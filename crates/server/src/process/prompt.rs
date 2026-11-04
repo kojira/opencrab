@@ -1,3 +1,13 @@
+/// How a turn ends: the engine continues after any generation that does not end with
+/// `NO_REPLY` on its final line. Shared by the conversation prompt and the sleep runs (D-1112).
+pub const TURN_COMPLETION_RULES: &str = "## Turn completion\n\
+\n\
+Decide whether to continue the current turn.\n\
+If no speech should be delivered, respond with exactly `NO_REPLY`.\n\
+If you provide speech and decide to end the turn, append `NO_REPLY` on its own final \
+line.\n\
+If you decide to continue the turn, omit `NO_REPLY`.";
+
 /// DBからエージェントの agents 行と skills を読み込んでシステムプロンプトを構築する。
 ///
 /// 返り値: (system_prompt, agent_name)
@@ -145,13 +155,7 @@ pub fn build_agent_context(
          - すでに自分の発話が答えており、新しい発言・結果・情報がない → `NO_REPLY`\n\
          - 他のエージェント同士の会話で、自分の返事が必要ない → `NO_REPLY`\n\
          \n\
-         ## Turn completion\n\
-         \n\
-         Decide whether to continue the current turn.\n\
-         If no speech should be delivered, respond with exactly `NO_REPLY`.\n\
-         If you provide speech and decide to end the turn, append `NO_REPLY` on its own final \
-         line.\n\
-         If you decide to continue the turn, omit `NO_REPLY`.\n\
+         {TURN_COMPLETION_RULES}\n\
          \n\
          ## Async Behavior\n\
          \n\

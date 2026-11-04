@@ -197,7 +197,6 @@
             "search_my_history",
             "record_memory_unit",
             "retract_memory_unit",
-            "declare_done",
         ];
         for a in allowed {
             assert!(
@@ -220,6 +219,8 @@
             "browse_memory_index",
             "search_memory_index",
             "retrieve_memory_nodes",
+            // D-1112: does not end the turn; NO_REPLY does.
+            "declare_done",
         ];
         for f in forbidden {
             assert!(
@@ -301,3 +302,106 @@
 
     // ---- #394: 窓の境界と広さを本人が決める（前進の保証つき）----
 
+
+    /// Answers every request with the same text and counts the calls.
+    struct SummaryLlm {
+        text: &'static str,
+        calls: std::sync::Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl opencrab_llm::traits::LlmProvider for SummaryLlm {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat_completion(
+            &self,
+            request: opencrab_llm::message::ChatRequest,
+        ) -> anyhow::Result<opencrab_llm::message::ChatResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(opencrab_llm::message::ChatResponse {
+                id: "r".to_string(),
+                model: request.model,
+                choices: vec![opencrab_llm::message::Choice {
+                    index: 0,
+                    message: opencrab_llm::message::Message::assistant(self.text),
+                    finish_reason: Some(opencrab_llm::message::FinishReason::Stop),
+                }],
+                usage: Default::default(),
+                created: 0,
+            })
+        }
+    }
+
+    /// D-1112, through the real engine: a model that writes its one-line summary and ends with
+    /// `NO_REPLY` (as the prompt now tells it) completes the run in one call and advances the
+    /// marker. Before the fix the prompt never said how a turn ends, so the model only wrote the
+    /// summary, the turn continued, and it restated the summary until the iteration cap.
+    #[tokio::test]
+    async fn summary_with_no_reply_completes_and_advances_marker() {
+        let state = crate::test_app_state();
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_model_pricing(
+                &conn,
+                &opencrab_db::queries::ModelPricingRow {
+                    provider: "mock".to_string(),
+                    model: "test".to_string(),
+                    input_price_per_1m: 0.0,
+                    output_price_per_1m: 0.0,
+                    context_window: Some(200_000),
+                    max_output_tokens: Some(4_096),
+                    cached_input_price_per_1m: None,
+                    cache_write_price_per_1m: None,
+                },
+            )
+            .unwrap();
+            opencrab_db::queries::upsert_agent(
+                &conn,
+                &opencrab_db::queries::AgentRow {
+                    agent_id: "a1".to_string(),
+                    name: "a1".to_string(),
+                    job_title: None,
+                    organization: None,
+                    image_url: None,
+                    persona_name: "p".to_string(),
+                    personality: None,
+                    instructions: String::new(),
+                    model: None,
+                    reasoning_effort: None,
+                    web_search: None,
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+        }
+        let mut router = opencrab_llm::router::LlmRouter::new();
+        router.add_provider(std::sync::Arc::new(SummaryLlm {
+            text: "話題の切れ目でまとまりを見ました。\nNO_REPLY",
+            calls: calls.clone(),
+        }));
+        router.set_default_provider("mock");
+        state.llm_router.swap(router);
+        let to_id = seed_passing_gate(&state);
+        let runner = crate::memory_organize::AppStateTurnRunner { state: &state };
+        let ran = run_declare(
+            &state.db,
+            &cfg(true, 3, 2),
+            &state.index_build_inflight,
+            "a1",
+            &runner,
+        )
+        .await
+        .unwrap();
+        assert!(ran);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the model ends the run itself");
+        let audit = latest_sleep_audit(&state).expect("audit");
+        assert_eq!(audit["outcome"], "completed");
+        assert_eq!(audit["position_advanced"], true);
+        let (_, cursor) = parse_marker(get_marker(&state, "a1").as_deref());
+        assert_eq!(cursor, to_id - 2, "the marker moves to the end of the window");
+    }
