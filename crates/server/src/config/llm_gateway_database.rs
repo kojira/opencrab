@@ -133,13 +133,13 @@ pub struct AliasConfig {
     pub model: String,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct GatewayConfig {
     #[serde(default)]
     pub rest: RestGatewayConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct RestGatewayConfig {
     #[serde(default = "default_port")]
     pub port: u16,
@@ -155,7 +155,7 @@ fn default_port() -> u16 {
     8080
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct DatabaseConfig {
     #[serde(default = "default_db_path")]
     pub path: String,

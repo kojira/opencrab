@@ -4,8 +4,13 @@
 pub fn load_config(path: &str) -> Result<AppConfig> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file: {}", path))?;
+    parse_config(&raw)
+}
 
-    let expanded = expand_env_vars(&raw);
+/// The one way config text becomes an [`AppConfig`]: startup ([`load_config`]) and the hot
+/// reload watcher both use it, so a reload sees exactly what a restart would.
+pub fn parse_config(raw: &str) -> Result<AppConfig> {
+    let expanded = expand_env_vars(raw);
 
     let mut config: AppConfig =
         toml::from_str(&expanded).with_context(|| "Failed to parse config TOML")?;
@@ -16,6 +21,12 @@ pub fn load_config(path: &str) -> Result<AppConfig> {
     }
 
     Ok(config)
+}
+
+/// The effective default model spec `provider:model` of an `[llm]` section. Every reader
+/// (turns, the startup budget check, the reload validation) builds it here.
+pub fn default_model_spec(llm: &LlmConfig) -> String {
+    format!("{}:{}", llm.default_provider, llm.default_model)
 }
 
 /// Replace `${VAR_NAME}` patterns with corresponding environment variable values.

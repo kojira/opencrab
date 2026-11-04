@@ -306,7 +306,7 @@ fn default_evaluator_threshold() -> f64 {
     0.7
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct AgentConfig {
     #[serde(default = "default_workspace_path")]
     pub workspace_path: String,
