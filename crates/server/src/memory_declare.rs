@@ -51,7 +51,7 @@ const RECENT_UNITS_SHOWN: usize = 15;
 ///
 /// 宣言ランの用途は「自分の生ログを俯瞰・範囲読みして、まとまりを宣言する」に固定される。
 /// 必要なのは**生ログの読み取り**（survey / read / search）と**宣言の記録/取り消し**、そして
-/// **ターンを終える最小限のラン制御**（declare_done）だけ。
+/// ターンは本文の最終行の `NO_REPLY` で終わる（D-1112。終了の道具は渡さない）。
 ///
 /// **タグ整理ラン（[`crate::memory_organize::ORGANIZE_ALLOWED_TOOLS`]）とは別のリスト**にする:
 /// - あちらには無い `record_memory_unit` / `retract_memory_unit`（段階1 で allowlist へ入れず
@@ -75,8 +75,6 @@ pub const DECLARE_ALLOWED_TOOLS: &[&str] = &[
     "retract_memory_unit",
     // 次回の窓（境界と広さ）を本人が決める（#394）
     "plan_next_memory_window",
-    // ラン制御（ターンを終える宣言のみ）
-    "declare_done",
 ];
 
 /// 本人が窓の位置を指定しても、clean 完了時には**最低でも提示窓の何分の 1 かは必ず前へ進む**
@@ -638,7 +636,9 @@ fn build_system_prompt(plan: &DeclarePlan) -> String {
         size_max = opencrab_actions::memory_units::DECLARE_WINDOW_MAX,
         // 約束の文面を実装の定数から組む（片方だけ変えても食い違わない / #394）。
         reset_n = MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET,
-    ) + &instructions_section
+    ) + "\n\n"
+        + crate::process::TURN_COMPLETION_RULES
+        + &instructions_section
 }
 
 /// エンジンに渡す「ユーザーターン」。system 側に対象を明示済みなので、ここは着手の合図のみ。
@@ -650,7 +650,7 @@ fn build_task_message(plan: &DeclarePlan) -> String {
         "スリープの時間です。上の「今回の範囲」（id {from}〜{to} の未宣言ログ {count} 件）を見て、\
          あなたにとって一つの記憶だと感じるまとまりを宣言してください。読むか・どこで切るか・\
          いくつ宣言するかはあなたが決めます。終わったら、どういう視点でまとまりを見たかを\
-         一言だけ残してください。",
+         一言だけ残し、その最終行に `NO_REPLY` だけを書いてランを終えてください。",
         count = w.log_count,
     )
 }

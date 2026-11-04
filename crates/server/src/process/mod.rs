@@ -16,6 +16,7 @@ mod end_event;
 mod live_inbound;
 mod loop_restart;
 mod prompt;
+pub use prompt::TURN_COMPLETION_RULES;
 mod skills;
 mod wiring;
 

@@ -96,12 +96,8 @@ const SUMMARY_MAX_CHARS: usize = 240;
 /// - 読み取り: `browse_memory_index` / `search_memory_index` / `retrieve_memory_nodes` /
 ///   `search_my_history`（対象 topic の中身をもっと知りたいときに引く）。
 /// - タグ操作: `tag_topic` / `untag_topic` / `merge_tags`（整理の本体）。
-/// - ラン制御: `declare_done`（そのターンを終える宣言）。整理ランは system プロンプトで
-///   「終わったら観点を一言残す」と促しており、モデルは通常ツール無しの最終テキストで
-///   自然終了するが、`declare_done` は「これ以上やることが無い」を明示する既存の終了シグナル
-///   なので載せる（外向きの副作用は無い / `CORE_INLINE_ACTIONS`）。他のラン制御
-///   （`report_progress` / `spawn_subtask` / `cancel_subtask`）は subtask ライフサイクル用で、
-///   整理ラン（inline・非 subtask）には不要なので入れない。
+/// - ターンは本文の最終行の `NO_REPLY` で終わる（D-1112。`declare_done` はターンを終えない
+///   ので渡さない）。
 pub const ORGANIZE_ALLOWED_TOOLS: &[&str] = &[
     // 読み取り
     "browse_memory_index",
@@ -116,8 +112,6 @@ pub const ORGANIZE_ALLOWED_TOOLS: &[&str] = &[
     "tag_topic",
     "untag_topic",
     "merge_tags",
-    // ラン制御（ターンを終える宣言のみ）
-    "declare_done",
 ];
 
 /// このエージェントの整理ランを（ゲートを満たせば）実行する。**本番エントリ**。
@@ -588,14 +582,16 @@ fn build_system_prompt(plan: &OrganizePlan) -> String {
          最近の分と、まだ見ていない過去の分が混ざっています。どれもあなた自身の記憶です。\
          各行は `[短縮ID] タイトル — 要約` です。`短縮ID` を `topic_id` に渡してください。\n{worklist_txt}",
         size = plan.worklist_size,
-    ) + &instructions_section
+    ) + "\n\n"
+        + crate::process::TURN_COMPLETION_RULES
+        + &instructions_section
 }
 
 /// エンジンに渡す「ユーザーターン」。system 側に対象を明示済みなので、ここは着手の合図のみ。
 fn build_task_message(plan: &OrganizePlan) -> String {
     format!(
         "スリープ整理の時間です。上に挙げた {} 件の記憶を、あなたの関心に沿ってタグ付け・統合してください。\
-         終わったら、どういう観点で整理したかを一言だけ残してください。",
+         終わったら、どういう観点で整理したかを一言だけ残し、その最終行に `NO_REPLY` だけを書いてランを終えてください。",
         plan.worklist_size
     )
 }
