@@ -554,19 +554,15 @@ pub async fn test_provider_endpoint(
 }
 
 pub(crate) fn reload_router(state: &AppState) -> Result<(), (StatusCode, String)> {
-    let overrides = {
-        let conn = state.db.lock().unwrap();
-        opencrab_db::queries::list_llm_provider_overrides(&conn).map_err(internal)?
-    };
-    let merged = crate::config::apply_llm_overrides(&state.llm_config, &overrides);
-    let router = crate::config::build_llm_router(&merged).map_err(internal)?;
+    let router =
+        crate::config::build_effective_llm_router(&state.db, &state.config().llm).map_err(internal)?;
     let names: Vec<String> = router
         .provider_names()
         .iter()
         .map(|s| s.to_string())
         .collect();
     state.llm_router.swap(router);
-    tracing::info!(providers = ?names, "LLM router hot-reloaded from dashboard settings");
+    tracing::info!(providers = ?names, "LLM router rebuilt");
     Ok(())
 }
 
