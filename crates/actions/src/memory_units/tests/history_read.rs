@@ -46,8 +46,8 @@
     /// 集計メタ（総数・id 範囲・total_buckets）は落とさず、新しい側のバケットを残す。
     #[test]
     fn survey_fit_bounds_tokens_and_keeps_meta() {
-        // 400 fat buckets serialize to well over the read limit (each bucket ~120 tokens).
-        let mut survey = fat_survey(400);
+        // 1,000 fat buckets (~73 tokens each) serialize to well over the read limit.
+        let mut survey = fat_survey(1000);
         let head_before = survey.buckets[0].bucket.clone();
         assert!(
             tokens_of(&survey) > history_result_token_budget("survey_my_history"),
@@ -75,12 +75,12 @@
             opencrab_core::tokens::estimate_tokens(&wrapped)
         );
         // 集計メタは残る（バケットを削っても地図の骨格は保つ）。
-        assert_eq!(survey.total_logs, 300 * 400);
-        assert_eq!(survey.total_buckets, 400);
+        assert_eq!(survey.total_logs, 300 * 1000);
+        assert_eq!(survey.total_buckets, 1000);
         assert_eq!(survey.min_id, Some(0));
         assert!(survey.truncated, "削ったら truncated が立つ");
         assert!(!survey.buckets.is_empty(), "地図が空になってはいけない");
-        assert!(survey.buckets.len() < 400, "実際に削れている");
+        assert!(survey.buckets.len() < 1000, "実際に削れている");
         assert_eq!(survey.returned_buckets, survey.buckets.len());
         // 新しい側（先頭）から残す。
         assert_eq!(survey.buckets[0].bucket, head_before);
@@ -384,6 +384,11 @@
             .execute(&json!({"from_id": 1, "to_id": 100}), &ctx)
             .await;
         assert!(r.success, "{:?}", r.error);
+        // The whole result (as the LLM sees it) stays under the read tool's inline limit.
+        let wrapped = serde_json::to_string(&r).unwrap();
+        assert!(
+            opencrab_core::tokens::estimate_tokens(&wrapped) < inline_limit_tokens("read_my_history")
+        );
         let data = r.data.unwrap();
         assert!(
             data["estimated_tokens"].as_u64().unwrap()
@@ -395,12 +400,6 @@
         assert_eq!(
             data["inline_limit_tokens"],
             json!(inline_limit_tokens("read_my_history"))
-        );
-        // The whole result (as the LLM sees it) stays under the read tool's inline limit.
-        let wrapped = serde_json::to_string(&r).unwrap();
-        assert!(
-            opencrab_core::tokens::estimate_tokens(&wrapped)
-                < opencrab_core::tool_result_log::inline_limit_for_tool("read_my_history")
         );
     }
 
