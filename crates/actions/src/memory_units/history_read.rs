@@ -1,7 +1,9 @@
 /// `read_my_history` の行数ハードキャップ。
 const READ_ROW_CAP: usize = 200;
-/// `read_my_history` の総文字数ハードキャップ（本文の累計）。
-const READ_CHAR_CAP: usize = 40_000;
+/// `read_my_history` の総文字数ハードキャップ（本文の累計）。トークン予算（読みの上限、
+/// D-1115）が本当の頭打ちで、これは DB から引く量の粗い上限。日本語 1 文字 ≒ 1 トークン強なので
+/// 読みの上限を下回らない値にする（下回ると予算に収まる窓を文字数で先に切ってしまう）。
+const READ_CHAR_CAP: usize = 120_000;
 /// `survey_my_history` のバケット数上限（既定）。
 const SURVEY_DEFAULT_MAX_BUCKETS: usize = 60;
 /// `survey_my_history` のバケット数上限（これ以上は要求されても丸める）。
@@ -11,36 +13,22 @@ const AROUND_DEFAULT_RADIUS: i64 = 20;
 /// `read_my_history` の `around` の半径上限。
 const AROUND_MAX_RADIUS: i64 = 100;
 
-/// 生ログ読み取り道具（`survey_my_history` / `search_my_history`）の返り値が収まるべき
-/// トークン予算。
+/// 生ログ・記憶の読み取り道具の返り値が収まるべき、本文のトークン予算。
 ///
-/// #294 のツール結果キャップ（[`opencrab_core::tool_result_log::TOOL_RESULT_TOKEN_LIMIT`]
-/// = 2,500 トークン）を超えると、返り値は**丸ごとメタ情報のスタブに差し替えられる**。
-/// 宣言ラン（#376 段階2）は生ログを読むことが本体なのに、地図（survey）や検索結果が
-/// 544 バイトのスタブに潰れてエージェントがオリエンテーション不能になり、成果ゼロで
-/// 反復上限に達した（#386）。**道具側で必ず上限内に収める**のがこの予算の役目。
-///
-/// 上限そのものではなく 2 割引いた値にするのは、`data` の外側に乗る余白を確実に飲み込む
-/// ため:
-/// - `ActionResult` ラッパ（`{"success":..,"data":..,"error":..,"side_effects":..}`）が
-///   ~20 トークン。
-/// - `search_my_history` が付ける全文への導線 `note`（予算判定の**後**に足す）が ~90 トークン。
-/// - トークン推定（tiktoken 近似）のぶれ。
-///
-/// 実測（#386 / 本番コピーの最大エージェント）で、この予算に収めた結果の**ラッパ込み**
-/// トークンは survey ~2,020 / search ~2,110 に収まり、上限 2,500 に対し 400 弱の余白が残る。
-/// ここに収めておけば、ラッパや note を被せても #294 のキャップに掛からない。
-pub(crate) const HISTORY_RESULT_TOKEN_BUDGET: usize =
-    opencrab_core::tool_result_log::TOOL_RESULT_TOKEN_LIMIT * 8 / 10;
+/// 読みは `is_read_tool` に入っているので、上限は `inline_limit_for_tool(name)`（読みの上限）。
+/// 道具側は封筒（`ActionResult` ラッパ・note・推定のぶれ）ぶんの余白を引いた
+/// `content_budget_for_tool(name)` に本文を収め、潰されずに全部を運ぶ（#386 / D-1115）。
+/// 余白の規則は `ws_read` と同じ 1 か所（DRY）。
+pub(crate) fn history_result_token_budget(tool_name: &str) -> usize {
+    opencrab_core::tool_result_log::content_budget_for_tool(tool_name)
+}
 
-/// 読み取り道具の返り値に添える per-result インライン上限（#386）。
-///
-/// #294 のキャップ（[`opencrab_core::tool_result_log::TOOL_RESULT_TOKEN_LIMIT`]）そのもの。
-/// エージェントが「1 回の結果はこれを超えると本文が捨てられる」と知り、`est_tokens` /
-/// `estimated_tokens` と突き合わせて範囲を刻めるよう、結果に `inline_limit_tokens` として
-/// 添える。**新しい上限ではなく、既存のキャップの可視化**（総コンテキスト予算とは別物）。
-pub(crate) const INLINE_LIMIT_TOKENS: usize =
-    opencrab_core::tool_result_log::TOOL_RESULT_TOKEN_LIMIT;
+/// 読み取り道具の返り値に添える per-result インライン上限（#386）。新しい上限ではなく、
+/// その道具に実際に掛かる上限（`inline_limit_for_tool`）の可視化。エージェントが
+/// `est_tokens` / `estimated_tokens` と突き合わせて範囲を決められる。
+pub(crate) fn inline_limit_tokens(tool_name: &str) -> usize {
+    opencrab_core::tool_result_log::inline_limit_for_tool(tool_name)
+}
 
 /// `HistorySurvey`（地図）の serialize 後トークン数が `budget_tokens` に収まるよう、
 /// **古いバケットから**落とす。
@@ -97,7 +85,7 @@ fn rows_tokens(rows: &[opencrab_db::queries::SessionLogRow]) -> usize {
 /// 1 行の content を、その行だけで `budget_tokens` に収まる長さまで**文字境界で**切り詰め、
 /// 打ち切ったと分かる marker を append する（#386）。
 ///
-/// 単一の巨大ログ（巨大な tool_result 等）は行を減らしても収まらない。丸ごと #294 で潰れて
+/// 単一の巨大ログ（巨大な tool_result 等）は行を減らしても収まらない。丸ごと上限で潰れて
 /// スタブになる（＝ ws_read の無い宣言ランでは二度と読めない）より、先頭を見せて「ここで
 /// 切った・全文は範囲を狭めるか ws_read で」と伝える方が前へ進める。通常サイズの行はここへ
 /// 来ない（[`fit_rows_to_budget`] が単一行超過のときだけ呼ぶ）。
@@ -133,8 +121,7 @@ fn truncate_row_content_to_budget(
 /// 返却行を **per-result インライン上限**（`budget_tokens`）に収まるよう、末尾（新しい側）
 /// から落とす。落としたら「続きの先頭 id」を返す（`next_from_id` に使う）。
 ///
-/// `read_my_history` の DB クエリは行数 + 文字数でしか切っておらず、40,000 文字ぶんを
-/// 返すと #294 の 2,500 トークン上限を優に超えて**丸ごと潰される**。ここでトークンでも
+/// `read_my_history` の DB クエリは行数 + 文字数でしか切っていない。ここでトークンでも
 /// 切っておくと、1 ページが必ずインライン上限に収まり、続きは cursor で読める（#386）。
 fn fit_rows_to_budget(
     rows: &mut Vec<opencrab_db::queries::SessionLogRow>,
@@ -228,12 +215,12 @@ impl Action for SurveyMyHistoryAction {
             Ok(mut survey) => {
                 // #294 のツール結果キャップに丸ごと潰される前に、道具側で必ず上限内へ
                 // 収める（#386）。あふれたら古いバケットから落とす（メタは残す）。
-                fit_survey_to_budget(&mut survey, HISTORY_RESULT_TOKEN_BUDGET);
+                fit_survey_to_budget(&mut survey, history_result_token_budget(self.name()));
                 match serde_json::to_value(&survey) {
                     Ok(mut v) => {
                         // per-result のインライン上限を地図に添える（#386）。エージェントが
                         // est_tokens とこの上限を突き合わせて「刻むか読むか」を決められる。
-                        v["inline_limit_tokens"] = json!(INLINE_LIMIT_TOKENS);
+                        v["inline_limit_tokens"] = json!(inline_limit_tokens(self.name()));
                         ActionResult::success(v)
                     }
                     Err(e) => ActionResult::error(&format!("survey のシリアライズに失敗: {e}")),
@@ -319,10 +306,22 @@ impl Action for ReadMyHistoryAction {
             );
         }
         if mode_count > 1 {
-            return ActionResult::error(
+            // どれとどれが同時に来たかを名指しする（D-1115）。モデルが消す方を 1 回で選べる。
+            let given: Vec<&str> = [
+                (has_session, "session_id"),
+                (has_id_range, "from_id+to_id"),
+                (has_around, "around_id"),
+                (has_time, "from_time+to_time"),
+            ]
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, name)| *name)
+            .collect();
+            return ActionResult::error(&format!(
                 "範囲指定は 1 つだけにしてください（session_id / id 範囲 / around / 時刻範囲）。\
-                 使わない範囲は 0 か空文字にしてください",
-            );
+                 今回は {} が同時に指定されています。使う 1 つを残し、ほかは 0 か空文字にしてください",
+                given.join(" と ")
+            ));
         }
 
         let filter = if has_session {
@@ -406,8 +405,8 @@ impl Action for ReadMyHistoryAction {
             } else {
                 scanned_tokens
             };
-            let fits = estimated_tokens <= INLINE_LIMIT_TOKENS;
-            let chunks = estimated_tokens.div_ceil(HISTORY_RESULT_TOKEN_BUDGET.max(1));
+            let fits = estimated_tokens <= inline_limit_tokens(self.name());
+            let chunks = estimated_tokens.div_ceil(history_result_token_budget(self.name()).max(1));
             let suggestion = if fits {
                 "この範囲は 1 回で読める".to_string()
             } else {
@@ -421,7 +420,7 @@ impl Action for ReadMyHistoryAction {
                 "range_total": page.range_total,
                 "estimated_tokens": estimated_tokens,
                 "estimate_approximate": page.truncated,
-                "inline_limit_tokens": INLINE_LIMIT_TOKENS,
+                "inline_limit_tokens": inline_limit_tokens(self.name()),
                 "fits": fits,
                 "suggestion": suggestion,
             }));
@@ -436,10 +435,9 @@ impl Action for ReadMyHistoryAction {
             READ_CHAR_CAP,
         ) {
             Ok(mut page) => {
-                // DB クエリは行数 + 文字数でしか切っていない。40,000 文字ぶんは #294 の
-                // 2,500 トークン上限を超えて丸ごと潰れるので、トークンでも切って 1 ページを
+                // DB クエリは行数 + 文字数でしか切っていない。トークンでも切って 1 ページを
                 // 必ず inline 上限内に収める（#386）。落としたぶんは cursor で続きを読める。
-                if let Some(next) = fit_rows_to_budget(&mut page.rows, HISTORY_RESULT_TOKEN_BUDGET)
+                if let Some(next) = fit_rows_to_budget(&mut page.rows, history_result_token_budget(self.name()))
                 {
                     page.truncated = true;
                     page.next_from_id = Some(next);
@@ -448,7 +446,7 @@ impl Action for ReadMyHistoryAction {
                 match serde_json::to_value(&page) {
                     Ok(mut v) => {
                         v["estimated_tokens"] = json!(rows_tokens(&page.rows));
-                        v["inline_limit_tokens"] = json!(INLINE_LIMIT_TOKENS);
+                        v["inline_limit_tokens"] = json!(inline_limit_tokens(self.name()));
                         ActionResult::success(v)
                     }
                     Err(e) => ActionResult::error(&format!("history のシリアライズに失敗: {e}")),

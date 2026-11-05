@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::memory_units::{HISTORY_RESULT_TOKEN_BUDGET, INLINE_LIMIT_TOKENS};
+use crate::memory_units::{history_result_token_budget, inline_limit_tokens};
 use crate::traits::{Action, ActionContext, ActionResult, SideEffect};
 
 /// `search_my_history` が受け付けるヒット件数の上限（clamp）。
@@ -160,7 +160,8 @@ impl Action for SearchMyHistoryAction {
 
         // スニペット化しても日本語ヒットはトークンが重い。予算に収まるヒット数まで
         // スコア下位から落とす（上位は残る）。
-        let dropped = fit_hits_to_budget(query, &mut hits, HISTORY_RESULT_TOKEN_BUDGET);
+        let dropped =
+            fit_hits_to_budget(query, &mut hits, history_result_token_budget(self.name()));
         let estimated_tokens = opencrab_core::tokens::estimate_tokens(
             &serde_json::to_string(&json!({
                 "query": query,
@@ -178,8 +179,8 @@ impl Action for SearchMyHistoryAction {
                 "match_total": match_total,
                 "returned_if_read": hits.len(),
                 "estimated_tokens": estimated_tokens,
-                "inline_limit_tokens": INLINE_LIMIT_TOKENS,
-                "fits": estimated_tokens <= INLINE_LIMIT_TOKENS,
+                "inline_limit_tokens": inline_limit_tokens(self.name()),
+                "fits": estimated_tokens <= inline_limit_tokens(self.name()),
                 "suggestion": if match_total > hits.len() as i64 {
                     "マッチが多い。クエリを絞るか、上位ヒットの id を read_my_history で読む"
                 } else {
@@ -193,7 +194,7 @@ impl Action for SearchMyHistoryAction {
             "count": hits.len(),
             "results": hits,
             "estimated_tokens": estimated_tokens,
-            "inline_limit_tokens": INLINE_LIMIT_TOKENS,
+            "inline_limit_tokens": inline_limit_tokens(self.name()),
         });
         // 本文を切った / 件数を落としたときだけ、全文への導線を 1 行添える。
         if any_content_truncated || dropped > 0 {
@@ -405,7 +406,9 @@ mod tests {
             })
             .collect();
         let mut hits = hits_src.clone();
-        let dropped = fit_hits_to_budget("q", &mut hits, HISTORY_RESULT_TOKEN_BUDGET);
+        // The function under test takes any budget; use one the 25 hits clearly exceed.
+        let budget = 2_000;
+        let dropped = fit_hits_to_budget("q", &mut hits, budget);
         assert!(dropped > 0, "予算超過なら落とすはず");
         assert_eq!(hits.len() + dropped, 25);
         // 上位（先頭）を残す。
@@ -413,7 +416,7 @@ mod tests {
         // 収まっている。
         let json =
             serde_json::to_string(&json!({"query":"q","count":hits.len(),"results":hits})).unwrap();
-        assert!(opencrab_core::tokens::estimate_tokens(&json) <= HISTORY_RESULT_TOKEN_BUDGET);
+        assert!(opencrab_core::tokens::estimate_tokens(&json) <= budget);
     }
 
     /// 1 件の長大ログでも、本文はプレビューに切られ id で全文へ辿れる。
@@ -457,7 +460,7 @@ mod tests {
         let wrapped = serde_json::to_string(&r).unwrap();
         let tokens = opencrab_core::tokens::estimate_tokens(&wrapped);
         assert!(
-            tokens < opencrab_core::tool_result_log::TOOL_RESULT_TOKEN_LIMIT,
+            tokens < inline_limit_tokens("search_my_history"),
             "search over inline limit: {tokens}"
         );
         let data = r.data.unwrap();
@@ -484,7 +487,10 @@ mod tests {
         assert!(data.get("note").is_none());
         // サイズ情報は常に載る（#386）。
         assert!(data["estimated_tokens"].as_i64().unwrap() > 0);
-        assert_eq!(data["inline_limit_tokens"], json!(INLINE_LIMIT_TOKENS));
+        assert_eq!(
+            data["inline_limit_tokens"],
+            json!(inline_limit_tokens("search_my_history"))
+        );
     }
 
     /// estimate_only は本文を返さず、マッチ総件数と推定トークン数だけ返す（#386）。
@@ -503,7 +509,10 @@ mod tests {
         // 全 12 件マッチ（limit=10 clamp とは独立に総数を数える）。
         assert_eq!(data["match_total"], 12);
         assert!(data["estimated_tokens"].as_i64().unwrap() > 0);
-        assert_eq!(data["inline_limit_tokens"], json!(INLINE_LIMIT_TOKENS));
+        assert_eq!(
+            data["inline_limit_tokens"],
+            json!(inline_limit_tokens("search_my_history"))
+        );
         // 本文（results）は返さない。
         assert!(data.get("results").is_none());
     }

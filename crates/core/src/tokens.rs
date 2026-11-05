@@ -76,7 +76,7 @@ fn next_tokenize_window(s: &str, start: usize) -> Option<(usize, usize)> {
 /// 本来のトークン数を**わずかに上回りうる**（境界ごとに高々数トークン）が、逆に下回ることは
 /// ない（本来のトークン数 ≤ 累計）。したがって真に `limit` 以上の入力を「未満」と取りこぼす
 /// ことはない。退避判定はこの bool しか使わず、退避されない側に載せる producer は上限に対し
-/// 余白（`RANGE_CONTENT_TOKEN_CEILING` の `-400` 等）を持つので、境界での上振れは無害。
+/// 余白（`content_budget_for_tool` の封筒ぶん）を持つので、境界での上振れは無害。
 ///
 /// **窓サイズはトレードオフ**: 窓を小さくすると 1 回の encode は軽くなるが、跨ぐ境界の数が
 /// 増えて上振れも増える。[`BOUNDED_TOKENIZE_WINDOW`]（2 KiB）は、その上振れが producer の

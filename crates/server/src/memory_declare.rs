@@ -593,7 +593,7 @@ fn build_system_prompt(plan: &DeclarePlan) -> String {
          - `plan_next_memory_window(next_from_id?, window_size?, note?)`: 次回の範囲の始まりと広さを決める\n\
          メッセージ送信・シェル実行・サブタスク起動はしないでください。これは記憶を宣言する時間です。\
          生ログは読むだけで、消えも変わりもしません。宣言は何度でもやり直せます。\n\
-         【サイズの約束】1 回のツール結果が inline_limit_tokens（約 2,500 トークン）を超えると本文は捨てられます。\
+         【サイズの約束】1 回のツール結果が inline_limit_tokens（約 {read_limit} トークン）を超えると本文は捨てられます。\
          地図の est_tokens や read_my_history の estimated_tokens を見て、大きい範囲は id 窓を狭めるか cursor_from_id で刻んで読んでください。\n\n\
          # あなたの記憶の地図（生ログ全体の分布・day 粒度）\n{survey_txt}\n\n\
          # 今回の範囲（未宣言 / id {from}〜{to} / {count} 件 / {span}）\n\
@@ -636,6 +636,8 @@ fn build_system_prompt(plan: &DeclarePlan) -> String {
         size_max = opencrab_actions::memory_units::DECLARE_WINDOW_MAX,
         // 約束の文面を実装の定数から組む（片方だけ変えても食い違わない / #394）。
         reset_n = MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET,
+        // 読みの上限は実際に掛かる値から（D-1115）。
+        read_limit = opencrab_core::tool_result_log::inline_limit_for_tool("read_my_history"),
     ) + "\n\n"
         + crate::process::TURN_COMPLETION_RULES
         + &instructions_section

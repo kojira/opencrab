@@ -1,7 +1,7 @@
 //! メモリインデックスのアイドル時メンテナンスループ。
 //!
-//! 単一の常駐タスクが一定間隔で DB の**全エージェント**を巡回し、各エージェントに
-//! ついて ①増分ビルド（アイドルゲート付き）②キーワードバックフィル（≤1 LLM コール）
+//! 単一の常駐タスクが一定間隔で DB の**全エージェント**を列挙し、エージェントごとに並行して
+//! （D-1116。同じエージェントは同時に 2 つ走らない） ①増分ビルド（アイドルゲート付き）②キーワードバックフィル（≤1 LLM コール）
 //! ③月次ロールアップ（≤1 LLM コール）を行う。何もすることがない tick は SQL 数本で
 //! 終わり、LLM コールはゼロ。
 //!
@@ -111,29 +111,63 @@ pub fn spawn_memory_maintenance_loop(state: AppState) {
                 let Ok(conn) = state.db.lock() else { continue };
                 opencrab_db::queries::list_agent_ids(&conn).unwrap_or_default()
             };
-            for agent_id in agent_ids {
-                match run_maintenance_tick(&state, &agent_id).await {
-                    Ok(report) if report.did_anything() => {
-                        tracing::info!(
-                            agent_id = %agent_id,
-                            logs_indexed = report.logs_indexed,
-                            keywords_backfilled = report.keywords_backfilled,
-                            rolled_up_month = ?report.rolled_up_month,
-                            categories_seeded = report.categories_seeded,
-                            topics_categorized = report.topics_categorized,
-                            organized = report.organized,
-                            declared = report.declared,
-                            "memory maintenance tick"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(agent_id = %agent_id, error = %e, "memory maintenance tick failed");
-                    }
-                }
-            }
+            // D-1116: agents run concurrently; a slow agent no longer delays the others.
+            spawn_agent_runs(&state, agent_ids, |state, agent_id| async move {
+                log_tick(&agent_id, run_maintenance_tick(&state, &agent_id).await);
+            });
         }
     });
+}
+
+/// Starts one maintenance run per agent, concurrently, and returns without waiting.
+///
+/// Each agent's own work stays serial: the run holds the agent's slot in the shared
+/// `index_build_inflight` map (key `tick:{agent}`, the same guard the sleep runs use) for its
+/// whole duration, so an agent whose previous run is still going is skipped this tick and picked
+/// up on the next one. Agents do not wait for each other (D-1116).
+pub(crate) fn spawn_agent_runs<F, Fut>(
+    state: &AppState,
+    agent_ids: Vec<String>,
+    run: F,
+) -> Vec<tokio::task::JoinHandle<()>>
+where
+    F: Fn(AppState, String) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    agent_ids
+        .into_iter()
+        .filter_map(|agent_id| {
+            let guard =
+                try_acquire_build_slot(&state.index_build_inflight, &format!("tick:{agent_id}"))?;
+            let fut = run(state.clone(), agent_id);
+            Some(tokio::spawn(async move {
+                let _guard = guard;
+                fut.await;
+            }))
+        })
+        .collect()
+}
+
+fn log_tick(agent_id: &str, result: anyhow::Result<MaintenanceReport>) {
+    match result {
+        Ok(report) if report.did_anything() => {
+            tracing::info!(
+                agent_id = %agent_id,
+                logs_indexed = report.logs_indexed,
+                keywords_backfilled = report.keywords_backfilled,
+                rolled_up_month = ?report.rolled_up_month,
+                categories_seeded = report.categories_seeded,
+                topics_categorized = report.topics_categorized,
+                organized = report.organized,
+                declared = report.declared,
+                "memory maintenance tick"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, error = %e, "memory maintenance tick failed");
+        }
+    }
 }
 
 /// The wait before the next maintenance tick: the configured interval (at least 60 s).
@@ -346,5 +380,53 @@ mod tests {
         drop(g1);
         // drop で解放される
         assert!(try_acquire_build_slot(&inflight, "a1").is_some());
+    }
+
+    /// D-1116: two agents' runs overlap (the second starts before the first finishes), and an
+    /// agent whose run is still going is not started again.
+    #[tokio::test]
+    async fn agents_run_concurrently_and_each_agent_stays_serial() {
+        use std::sync::Mutex;
+        use std::time::Duration;
+        let state = crate::test_app_state();
+        let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let run = |events: Arc<Mutex<Vec<String>>>| {
+            move |_state: AppState, agent_id: String| {
+                let events = events.clone();
+                async move {
+                    events.lock().unwrap().push(format!("start {agent_id}"));
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    events.lock().unwrap().push(format!("end {agent_id}"));
+                }
+            }
+        };
+        let handles = spawn_agent_runs(&state, vec!["a1".into(), "a2".into()], run(events.clone()));
+        assert_eq!(handles.len(), 2);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // a1 is still running: a new tick does not start it twice.
+        let again = spawn_agent_runs(&state, vec!["a1".into()], run(events.clone()));
+        assert!(
+            again.is_empty(),
+            "the same agent must not run twice at once"
+        );
+        for h in handles {
+            h.await.unwrap();
+        }
+        let ev = events.lock().unwrap().clone();
+        let pos = |e: &str| ev.iter().position(|x| x == e).unwrap();
+        assert!(
+            pos("start a2") < pos("end a1"),
+            "a2 started only after a1 finished: {ev:?}"
+        );
+        assert!(
+            pos("start a1") < pos("end a2"),
+            "a1 started only after a2 finished: {ev:?}"
+        );
+        // After a1 finished, its slot is free again.
+        let after = spawn_agent_runs(&state, vec!["a1".into()], run(events.clone()));
+        assert_eq!(after.len(), 1);
+        for h in after {
+            h.await.unwrap();
+        }
     }
 }

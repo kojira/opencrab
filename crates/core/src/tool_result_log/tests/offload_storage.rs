@@ -4,11 +4,32 @@
     #[test]
     fn read_predicate_is_the_single_source_for_both_decisions() {
         // 「読み」の定義は 1 つ。上限（退避するか）と参照化（持ち越すか）が同じ集合を指す。
-        for t in ["ws_read", "ws_list"] {
-            assert!(is_read_tool(t));
+        // D-1115: the memory and history reads are reads too (side-effect free, re-callable).
+        for t in [
+            "ws_read",
+            "ws_list",
+            "read_my_history",
+            "survey_my_history",
+            "search_my_history",
+            "browse_memory_index",
+            "search_memory_index",
+            "retrieve_memory_nodes",
+        ] {
+            assert!(is_read_tool(t), "{t}");
             assert_eq!(inline_limit_for_tool(t), READ_TOOL_RESULT_TOKEN_LIMIT);
         }
-        for t in ["execute_shell", "search_my_history", "ws_write"] {
+        // Writes (including the memory writes used in sleep runs) are not reads.
+        for t in [
+            "execute_shell",
+            "ws_write",
+            "record_memory_unit",
+            "retract_memory_unit",
+            "plan_next_memory_window",
+            "record_memory_core",
+            "update_memory_core",
+            "tag_topic",
+            "summarize_and_save",
+        ] {
             assert!(!is_read_tool(t));
             assert_eq!(inline_limit_for_tool(t), TOOL_RESULT_TOKEN_LIMIT);
         }
