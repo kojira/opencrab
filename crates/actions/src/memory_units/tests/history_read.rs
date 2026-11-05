@@ -46,30 +46,31 @@
     /// 集計メタ（総数・id 範囲・total_buckets）は落とさず、新しい側のバケットを残す。
     #[test]
     fn survey_fit_bounds_tokens_and_keeps_meta() {
+        // 400 fat buckets serialize to well over the read limit (each bucket ~120 tokens).
         let mut survey = fat_survey(400);
         let head_before = survey.buckets[0].bucket.clone();
         assert!(
-            tokens_of(&survey) > HISTORY_RESULT_TOKEN_BUDGET,
+            tokens_of(&survey) > history_result_token_budget("survey_my_history"),
             "前提が崩れている（既に予算内）: {}",
             tokens_of(&survey)
         );
 
-        fit_survey_to_budget(&mut survey, HISTORY_RESULT_TOKEN_BUDGET);
+        fit_survey_to_budget(&mut survey, history_result_token_budget("survey_my_history"));
 
         // survey 単体で予算内。
         assert!(
-            tokens_of(&survey) <= HISTORY_RESULT_TOKEN_BUDGET,
+            tokens_of(&survey) <= history_result_token_budget("survey_my_history"),
             "over budget: {}",
             tokens_of(&survey)
         );
-        // ActionResult ラッパを被せても #294 の上限（2,500）未満。
+        // ActionResult ラッパを被せても読みの inline 上限未満。
         let wrapped = serde_json::to_string(&ActionResult::success(
             serde_json::to_value(&survey).unwrap(),
         ))
         .unwrap();
         assert!(
             opencrab_core::tokens::estimate_tokens(&wrapped)
-                < opencrab_core::tool_result_log::TOOL_RESULT_TOKEN_LIMIT,
+                < opencrab_core::tool_result_log::inline_limit_for_tool("survey_my_history"),
             "wrapped over inline limit: {}",
             opencrab_core::tokens::estimate_tokens(&wrapped)
         );
@@ -89,8 +90,8 @@
     #[test]
     fn survey_fit_leaves_small_survey_untouched() {
         let mut survey = fat_survey(3);
-        assert!(tokens_of(&survey) <= HISTORY_RESULT_TOKEN_BUDGET);
-        fit_survey_to_budget(&mut survey, HISTORY_RESULT_TOKEN_BUDGET);
+        assert!(tokens_of(&survey) <= history_result_token_budget("survey_my_history"));
+        fit_survey_to_budget(&mut survey, history_result_token_budget("survey_my_history"));
         assert_eq!(survey.buckets.len(), 3);
         assert!(!survey.truncated);
     }
@@ -124,7 +125,7 @@
         let wrapped = serde_json::to_string(&r).unwrap();
         let tokens = opencrab_core::tokens::estimate_tokens(&wrapped);
         assert!(
-            tokens < opencrab_core::tool_result_log::TOOL_RESULT_TOKEN_LIMIT,
+            tokens < opencrab_core::tool_result_log::inline_limit_for_tool("survey_my_history"),
             "survey action over inline limit: {tokens}"
         );
         // 地図として最低限（総数と最低 1 バケット）は残る。
@@ -133,7 +134,7 @@
         assert!(!data["buckets"].as_array().unwrap().is_empty());
         // サイズ地図として est_tokens と per-result 上限が載る（#386）。
         assert!(data["total_est_tokens"].as_i64().unwrap() > 0);
-        assert_eq!(data["inline_limit_tokens"], json!(INLINE_LIMIT_TOKENS));
+        assert_eq!(data["inline_limit_tokens"], json!(inline_limit_tokens("survey_my_history")));
         assert!(data["buckets"][0]["est_tokens"].as_i64().is_some());
     }
 
@@ -160,29 +161,31 @@
     #[tokio::test]
     async fn read_estimate_only_reports_size_without_bodies() {
         let (_d, ctx) = test_context();
-        seed_big_logs(&ctx, 60, 400); // 60 件 × ~400 文字 → 明らかに 2,500 トークン超
+        seed_big_logs(&ctx, 200, 400); // 200 件 × ~400 文字 → 読みの上限（30,000）超
 
         let r = ReadMyHistoryAction
             .execute(
-                &json!({"from_id": 1, "to_id": 60, "estimate_only": true}),
+                &json!({"from_id": 1, "to_id": 200, "estimate_only": true}),
                 &ctx,
             )
             .await;
         assert!(r.success, "{:?}", r.error);
         let data = r.data.unwrap();
         assert_eq!(data["estimate_only"], true);
-        assert_eq!(data["range_total"], 60);
-        assert!(data["estimated_tokens"].as_i64().unwrap() > INLINE_LIMIT_TOKENS as i64);
+        assert_eq!(data["range_total"], 200);
+        assert!(
+            data["estimated_tokens"].as_i64().unwrap() > inline_limit_tokens("read_my_history") as i64
+        );
         assert_eq!(data["fits"], false);
-        assert_eq!(data["inline_limit_tokens"], json!(INLINE_LIMIT_TOKENS));
+        assert_eq!(data["inline_limit_tokens"], json!(inline_limit_tokens("read_my_history")));
         // 本文（rows）は返さない。
         assert!(data.get("rows").is_none());
         // 推定は、実際に取ったときのサイズと大きく食い違わない（同オーダー）。
         let full = ReadMyHistoryAction
-            .execute(&json!({"from_id": 1, "to_id": 60}), &ctx)
+            .execute(&json!({"from_id": 1, "to_id": 200}), &ctx)
             .await;
         let full_wrapped = serde_json::to_string(&full).unwrap();
-        // 実結果は 1 ページに収まっている（下のテストで担保）が、推定は全 60 件ぶんなので
+        // 実結果は 1 ページに収まっている（下のテストで担保）が、推定は全 200 件ぶんなので
         // 実結果より大きいはず（推定 > 1 ページ）。少なくとも推定は正の値。
         assert!(data["estimated_tokens"].as_i64().unwrap() > 0);
         assert!(!full_wrapped.is_empty());
@@ -192,17 +195,17 @@
     #[tokio::test]
     async fn read_page_fits_inline_limit_and_reports_tokens() {
         let (_d, ctx) = test_context();
-        seed_big_logs(&ctx, 60, 400);
+        seed_big_logs(&ctx, 200, 400); // over the read limit, so the page is cut by tokens
 
         let r = ReadMyHistoryAction
-            .execute(&json!({"from_id": 1, "to_id": 60}), &ctx)
+            .execute(&json!({"from_id": 1, "to_id": 200}), &ctx)
             .await;
         assert!(r.success);
-        // ラッパ込み（LLM が見る本文）で #294 の上限未満＝潰れない。
+        // ラッパ込み（LLM が見る本文）で読みの inline 上限未満＝潰れない。
         let wrapped = serde_json::to_string(&r).unwrap();
         assert!(
             opencrab_core::tokens::estimate_tokens(&wrapped)
-                < opencrab_core::tool_result_log::TOOL_RESULT_TOKEN_LIMIT,
+                < inline_limit_tokens("read_my_history"),
             "read page over inline limit: {}",
             opencrab_core::tokens::estimate_tokens(&wrapped)
         );
@@ -210,9 +213,9 @@
         // トークンで打ち切ったので続きがある。
         assert_eq!(data["truncated"], true);
         assert!(data["next_from_id"].as_i64().is_some());
-        assert!(data["returned"].as_u64().unwrap() < 60);
+        assert!(data["returned"].as_u64().unwrap() < 200);
         assert!(data["estimated_tokens"].as_i64().unwrap() > 0);
-        assert_eq!(data["inline_limit_tokens"], json!(INLINE_LIMIT_TOKENS));
+        assert_eq!(data["inline_limit_tokens"], json!(inline_limit_tokens("read_my_history")));
     }
 
     // ---- #388: モデルは全プロパティを埋める。値ベース判定で正しいモードに解決する ----
@@ -346,6 +349,58 @@
         assert!(
             err.contains("0 か空文字"),
             "拒否メッセージに復帰方法が無い: {err}"
+        );
+    }
+
+    /// D-1115: the rejection names exactly which range params were given, so the model knows
+    /// which ones to clear (かいろ sent from_id+to_id and around_id together and was rejected).
+    #[tokio::test]
+    async fn read_two_ranges_error_names_the_given_params() {
+        let (_d, ctx) = test_context();
+        seed_logs(&ctx, 20);
+        let r = ReadMyHistoryAction
+            .execute(
+                &with_override(
+                    all_props_filled(),
+                    json!({"around_id": 5, "from_id": 5, "to_id": 15}),
+                ),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success);
+        let err = r.error.unwrap();
+        assert!(err.contains("from_id+to_id"), "{err}");
+        assert!(err.contains("around_id"), "{err}");
+        assert!(!err.contains("session_id="), "{err}");
+    }
+
+    /// D-1115: history reads are reads (`is_read_tool`), so a window of large tool-result logs
+    /// that fits in the read limit comes back whole in one call, not 2-7 rows per call.
+    #[tokio::test]
+    async fn read_window_of_large_logs_returns_all_rows_in_one_call() {
+        let (_d, ctx) = test_context();
+        seed_big_logs(&ctx, 100, 150); // 100 x ~150 chars: over the old 2,500 cap, under the read limit
+        let r = ReadMyHistoryAction
+            .execute(&json!({"from_id": 1, "to_id": 100}), &ctx)
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert!(
+            data["estimated_tokens"].as_u64().unwrap()
+                > opencrab_core::tool_result_log::TOOL_RESULT_TOKEN_LIMIT as u64,
+            "precondition: the page is larger than the old shell-output cap"
+        );
+        assert_eq!(data["returned"], 100);
+        assert_eq!(data["truncated"], false);
+        assert_eq!(
+            data["inline_limit_tokens"],
+            json!(inline_limit_tokens("read_my_history"))
+        );
+        // The whole result (as the LLM sees it) stays under the read tool's inline limit.
+        let wrapped = serde_json::to_string(&r).unwrap();
+        assert!(
+            opencrab_core::tokens::estimate_tokens(&wrapped)
+                < opencrab_core::tool_result_log::inline_limit_for_tool("read_my_history")
         );
     }
 

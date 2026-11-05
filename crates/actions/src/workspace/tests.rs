@@ -1,5 +1,6 @@
 use super::*;
 use crate::traits::*;
+use opencrab_core::tool_result_log::READ_TOOL_RESULT_TOKEN_LIMIT;
 use serde_json::json;
 
 fn test_context() -> (tempfile::TempDir, ActionContext) {
@@ -339,7 +340,7 @@ async fn test_ws_read_legacy_offset_limit_falls_to_full_read() {
 }
 
 /// 512 文字切り＋**標識付き**（overflow > 0）でも、返りページの推定トークンは
-/// RANGE_CONTENT_TOKEN_CEILING(2,100) 未満に収まる（＝再退避しない）。overflow=0 の 512
+/// range_content_token_ceiling() 未満に収まる（＝再退避しない）。overflow=0 の 512
 /// ちょうどだけでなく、標識込みの最悪ケースも天井内であることを固定する。
 #[tokio::test]
 async fn test_ws_read_truncated_marked_line_under_ceiling() {
@@ -361,7 +362,7 @@ async fn test_ws_read_truncated_marked_line_under_ceiling() {
         "切られた標識が付く: {content:.64}"
     );
     assert!(
-        d["estimated_tokens"].as_u64().unwrap() < RANGE_CONTENT_TOKEN_CEILING as u64,
+        d["estimated_tokens"].as_u64().unwrap() < range_content_token_ceiling() as u64,
         "標識込みでもページ天井（読み上限−400）未満: {}",
         d["estimated_tokens"]
     );
@@ -415,7 +416,7 @@ async fn test_ws_read_line_range_stays_under_inline_limit() {
 }
 
 /// テスト 4: 密テキスト（日本語, 1 文字 ≒ 1 トークン）の複数行で、ページはトークン天井
-/// （[`RANGE_CONTENT_TOKEN_CEILING`] ≒ 2,100）に達する直前で止まる。返り本文は inline 上限を
+/// （[`range_content_token_ceiling`] ≒ 2,100）に達する直前で止まる。返り本文は inline 上限を
 /// 超えず（再退避しない）、next_line で続きを辿れる。
 #[tokio::test]
 async fn test_ws_read_page_ceiling_binds_on_dense_text() {
@@ -502,9 +503,9 @@ async fn test_ws_read_does_not_block_executor() {
 ///
 /// これが「読み戻しがループしない」＝ ws_read が自分の出力を READ inline 上限
 /// （[`READ_TOOL_RESULT_TOKEN_LIMIT`] = 30,000）以下に構造的にキャップする
-/// （[`RANGE_CONTENT_TOKEN_CEILING`] = 上限 −400）ことの機械証明。
+/// （[`range_content_token_ceiling`] = 上限 −400）ことの機械証明。
 ///
-/// 逆 revert（`RANGE_CONTENT_TOKEN_CEILING` を READ 上限以上へ／ws_read の自己キャップ撤去）で
+/// 逆 revert（`range_content_token_ceiling` を READ 上限以上へ／ws_read の自己キャップ撤去）で
 /// この assert は FAIL する（ws_read 結果が再 offload され notice へ化ける）。
 #[tokio::test]
 async fn test_offload_then_ws_read_result_not_reoffloaded_loop_closed() {
@@ -516,7 +517,7 @@ async fn test_offload_then_ws_read_result_not_reoffloaded_loop_closed() {
     // (1) execute_shell の大出力（>2,500 tok）を模した結果封筒。行のある生テキストで、
     // 退避本文はヘッダ無しの verbatim（exit_code==0 かつ stderr 空）になる。
     // 各行は高密度（~150 文字 ≒ 40 tok）にして、返りページが **行数既定（2,000 行）ではなく
-    // トークン天井（[`RANGE_CONTENT_TOKEN_CEILING`]）で頭打ちになる**ようにする。こうすると
+    // トークン天井（[`range_content_token_ceiling`]）で頭打ちになる**ようにする。こうすると
     // 天井を revert（無効化）したとき返りが 2,000 行（≒ 8 万 tok）に膨らんで READ 上限を超え、
     // ws_read 結果が再 offload されて (4) の assert が FAIL する（＝非トートロジー）。
     const MARK: &str = "LOOPCLOSED-mark grep spiral payload row";

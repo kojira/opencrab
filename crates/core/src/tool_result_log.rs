@@ -59,9 +59,8 @@ use std::path::Path;
 ///
 /// **これは複数 crate の共有契約（#576）。** ツール結果を作る側は「この上限**トークン**内なら
 /// 退避されない」ことを頼りに自分の出力をトークンで頭打ちにしている:
-/// `ws_read`（`RANGE_CONTENT_TOKEN_CEILING = ここ - 400`）、`memory_units`
-/// （`HISTORY_RESULT_TOKEN_BUDGET = ここ * 8/10` / `INLINE_LIMIT_TOKENS = ここ`）、
-/// `search`、Nostr 受信退避など。**だから単位はトークンから動かせない**。判定をバイトに
+/// 読み（`ws_read`、生ログ・記憶の読み）は [`content_budget_for_tool`]（ツール別上限から
+/// 封筒ぶんの余白を引いた値）に、Nostr 受信退避などはこの上限に。**だから単位はトークンから動かせない**。判定をバイトに
 /// すると同じ値でも言語・エンコードでバイト量がぶれ、トークンで上限内に収めた本文が
 /// バイトで退避され、これら producer の保証が破れる。#576 で消したのは「判定の単位」では
 /// なく「全体を一括トークナイズすること」だけ（[`exceeds_limit`] を参照）。
@@ -69,11 +68,9 @@ use std::path::Path;
 /// **producer は「この上限そのもの」ではなく、余白を引いた予算に出力を収めること。**
 /// 判定（[`exceeds_limit`] → [`crate::tokens::tokens_reach_limit`]）は入力を窓分割して数える
 /// ため、窓境界で累計が数トークン**上振れ**する（最悪見積もりでも合計 100 トークン未満）。
-/// 上限ちょうどを出力 cap に採るとこの上振れが刺さって退避されうる。実際に本文を切っている
-/// のは余白付きの `HISTORY_RESULT_TOKEN_BUDGET`（-500）/ `RANGE_CONTENT_TOKEN_CEILING`（-400）
-/// で、`INLINE_LIMIT_TOKENS`（余白ゼロ＝上限そのもの）は名前に反して cap ではなく LLM への
-/// **表示値**（`fits` 判定と表示フィールドにしか使われない）。将来ここへ「上限そのもの」を
-/// cap に採る producer を足さないこと。
+/// 上限ちょうどを出力 cap に採るとこの上振れが刺さって退避されうる。本文は余白付きの
+/// [`content_budget_for_tool`] で切り、上限そのもの（[`inline_limit_for_tool`]）は LLM への
+/// **表示値**（`inline_limit_tokens` / `fits`）にだけ使う。
 pub const TOOL_RESULT_TOKEN_LIMIT: usize = 2_500;
 
 /// **読み**（`ws_read` 等）の結果に使う inline 上限（#707）。
@@ -106,6 +103,16 @@ pub fn inline_limit_for_tool(tool_name: &str) -> usize {
     }
 }
 
+/// A producer's content budget for one result of `tool_name`: the tool's inline limit minus a
+/// fixed margin for the result envelope (keys, numbers, notes, the `ActionResult` wrapper) and
+/// the windowed-count overshoot of [`exceeds_limit`] (under 100 tokens). Producers cap their
+/// content here so the whole result stays inline (#564 / #576). One rule for every reader
+/// (`ws_read`, the history and memory reads / D-1115).
+pub fn content_budget_for_tool(tool_name: &str) -> usize {
+    const ENVELOPE_MARGIN_TOKENS: usize = 500;
+    inline_limit_for_tool(tool_name).saturating_sub(ENVELOPE_MARGIN_TOKENS)
+}
+
 /// append 時の inline 上限。ツール別上限と、そのときの残り会話枠の小さい方。
 ///
 /// `remaining` が `None` のときは水位が無い（テスト / 水位未設定）のでツール別上限だけ。
@@ -124,8 +131,23 @@ pub fn append_limit_for_tool(tool_name: &str, remaining: Option<usize>) -> usize
 ///
 /// **#709 以降、参照化はすべてのツール結果に掛かる**ので、この述語が効くのは
 /// [`inline_limit_for_tool`]（1 回で運べる量）だけになった。「読み」を増やすときはここを直す。
+///
+/// D-1115: the history and memory reads (`read_my_history`, `survey_my_history`,
+/// `search_my_history`, `browse_memory_index`, `search_memory_index`, `retrieve_memory_nodes`)
+/// only query the DB and write nothing, so they are reads too. On the shell-output cap a sleep
+/// run got 2-7 of 100 logs per `read_my_history` call and ran out of iterations reading.
 pub fn is_read_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "ws_read" | "ws_list")
+    matches!(
+        tool_name,
+        "ws_read"
+            | "ws_list"
+            | "read_my_history"
+            | "survey_my_history"
+            | "search_my_history"
+            | "browse_memory_index"
+            | "search_memory_index"
+            | "retrieve_memory_nodes"
+    )
 }
 
 /// 退避ファイル名 1 コンポーネント（session_id / tool_call_id）の上限バイト数。
@@ -430,7 +452,7 @@ fn format_hint(s: &str) -> Option<&'static str> {
 /// 超えて `execute_shell` 経由で**もう一度退避される**（#856 発見3 の grep スパイラル）。無限
 /// ループにはならない（再退避も次の `ws_read` で読める）が 1 段余計に回る。`ws_read`
 /// （`start_line=1`）は行番号を必要とせず、`compute_ws_read` が返り値を構造的に inline 上限未満へ
-/// 抑える（[`RANGE_CONTENT_TOKEN_CEILING`] / `crates/actions/src/workspace.rs`）ので、直読みを
+/// 抑える（[`content_budget_for_tool`] / `crates/actions/src/workspace.rs`）ので、直読みを
 /// 先頭にすればこの余計な 1 段が消える。`grep` は「行番号を得て特定箇所へ飛ぶ」用途に残すが、
 /// **退避ファイルへの grep は広いパターンだと再退避され得る**ことを文面で明示し、その場合も
 /// 生成された新しい退避ファイルを `ws_read` で読めば閉じることを示す（回復可能＝無限ループ

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use opencrab_core::tool_result_log::READ_TOOL_RESULT_TOKEN_LIMIT;
+use opencrab_core::tool_result_log::{content_budget_for_tool, inline_limit_for_tool};
 use serde_json::json;
 
 use crate::traits::{Action, ActionContext, ActionResult, SideEffect};
@@ -82,7 +82,7 @@ impl Action for WsReadAction {
 /// **行範囲読みは全ファイル長ぶんの走査も全文読みもしない。** 規模（`total_bytes`）は
 /// `metadata().len()`（O(1)）で得る。本文は [`Workspace::line_reader`] が 1 回 open した窓の
 /// 中で `start_line` から 1 行ずつ、各行 [`WS_READ_MAX_LINE_CHARS`] 文字までを積み、標識込みの
-/// 累計が [`RANGE_CONTENT_TOKEN_CEILING`] に達する直前で止める（返り値は必ず inline 上限未満＝
+/// 累計が [`range_content_token_ceiling`] に達する直前で止める（返り値は必ず inline 上限未満＝
 /// 再退避しない / #564 の自己ループを断つ）。二分探索もバイト境界補正も無い（#617）。範囲指定
 /// なしの全文読みだけは従来どおり全体を読む（後方互換）。
 ///
@@ -100,7 +100,7 @@ fn compute_ws_read(
     // 予算は**行トークンの走行合計**で判定する。累積 content を毎行トークナイズし直すと、ページ
     // 確定までに O(n²) のトークナイズが走る（149 行で ~740KB を tiktoken に通していた）。各 piece
     // を 1 度だけ数えて足すと O(n) になる。部分文字列を別々に数えた和は必ず全体の真値以上（分割で
-    // トークンは減らない）で、`RANGE_CONTENT_TOKEN_CEILING` の −400 余白に収まるので、過小評価で
+    // トークンは減らない）で、`range_content_token_ceiling` の余白に収まるので、過小評価で
     // 再退避が起きることはない（[`tokens_reach_limit`] の窓和と同じ安全側 / #576）。改行結合ぶんも
     // 1 トークン上限として足す（`\n` は 1 トークンだが、跨ぐ結合で増えることはあっても減らない）。
     let (mut reader, total_bytes) = ws.line_reader(path, start_line, WS_READ_MAX_LINE_CHARS)?;
@@ -126,7 +126,7 @@ fn compute_ws_read(
         // 予算判定。ページに 1 行も無いうちは無条件で 1 行返す（最低 1 行保証: 単独で予算超過の
         // 行でも 512 文字に切って返し next_line を前進させる。ここを空返しにすると next_line が
         // start_line から進まず、同じ行を読み続ける暴走ページングになる / #567 の趣旨を行版で保つ）。
-        if !content.is_empty() && used_tokens + piece_tokens > RANGE_CONTENT_TOKEN_CEILING {
+        if !content.is_empty() && used_tokens + piece_tokens > range_content_token_ceiling() {
             next_line = Some(line.number); // この行は含めず、次回ここから読み直す
             break;
         }
@@ -150,7 +150,7 @@ fn compute_ws_read(
         "start_line": first_line.unwrap_or(start_line),
         "has_more": next_line.is_some(),
         "estimated_tokens": estimated_tokens,
-        "inline_limit_tokens": READ_TOOL_RESULT_TOKEN_LIMIT,
+        "inline_limit_tokens": inline_limit_for_tool("ws_read"),
     });
     if let Some(n) = next_line {
         out["next_line"] = json!(n);
@@ -158,11 +158,12 @@ fn compute_ws_read(
     Ok(out)
 }
 
-/// 行範囲読みで返す本文のトークン上限。結果 JSON 全体（本文＋メタ情報の封筒）が inline 上限
-/// [`TOOL_RESULT_TOKEN_LIMIT`] を超えて再退避される（#564 の自己ループ）ことを構造的に防ぐため、
-/// 封筒ぶんの余白を引いた保守値にする。封筒は keys＋数値＋`path`＋標識で実測数百トークン以内
-/// なので、余裕を持って 400 引く。
-const RANGE_CONTENT_TOKEN_CEILING: usize = READ_TOOL_RESULT_TOKEN_LIMIT - 400;
+/// 行範囲読みで返す本文のトークン上限。結果 JSON 全体（本文＋メタ情報の封筒）が inline 上限を
+/// 超えて再退避される（#564 の自己ループ）ことを構造的に防ぐため、封筒ぶんの余白を引いた値。
+/// 余白の規則は読み全体で 1 つ（[`content_budget_for_tool`] / D-1115）。
+fn range_content_token_ceiling() -> usize {
+    content_budget_for_tool("ws_read")
+}
 
 /// 行範囲読みで 1 行あたりに返す最大文字数（`char` 数）。超える行は切って ` …⟨+M文字⟩` を付ける。
 ///
