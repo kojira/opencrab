@@ -309,19 +309,22 @@ pub(super) fn outgoing_relation_annotation(
     log: &opencrab_db::queries::SessionLogRow,
     refs: &ConversationRefs,
 ) -> Option<String> {
-    let meta: serde_json::Value = serde_json::from_str(log.metadata_json.as_deref()?).ok()?;
-    let kind = meta.get("utterance_kind").and_then(|v| v.as_str())?;
-    let relation = match kind {
-        "reply" => "reply",
-        "reaction" => "reaction",
-        "repost" => "repost",
-        _ => return None,
-    };
+    let relation = outgoing_utterance_kind(log)?;
     let target = reply_target_of(log)
         .and_then(|t| refs.event_num_by_target(&t))
         .map(|n| format!("e{n}"))
         .unwrap_or_else(|| "外部".to_string());
     Some(format!("({relation}→{target})"))
+}
+
+/// エージェント自身の発話 op の種別（metadata の `utterance_kind`。gateway が宣言した op 名で、
+/// core は語彙を持たない・D-1099）。発話 op でない speech は `None`。
+pub(super) fn outgoing_utterance_kind(log: &opencrab_db::queries::SessionLogRow) -> Option<String> {
+    let meta: serde_json::Value = serde_json::from_str(log.metadata_json.as_deref()?).ok()?;
+    meta.get("utterance_kind")
+        .and_then(|v| v.as_str())
+        .filter(|kind| !kind.is_empty())
+        .map(str::to_string)
 }
 
 /// `[… kind:<数字> <ラベル> …]` からラベル語だけを取り出す（新形も旧 from=/target= 付きも）。

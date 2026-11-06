@@ -1,7 +1,7 @@
 use super::refs::{external_origin_of, spawn_ack_subtask_id, ConversationRefs};
 use super::sanitize::{
-    inbound_relation_annotation, outgoing_relation_annotation, render_limit,
-    scrub_identifiers_for_display, strip_inbound_meta_for_display, truncate_body,
+    inbound_relation_annotation, outgoing_relation_annotation, outgoing_utterance_kind,
+    render_limit, scrub_identifiers_for_display, strip_inbound_meta_for_display, truncate_body,
 };
 use super::tool_result_fold::{fold_subtask_completed, result_reference};
 
@@ -53,6 +53,11 @@ pub fn format_single_log_with_echo(
                     Some(lim) => truncate_body(&cleaned, lim),
                     None => cleaned,
                 };
+                // 本文の無い発話 op（いいね・リポスト）は op 名を本文として記録している。発言では
+                // ないので、注記だけを出して本文行は出さない。
+                if outgoing_utterance_kind(log).as_deref() == Some(log.content.as_str()) {
+                    return format!("[{speaker}]{ts}{eref}{relation}");
+                }
                 format!("[{speaker}]{ts}{eref}{relation}:\n{content}")
             }
             None => {

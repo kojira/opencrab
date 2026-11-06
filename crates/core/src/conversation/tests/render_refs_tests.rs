@@ -408,6 +408,27 @@ mod render_refs_tests {
         assert!(o_reaction.contains("🫧"), "本文が残る: {o_reaction}");
     }
 
+    // D-1119b: 本文の無い発話 op（いいね）は op 名を本文に記録する。描画では「言った」ことに
+    // せず、種別と対象の注記だけを出す。
+    #[test]
+    fn bodyless_outgoing_utterance_renders_as_the_act_not_as_speech() {
+        let target_id = "dd".repeat(32);
+        let mut target = speech("me", "pk_other", "元の投稿", Some("opaque-origin-2"));
+        target.metadata_json = Some(
+            serde_json::json!({ "external_origin": "opaque-origin-2", "external_ref": target_id })
+                .to_string(),
+        );
+        let mut my_like = speech("me", "me", "like", None);
+        my_like.metadata_json = Some(
+            serde_json::json!({ "utterance_kind": "like", "reply_target": target_id }).to_string(),
+        );
+        let logs = vec![target, my_like];
+        let refs = ConversationRefs::build(&logs, "me");
+        let out = format_single_log_with_echo(&logs[1], None, Some(&refs));
+        assert!(out.ends_with("(like→e1)"), "the act and its target only: {out}");
+        assert!(!out.contains(":\nlike"), "not rendered as saying 'like': {out}");
+    }
+
     // row295c 6b: reply_target が gateway の external_ref と一致すれば会話内の e 番号へ解決する。
     #[test]
     fn reply_target_resolves_to_e_number_when_recorded() {
