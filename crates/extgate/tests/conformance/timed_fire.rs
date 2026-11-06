@@ -168,16 +168,93 @@ async fn same_session_timed_fires_run_as_separate_serialized_turns() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 2, "both triggers ran");
+    // D-1120: each fire is an event of its own turn, recorded in the history when that turn
+    // starts; the first turn sees only its own fire, the second sees both in order.
+    let conversations = h.runtime.conversations.lock().unwrap().clone();
+    assert_eq!(conversations.len(), 2);
+    let first = &conversations[0];
+    let second = &conversations[1];
+    let fired = |c: &str, m: &str| c.contains(m);
+    assert!(
+        fired(first, "trigger message")
+            && !(fired(first, "interval trigger message") && fired(first, "daily trigger message")),
+        "the first turn carries only its own fire: {first}"
+    );
+    assert!(
+        fired(second, "interval trigger message") && fired(second, "daily trigger message"),
+        "the second turn sees both fires as history: {second}"
+    );
+}
+
+/// D-1120: a timed fire's message is an event of its turn (in the history), not a standing
+/// system context. A resume after the fire's subtask completes does not get the fire's message
+/// again as if the schedule had just fired.
+#[tokio::test]
+async fn resume_after_a_timed_fire_does_not_repeat_the_fire() {
+    let h = Harness::start().await;
+    *h.runtime.reply.lock().unwrap() = "NO_REPLY".into();
+    let session_id = "opaque-heartbeat-session";
+    let instance_id = uuid();
+    insert_named_session(&h, session_id);
+    put_instance(&h, &instance_id, true).await;
+    let mut stream = h.connect().await;
+    hello_ok(&mut stream, &instance_id).await;
+    let binding_id = session_row(&h, &instance_id, session_id).row_id;
+
+    let sink = ExtgateTimedFireSink::new(Arc::clone(&h.state), h.runtime.clone());
+    let mut fire = timed_fire_request(&binding_id, session_id, "agent-1");
+    fire.prompt = "heartbeat: find one news item and post it".into();
+    sink.fire_timed_turn(fire);
+    for _ in 0..200 {
+        if h.runtime.turns.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 1);
+
+    // The fire turn's continuation sink (as the engine would hand it to a spawned subtask).
+    let completion = h
+        .runtime
+        .last_sink
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the fire turn runs with a completion sink");
+    settle_completed(
+        &h.runtime.subtask_registry_for(session_id),
+        &h.state.db,
+        completion.as_ref(),
+        SettleContext {
+            parent_session_id: session_id.to_string(),
+            agent_id: "agent-1".into(),
+            subtask_id: "st-news".into(),
+            sub_session_id: String::new(),
+            exit_reason: "completed".into(),
+            lifecycle: SubtaskLifecycle::new(),
+        },
+        "found one",
+    );
+    for _ in 0..200 {
+        if h.runtime.turns.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 2, "the completion resumes once");
+
     let prompts = h.runtime.system_prompts.lock().unwrap().clone();
-    assert_eq!(prompts.len(), 2);
-    let interval_turns = prompts
-        .iter()
-        .filter(|p| p.contains("interval trigger message") && !p.contains("daily trigger message"))
-        .count();
-    let daily_turns = prompts
-        .iter()
-        .filter(|p| p.contains("daily trigger message") && !p.contains("interval trigger message"))
-        .count();
-    assert_eq!(interval_turns, 1, "interval turn carries only its own message");
-    assert_eq!(daily_turns, 1, "daily turn carries only its own message");
+    let conversations = h.runtime.conversations.lock().unwrap().clone();
+    assert!(
+        !prompts[1].contains("find one news item"),
+        "the resume's system prompt does not carry the fire again: {}",
+        prompts[1]
+    );
+    assert_eq!(
+        conversations[1].matches("find one news item").count(),
+        1,
+        "the fire is visible once, as history: {}",
+        conversations[1]
+    );
+    assert!(conversations[1].contains("subtask_completed"));
 }

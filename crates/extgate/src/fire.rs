@@ -69,12 +69,15 @@ impl<R: AgentRuntime> TimedFireSink for ExtgateTimedFireSink<R> {
             session_id: req.session_id,
             only_speaker: false,
             speaker_id: String::new(),
-            system_context: req.prompt,
+            // D-1120: the fire's message is an event of this turn, recorded once in the history
+            // (see `run_v3_said_less_turn`), not a standing context: resumes after the turn's
+            // subtasks must not be told again that the schedule just fired.
+            system_context: String::new(),
             model_profile: opencrab_actions::TurnModelProfile::Default,
             activity: None,
         };
         tokio::spawn(async move {
-            run_v3_said_less_turn(sink, req.caller).await;
+            run_v3_said_less_turn(sink, req.caller, Some(req.prompt)).await;
         });
     }
 }
