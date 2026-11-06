@@ -122,9 +122,12 @@ describe('SessionDetail web conversation', () => {
       expect(screen.getByPlaceholderText('sessionDetail.ownerPlaceholder')).toBeEnabled();
     });
     expect(getWebConversationState).toHaveBeenCalledWith(PHYSICAL_ID);
-    expect(FakeEventSource.instances[0].url).toBe(
-      `/api/web-conversations/${PHYSICAL_ID}/events`,
-    );
+    // The event stream opens in an effect after the composer is enabled; wait for it.
+    await waitFor(() => {
+      expect(FakeEventSource.instances[0]?.url).toBe(
+        `/api/web-conversations/${PHYSICAL_ID}/events`,
+      );
+    });
   });
 
   it('shows unnamed title and disables composer while provisioning', async () => {

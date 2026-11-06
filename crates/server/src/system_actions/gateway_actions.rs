@@ -74,17 +74,27 @@ impl GatewayActions for SystemGatewayActions {
             // として**両方**残す（統廃合は #157 の範囲外）。
             "create_skill" => crate::agent_management::create_skill(&self.state, args, ctx),
             // エージェント自身の定時実行スケジュール（#455）。対象は常に ctx.session_id。
-            "get_my_schedules" => crate::agent_schedule::get_my_schedules(&self.state, args, ctx),
-            "set_my_schedule" => crate::agent_schedule::set_my_schedule(&self.state, args, ctx),
+            "get_my_schedules" => {
+                crate::agent_schedule::get_my_schedules(&self.state, args, &self.conversation_ctx(ctx))
+            }
+            "set_my_schedule" => {
+                crate::agent_schedule::set_my_schedule(&self.state, args, &self.conversation_ctx(ctx))
+            }
             // 更新・削除（#477）。id 指定で、ctx.agent_id＋現在セッションの所属チェックを通った行だけ。
-            "update_my_schedule" => {
-                crate::agent_schedule::update_my_schedule(&self.state, args, ctx)
-            }
-            "delete_my_schedule" => {
-                crate::agent_schedule::delete_my_schedule(&self.state, args, ctx)
-            }
+            "update_my_schedule" => crate::agent_schedule::update_my_schedule(
+                &self.state,
+                args,
+                &self.conversation_ctx(ctx),
+            ),
+            "delete_my_schedule" => crate::agent_schedule::delete_my_schedule(
+                &self.state,
+                args,
+                &self.conversation_ctx(ctx),
+            ),
             // #612 D2: 時間を待たずに手動発火（オーナー / co_agent 限定・OWNER_ONLY_ACTIONS）。
-            "run_my_schedule" => crate::agent_schedule::run_my_schedule(&self.state, args, ctx),
+            "run_my_schedule" => {
+                crate::agent_schedule::run_my_schedule(&self.state, args, &self.conversation_ctx(ctx))
+            }
             // subtask 起動（#175 S4）。transport 非依存の唯一の実装（Discord 側の実装は
             // 撤去済み）。inner へは委譲しない。
             "spawn_subtask" => {

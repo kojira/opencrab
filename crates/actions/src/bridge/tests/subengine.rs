@@ -1,12 +1,11 @@
 // ---- RFC #152 S2: 合成 gateway 注入 + deny-by-default 最外周フィルタ ----
 
-/// server ツール（nostr_generate_key）と transport ツール（report_progress）と、
-/// 開放してはならないツール（send_ui）を同時に提供する、合成 gateway のフェイク。
-/// `SystemGatewayActions`（server ツール + inner の union）の到達性だけを模す。
+/// 合成 gateway のフェイク。`SystemGatewayActions`（server ツール + inner の union）の
+/// 到達性だけを模す。
 ///
-/// sub-engine の到達可否は各定義の `class.sub_engine` 属性で決まる（PR-2B）ので、
-/// フェイクも実属性を再現する: `nostr_generate_key` / `report_progress` は
-/// `Allowed`、`send_ui` は `Blocked`。
+/// sub-engine の到達可否は各定義の `class.sub_engine` 属性で決まる（PR-2B / D-1119）ので、
+/// フェイクも実属性を再現する: `nostr_generate_key` / `report_progress` は `Allowed`、
+/// gateway の発話 `reply` は既定の `NotExposed`、`send_ui` は `Blocked`。
 struct FakeCompositeGateway;
 
 #[async_trait]
@@ -21,6 +20,7 @@ impl GatewayActions for FakeCompositeGateway {
                 "report_progress",
                 opencrab_gateway::SubEngineAccess::Allowed,
             ),
+            ("reply", opencrab_gateway::SubEngineAccess::NotExposed),
             ("send_ui", opencrab_gateway::SubEngineAccess::Blocked),
         ]
         .iter()
@@ -51,10 +51,10 @@ impl GatewayActions for FakeCompositeGateway {
     }
 }
 
-/// deny-by-default: 合成 gateway の definitions 和集合から、許可リストの
-/// ツールだけが sub-engine に見える（send_ui 等は消える）。
+/// D-1119: サブタスクも本人なので、親ターンと同じ gateway 操作が見える。消えるのは
+/// `Blocked` を名乗るもの（send_ui）だけ。
 #[test]
-fn subengine_definitions_only_expose_allowlisted_tools() {
+fn subengine_definitions_match_the_parent_except_blocked() {
     let sub = SubEngineGatewayActions::new(Arc::new(FakeCompositeGateway));
     let names: Vec<String> = sub.definitions().into_iter().map(|d| d.name).collect();
     assert!(
@@ -66,9 +66,28 @@ fn subengine_definitions_only_expose_allowlisted_tools() {
         "nostr_generate_key must be reachable after S2 triage"
     );
     assert!(
+        names.contains(&"reply".to_string()),
+        "a not_exposed gateway op is the parent's tool and must be visible to its subtask: {names:?}"
+    );
+    assert!(
         !names.contains(&"send_ui".to_string()),
         "send_ui must NOT be exposed to the sub-engine"
     );
+}
+
+/// D-1119: サブタスクは `not_exposed` の gateway 操作を実行でき、呼び出しは親と同じ
+/// gateway へ届く（ctx も変えずに渡る）。
+#[tokio::test]
+async fn subengine_runs_a_not_exposed_gateway_op() {
+    let sub = SubEngineGatewayActions::new(Arc::new(FakeCompositeGateway));
+    let ctx = GatewayCallContext::new(opencrab_gateway::GatewayCaller::Owner, "a1")
+        .with_session_id("subtask-x")
+        .with_depth(1);
+    let r = sub
+        .execute("reply", &json!({"event": "e1", "text": "hi"}), &ctx)
+        .await;
+    assert!(r.success, "reply must reach the gateway: {:?}", r.error);
+    assert_eq!(r.data.unwrap()["reached"], "reply");
 }
 
 /// 許可された server ツール（nostr_generate_key）は合成 gateway へ到達・実行できる。

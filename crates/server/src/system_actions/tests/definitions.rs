@@ -480,52 +480,41 @@ fn rebuild_memory_index_is_exposed_in_own_definitions() {
     );
 }
 
-/// **サブタスクのネスト禁止**（壊すと重大）。
-///
-/// sub-engine の実効ゲートは bridge の MAX_DEPTH ではなく、各ツール定義の
-/// `class.sub_engine == Allowed` 属性（`SubEngineGatewayActions` が最外周で絞る）。
-/// `spawn_subtask` が server-neutral 層へ移った今、うっかり `Allowed` を名乗らせると
-/// サブタスクが無限にネストできてしまう。合成 gateway（own + inner）を
-/// `SubEngineGatewayActions` で包んだ結果を直接固定する。
-#[test]
-fn sub_engine_cannot_see_spawn_subtask() {
-    let state = crate::test_app_state();
-    let composite: Arc<dyn GatewayActions> =
-        Arc::new(SystemGatewayActions::new(state, None, None, None));
-    let sub = opencrab_actions::SubEngineGatewayActions::new(composite);
-    let names: Vec<String> = sub.definitions().into_iter().map(|d| d.name).collect();
-    assert!(
-        !names.contains(&"spawn_subtask".to_string()),
-        "sub-engine から spawn_subtask が見えてはならない（ネスト禁止）: {names:?}"
-    );
-    // 許可された制御ツールは見える（許可リストが空振りしていないことの対）。
-    assert!(names.contains(&"report_progress".to_string()));
-    // #654: nostr_generate_key の定義は nostr feature 依存（#651）。off では露出しないので
-    // 期待値も同じ cfg で組む（sub-engine 許可リストの対照そのものは report_progress で担保）。
-#[cfg(any())]
-    assert!(names.contains(&"nostr_generate_key".to_string()));
-}
-
-/// sub-engine から `spawn_subtask` を名前指定で呼んでも拒否される
-/// （定義から隠すだけでは、親コンテキストの記憶で名前を呼ばれると素通しになる）。
+/// D-1119: サブタスクも本人なので、合成 gateway の操作は親ターンと同じに見える
+/// （`spawn_subtask` も含む）。ネストの深さは別の層（bridge の `MAX_DEPTH` と
+/// `depth_capped`）が抑えるので、depth>=MAX_DEPTH の sub-engine では `spawn_subtask` は
+/// 見えず、実行も拒否される。
 #[tokio::test]
-async fn sub_engine_execution_of_spawn_subtask_is_rejected() {
+async fn sub_engine_sees_parent_tools_and_spawn_subtask_is_depth_capped() {
     let state = crate::test_app_state();
     let composite: Arc<dyn GatewayActions> =
         Arc::new(SystemGatewayActions::new(state, None, None, None));
-    let sub = opencrab_actions::SubEngineGatewayActions::new(composite);
-    let r = sub
-        .execute(
-            "spawn_subtask",
-            &json!({ "task": "nested" }),
-            &sub_ctx("subtask-st-1"),
-        )
-        .await;
-    assert!(!r.success);
+    let sub: Arc<dyn GatewayActions> =
+        Arc::new(opencrab_actions::SubEngineGatewayActions::new(composite));
+    let names: Vec<String> = sub.definitions().into_iter().map(|d| d.name).collect();
+    for name in ["report_progress", "spawn_subtask", "set_my_schedule"] {
+        assert!(
+            names.contains(&name.to_string()),
+            "a subtask has its parent's tool {name}: {names:?}"
+        );
+    }
+
+    let (_dir, ctx) = shell_ctx();
+    let capped = opencrab_actions::BridgedExecutor::new(opencrab_actions::ActionDispatcher::new(), ctx)
+        .with_depth(2)
+        .with_gateway_actions(sub);
+    let visible: Vec<String> = capped
+        .effective_tool_definitions()
+        .into_iter()
+        .map(|t| t.definition.name)
+        .collect();
     assert!(
-        r.error.unwrap().starts_with(REJECTION_CODE_PREFIX),
-        "許可外の実在ツールは権限拒否として返す"
+        !visible.contains(&"spawn_subtask".to_string()),
+        "spawn_subtask must not be visible at the nesting cap: {visible:?}"
     );
+    let r = opencrab_core::ActionExecutor::execute(&capped, "spawn_subtask", &json!({ "task": "nested" }))
+        .await;
+    assert!(!r.success, "spawn_subtask at the nesting cap must be rejected");
 }
 
 /// Discord のような inner が report_progress を定義しても、merge 後は own の

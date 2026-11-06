@@ -133,7 +133,7 @@ For protocol version 3, every operation declaration contains these required, dig
 
 - `authorization.allowed_callers`: a non-empty, sorted subset of `owner`, `co_agent`, `trusted`, and `guest`; core compares only the gateway-authenticated generic caller classification and fails closed;
 - `dispatch`: `inline`, `background`, or `utterance`; `utterance` uses one generic frame and one gateway delivery-handler invocation with the same terminal-outcome mapping as before separation and is never converted into a background subtask; concrete adapter calls remain historical (Discord one ordered `create_message` per produced chunk until success/first failure; Nostr one command attempt);
-- `sub_engine`: `not_exposed`, `blocked`, or `allowed`;
+- `sub_engine`: `not_exposed`, `blocked`, or `allowed`. A subtask is the agent itself (D-1119), so a subtask sees and runs every operation its parent turn has; `not_exposed` and `allowed` mean exactly that and behave identically. Only `blocked` hides the operation from subtasks and rejects it there;
 - `sharing`: `agent_bound` or `conversation_bound`;
 - `effect`: `read_only`, `state_change`, or `utterance`; `dispatch=utterance` **if and only if** `effect=utterance` (both directions are validated).
 

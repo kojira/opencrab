@@ -107,22 +107,17 @@ impl BridgedExecutor {
         self.tool_class_index = index;
     }
 
-    /// depth>=1 の sub-engine から遮断すべきか（`class.sub_engine == Blocked`）。
+    /// depth>=1 の sub-engine から遮断すべきか。規則は [`super::subengine::sub_engine_may_use`]
+    /// （`Blocked` だけを除く）の 1 か所で、外周の [`SubEngineGatewayActions`] と同じ。
     /// 索引に無い名前は `false`（属性を名乗る定義が無いツールは遮断しない）。
     ///
-    /// **多層防御の層が移ったことの記録（消さないこと）**:
-    /// - **本番では事実上不活性**。depth>=1 では `gateway_actions` が常に
-    ///   [`SubEngineGatewayActions`]（`Allowed` だけに事前フィルタする外周）なので、索引に
-    ///   `Blocked` が入らず、この二層目は必ず `false` を返す。実効ゲートは外周フィルタが担う。
-    ///   挙動は旧実装と完全に等価（旧 `DISCORD_ACTIONS` の名前ベース深さ拒否も、外周の許可
-    ///   リストの上に乗る冗長な層だった）。
-    /// - **将来 depth>=1 で生の gateway を直付けする経路を足すと、この層が復活する**
-    ///   （外周フィルタを通らないツールに対して `Blocked` 属性が実効ゲートになる）。だから
-    ///   「使われていないから消す」判断はしないこと。多層防御の意図は残す。
+    /// 外周（`SubEngineGatewayActions`）が `Blocked` を可視性・実行の両方で落とすので、
+    /// depth>=1 でこの層が `true` を返すのは、外周を通らない経路（MCP スロットなど）に
+    /// `Blocked` を名乗る定義があるときだけ。
     pub(super) fn is_blocked_in_subengine(&self, name: &str) -> bool {
         self.tool_class_index
             .get(name)
-            .map(|c| c.sub_engine == opencrab_gateway::SubEngineAccess::Blocked)
+            .map(|c| !super::subengine::sub_engine_may_use(c.sub_engine))
             .unwrap_or(false)
     }
 

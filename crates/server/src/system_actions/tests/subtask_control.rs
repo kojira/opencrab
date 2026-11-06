@@ -642,3 +642,20 @@ async fn report_progress_does_not_escalate_agent_callers() {
     assert_eq!(settled.len(), 1);
     assert_eq!(settled[0].caller, opencrab_actions::CallerIdentity::Agent);
 }
+
+/// D-1119: 「この会話」を対象にするツール（`*_my_schedule`）は、サブタスクから呼ばれても
+/// サブタスクを起こした会話のセッションを対象にする（サブタスクも本人）。登録簿に無い
+/// セッション（通常ターン）はそのまま。
+#[tokio::test]
+async fn conversation_session_of_a_subtask_is_its_parent_conversation() {
+    let state = crate::test_app_state();
+    let registry = registry_with("st-1", "subtask-st-1", "discord-agent-x-1-2");
+    let sys = SystemGatewayActions::new(state, None, Some(registry), None);
+    assert_eq!(sys.conversation_session("subtask-st-1"), "discord-agent-x-1-2");
+    assert_eq!(
+        sys.conversation_session("discord-agent-x-1-2"),
+        "discord-agent-x-1-2"
+    );
+    let ctx = sys.conversation_ctx(&sub_ctx("subtask-st-1"));
+    assert_eq!(ctx.session_id.as_deref(), Some("discord-agent-x-1-2"));
+}
