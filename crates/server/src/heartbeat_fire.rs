@@ -6,10 +6,12 @@ use crate::AppState;
 
 pub const HEARTBEAT_NEUTRAL_SESSION_LABEL: &str = "（この会話）";
 
+/// 定時実行の発火を、事実だけで伝える文（D-1120）。告知するか・委譲するか・何もしないかは LLM が
+/// 決める（core は行動を指示しない）。この文は会話の履歴に「発火」の出来事として 1 回だけ記録され、
+/// 後続の resume ターンへ指示として再注入されない。
 fn format_heartbeat_prompt(session_label: &str, instructions_text: &str) -> String {
-    let action = "取り組むことがあれば、この応答はそのままセッションの gateway へ投稿されるので、これから何をするかを自分の言葉で短く添えたうえで、実作業は spawn_subtask で起動してください。";
     format!(
-        "[ハートビート] 現在の会話「{session_label}」。{instructions_text}\nいまはハートビートの時間です。{action}いま何もすることが無ければ、通常のターンと同じく NO_REPLY とだけ答えてください。"
+        "[ハートビート] この会話「{session_label}」の定時実行が発火しました。予定のメッセージ:\n{instructions_text}\nこのターンで書いた本文は、この会話の gateway へ投稿として届きます。NO_REPLY とだけ書くと、何もしません。"
     )
 }
 
@@ -77,4 +79,24 @@ pub async fn run_one_heartbeat(
     });
     record_heartbeat_fire(&state.db, agent_id, target, schedule_id);
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D-1120: the fire states facts only; it does not tell the agent to announce or to delegate.
+    #[test]
+    fn heartbeat_prompt_states_facts_without_directing_behaviour() {
+        let prompt =
+            format_heartbeat_prompt(HEARTBEAT_NEUTRAL_SESSION_LABEL, "ニュースを1件探して投稿");
+        assert!(prompt.contains("ニュースを1件探して投稿"));
+        assert!(prompt.contains("NO_REPLY"));
+        for directive in ["spawn_subtask", "添えたうえで", "起動してください"] {
+            assert!(
+                !prompt.contains(directive),
+                "no core-imposed directive {directive:?}: {prompt}"
+            );
+        }
+    }
 }

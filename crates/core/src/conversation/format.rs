@@ -237,6 +237,11 @@ pub fn format_single_log_with_echo(
                     if kind == "subtask_completed" {
                         return format_subtask_completed(&value, &log.content, &ts, refs);
                     }
+                    // D-1120: a timed fire is an event of its turn; its message is shown as it was.
+                    if kind == "timed_fire" {
+                        let message = value.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                        return format!("[timed_fire]{ts}:\n{message}");
+                    }
                     if kind == "turn_terminated" {
                         let marker = value
                             .get("marker")

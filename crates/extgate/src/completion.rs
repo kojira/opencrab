@@ -165,7 +165,7 @@ impl<R: AgentRuntime> SubtaskCompletionSink for ExtgateCompletionSink<R> {
 async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: SubtaskSettled) {
     // resume は発端 said の無い自己ターン。heartbeat（#925）と完全に同型なので共有ヘルパへ
     // 委譲する（単一実装）。D-1093: core は返信先を決めないので、resume も返信先を持ち回らない。
-    run_v3_said_less_turn(sink, ev.caller.clone()).await;
+    run_v3_said_less_turn(sink, ev.caller.clone(), None).await;
 }
 
 /// gateway の `system_context`（Nostr の応答文脈・オーナー鍵・heartbeat 指示）を system の
@@ -182,20 +182,43 @@ pub(crate) fn with_system_context(system: String, system_context: &str) -> Strin
     }
 }
 
+/// 定時実行の発火を、その会話の履歴へ出来事として記録する（D-1120）。描画は
+/// `opencrab_core::conversation` の `timed_fire`。
+fn record_timed_fire<R: AgentRuntime>(sink: &ExtgateCompletionSink<R>, message: &str) {
+    let Ok(conn) = sink.state.db.lock() else {
+        tracing::warn!(session_id = %sink.session_id, "timed-fire: history lock failed");
+        return;
+    };
+    let event = opencrab_core::history::Event::System {
+        content: serde_json::json!({ "type": "timed_fire", "message": message }).to_string(),
+        speaker_id: None,
+        metadata: None,
+    };
+    opencrab_core::history::record_best_effort(&conn, &sink.agent_id, &sink.session_id, &event);
+}
+
 /// 発端 said の無い自己ターン（resume 継続 / #925 heartbeat）を 1 本駆動する共有実装。
 ///
 /// `caller` は実行権限（resume は spawn 時の caller・heartbeat は `Owner`）。発話は返信先を
 /// 持たない（D-1093）。started（origin=None・👀 は付けない）→ system＋`prompt_suffix` → `run_session_turn`
 /// （新規 said を記録しない）→ 継続（`v3_attach_dispatch`＋`ExtgateCompletionSink`）→ 配送
 /// （`apply_delivery_effect`）→ 🏁（`select_completed_target`）を、通常ターンと同じ機構で回す。
+///
+/// `trigger`（定時実行の発火文・D-1120）は、セッションの直列ロックを取ってからこのターンの出来事
+/// として履歴へ 1 回だけ記録する。resume（`None`）はそれを持ち回らないので、発火の指示が後続の
+/// ターンで「いま起きたこと」として繰り返されない。
 pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
     sink: ExtgateCompletionSink<R>,
     caller: CallerIdentity,
+    trigger: Option<String>,
 ) {
     let locks = sink.runtime.session_locks();
     let session_id = sink.session_id.clone();
     locks
         .run_serialized(&session_id, async move {
+            if let Some(message) = trigger.as_deref() {
+                record_timed_fire(&sink, message);
+            }
             let activity_id = uuid::Uuid::new_v4().to_string();
             // D-1087: このターンの活動はこの activity に属する（継承した sink を使い回すため
             // ここで差し替える）。
