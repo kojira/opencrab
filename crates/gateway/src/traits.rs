@@ -257,9 +257,12 @@ pub fn utterance_body(
             .and_then(|value| value.as_str())
             .map(str::to_string)
     };
+    // An utterance without text or emoji (a like, a repost) is recorded and delivered under the
+    // operation's name, so it is never an empty speech row (deliveries require a non-empty text).
     let body = string("text")
         .or_else(|| string("emoji"))
-        .unwrap_or_default();
+        .filter(|body| !body.is_empty())
+        .unwrap_or_else(|| operation.to_string());
     let target = string("target").or_else(|| string("event"));
     (body, operation.to_string(), target)
 }

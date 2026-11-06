@@ -597,3 +597,87 @@ async fn di_short_ref_resolution_targets_declared_fields() {
     let _ = tokio::time::timeout(Duration::from_secs(2), exec).await;
 }
 
+
+
+/// D-1119b: a bodyless utterance (`{event}` only, e.g. a like) is delivered and recorded, both from
+/// the conversation's own turn (depth 0) and from its subtask (depth 1, through the same projection
+/// the subtask inherits). The speech lands in the conversation's session, the delivery on its
+/// binding, and the invoke goes to the instance with the conversation's session key.
+#[tokio::test]
+async fn bodyless_utterance_is_delivered_and_recorded_at_depth_0_and_1() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    let session_key: String = "bluesky-agent-1".to_string();
+    let like = json!([{
+        "name": "like", "description": "like a post",
+        "input_schema": {"type": "object", "required": ["event"],
+            "properties": {"event": {"type": "string", "format": "short-ref"}}},
+        "output_schema": null, "callback_schema": null,
+        "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
+        "dispatch": "utterance", "sub_engine": "not_exposed",
+        "sharing": "conversation_bound", "effect": "utterance"
+    }]);
+    let mut s = h.connect().await;
+    assert_eq!(hello_with_ops(&mut s, &instance_id, 1, &like).await["m"], "ok");
+    let binding_id = session_row(&h, &instance_id, &session_key).row_id;
+    let ops: Arc<dyn GatewayActions> = Arc::new(
+        ExtgateOpsGatewayActions::for_binding(
+            Arc::clone(&h.state),
+            &instance_id,
+            &binding_id,
+            &session_key,
+            "agent-1",
+        )
+        .expect("declared"),
+    );
+    let subtask: Arc<dyn GatewayActions> =
+        Arc::new(opencrab_actions::SubEngineGatewayActions::new(Arc::clone(&ops)));
+    for (gateway, depth, uri) in [
+        (&ops, 0u32, "at://did:plc:a/app.bsky.feed.post/1"),
+        (&subtask, 1u32, "at://did:plc:a/app.bsky.feed.post/2"),
+    ] {
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-1")
+            .with_session_id(if depth == 0 { session_key.clone() } else { "subtask-x".to_string() })
+            .with_depth(depth);
+        let r = gateway.execute("like", &json!({"event": uri}), &ctx).await;
+        assert!(r.success, "depth {depth}: like must be accepted: {:?}", r.error);
+        let invoke = read_until(&mut s, |v| v["m"] == "invoke").await;
+        assert_eq!(invoke["operation"], "like");
+        assert_eq!(invoke["session"], session_key, "depth {depth}: the conversation's key");
+        assert_eq!(invoke["payload"]["event"], uri);
+        let call_id = invoke["id"].as_str().unwrap().to_string();
+        write_frame(&mut s, &json!({"id": call_id, "m": "ok"})).await;
+    }
+    let logs = {
+        let conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_key).unwrap()
+    };
+    let likes = logs
+        .iter()
+        .filter(|l| l.log_type == "speech" && l.content == "like")
+        .count();
+    assert_eq!(likes, 2, "both likes are recorded in the conversation's session");
+    let delivered: i64 = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let n: i64 = h
+                .state
+                .db
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM deliveries WHERE binding_id = ?1 AND state = 'delivered'",
+                    [&binding_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if n == 2 {
+                return n;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both deliveries settle as delivered");
+    assert_eq!(delivered, 2);
+}
