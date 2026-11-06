@@ -54,6 +54,40 @@ pub struct SystemGatewayActions {
     run_env: std::collections::BTreeMap<String, String>,
 }
 
+impl SystemGatewayActions {
+    /// サブタスク（`subtask-*` セッション）から呼ばれたとき、そのサブタスクが働いている会話の
+    /// セッションへ解決する（D-1119: サブタスクも本人なので、「この会話」はサブタスクを起こした
+    /// 会話）。登録簿の `parent_session_id` を、登録簿に無いセッション（＝会話）に着くまでたどる。
+    /// 登録簿に無ければそのまま（depth 0 の通常ターン）。
+    pub(crate) fn conversation_session(&self, session_id: &str) -> String {
+        let mut current = session_id.to_string();
+        let Some(registry) = self.subtask_registry.as_ref() else {
+            return current;
+        };
+        for _ in 0..8 {
+            let parent = registry
+                .iter()
+                .find(|e| e.session_id == current)
+                .map(|e| e.parent_session_id.clone());
+            match parent {
+                Some(p) if p != current => current = p,
+                _ => break,
+            }
+        }
+        current
+    }
+
+    /// `ctx` のセッションを [`Self::conversation_session`] へ差し替えた写し（「この会話」を
+    /// 対象にするツール用）。
+    pub(crate) fn conversation_ctx(&self, ctx: &GatewayCallContext) -> GatewayCallContext {
+        let mut out = ctx.clone();
+        if let Some(session_id) = ctx.session_id.as_deref() {
+            out.session_id = Some(self.conversation_session(session_id));
+        }
+        out
+    }
+}
+
 /// `report_progress` が登録簿から引く、進捗通知に要る項目だけの写し。
 ///
 /// 登録簿のエントリ（`SpawnedSubtask`）は shard ロック下でしか読めないので、必要な

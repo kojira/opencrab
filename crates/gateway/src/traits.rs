@@ -266,18 +266,20 @@ pub fn utterance_body(
 
 /// depth>=1 の sub-engine（`spawn_subtask` で起動した子）から見たツールの扱い。
 ///
-/// かつて 2 つの互いに素なリスト（sub-engine 許可リストと深さ拒否リスト）が扱っていた
-/// 情報を、1 つの 3 値で無損失に統合する。`SubEngineGatewayActions`（最外周フィルタ）と
-/// `BridgedExecutor`（depth ゲート）がこの属性を引く。
+/// サブタスクもエージェント本人なので、親ターンと同じツールを見せて実行させるのが既定
+/// （D-1119・オーナー裁定）。`SubEngineGatewayActions`（最外周フィルタ）と `BridgedExecutor`
+/// （depth ゲート）は、どちらも `sub_engine_may_use`（`Blocked` だけを除く）でこの属性を引く。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubEngineAccess {
-    /// sub-engine に見せて実行も許す。現状は `report_progress` / `nostr_generate_key` のみ。
+    /// 親ターンと同じ（サブタスクにも見せて実行させる）。D-1119 以降は `NotExposed` と
+    /// まったく同じ扱いで、どちらを宣言しても結果は変わらない（gateway が `"allowed"` を
+    /// 宣言していても、`"not_exposed"` に直す必要はない）。
     Allowed,
-    /// depth>=1 で明示的に拒否する（多層防御）。配送系（
-    /// discord 送信・VC 参加退出など）。
+    /// サブタスクには見せず、実行も拒否する。親ターンだけで使わせる理由を、宣言する側が
+    /// 持つときだけ名乗る（例: Discord の `send_ui`）。
     Blocked,
-    /// 既定。許可リストに載せない（許可・拒否のどちらでもない大多数）。
-    /// sub-engine は最外周の allow-list フィルタでこれを見ない。
+    /// 既定。親ターンと同じ（サブタスクにも見せて実行させる）。名前は gateway wire の値
+    /// （`"not_exposed"`）を保つための歴史的なもので、D-1119 以降は「隠す」意味を持たない。
     NotExposed,
 }
 

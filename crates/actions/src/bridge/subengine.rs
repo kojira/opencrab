@@ -5,8 +5,11 @@ use opencrab_gateway::GatewayActions;
 
 use super::gateway_reject;
 
-/// sub-engine 専用の最小権限 gateway。`sub_engine == Allowed` のアクションだけを
-/// inner 実装へ委譲する（#63 / RFC #152 S2）。
+/// sub-engine（サブタスク）用の gateway。サブタスクもエージェント本人なので（D-1119・
+/// オーナー裁定「サブタスクも本人なのに」）、親ターンと同じ gateway 操作を見せて実行させる。
+/// 除くのは定義が `sub_engine == Blocked` を名乗るものだけ（[`sub_engine_may_use`]）。
+/// 旧仕様（#63 / RFC #152 S2）は `Allowed` だけを通す最小権限で、gateway の投稿・返信・
+/// 読み取りがサブタスクから消えていた。
 ///
 /// `inner` は合成 gateway（`SystemGatewayActions`）へのハンドル（RFC #152 S2）。
 /// これにより sub-engine から server ツール（`nostr_generate_key` 等）へ到達できる。
@@ -26,13 +29,19 @@ impl SubEngineGatewayActions {
     }
 }
 
+/// サブタスク（depth>=1）がこの属性の操作を使えるか。可視性（`definitions`）・実行
+/// （`execute`）・`BridgedExecutor` の depth ゲートが共有する唯一の規則（D-1119）。
+pub fn sub_engine_may_use(access: opencrab_gateway::SubEngineAccess) -> bool {
+    access != opencrab_gateway::SubEngineAccess::Blocked
+}
+
 #[async_trait]
 impl GatewayActions for SubEngineGatewayActions {
     fn definitions(&self) -> Vec<opencrab_gateway::GatewayActionDef> {
         self.inner
             .definitions()
             .into_iter()
-            .filter(|d| d.class.sub_engine == opencrab_gateway::SubEngineAccess::Allowed)
+            .filter(|d| sub_engine_may_use(d.class.sub_engine))
             .collect()
     }
 
@@ -46,11 +55,11 @@ impl GatewayActions for SubEngineGatewayActions {
         let defs = self.inner.definitions();
         let def = defs.iter().find(|d| d.name == name);
         match def {
-            // `sub_engine == Allowed` のツールだけ inner へ委譲する。
-            Some(d) if d.class.sub_engine == opencrab_gateway::SubEngineAccess::Allowed => {
+            // `Blocked` 以外は親ターンと同じく inner へ委譲する。
+            Some(d) if sub_engine_may_use(d.class.sub_engine) => {
                 self.inner.execute(name, args, ctx).await
             }
-            // 実在するが許可外 → 権限拒否（rejected: マーカー）。
+            // 実在するが `Blocked` → 権限拒否（rejected: マーカー）。
             Some(_) => gateway_reject(format!("action '{name}' is not available in sub-engines")),
             // 未知の名前 → 通常の失敗（幻覚ツール名を Rejected に誤分類させない）。
             None => opencrab_gateway::GatewayActionResult {
