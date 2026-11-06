@@ -646,8 +646,8 @@ async fn report_progress_does_not_escalate_agent_callers() {
 /// D-1119: 「この会話」を対象にするツール（`*_my_schedule`）は、サブタスクから呼ばれても
 /// サブタスクを起こした会話のセッションを対象にする（サブタスクも本人）。登録簿に無い
 /// セッション（通常ターン）はそのまま。
-#[test]
-fn conversation_session_of_a_subtask_is_its_parent_conversation() {
+#[tokio::test]
+async fn conversation_session_of_a_subtask_is_its_parent_conversation() {
     let state = crate::test_app_state();
     let registry = registry_with("st-1", "subtask-st-1", "discord-agent-x-1-2");
     let sys = SystemGatewayActions::new(state, None, Some(registry), None);
