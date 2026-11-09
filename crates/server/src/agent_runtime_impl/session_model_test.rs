@@ -676,3 +676,46 @@ async fn realtime_input_high_guard_uses_the_live_policy() {
     ));
     assert_eq!(stored_realtime(&state, "sess-a"), None);
 }
+
+/// D-1122: `/model` resolves against the real ChatGPT catalog, so a model the ChatGPT backend
+/// serves (gpt-6-astra) must be in it, or the session switch is rejected as NotFound.
+#[tokio::test]
+async fn set_session_model_accepts_chatgpt_gpt_6_astra() {
+    let state = crate::test_app_state();
+    {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::upsert_model_pricing(
+            &conn,
+            &opencrab_db::queries::ModelPricingRow {
+                provider: "chatgpt".to_string(),
+                model: "gpt-6-astra".to_string(),
+                input_price_per_1m: 0.0,
+                output_price_per_1m: 0.0,
+                context_window: Some(400_000),
+                max_output_tokens: Some(32_000),
+                cached_input_price_per_1m: None,
+                cache_write_price_per_1m: None,
+            },
+        )
+        .unwrap();
+        agent(&conn, "a1", None);
+        session(&conn, "sess-a", &["a1"]);
+    }
+    let mut router = opencrab_llm::router::LlmRouter::new();
+    router.add_provider(Arc::new(opencrab_llm::providers::ChatGptProvider::new()));
+    state.llm_router.swap(router);
+
+    state
+        .set_session_model(
+            "a1",
+            "sess-a",
+            TurnModelProfile::Default,
+            "chatgpt:gpt-6-astra",
+        )
+        .await
+        .expect("chatgpt:gpt-6-astra is accepted");
+    assert_eq!(
+        stored(&state, "sess-a").as_deref(),
+        Some("chatgpt:gpt-6-astra")
+    );
+}
