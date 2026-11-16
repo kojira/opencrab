@@ -1,4 +1,6 @@
-use opencrab_core::{context_budget::ContextBudgetError, EngineResult, ExplicitTermination};
+use opencrab_core::{
+    context_budget::ContextBudgetError, EngineResult, ExplicitTermination, LlmCallFailed,
+};
 
 fn insert_event(
     writer: &super::TurnLogWriter,
@@ -41,6 +43,11 @@ pub(super) fn persist_result(
             cause
                 .downcast_ref::<ContextBudgetError>()
                 .and_then(context_budget_event)
+                .or_else(|| {
+                    cause
+                        .downcast_ref::<LlmCallFailed>()
+                        .map(llm_call_failed_event)
+                })
         }),
     };
     if let Some(event) = event {
@@ -59,6 +66,21 @@ pub(super) fn persist_context_budget_error(
         insert_event(writer, agent_id, session_id, event);
     }
 }
+
+/// D-1131: a failed LLM call ended the turn. The agent sees in its next turn which model failed
+/// and what the provider said, e.g. after a `select_llm` switch to a model the provider rejects.
+fn llm_call_failed_event(failure: &LlmCallFailed) -> serde_json::Value {
+    serde_json::json!({
+        "type": "turn_failed",
+        "model": failure.model,
+        "error_code": failure.code,
+        "detail": opencrab_core::llm_text::truncate_chars(&failure.body, LLM_FAILURE_DETAIL_CHARS),
+    })
+}
+
+/// The provider error text kept in a `turn_failed` event. Router errors are one short line per
+/// provider tried; the cut only bounds an unusually long provider body.
+const LLM_FAILURE_DETAIL_CHARS: usize = 500;
 
 fn context_budget_event(error: &ContextBudgetError) -> Option<serde_json::Value> {
     matches!(error, ContextBudgetError::Exhausted { .. }).then(|| {
@@ -86,6 +108,44 @@ mod tests {
             last_generation_had_continuation_speech: true,
             xml_fallback_parses: 0,
         }
+    }
+
+    /// D-1131: a turn that ended on a failed LLM call (e.g. the model `select_llm` switched to was
+    /// rejected) leaves a `turn_failed` event naming the model and the provider error.
+    #[test]
+    fn failed_llm_call_is_persisted_as_turn_failed() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let body = "All providers failed for model 'opus-5.5' (1 tried):\n  [chatgpt] ChatGPT API error (400): model_not_found";
+        let error = anyhow::Error::from(LlmCallFailed {
+            model: "opus-5.5".to_string(),
+            code: "error".to_string(),
+            body: body.to_string(),
+        });
+        persist_result(
+            &crate::process::TurnLogWriter::direct(db.clone()),
+            "a",
+            "s",
+            &Err(error),
+        );
+
+        let logs = {
+            let conn = db.lock().unwrap();
+            opencrab_db::queries::list_session_logs_by_session(&conn, "s").unwrap()
+        };
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].log_type, "system");
+        let event: serde_json::Value = serde_json::from_str(&logs[0].content).unwrap();
+        assert_eq!(event["type"], "turn_failed");
+        assert_eq!(event["model"], "opus-5.5");
+        assert!(event["detail"]
+            .as_str()
+            .unwrap()
+            .contains("model_not_found"));
+
+        let rendered =
+            opencrab_core::conversation::format_single_log_with_echo(&logs[0], None, None);
+        assert!(rendered.contains("opus-5.5"), "{rendered}");
+        assert!(rendered.contains("model_not_found"), "{rendered}");
     }
 
     #[test]

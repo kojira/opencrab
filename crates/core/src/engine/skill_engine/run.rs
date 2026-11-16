@@ -246,22 +246,28 @@ impl SkillEngine {
                 });
             }
 
-            // transport 失敗はここで打ち切り（理由は上で llm_logs に残した）。
-            let response = exchange_result?.response;
-
-            // Ok だが意味的に使えない応答（空 #706 / 切り捨て #676）は fail loud で打ち切る。
-            // tool_calls / content を抽出する**前**に見る——切り捨てられた tool_call JSON が
-            // 「空の tool_calls → 最終応答扱い」で黙って消える形をここ 1 点で塞ぐ。
-            if let Some(run_helpers::CallFailure { code, body }) = call_failure {
-                tracing::error!(
-                    iteration = iterations,
-                    error_code = %code,
-                    model = %model,
-                    stage = "turn_failed",
-                    "turn: LLM 応答が使えないためターン失敗（fail loud）"
-                );
-                anyhow::bail!("{body}");
+            // transport 失敗と、Ok だが意味的に使えない応答（空 #706 / 切り捨て #676）はここ 1 点で
+            // fail loud に打ち切る（tool_calls 抽出の**前**。切り捨てられた tool_call JSON が黙って
+            // 消えないように）。D-1131: 失敗したモデルを LlmCallFailed に載せ、次ターンの履歴へ残す。
+            let failure = match (&exchange_result, call_failure) {
+                (_, Some(failure)) => Some(failure),
+                (Err(error), None) => Some(run_helpers::CallFailure {
+                    code: "error".to_string(),
+                    body: error.to_string(),
+                }),
+                (Ok(_), None) => None,
+            };
+            if let Some(run_helpers::CallFailure { code, body }) = failure {
+                tracing::error!(iteration = iterations, error_code = %code, model = %model,
+                    stage = "turn_failed", "turn: LLM 呼び出しが失敗したためターン失敗（fail loud）");
+                let failed = crate::engine::types::LlmCallFailed {
+                    model: model.clone(),
+                    code,
+                    body,
+                };
+                return Err(failed.into());
             }
+            let response = exchange_result?.response;
 
             // 応答本文とツールコールをローカルに抽出（正準モデルは choices[0] を持つ）。
             let normalized = normalize_response(&response);

@@ -99,6 +99,14 @@ where
             | opencrab_actions::CallerIdentity::CoAgent { .. }
             | opencrab_actions::CallerIdentity::TrustedUser
     );
+    // D-1131: the agent's model tools see and resolve against the gateway `/model` list.
+    let model_list: Arc<dyn opencrab_actions::ModelAdministration> = Arc::new(state.clone());
+    dispatcher.register(Arc::new(
+        opencrab_actions::common::GetSystemInfoAction::new(Some(model_list.clone())),
+    ));
+    dispatcher.register(Arc::new(
+        opencrab_actions::llm_selection::SelectLlmAction::new(Some(model_list)),
+    ));
     // 画像生成（D-1076）: chatgpt 形式の provider があればその生成器で差し替え登録する。
     dispatcher.register(Arc::new(
         opencrab_actions::generate_image::GenerateImageAction::new(

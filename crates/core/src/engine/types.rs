@@ -304,6 +304,25 @@ pub trait LlmClient: Send + Sync {
     }
 }
 
+/// D-1131: the engine ended the turn because an LLM call failed (transport error or an unusable
+/// response). `model` is the model that call used (a `select_llm` override included), so the
+/// server can record the failure in the agent's history. Displays as `body`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmCallFailed {
+    pub model: String,
+    /// The `llm_logs.error_code` of the call.
+    pub code: String,
+    pub body: String,
+}
+
+impl std::fmt::Display for LlmCallFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.body)
+    }
+}
+
+impl std::error::Error for LlmCallFailed {}
+
 /// LLM が指定した正常な明示終了理由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
