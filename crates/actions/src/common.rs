@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use serde_json::json;
 
+use std::sync::Arc;
+
+use crate::model_admin::ModelAdministration;
 use crate::traits::{Action, ActionContext, ActionResult};
 
 /// 心の声アクション
@@ -153,7 +156,20 @@ impl Action for UpdateImpressionAction {
 }
 
 /// システム情報取得アクション
-pub struct GetSystemInfoAction;
+///
+/// D-1131: `active_model` is the model the next LLM call of this turn uses (a `select_llm`
+/// override included), and `selectable_models` is the gateway `/model` list
+/// ([`ModelAdministration::list_models`]), the same choices `select_llm` accepts.
+#[derive(Default)]
+pub struct GetSystemInfoAction {
+    models: Option<Arc<dyn ModelAdministration>>,
+}
+
+impl GetSystemInfoAction {
+    pub fn new(models: Option<Arc<dyn ModelAdministration>>) -> Self {
+        Self { models }
+    }
+}
 
 #[async_trait]
 impl Action for GetSystemInfoAction {
@@ -162,7 +178,7 @@ impl Action for GetSystemInfoAction {
     }
 
     fn description(&self) -> &str {
-        "自分のシステム情報（使用中のLLMモデル、プロバイダー、ゲートウェイなど）を確認する"
+        "自分のシステム情報（今使っているLLMモデル、選べるモデル一覧、プロバイダー、ゲートウェイなど）を確認する"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -174,18 +190,20 @@ impl Action for GetSystemInfoAction {
 
     async fn execute(&self, _args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
         let info = ctx.runtime_info.lock().unwrap().clone();
-        let active = info
-            .active_model
-            .unwrap_or_else(|| info.default_model.clone());
-
-        ActionResult::success(json!({
+        let active = crate::llm_selection::model_in_effect(ctx);
+        let mut data = json!({
             "agent_id": ctx.agent_id,
             "agent_name": ctx.agent_name,
             "default_model": info.default_model,
             "active_model": active,
             "available_providers": info.available_providers,
             "gateway": info.gateway,
-        }))
+        });
+        match crate::llm_selection::selectable_models(self.models.as_deref(), &ctx.agent_id).await {
+            Ok(models) => data["selectable_models"] = json!(models),
+            Err(error) => data["selectable_models_error"] = json!(error),
+        }
+        ActionResult::success(data)
     }
 }
 

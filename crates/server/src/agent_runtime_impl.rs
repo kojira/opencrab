@@ -95,12 +95,7 @@ impl ModelAdministration for AppState {
         let models = crate::api::llm::available_models(self)
             .await
             .map_err(|_| ModelAdminError::Internal)?;
-        let canonical =
-            crate::api::llm::resolve_exact_model(&models, model).map_err(|error| match error {
-                crate::api::llm::ModelResolutionError::InvalidArgs => ModelAdminError::InvalidArgs,
-                crate::api::llm::ModelResolutionError::NotFound => ModelAdminError::NotFound,
-                crate::api::llm::ModelResolutionError::Ambiguous => ModelAdminError::Ambiguous,
-            })?;
+        let canonical = opencrab_actions::resolve_exact_model(&models, model)?;
 
         let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
         let existing = opencrab_db::queries::get_agent(&conn, agent_id)
@@ -234,12 +229,7 @@ impl ModelAdministration for AppState {
         let models = crate::api::llm::available_models(self)
             .await
             .map_err(|_| ModelAdminError::Internal)?;
-        let canonical =
-            crate::api::llm::resolve_exact_model(&models, model).map_err(|error| match error {
-                crate::api::llm::ModelResolutionError::InvalidArgs => ModelAdminError::InvalidArgs,
-                crate::api::llm::ModelResolutionError::NotFound => ModelAdminError::NotFound,
-                crate::api::llm::ModelResolutionError::Ambiguous => ModelAdminError::Ambiguous,
-            })?;
+        let canonical = opencrab_actions::resolve_exact_model(&models, model)?;
 
         // Membership re-check, validation and write share this one DB lock. The session lock is
         // never taken: a running turn keeps its pinned model; the change applies next turn.

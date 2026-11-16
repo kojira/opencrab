@@ -10,7 +10,8 @@ pub use skill_engine::{PartialTextEvent, PartialTextGate, PartialTextHook, Skill
 pub use types::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
     EngineResult, ExecutorRun, ExplicitTermination, FoldedInbound, FunctionDefinition,
-    LiveInboundSource, LlmCallLog, LlmClient, LlmExchange, LlmExchangeLog, OutputTextEvent,
-    OutputTextSink, ProviderToolHistory, ToolCall, ToolDispatcher, SYSTEM_SEGMENT_BREAK,
+    LiveInboundSource, LlmCallFailed, LlmCallLog, LlmClient, LlmExchange, LlmExchangeLog,
+    OutputTextEvent, OutputTextSink, ProviderToolHistory, ToolCall, ToolDispatcher,
+    SYSTEM_SEGMENT_BREAK,
 };
 pub use xml_parser::parse_xml_tool_calls;

@@ -32,7 +32,7 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(GenerateInnerVoiceAction));
         dispatcher.register(Arc::new(UpdateImpressionAction));
         dispatcher.register(Arc::new(DeclareDoneAction));
-        dispatcher.register(Arc::new(GetSystemInfoAction));
+        dispatcher.register(Arc::new(GetSystemInfoAction::default()));
 
         // ワークスペースアクション登録
         dispatcher.register(Arc::new(WsReadAction));
@@ -77,7 +77,7 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(RetractMemoryCoreAction));
 
         // LLM関連アクション登録
-        dispatcher.register(Arc::new(SelectLlmAction));
+        dispatcher.register(Arc::new(SelectLlmAction::default()));
         dispatcher.register(Arc::new(EvaluateResponseAction));
         dispatcher.register(Arc::new(AnalyzeLlmUsageAction));
         dispatcher.register(Arc::new(RecallModelExperiencesAction));

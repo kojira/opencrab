@@ -246,8 +246,23 @@ impl SkillEngine {
                 });
             }
 
-            // transport 失敗はここで打ち切り（理由は上で llm_logs に残した）。
-            let response = exchange_result?.response;
+            // transport 失敗はここで打ち切り（理由は上で llm_logs に残した）。D-1131: どのモデルの
+            // 呼び出しが失敗したかを LlmCallFailed として載せ、server が次ターンの履歴へ残せるようにする。
+            let response = match exchange_result {
+                Ok(exchange) => exchange.response,
+                Err(error) => {
+                    let failure = call_failure.unwrap_or_else(|| run_helpers::CallFailure {
+                        code: "error".to_string(),
+                        body: error.to_string(),
+                    });
+                    return Err(crate::engine::types::LlmCallFailed {
+                        model: model.clone(),
+                        code: failure.code,
+                        body: failure.body,
+                    }
+                    .into());
+                }
+            };
 
             // Ok だが意味的に使えない応答（空 #706 / 切り捨て #676）は fail loud で打ち切る。
             // tool_calls / content を抽出する**前**に見る——切り捨てられた tool_call JSON が
@@ -260,7 +275,12 @@ impl SkillEngine {
                     stage = "turn_failed",
                     "turn: LLM 応答が使えないためターン失敗（fail loud）"
                 );
-                anyhow::bail!("{body}");
+                return Err(crate::engine::types::LlmCallFailed {
+                    model: model.clone(),
+                    code,
+                    body,
+                }
+                .into());
             }
 
             // 応答本文とツールコールをローカルに抽出（正準モデルは choices[0] を持つ）。

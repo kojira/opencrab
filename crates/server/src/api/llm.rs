@@ -2,40 +2,6 @@ use axum::{extract::State, http::StatusCode, Json};
 
 use crate::AppState;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ModelResolutionError {
-    InvalidArgs,
-    NotFound,
-    Ambiguous,
-}
-
-/// Resolve exactly against a model-choice snapshot. Fuzzy matching belongs to gateway UX only.
-pub(crate) fn resolve_exact_model(
-    available: &[String],
-    input: &str,
-) -> Result<String, ModelResolutionError> {
-    if input.is_empty() || input.trim() != input {
-        return Err(ModelResolutionError::InvalidArgs);
-    }
-    if available.iter().any(|model| model == input) {
-        return Ok(input.to_string());
-    }
-    if input.contains(':') {
-        return Err(ModelResolutionError::NotFound);
-    }
-
-    let mut matches = available
-        .iter()
-        .filter(|canonical| canonical.split_once(':').is_some_and(|(_, id)| id == input));
-    let Some(first) = matches.next() else {
-        return Err(ModelResolutionError::NotFound);
-    };
-    if matches.next().is_some() {
-        return Err(ModelResolutionError::Ambiguous);
-    }
-    Ok(first.clone())
-}
-
 /// The shared, fail-closed availability source for dashboard and gateway model administration.
 pub(crate) async fn available_models(state: &AppState) -> anyhow::Result<Vec<String>> {
     let mut choices = Vec::new();
@@ -84,7 +50,8 @@ mod slash_model_resolution_contract {
     use opencrab_actions::{ModelAdminError, ModelAdministration};
     use opencrab_llm::traits::{LlmProvider, ModelInfo};
 
-    use super::{available_models, resolve_exact_model, ModelResolutionError as ResolutionError};
+    use super::available_models;
+    use opencrab_actions::{resolve_exact_model, ModelResolutionError as ResolutionError};
 
     struct FailingModelCatalog;
 

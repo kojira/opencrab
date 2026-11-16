@@ -60,6 +60,53 @@ pub enum ModelAdminError {
     Internal,
 }
 
+/// Why [`resolve_exact_model`] could not resolve a model request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelResolutionError {
+    InvalidArgs,
+    NotFound,
+    Ambiguous,
+}
+
+/// Resolve exactly against a model-choice snapshot ([`ModelSnapshot::models`]). The single
+/// resolver for the gateway `/model` commands and the agent's `select_llm` (D-1131). Fuzzy
+/// matching belongs to gateway UX only.
+pub fn resolve_exact_model(
+    available: &[String],
+    input: &str,
+) -> Result<String, ModelResolutionError> {
+    if input.is_empty() || input.trim() != input {
+        return Err(ModelResolutionError::InvalidArgs);
+    }
+    if available.iter().any(|model| model == input) {
+        return Ok(input.to_string());
+    }
+    if input.contains(':') {
+        return Err(ModelResolutionError::NotFound);
+    }
+
+    let mut matches = available
+        .iter()
+        .filter(|canonical| canonical.split_once(':').is_some_and(|(_, id)| id == input));
+    let Some(first) = matches.next() else {
+        return Err(ModelResolutionError::NotFound);
+    };
+    if matches.next().is_some() {
+        return Err(ModelResolutionError::Ambiguous);
+    }
+    Ok(first.clone())
+}
+
+impl From<ModelResolutionError> for ModelAdminError {
+    fn from(error: ModelResolutionError) -> Self {
+        match error {
+            ModelResolutionError::InvalidArgs => ModelAdminError::InvalidArgs,
+            ModelResolutionError::NotFound => ModelAdminError::NotFound,
+            ModelResolutionError::Ambiguous => ModelAdminError::Ambiguous,
+        }
+    }
+}
+
 /// Server-owned model administration boundary. Callers identify an already-resolved agent;
 /// implementations own availability, validation, and persistence.
 #[async_trait]

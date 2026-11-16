@@ -263,6 +263,14 @@ pub fn format_single_log_with_echo(
                             "[delivery_cut: 直前の発言は相手に途中までしか届かなかった。届いたのは『{delivered}』まで]"
                         );
                     }
+                    // D-1131: the turn ended because an LLM call failed (model + provider error).
+                    if kind == "turn_failed" {
+                        let model = value.get("model").and_then(|v| v.as_str()).unwrap_or("?");
+                        let detail = value.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+                        return format!(
+                            "[turn_failed]{ts}:\nモデル {model} の LLM 呼び出しが失敗し、ターンが終わった: {detail}"
+                        );
+                    }
                     if kind == "turn_exhausted" {
                         let reason = value
                             .get("reason")
