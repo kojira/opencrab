@@ -530,7 +530,7 @@ async fn di_projection_reply_utterance_rejection_emits_turn_failed_and_keeps_spe
     assert_eq!(state_str, "failed", "拒否された発話 delivery は failed");
 }
 
-/// item4: 宣言 schema が `"format":"short-ref"` を付けた field だけ、core が実 ID へ解決してから
+/// item4: 宣言 schema が `"x-opencrab-short-ref": true` を付けた field だけ、core が実 ID へ解決してから
 /// invoke する（会話の e番号 → external_origin）。全 string 無差別ではなく的を絞る。
 #[tokio::test]
 async fn di_short_ref_resolution_targets_declared_fields() {
@@ -551,11 +551,11 @@ async fn di_short_ref_resolution_targets_declared_fields() {
         )
         .unwrap();
     }
-    // event は format:short-ref、text は非参照。
+    // event は x-opencrab-short-ref、text は非参照。
     let ops = json!([{
         "name": "reply", "description": "d",
         "input_schema": {"type": "object", "required": ["event", "text"], "properties": {
-            "event": {"type": "string", "format": "short-ref"},
+            "event": {"type": "string", "x-opencrab-short-ref": true},
             "text": {"type": "string"}
         }},
         "output_schema": null, "callback_schema": null,
@@ -579,9 +579,14 @@ async fn di_short_ref_resolution_targets_declared_fields() {
         "agent-1",
     )
     .unwrap();
-    // D-1133: the LLM-facing schema carries no core marker (providers reject unknown formats).
+    // D-1133/D-1134: the LLM sees the declared schema, whose marker is a vendor keyword and not a
+    // `format` (providers reject unknown formats).
     let reply = proj.definitions().into_iter().find(|d| d.name == "reply").unwrap();
-    assert_eq!(reply.parameters["properties"]["event"], json!({"type": "string"}));
+    assert_eq!(
+        reply.parameters["properties"]["event"],
+        json!({"type": "string", "x-opencrab-short-ref": true})
+    );
+    assert!(reply.parameters["properties"]["event"].get("format").is_none());
     let ctx = GatewayCallContext::for_agent("agent-1");
     let exec = tokio::spawn(async move {
         proj.execute("reply", &json!({"event": "e1", "text": "本文"}), &ctx)
@@ -615,7 +620,7 @@ async fn bodyless_utterance_is_delivered_and_recorded_at_depth_0_and_1() {
     let like = json!([{
         "name": "like", "description": "like a post",
         "input_schema": {"type": "object", "required": ["event"],
-            "properties": {"event": {"type": "string", "format": "short-ref"}}},
+            "properties": {"event": {"type": "string", "x-opencrab-short-ref": true}}},
         "output_schema": null, "callback_schema": null,
         "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
         "dispatch": "utterance", "sub_engine": "not_exposed",

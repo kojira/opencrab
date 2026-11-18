@@ -1,4 +1,4 @@
-// ===== D-1079a: declared `format:"workspace-file"` fields → core-owned outbox descriptors =====
+// ===== D-1079a: declared `"x-opencrab-workspace-file": true` fields → core-owned outbox descriptors =====
 
 /// Utterance op with a marked array field (`files`), a marked-looking but undeclared field is
 /// not rewritten, and an unmarked string passes through.
@@ -9,7 +9,7 @@ fn ops_with_workspace_files() -> Value {
             "input_schema": {"type": "object", "required": ["text"], "properties": {
                 "text": {"type": "string"},
                 "label": {"type": "string"},
-                "files": {"type": "array", "items": {"type": "string", "format": "workspace-file"}}
+                "files": {"type": "array", "items": {"type": "string", "x-opencrab-workspace-file": true}}
             }},
             "output_schema": null, "callback_schema": null,
             "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
@@ -19,7 +19,7 @@ fn ops_with_workspace_files() -> Value {
         {
             "name": "store_file", "description": "d",
             "input_schema": {"type": "object", "required": ["file"], "properties": {
-                "file": {"type": "string", "format": "workspace-file"}
+                "file": {"type": "string", "x-opencrab-workspace-file": true}
             }},
             "output_schema": null, "callback_schema": null,
             "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},

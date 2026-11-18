@@ -96,6 +96,33 @@ fn nested_properties_recurse_and_allow() {
     assert_eq!(ok.len(), 1);
 }
 
+/// D-1134: core markers are boolean vendor keywords, accepted on properties and array items.
+#[test]
+fn opencrab_marker_keywords_are_boolean() {
+    let mut d = decl("a");
+    d["input_schema"] = json!({
+        "type": "object",
+        "properties": {
+            "event": {"type": "string", "x-opencrab-short-ref": true},
+            "files": {"type": "array",
+                "items": {"type": "string", "x-opencrab-workspace-file": true}}
+        }
+    });
+    assert_eq!(
+        validate_operations(&json!([d]), &no_reserved)
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut d = decl("a");
+    d["input_schema"] = json!({
+        "type": "object",
+        "properties": {"event": {"type": "string", "x-opencrab-short-ref": "yes"}}
+    });
+    let err = validate_operations(&json!([d]), &no_reserved).unwrap_err();
+    assert_eq!(err.code, ErrorCode::OperationDeclarationInvalid);
+}
+
 #[test]
 fn class_unknown_enum_rejected() {
     let mut d = decl("a");
