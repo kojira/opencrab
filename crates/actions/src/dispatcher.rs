@@ -164,7 +164,6 @@ mod tests {
             db: opencrab_db::Db::from_connection(conn),
             workspace: std::sync::Arc::new(ws),
             last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
             current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
             caller: CallerIdentity::Owner,
             runtime_info: std::sync::Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {

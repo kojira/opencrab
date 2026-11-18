@@ -151,7 +151,7 @@ impl SkillEngine {
         user_message: &str,
         model: &str,
     ) -> Result<types::EngineResult> {
-        self.run_with_model_override(system_context, user_message, model, None, &[])
+        self.run_with_images(system_context, user_message, model, &[])
             .await
     }
 

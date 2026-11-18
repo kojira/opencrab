@@ -13,7 +13,6 @@ fn test_context() -> (tempfile::TempDir, ActionContext) {
         db: opencrab_db::Db::from_connection(conn),
         workspace: std::sync::Arc::new(ws),
         last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
         current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
         runtime_info: std::sync::Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
             default_model: "mock:test-model".to_string(),
@@ -36,7 +35,6 @@ fn ctx_with_caller(base: &ActionContext, caller: CallerIdentity) -> ActionContex
         db: base.db.clone(),
         workspace: base.workspace.clone(),
         last_metrics_id: base.last_metrics_id.clone(),
-        model_override: base.model_override.clone(),
         current_purpose: base.current_purpose.clone(),
         runtime_info: base.runtime_info.clone(),
         caller,

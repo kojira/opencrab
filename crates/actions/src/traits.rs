@@ -45,7 +45,6 @@ impl ActionResult {
 pub enum SideEffect {
     SkillAcquired { skill_id: String },
     FileWritten { path: String },
-    LlmSwitched { purpose: String, model: String },
 }
 
 /// 呼び出し元の識別子。
@@ -66,8 +65,6 @@ pub struct ActionContext {
     /// Shared last metrics ID, updated by LlmRouterAdapter after each LLM call.
     /// Used by evaluate_response to auto-link evaluations.
     pub last_metrics_id: Arc<std::sync::Mutex<Option<String>>>,
-    /// Shared model override: when set by select_llm, SkillEngine uses this model.
-    pub model_override: Arc<std::sync::Mutex<Option<String>>>,
     /// Shared current purpose: select_llm can set this to tag subsequent LLM calls.
     pub current_purpose: Arc<std::sync::Mutex<String>>,
     /// Runtime system information (model name, provider, etc.)

@@ -181,7 +181,6 @@
             db: state.db.clone(),
             workspace: std::sync::Arc::new(workspace),
             last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
             current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
             runtime_info: std::sync::Arc::new(std::sync::Mutex::new(
                 opencrab_actions::RuntimeInfo {

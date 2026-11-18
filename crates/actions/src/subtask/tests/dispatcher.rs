@@ -329,7 +329,6 @@
             db: db.clone(),
             workspace: Arc::new(ws),
             last_metrics_id: Arc::new(Mutex::new(None)),
-            model_override: Arc::new(Mutex::new(None)),
             current_purpose: Arc::new(Mutex::new("conversation".to_string())),
             runtime_info: Arc::new(Mutex::new(crate::RuntimeInfo {
                 default_model: "mock:test".to_string(),
@@ -463,7 +462,6 @@
             db: db.clone(),
             workspace: Arc::new(ws),
             last_metrics_id: Arc::new(Mutex::new(None)),
-            model_override: Arc::new(Mutex::new(None)),
             current_purpose: Arc::new(Mutex::new("conversation".to_string())),
             runtime_info: Arc::new(Mutex::new(crate::RuntimeInfo {
                 default_model: "mock:test".to_string(),

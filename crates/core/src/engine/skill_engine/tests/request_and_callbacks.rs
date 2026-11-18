@@ -433,7 +433,7 @@
     }
 
     #[tokio::test]
-    async fn test_model_override() {
+    async fn every_llm_call_of_a_turn_uses_the_turn_model() {
         use std::sync::{Arc, Mutex};
 
         // MockLlm that captures the model from each request.
@@ -460,9 +460,8 @@
         let captured = Arc::new(Mutex::new(Vec::new()));
         let llm = ModelCapturingLlm {
             responses: Mutex::new(vec![
-                // First call uses default model; after tool call, model override kicks in.
                 tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
-                final_text_response("Done after model switch"),
+                final_text_response("Done"),
             ]),
             captured_models: captured.clone(),
         };
@@ -477,28 +476,20 @@
             },
         );
 
-        let model_override = Arc::new(Mutex::new(None));
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
 
-        // Simulate: after the first tool call, model_override gets set.
-        let override_clone = model_override.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-            *override_clone.lock().unwrap() = Some("openai:gpt-4o-mini".to_string());
-        });
-
         let result = engine
-            .run_with_model_override("system", "hi", "default-model", Some(model_override), &[])
+            .run("system", "hi", "turn-model")
             .await
             .unwrap();
 
-        assert_eq!(result.response, "Done after model switch");
+        assert_eq!(result.response, "Done");
 
-        let models = captured.lock().unwrap();
-        assert_eq!(models.len(), 2);
-        assert_eq!(models[0], "default-model"); // First call uses default.
-                                                // Second call should use the overridden model (race condition safe - set before tool call finishes).
-                                                // Due to timing, it might be either; the important thing is the mechanism works.
+        // D-1135: a turn runs on one model; a model change applies from the next turn.
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec!["turn-model".to_string(), "turn-model".to_string()]
+        );
     }
 
     #[tokio::test]

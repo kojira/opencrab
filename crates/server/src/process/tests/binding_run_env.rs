@@ -27,7 +27,6 @@ fn owner_context(
         db: state.db.clone(),
         workspace: Arc::new(workspace),
         last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
-        model_override: Arc::new(std::sync::Mutex::new(None)),
         current_purpose: Arc::new(std::sync::Mutex::new("test".to_string())),
         runtime_info: Arc::new(std::sync::Mutex::new(opencrab_actions::RuntimeInfo {
             default_model: "mock:test".to_string(),

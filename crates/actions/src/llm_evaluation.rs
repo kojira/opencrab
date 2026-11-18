@@ -60,7 +60,7 @@ impl Action for EvaluateResponseAction {
         let evaluation = args["evaluation"].as_str().unwrap_or("");
 
         // Meta: record which model is making this evaluation (the evaluator itself).
-        let evaluator_model = ctx.model_override.lock().ok().and_then(|m| m.clone());
+        let evaluator_model = crate::llm_selection::current_turn_model(ctx);
 
         // Resolve metrics_id: explicit param or auto-fill from last LLM call.
         let metrics_id = args["metrics_id"]
@@ -145,7 +145,6 @@ mod tests {
             db: opencrab_db::Db::from_connection(conn),
             workspace: Arc::new(ws),
             last_metrics_id: Arc::new(std::sync::Mutex::new(Some(metrics_id.clone()))),
-            model_override: Arc::new(std::sync::Mutex::new(None)),
             current_purpose: Arc::new(std::sync::Mutex::new("conversation".to_string())),
             runtime_info: Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
                 default_model: "mock:test-model".to_string(),

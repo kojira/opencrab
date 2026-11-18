@@ -217,7 +217,6 @@ fn test_context() -> (tempfile::TempDir, ActionContext) {
         db: opencrab_db::Db::from_connection(conn),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
-        model_override: Arc::new(std::sync::Mutex::new(None)),
         current_purpose: Arc::new(std::sync::Mutex::new("conversation".to_string())),
         runtime_info: Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
             default_model: "mock:test-model".to_string(),
@@ -241,7 +240,6 @@ fn empty_context() -> (tempfile::TempDir, ActionContext) {
         db: opencrab_db::Db::from_connection(conn),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
-        model_override: Arc::new(std::sync::Mutex::new(None)),
         current_purpose: Arc::new(std::sync::Mutex::new("conversation".to_string())),
         runtime_info: Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
             default_model: "mock:test-model".to_string(),

@@ -27,7 +27,7 @@ pub const CORE_INLINE_ACTIONS: &[&str] = &[
     "ws_edit",
     "ws_delete",
     "ws_mkdir",
-    // (4) run 内共有状態: model_override / current_purpose を書き換える。
+    // (4) run 内共有状態: current_purpose を書き換える（会話のモデルは次ターンから）。
     "select_llm",
     // (4) run 内共有状態: 以後のスキル可視性（棚）を書き換える。
     "retire_my_skill",

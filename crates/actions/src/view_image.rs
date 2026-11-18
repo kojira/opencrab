@@ -118,7 +118,6 @@ mod tests {
             db: opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap()),
             workspace: std::sync::Arc::new(ws),
             last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
             current_purpose: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
             runtime_info: std::sync::Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
                 default_model: "mock:test-model".to_string(),

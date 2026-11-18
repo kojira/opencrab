@@ -13,16 +13,15 @@ use super::{
 use crate::engine::types::{ChatRequest, EngineResult, LlmCallLog, LlmExchangeLog};
 
 impl SkillEngine {
-    /// Run the action loop with optional dynamic model override.
+    /// Run the action loop on `model` with the user message's images.
     ///
-    /// If `model_override` is provided, the engine checks it before each LLM call
-    /// and uses the overridden model if set (e.g., by `select_llm` action).
-    pub async fn run_with_model_override(
+    /// D-1135: one model for the whole turn. `select_llm` changes the conversation's model like
+    /// `/model`, which the next turn reads.
+    pub async fn run_with_images(
         &self,
         system_context: &str,
         user_message: &str,
-        default_model: &str,
-        model_override: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+        model: &str,
         image_urls: &[String],
     ) -> Result<EngineResult> {
         // プロンプトキャッシュはプロバイダの能力としてプロバイダ側が適用する（#44）。
@@ -64,6 +63,7 @@ impl SkillEngine {
         // 配送フックの無い run（subtask 等）は、単独 NO_REPLY で直前の本文を失わない。
         let mut last_undelivered_speech: Option<String> = None;
 
+        let model = model.to_string();
         loop {
             iterations += 1;
 
@@ -124,12 +124,6 @@ impl SkillEngine {
                 }
             }
             apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
-
-            // Check for dynamic model override.
-            let model = model_override
-                .as_ref()
-                .and_then(|o| o.lock().ok().and_then(|m| m.clone()))
-                .unwrap_or_else(|| default_model.to_string());
 
             // #665: LLM 呼び出しの入り。この後の `self.llm.chat(...).await` が返らなければここが
             // 最後の行になる（宙吊りの典型＝推論に入って戻らない／プロキシ未到達）。agent_id / session_id /
