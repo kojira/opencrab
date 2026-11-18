@@ -62,7 +62,6 @@ fn context(root: &std::path::Path, caller: crate::CallerIdentity) -> ActionConte
         db: opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap()),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
-        model_override: Arc::new(std::sync::Mutex::new(None)),
         current_purpose: Arc::new(std::sync::Mutex::new(String::new())),
         runtime_info: Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
             default_model: "mock:test-model".to_string(),

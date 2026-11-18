@@ -157,9 +157,10 @@ impl Action for UpdateImpressionAction {
 
 /// システム情報取得アクション
 ///
-/// D-1131: `active_model` is the model the next LLM call of this turn uses (a `select_llm`
-/// override included), and `selectable_models` is the gateway `/model` list
-/// ([`ModelAdministration::list_models`]), the same choices `select_llm` accepts.
+/// D-1135: `current_turn_model` is the model this turn runs on; `conversation_model` is this
+/// conversation's model (`/model`, `select_llm`), which the next turn uses. `selectable_models`
+/// is the gateway `/model` list ([`ModelAdministration::list_models`]), the same choices
+/// `select_llm` accepts (D-1131).
 #[derive(Default)]
 pub struct GetSystemInfoAction {
     models: Option<Arc<dyn ModelAdministration>>,
@@ -178,7 +179,7 @@ impl Action for GetSystemInfoAction {
     }
 
     fn description(&self) -> &str {
-        "自分のシステム情報（今使っているLLMモデル、選べるモデル一覧、プロバイダー、ゲートウェイなど）を確認する"
+        "自分のシステム情報（このターンのモデル、この会話のモデル＝次のターンから使うモデル、選べるモデル一覧、プロバイダー、ゲートウェイなど）を確認する"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -190,15 +191,18 @@ impl Action for GetSystemInfoAction {
 
     async fn execute(&self, _args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
         let info = ctx.runtime_info.lock().unwrap().clone();
-        let active = crate::llm_selection::model_in_effect(ctx);
         let mut data = json!({
             "agent_id": ctx.agent_id,
             "agent_name": ctx.agent_name,
             "default_model": info.default_model,
-            "active_model": active,
+            "current_turn_model": crate::llm_selection::current_turn_model(ctx),
             "available_providers": info.available_providers,
             "gateway": info.gateway,
         });
+        match crate::llm_selection::conversation_model(self.models.as_deref(), ctx).await {
+            Ok(model) => data["conversation_model"] = json!(model),
+            Err(error) => data["conversation_model_error"] = json!(error),
+        }
         match crate::llm_selection::selectable_models(self.models.as_deref(), &ctx.agent_id).await {
             Ok(models) => data["selectable_models"] = json!(models),
             Err(error) => data["selectable_models_error"] = json!(error),
@@ -258,7 +262,6 @@ mod tests {
             db: opencrab_db::Db::from_connection(conn),
             workspace: std::sync::Arc::new(ws),
             last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
             current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
             caller: CallerIdentity::Owner,
             runtime_info: std::sync::Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {

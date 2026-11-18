@@ -91,7 +91,6 @@ fn setup() -> (tempfile::TempDir, BridgedExecutor) {
         db: opencrab_db::Db::from_connection(conn),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(Mutex::new(None)),
-        model_override: Arc::new(Mutex::new(None)),
         current_purpose: Arc::new(Mutex::new("conversation".to_string())),
         runtime_info: Arc::new(Mutex::new(opencrab_actions::RuntimeInfo {
             default_model: "mock:test-model".to_string(),
@@ -134,7 +133,6 @@ fn setup_with_data() -> (tempfile::TempDir, BridgedExecutor, opencrab_db::Db) {
         db: db.clone(),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(Mutex::new(None)),
-        model_override: Arc::new(Mutex::new(None)),
         current_purpose: Arc::new(Mutex::new("conversation".to_string())),
         runtime_info: Arc::new(Mutex::new(opencrab_actions::RuntimeInfo {
             default_model: "mock:test-model".to_string(),
@@ -316,7 +314,6 @@ async fn test_engine_tool_logs_done_failed_refused() {
         db: db2.clone(),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(Mutex::new(None)),
-        model_override: Arc::new(Mutex::new(None)),
         current_purpose: Arc::new(Mutex::new("conversation".to_string())),
         runtime_info: Arc::new(Mutex::new(opencrab_actions::RuntimeInfo {
             default_model: "mock:test-model".to_string(),
@@ -509,7 +506,6 @@ async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, ope
         db: db.clone(),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(Mutex::new(None)),
-        model_override: Arc::new(Mutex::new(None)),
         current_purpose: Arc::new(Mutex::new("conversation".to_string())),
         runtime_info: Arc::new(Mutex::new(opencrab_actions::RuntimeInfo {
             default_model: "mock:test-model".to_string(),

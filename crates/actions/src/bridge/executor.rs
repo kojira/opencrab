@@ -249,12 +249,6 @@ impl BridgedExecutor {
     /// 同じ executor を使う engine が次の LLM call で読む turn-local 状態。
     pub fn runtime_state(&self) -> ExecutorRuntimeState {
         ExecutorRuntimeState {
-            model_override: self
-                .context
-                .model_override
-                .lock()
-                .ok()
-                .and_then(|value| value.clone()),
             current_purpose: self
                 .context
                 .current_purpose

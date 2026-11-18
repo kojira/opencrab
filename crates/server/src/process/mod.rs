@@ -221,7 +221,6 @@ pub async fn run_agent_response(
 
     // Create BridgedExecutor with ActionContext.
     let last_metrics_id = Arc::new(std::sync::Mutex::new(None));
-    let model_override = Arc::new(std::sync::Mutex::new(None));
     // depth >= 1 の再入実行は sub-engine（`spawn_subtask` が起動したサブタスク）。
     // メトリクスの purpose ラベルは旧 Discord 実装（`execute_spawn_subtask`）と同じく
     // "subtask" にする（#175 S4）。
@@ -260,7 +259,6 @@ pub async fn run_agent_response(
         db: state.db.clone(),
         workspace: Arc::new(workspace),
         last_metrics_id: last_metrics_id.clone(),
-        model_override: model_override.clone(),
         current_purpose: current_purpose.clone(),
         runtime_info: Arc::new(std::sync::Mutex::new(runtime_info)),
     };
@@ -370,7 +368,7 @@ pub async fn run_agent_response(
     // （router 経由・core で名前突き合わせしない）。送らないプロバイダ（chatgpt/codex/cursor/acp）
     // は解決も要求もせず、engine は上限未指定のまま＝プロバイダ内部既定に委ねる（切り捨ては
     // 方針3の incomplete→Length→bail が担う）。解決は effective_model（ターン単位）で行う——
-    // context_window 予算計算と同じ流儀・同じ粒度（select_llm の per-iteration 上書きは追わない）。
+    // context_window 予算計算と同じ流儀・同じ粒度（ターン中にモデルは変わらない）。
     if state
         .llm_router
         .get()
@@ -585,11 +583,10 @@ pub async fn run_agent_response(
             }
         }
         let result = engine
-            .run_with_model_override(
+            .run_with_images(
                 system_prompt,
                 conversation_override.as_deref().unwrap_or(conversation),
                 &effective_model,
-                Some(model_override.clone()),
                 &merged_image_urls,
             )
             .instrument(turn_span.clone())
@@ -623,13 +620,7 @@ pub async fn run_agent_response(
         // 注: codex プロバイダはこのフォールバックに意図的に依存しているため、発火自体は異常ではない。
         if let Ok(ref engine_result) = result {
             if engine_result.xml_fallback_parses > 0 {
-                // run 中に set_model で切り替わっている可能性があるため、override の現在値を優先する
-                // （イテレーション単位の正確なモデルはエンジンの debug ログ側にある）。
-                let fired_model = model_override
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.clone())
-                    .unwrap_or_else(|| effective_model.clone());
+                let fired_model = &effective_model;
                 crate::agent_log::agent_log(
                     &state.db,
                     Some(agent_id),

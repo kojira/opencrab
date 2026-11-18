@@ -325,7 +325,7 @@ impl Action for SaveModelInsightAction {
         };
 
         // Meta: which model is writing this insight?
-        let author_model = ctx.model_override.lock().ok().and_then(|m| m.clone());
+        let author_model = Some(crate::llm_selection::current_turn_model(ctx));
 
         let provider = args["provider"].as_str();
         let model = args["model"].as_str();

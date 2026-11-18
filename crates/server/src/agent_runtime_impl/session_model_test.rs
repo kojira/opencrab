@@ -719,3 +719,7 @@ async fn set_session_model_accepts_chatgpt_gpt_6_astra() {
         Some("chatgpt:gpt-6-astra")
     );
 }
+
+/// D-1135: the agent's select_llm is the same change as `/model`.
+#[path = "select_llm_test.rs"]
+mod select_llm_test;

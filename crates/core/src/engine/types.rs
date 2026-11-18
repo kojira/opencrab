@@ -305,7 +305,7 @@ pub trait LlmClient: Send + Sync {
 }
 
 /// D-1131: the engine ended the turn because an LLM call failed (transport error or an unusable
-/// response). `model` is the model that call used (a `select_llm` override included), so the
+/// response). `model` is the model that call used (the turn's model), so the
 /// server can record the failure in the agent's history. Displays as `body`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmCallFailed {

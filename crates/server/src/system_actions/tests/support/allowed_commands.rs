@@ -74,7 +74,6 @@ pub(crate) fn shell_ctx() -> (tempfile::TempDir, opencrab_actions::ActionContext
         db: opencrab_db::Db::from_connection(conn),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
-        model_override: Arc::new(std::sync::Mutex::new(None)),
         current_purpose: Arc::new(std::sync::Mutex::new("test".to_string())),
         runtime_info: Arc::new(std::sync::Mutex::new(opencrab_actions::RuntimeInfo {
             default_model: "mock:test".to_string(),

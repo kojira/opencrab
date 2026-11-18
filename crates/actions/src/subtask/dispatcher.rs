@@ -76,7 +76,7 @@ impl ActionExecutor for SharedExecutor {
 ///    通常のもの（gateway が宣言する作成系・アップロード系の操作）。background 化すると値の代わりに
 ///    `spawned` が返るだけなので、用法そのものが壊れる。
 /// 4. **run 内共有状態を書くツール**（`select_llm` など）: `ActionContext` の
-///    `model_override` / `current_purpose` のように、走行中の run（や同ターンの配送）
+///    `current_purpose` のように、走行中の run（や同ターンの配送）
 ///    が参照している状態を書き換える。background 化すると (a) そのターンには効かず、
 ///    (b) 書き込みが engine の次イテレーションや配送と競合して「いつのターンから効くか」が
 ///    非決定になる。制御の効き方を保つため inline に残す。

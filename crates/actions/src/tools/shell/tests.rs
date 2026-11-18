@@ -14,7 +14,6 @@ fn make_ctx(caller: CallerIdentity) -> (tempfile::TempDir, ActionContext) {
         db: opencrab_db::Db::from_connection(conn),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(Mutex::new(None)),
-        model_override: Arc::new(Mutex::new(None)),
         current_purpose: Arc::new(Mutex::new("test".to_string())),
         runtime_info: Arc::new(Mutex::new(RuntimeInfo {
             default_model: "test".to_string(),

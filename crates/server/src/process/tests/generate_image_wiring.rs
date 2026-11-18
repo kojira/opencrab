@@ -89,7 +89,6 @@ fn owner_context(
         db: state.db.clone(),
         workspace: Arc::new(workspace),
         last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
-        model_override: Arc::new(std::sync::Mutex::new(None)),
         current_purpose: Arc::new(std::sync::Mutex::new(String::new())),
         caller: opencrab_actions::CallerIdentity::Owner,
         runtime_info: Arc::new(std::sync::Mutex::new(opencrab_actions::RuntimeInfo {

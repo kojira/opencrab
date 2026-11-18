@@ -36,7 +36,6 @@ pub struct EffectiveToolDefinition {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutorRuntimeState {
-    pub model_override: Option<String>,
     pub current_purpose: String,
 }
 
