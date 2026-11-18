@@ -1,8 +1,8 @@
-//! Generic outbound workspace files (`"format": "workspace-file"`).
+//! Generic outbound workspace files (`"x-opencrab-workspace-file": true`).
 //!
 //! A gateway marks a top-level operation property as a workspace file: either
-//! `{"type":"string","format":"workspace-file"}` or
-//! `{"type":"array","items":{"type":"string","format":"workspace-file"}}`.
+//! `{"type":"string","x-opencrab-workspace-file":true}` or
+//! `{"type":"array","items":{"type":"string","x-opencrab-workspace-file":true}}`.
 //! Core resolves each agent-supplied path inside the caller agent's workspace,
 //! copies the regular file into the core-owned outbox
 //! (`<outbox_root>/<instance_id>/<uuid>.bin`, 0600, fsync) and replaces the
@@ -22,8 +22,8 @@ use crate::file_copy::{copy_regular_file, CopyFailure};
 use crate::operations::GatewayOperationDeclaration;
 use crate::registry::ExtgateState;
 
-/// Declaration `format` value that marks a workspace-relative file path.
-pub const WORKSPACE_FILE_FORMAT: &str = "workspace-file";
+/// Declaration schema keyword (`true`) that marks a workspace-relative file path.
+pub const WORKSPACE_FILE_KEYWORD: &str = "x-opencrab-workspace-file";
 
 const MAX_NAME_CHARS: usize = 255;
 
@@ -74,7 +74,7 @@ fn marked_fields(declaration: &GatewayOperationDeclaration) -> Vec<(String, Mark
         return Vec::new();
     };
     let is_marked =
-        |spec: &Value| spec.get("format").and_then(Value::as_str) == Some(WORKSPACE_FILE_FORMAT);
+        |spec: &Value| spec.get(WORKSPACE_FILE_KEYWORD).and_then(Value::as_bool) == Some(true);
     props
         .iter()
         .filter_map(|(name, spec)| {

@@ -1,5 +1,5 @@
 //! Outbound file descriptors produced by core for declared
-//! `"format": "workspace-file"` operation fields.
+//! `"x-opencrab-workspace-file": true` operation fields.
 //!
 //! Core copies the agent's workspace file into its outbox and replaces the
 //! field value with `{id, name, media_type, size, sha256, local_path}`, where

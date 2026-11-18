@@ -9,6 +9,8 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::error::{ErrorCode, GateError};
+use crate::ops_projection::SHORT_REF_KEYWORD;
+use crate::outbound_files::WORKSPACE_FILE_KEYWORD;
 
 /// 宣言配列上限。frame 全体は既存 1 MiB 上限に従う（protocol.rs）。
 const MAX_OPERATIONS: usize = 256;
@@ -18,9 +20,10 @@ const MAX_SCHEMA_NODES: usize = 1024;
 const MAX_STRING_LEN: usize = 16_384;
 
 /// JSON Schema 2020-12 subset の許可 keyword（DI-03）。これ以外は宣言不正。
-// DI-03 の subset + `format`（レビュー要望の generic 参照フィールド標示。core は `format` の値
-// 文字列を解釈せず、projection が "short-ref" 標示の field だけを短縮参照解決する。platform 語彙は
-// 持たない）。
+// DI-03 の subset + `format` + core 用の vendor keyword（boolean）。`x-opencrab-short-ref` は
+// projection が短縮参照解決する field、`x-opencrab-workspace-file` は outbox へ複製する field の標示
+// （platform 語彙は持たない）。`format` には標準の値だけを書く: 未知の format を LLM provider が
+// 拒否するため、core の標示は `format` に載せない（D-1134）。
 const ALLOWED_SCHEMA_KEYWORDS: &[&str] = &[
     "type",
     "required",
@@ -29,6 +32,8 @@ const ALLOWED_SCHEMA_KEYWORDS: &[&str] = &[
     "items",
     "description",
     "format",
+    SHORT_REF_KEYWORD,
+    WORKSPACE_FILE_KEYWORD,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -483,6 +488,9 @@ fn validate_schema_node(node: &Value, depth: usize, nodes: &mut usize) -> Result
                 if s.len() > MAX_STRING_LEN {
                     return Err(invalid());
                 }
+            }
+            SHORT_REF_KEYWORD | WORKSPACE_FILE_KEYWORD => {
+                value.as_bool().ok_or_else(invalid)?;
             }
             _ => unreachable!("keyword allowlisted above"),
         }

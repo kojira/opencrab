@@ -12,7 +12,7 @@ _エージェントがワークスペースのファイルを gateway operation 
 
 ## 宣言（gateway）
 
-gateway は operation の `input_schema` の top-level property に汎用 marker `"format": "workspace-file"` を付ける。型は string か、`items` で string の array。
+gateway は operation の `input_schema` の top-level property に汎用 marker `"x-opencrab-workspace-file": true` を付ける。型は string か、`items` で string の array（marker は `items` 側）。短縮参照の解決対象 field は同じく `"x-opencrab-short-ref": true`。core の印は `format` に載せない（`format` は JSON Schema の値だけ。未知の format は LLM provider が tool schema ごと拒否する・D-1134）。
 
 ```json
 {
@@ -21,12 +21,12 @@ gateway は operation の `input_schema` の top-level property に汎用 marker
     "type": "object",
     "required": ["event", "text"],
     "properties": {
-      "event": {"type": "string", "format": "short-ref"},
+      "event": {"type": "string", "x-opencrab-short-ref": true},
       "text": {"type": "string"},
       "files": {
         "type": "array",
         "description": "Workspace-relative paths of files to attach",
-        "items": {"type": "string", "format": "workspace-file"}
+        "items": {"type": "string", "x-opencrab-workspace-file": true}
       }
     }
   }

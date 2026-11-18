@@ -316,7 +316,7 @@ impl ExtgateState {
         self.attachment_inbox_root.lock().ok()?.clone()
     }
 
-    /// Core-owned root for outbound workspace-file copies (`format: workspace-file`).
+    /// Core-owned root for outbound workspace-file copies (`x-opencrab-workspace-file`).
     pub fn set_attachment_outbox_root(&self, root: PathBuf) {
         *self
             .attachment_outbox_root

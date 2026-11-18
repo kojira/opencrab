@@ -23,6 +23,10 @@ use crate::operations::{
 use crate::outbound_files::stage_workspace_files;
 use crate::registry::ExtgateState;
 
+/// Declaration schema keyword (`true`) marking a top-level string field whose short ref
+/// (uN/eN/cN) core resolves to the real id before invoke.
+pub const SHORT_REF_KEYWORD: &str = "x-opencrab-short-ref";
+
 /// 1 binding/session に対する宣言能力の投影。RunRequest.gateway_actions へ載せる。
 pub struct ExtgateOpsGatewayActions {
     state: Arc<ExtgateState>,
@@ -65,7 +69,7 @@ impl ExtgateOpsGatewayActions {
 
     /// payload 内の短縮参照文字列（uN/eN/cN）を実 ID へ解決する（core 側・汎用）。会話ログから
     /// `ConversationRefs` を決定的に再構築して逆引きする。解決できない値はそのまま通す。
-    /// 宣言 schema が `"format":"short-ref"` を付けた top-level field だけを短縮参照解決する
+    /// 宣言 schema が `"x-opencrab-short-ref": true` を付けた top-level field だけを短縮参照解決する
     /// （全 string 無差別ではなく的を絞る・レビュー要望）。gateway が参照フィールドを標示し、core は
     /// その field のみ ConversationRefs で解決する（platform 語彙なし・generic）。
     fn resolve_payload(&self, operation: &str, payload: &Value) -> Value {
@@ -91,7 +95,7 @@ impl ExtgateOpsGatewayActions {
         Value::Object(out)
     }
 
-    /// 宣言 schema の top-level properties から `"format":"short-ref"` 標示の field 名を集める。
+    /// 宣言 schema の top-level properties から `"x-opencrab-short-ref": true` 標示の field 名を集める。
     fn short_ref_fields(&self, operation: &str) -> Vec<String> {
         self.declarations
             .iter()
@@ -102,7 +106,7 @@ impl ExtgateOpsGatewayActions {
                 props
                     .iter()
                     .filter(|(_, spec)| {
-                        spec.get("format").and_then(|f| f.as_str()) == Some("short-ref")
+                        spec.get(SHORT_REF_KEYWORD).and_then(Value::as_bool) == Some(true)
                     })
                     .map(|(k, _)| k.clone())
                     .collect()
@@ -150,29 +154,6 @@ fn map_sharing(s: Sharing) -> ToolSharing {
     }
 }
 
-/// D-1133: the tool schema the LLM sees. `"format":"short-ref"` / `"format":"workspace-file"`
-/// are core's own markers read from `input_schema` (short-ref resolution, outbound files); they
-/// are not JSON Schema formats, and providers that compile tool schemas reject unknown formats
-/// (`invalid_json_schema: Unknown format: short-ref`). Only those markers are removed.
-fn llm_parameters(schema: &Value) -> Value {
-    match schema {
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .filter(|(key, value)| {
-                    !(key.as_str() == "format"
-                        && matches!(
-                            value.as_str(),
-                            Some("short-ref") | Some(crate::outbound_files::WORKSPACE_FILE_FORMAT)
-                        ))
-                })
-                .map(|(key, value)| (key.clone(), llm_parameters(value)))
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(items.iter().map(llm_parameters).collect()),
-        other => other.clone(),
-    }
-}
-
 #[async_trait]
 impl GatewayActions for ExtgateOpsGatewayActions {
     fn definitions(&self) -> Vec<GatewayActionDef> {
@@ -181,7 +162,7 @@ impl GatewayActions for ExtgateOpsGatewayActions {
             .map(|d| GatewayActionDef {
                 name: d.name.clone(),
                 description: d.description.clone(),
-                parameters: llm_parameters(&d.input_schema),
+                parameters: d.input_schema.clone(),
                 class: ToolClass {
                     dispatch: match d.policy.dispatch {
                         OperationDispatch::Inline => DispatchMode::Inline,
@@ -217,7 +198,7 @@ impl GatewayActions for ExtgateOpsGatewayActions {
             };
         }
         let payload = self.resolve_payload(name, args);
-        // Declared `format:"workspace-file"` fields become outbox descriptors before any
+        // Declared `"x-opencrab-workspace-file": true` fields become outbox descriptors before any
         // delivery/speech row or invoke frame exists; a rejection writes nothing.
         let (payload, staged_files) = match stage_workspace_files(
             &self.state,
