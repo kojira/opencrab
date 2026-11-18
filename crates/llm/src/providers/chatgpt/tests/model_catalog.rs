@@ -7,6 +7,8 @@ async fn publishes_gpt_6_models_with_gpt_5_6_capabilities() {
         "gpt-6-astra",
         "gpt-6.1-sol",
         "gpt-6.1-terra",
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
         "gpt-6-luna",
     ] {
         let model = models.iter().find(|model| model.id == id).expect(id);
