@@ -579,6 +579,9 @@ async fn di_short_ref_resolution_targets_declared_fields() {
         "agent-1",
     )
     .unwrap();
+    // D-1133: the LLM-facing schema carries no core marker (providers reject unknown formats).
+    let reply = proj.definitions().into_iter().find(|d| d.name == "reply").unwrap();
+    assert_eq!(reply.parameters["properties"]["event"], json!({"type": "string"}));
     let ctx = GatewayCallContext::for_agent("agent-1");
     let exec = tokio::spawn(async move {
         proj.execute("reply", &json!({"event": "e1", "text": "本文"}), &ctx)
