@@ -150,6 +150,29 @@ fn map_sharing(s: Sharing) -> ToolSharing {
     }
 }
 
+/// D-1133: the tool schema the LLM sees. `"format":"short-ref"` / `"format":"workspace-file"`
+/// are core's own markers read from `input_schema` (short-ref resolution, outbound files); they
+/// are not JSON Schema formats, and providers that compile tool schemas reject unknown formats
+/// (`invalid_json_schema: Unknown format: short-ref`). Only those markers are removed.
+fn llm_parameters(schema: &Value) -> Value {
+    match schema {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(key, value)| {
+                    !(key.as_str() == "format"
+                        && matches!(
+                            value.as_str(),
+                            Some("short-ref") | Some(crate::outbound_files::WORKSPACE_FILE_FORMAT)
+                        ))
+                })
+                .map(|(key, value)| (key.clone(), llm_parameters(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(llm_parameters).collect()),
+        other => other.clone(),
+    }
+}
+
 #[async_trait]
 impl GatewayActions for ExtgateOpsGatewayActions {
     fn definitions(&self) -> Vec<GatewayActionDef> {
@@ -158,7 +181,7 @@ impl GatewayActions for ExtgateOpsGatewayActions {
             .map(|d| GatewayActionDef {
                 name: d.name.clone(),
                 description: d.description.clone(),
-                parameters: d.input_schema.clone(),
+                parameters: llm_parameters(&d.input_schema),
                 class: ToolClass {
                     dispatch: match d.policy.dispatch {
                         OperationDispatch::Inline => DispatchMode::Inline,
