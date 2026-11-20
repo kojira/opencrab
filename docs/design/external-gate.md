@@ -566,3 +566,14 @@ wire（protocol 3）:
 - 外向きの送信は instance が live なら送る。bind・ack は無い。
 - `provision`・`create_binding`・`bind` は存在しない（`unknown_message`）。gate-admin、A2UI（`send_ui`・`pending_interactions`、v65 で drop）、Discord 型の受付判定（whitelist・DM・guild）も core から消えた。受付は gateway の仕事である。
 - error code から `address_in_use` を外した。
+
+## 道具（operation）の宣言（D-1134 時点）
+
+`hello` の `operations` は道具の配列（name の昇順・重複なし、最大 256 件）。各要素は `name` / `description` / `input_schema` / `output_schema` / `callback_schema`（null 可）と、`authorization.allowed_callers`（`owner` / `co_agent` / `trusted` / `guest` の昇順）、`dispatch`（`inline` / `background` / `utterance`）、`sub_engine`（`not_exposed` / `blocked` / `allowed`）、`sharing`（`agent_bound` / `conversation_bound`）、`effect`（`read_only` / `state_change` / `utterance`）を持つ。`dispatch=utterance` と `effect=utterance` は両方そろうときだけ有効（`crates/extgate/src/operations.rs`）。
+
+schema に使えるキーは `type` / `required` / `properties` / `enum` / `items` / `description` / `format` と、core 用の印 2 つだけ（`ALLOWED_SCHEMA_KEYWORDS`）。
+
+- `"x-opencrab-short-ref": true` — top-level の欄。core が会話の短縮参照（`e12` など）を実 ID に置き換えてから gateway に渡す。
+- `"x-opencrab-workspace-file": true` — top-level の string 欄、または array 欄の `items`。core がエージェントのワークスペースのファイルを outbox にコピーし、descriptor に置き換えて渡す（[design-generic-outbound-attachments.md](../design-generic-outbound-attachments.md)）。
+
+どちらも値は boolean。`format` には JSON Schema 標準の値だけを書く。未知の `format`（以前の `"short-ref"` / `"workspace-file"`）は LLM プロバイダーが道具の定義ごと拒否する（`invalid_json_schema`）。core は道具の schema をそのまま LLM に渡す。

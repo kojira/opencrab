@@ -1,5 +1,10 @@
 # Gateway process and storage ownership
 
+> **Historical (superseded).** This was the #1006 design stage. The gate-admin socket, principals,
+> grants and `provision` it describes were removed by D-1098/D-1099: today a gateway only says
+> `hello` on the gate socket and core keeps only sessions. Current facts: [DESIGN.md §2 and §7](DESIGN.md)
+> and the D-1099 section of [design/external-gate.md](design/external-gate.md). Kept as a record.
+
 Status: **draft design for Issue #1006; not authoritative until architecture review approves it**. If approved, this decision rejects the prior bidirectional ownership and runtime-import design. There is no compatibility fallback.
 
 This is a design-stage correction, not a rejection of every existing component. The generic runtime UDS framing, opaque `kind_id`/config/address storage, generic caller roles, the existing single core delivery ledger semantics, and dynamically declared operation capabilities are retained because they satisfy the invariants below. Direct core-SQLite access, runtime legacy import, core-owned concrete settings/identities, server concrete administration, and placement-only Discord ownership are rejected and redesigned. Issue #1006 is strict behavior-preserving separation: it does not add an external-emission ledger, prepared-request recovery, negotiated delivery-guarantee labels, reconnect replay, or a stronger platform delivery promise. Every such category-B enhancement is deferred together to the separate follow-up proposed in `docs/evidence/issue-1006-strict-separation-redesign.md`; that follow-up is explicitly not a #1006 completion or release gate.

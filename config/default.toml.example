@@ -3,9 +3,9 @@
 # このファイルを `config/default.toml` にコピーしてサーバーを起動してください。
 #   cp config/default.toml.example config/default.toml
 #
-# 初回セットアップ（LLM プロバイダ / エージェント作成 / Discord 接続 /
-# チャンネル許可）は、サーバー起動後にダッシュボードの `/setup` から
-# すべて完結できます。このファイルを手で編集する必要はありません。
+# 初回セットアップ（LLM プロバイダ / エージェント作成）は、サーバー起動後に
+# ダッシュボードの `/setup` から完結できます。このファイルを手で編集する必要はありません。
+# Discord / Nostr などの設定は core ではなく各 gateway プロセスが持ちます。
 #
 # ダッシュボードで変更した設定は DB に保存され、この TOML より優先されます。
 # LLM プロバイダーの変更は再起動なしで反映されます。
@@ -13,8 +13,6 @@
 # `${VAR}` は環境変数に展開されます（未定義なら空文字）。
 
 [agent]
-heartbeat_interval_secs = 1800
-heartbeat_enabled = false
 workspace_path = "data/agents/{agent_id}/workspace"
 max_workspace_size_mb = 100
 
@@ -32,22 +30,9 @@ max_workspace_size_mb = 100
 # 詳しくは docs/DESIGN.md の「非ブロックツール実行」を参照。
 auto_dispatch = true
 
-# 通知先（webhook）の設定ファイル由来フォールバック。
-#
-# 通知先は「呼び出しで明示 → DB の scope 別既定（tool>agent>global）→ ここ」の順で
-# 解決され、DB に設定が 1 つも無いときだけこの値が使われる。
-# 特定の transport（Discord 等）に依存しない設定なので [subtask] に置く。
-#
-# url = "" または未指定なら無効。
-# default_webhook = { url = "${SUBTASK_WEBHOOK_URL}", events = ["started", "progress", "completed", "failed", "timed_out", "aborted"] }
-
 [llm]
 default_provider = "openai"
 default_model = "claude-sonnet-4-6"
-
-[llm.self_selection]
-enabled = false
-allowed_aliases = ["fast", "smart", "reasoning", "creative", "local", "cheap"]
 
 [llm.fallback]
 chain = ["anthropic", "ollama"]
@@ -109,7 +94,8 @@ models = ["auto", "gpt-5.2", "claude-opus-5", "claude-sonnet-5"]
 # args = ["--experimental-acp"]
 # models = ["default"]
 
-# ChatGPT direct API（~/.codex/auth.json の OAuth トークンを使用）
+# ChatGPT direct API（~/.codex/auth.json の OAuth トークンを使用）。
+# 選べるモデルは GET /api/llm/model-choices（/model と select_llm と同じ一覧）。
 [llm.providers.chatgpt]
 enabled = false
 auth_file = "~/.codex/auth.json"
@@ -124,23 +110,17 @@ creative = { provider = "openai", model = "claude-sonnet-4-6" }
 local = { provider = "ollama", model = "llama3.1:8b" }
 cheap = { provider = "openai", model = "claude-haiku" }
 
-# ===== Gateway =====
+# ===== REST API =====
 [gateway.rest]
-enabled = true
 port = 8080
-
-[dashboard]
-enabled = true
-port = 3000
 
 [database]
 path = "data/opencrab.db"
 
+# gateway プロセス（Discord / Nostr / Web / CLI / Bluesky）が接続する Unix ソケット。
+# 絶対パス。空なら listen しない（gateway を使わない構成）。
 [gate]
 listen_socket = "/tmp/opencrab-extgate.sock"
-# Both transports are V3-only; missing or any other value fails startup when applicable.
-nostr_ingress = "v3"
-discord_ingress = "v3"
 
 # ===== ツール設定 =====
 [tools]

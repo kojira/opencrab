@@ -1,7 +1,9 @@
 # schema（`PRAGMA user_version` + 番号付き MIGRATIONS）
 
-新規 DB は `sql.rs` の `SCHEMA_SQL`。既存 DB は `mod.rs` の `MIGRATIONS`。
-両方に同じ差分を書く（新規 DB は最新番号を通らず SCHEMA だけ、が本体の罠）。
+新規 DB は `sql/` の `SCHEMA_SQL` ほか、既存 DB は `migrations/`（`mod.rs` の `MIGRATIONS`）。
+両方に同じ差分を書く（新規 DB は最新番号を通らず SCHEMA だけ、が本体の罠）。現行は v65。
+
+以下は一部の版の記録。その後の版で消えた表（`session_watches`、`nostr_bundle_state`、gate-admin の表、`pending_interactions` など）を含む。各版の正本は `migrations/vNN.rs`。
 
 ## v51（generic open binding address lookup）
 

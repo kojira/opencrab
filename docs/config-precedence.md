@@ -1,5 +1,12 @@
 # 設定の優先順位（TOML と DB の真実の源）
 
+> **Partly superseded.** The principle (TOML = global defaults, DB = per-agent runtime settings,
+> the DB wins) still holds. The Discord parts below (`[gateway.discord]`, `agent_discord_config`,
+> `channel_config`, the shared/per-agent gateway de-duplication) and `session_heartbeat_config` /
+> `[agent].heartbeat_enabled` are gone from the core: Discord is a separate gateway process and time
+> triggers are `agent_schedules` only (#612; the `heartbeat_*` TOML keys are accepted but not read).
+> Kept as a record.
+
 opencrab の設定は 2 系統ある。どちらが勝つかの規則をここに固定する（#40）。
 
 ## 原則

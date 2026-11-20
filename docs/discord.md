@@ -1,5 +1,12 @@
 # Discord ゲートウェイ 詳細設定ガイド
 
+> **Historical (superseded).** The Discord gateway no longer runs inside the core; the
+> `opencrab-discord` crate, `[gateway.discord]`, `OWNER_DISCORD_ID` in the core, and the
+> `/api/agents/{id}/discord` and channel-config routes were removed. Discord is now a separate
+> process in [kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) that owns its
+> bots, owners, channels and trusted users and talks to the core over the gate socket
+> ([design/external-gate.md](design/external-gate.md)). Kept as a record.
+
 opencrab の Discord 連携に関する設定・運用ガイド。
 
 ## 概要

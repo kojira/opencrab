@@ -12,8 +12,8 @@ OpenCrabは、自律的に思考・学習・行動するAIエージェントを�
 - **非同期ランタイム**: Tokio。全I/O操作は非同期
 - **永続化**: SQLite (rusqlite, bundled)。外部DBサーバー不要で即座に動作
 - **全文検索**: SQLite FTS5。記憶検索にBM25スコアリングを使用
-- **LLMプロバイダー**: OpenAI, Anthropic, Google, OpenRouter, Ollama, llama.cpp の6種をサポート。クラウドとローカルの両方に対応
-- **ゲートウェイ**: Discord / Nostr / Web / CLI は core/server から独立配備し、generic runtime UDS（gate socket）だけで接続する。資格情報は無い（D-1098）。REST は core の generic 管理 API であり具象 gateway ではない（§7、Issue #1006）
+- **LLMプロバイダー**: OpenAI, Anthropic, Google, OpenRouter, Ollama, llama.cpp, Codex CLI, Cursor CLI, ACP, ChatGPT（`~/.codex/auth.json`）の 10 形式（`crates/server/src/config/router.rs` の `KNOWN_PROVIDER_TYPES`）。クラウドとローカルの両方に対応
+- **ゲートウェイ**: Discord / Nostr / Web / CLI（[opencrab-gateways](https://github.com/kojira/opencrab-gateways)）と Bluesky（[opencrab-bluesky-gateway](https://github.com/kojira/opencrab-bluesky-gateway)）は core とは別のプロセスで、gate socket（Unix ソケット 1 本）だけで接続する。資格情報は無く、ソケットを開けることだけが条件（D-1098）。core はセッションだけを持つ（D-1099）。REST は core の管理 API であり gateway ではない（§7）
 
 ### 1.3 設計哲学
 
@@ -26,33 +26,33 @@ OpenCrabは、自律的に思考・学習・行動するAIエージェントを�
 
 ## 2. アーキテクチャ
 
-### 2.1–2.4 current target: crate/process ownership and dependency direction
-
-The old in-process `server` feature graph was an intermediate #191 state and is not future guidance. Current production code still contains the violations inventoried in [design-gateway-process-ownership.md §3](design-gateway-process-ownership.md#3-evidence-backed-as-is-violation-inventory); implementation must move toward this common target instead of restoring compile-time gateway wiring:
+### 2.1 プロセスと所有
 
 ```text
-operator -- concrete local admin --> gateway daemon --> gateway-owned store/secrets
-                                      |       |
-                                      |       +-- supervises --> gateway instance child
-                                      |                            |
-                                      +-- provision (gate socket)  +-- hello/said/say (gate socket)
-                                                   |                            |
-                                                   v                            v
-                                              core runtime (one gate socket, no credential)
-                                                   |
-                                                   +------ core conversation store
-
-server ---------------- generic core APIs only --------------------------> core
-       (never configures, spawns, or supervises a concrete gateway daemon)
+gateway process (Discord / Nostr / Web / CLI / Bluesky)
+   │  gateway が持つもの: 接続先・Bot・鍵・オーナーと権限・受付・表示・設定画面・自分の DB
+   │
+   │  gate socket（[gate] listen_socket の Unix ソケット 1 本、JSON 1 行 = 1 frame）
+   │  hello（instance・agent・宣言する道具）/ said / say / invoke / command / activity …
+   ▼
+core（opencrab-server）
+   │  core が持つもの: エージェント・セッション（会話記録・記憶・ターン・ツール実行・
+   │  定期実行・モデル設定）・配送の記録
+   ▼
+SQLite（data/opencrab.db）
 ```
 
-**Core-owned generic conversation/execution state** means agents, positive-integer subjects and their generic allocation/tombstone/grant safeguards, sessions/membership/history, session locks, generic schedules/heartbeat, subtasks, generic gate rows, inbound deduplication, and the existing delivery ledger/state machine. **Gateway-owned concrete platform state/lifecycle** means endpoint/account IDs, credentials, external identity projections, admission/delivery policy, subscriptions, display behavior, platform schema/admin, platform send adapters, and instance children. “State belongs in core” applies only to the first class. “Transport has no generic conversation runtime” does not make the gateway stateless. Generic supervision utilities may be shared, but only an independently deployed gateway daemon supervises its instance children; `server` never does.
+- core は gateway の種類で分岐しない。gateway は `hello` で自分の instance・担当エージェント・道具（operation）を名乗り、core はそれを不透明なまま扱う（[external-gate.md](design/external-gate.md)）。
+- セッションキーは gateway が決める不透明な文字列（D-1099）。core は形式を解釈しない。
+- 配備は core と各 gateway が別々。gateway が再起動しても core は止まらず、core が再起動したら gateway はつながり直す（§12）。
 
-`core`, `db`, `gateway`, `actions`, `extgate`, `gate-client`, and `server` have no production dependency on a concrete gateway crate. Concrete daemons may depend on `gate-client` and platform-neutral process utilities, not core SQLite/server types. The separate offline migrator is the only dependency exception. Generic `AgentRuntime`, one session-lock/subtask/schedule implementation, opaque gate rows, runtime framing, dynamic declarations, the pre-separation one-frame/one-handler mapping, historical adapter calls, and terminal outcomes are retained. Issue #1006 does not add a gateway emission ledger, reconnect replay, prepared protocol, or stronger delivery guarantee. See [design-plugin-architecture.md §3](design-plugin-architecture.md#3-コアが持つもの--外に出すもの) and [design-gateway-process-ownership.md](design-gateway-process-ownership.md) for the closed boundary and transition.
+### 2.2 境界を機械で守る検査（CI）
 
-### 2.5 境界を機械で守る検査（CI）
+- `scripts/check-deps.sh`: core 側クレートが gateway 固有のクレートに依存しないことを検査する。
+- `scripts/check-file-size.sh`: `crates/` の Rust ファイルは 800 行まで。
+- `scripts/check-no-private-identifiers.sh`: 非公開の識別子（Discord ID、Nostr 鍵、内部パスなど）の混入を止める。
 
-R4–R7 were useful historical checks: they proved SDK removal from shared trees, feature detachability, and no concrete identifiers in `core`. The former R5/R6 `opencrab-server --features discord|nostr|web` matrix described the superseded in-process intermediate and must not be restored. The target audit instead checks all shared/server production dependency trees with `--edges no-dev`, all relevant manifests, and production AST/macro tokens; it rejects concrete gateway dependencies, names, schema/query/route vocabulary, config decoding, lifecycle supervision, and name-based gateway-operation policy. Dev-only Discord/Nostr QC dependencies remain permitted and tested as dev edges. Historical migrations, tests, comments, dead/legacy code, and persisted history are classified rather than mechanically word-deleted. The exact V01–V16 audit and completion evidence are in [design-gateway-process-ownership.md §3–4](design-gateway-process-ownership.md#3-evidence-backed-as-is-violation-inventory).
+旧来の設計段階（in-process の `server` feature、gate-admin）は [design-gateway-process-ownership.md](design-gateway-process-ownership.md) に記録として残っている。
 
 ---
 
@@ -64,29 +64,23 @@ R4–R7 were useful historical checks: they proved SDK removal from shared trees
 
 | 要素 | 説明 | 保存先 |
 |------|------|--------|
-| **Soul** | 性格特性。Big Five性格モデル、社交スタイル、思考スタイル | `soul`テーブル |
-| **Identity** | 名前、役割、所属、アバター | `identity`テーブル |
+| **Soul** | ペルソナ名、性格テキスト、思考スタイル | `agents` テーブル（`persona_name`, `personality`）、プリセットは `soul_presets` |
+| **Identity** | 名前、役割、所属、アバター | `agents` テーブル（`name`, `job_title`, `organization`, `image_url`） |
 | **Memory** | キュレーション記憶（永続的な知識）とセッションログ（会話履歴） | `memory_curated`, `memory_sessions`テーブル |
 | **Skill** | エージェントが持つ能力。標準スキル（ファイル定義）と獲得スキル（実行時学習） | `skills`テーブル |
 | **Workspace** | エージェント専用のファイル空間。パストラバーサル防止付き | ファイルシステム |
-| **LLM設定** | デフォルトモデル、用途別モデル割り当て、自己選択の許可 | 設定ファイル |
+| **LLM設定** | エージェントのモデル・推論強度、会話ごとのモデル | `agents.model` / `agents.reasoning_effort`、`sessions.model` |
 
 ### 3.2 個性システム (Soul)
 
-Soulは3つの軸でエージェントの個性を定義する：
-
-1. **Personality (Big Five)**: 開放性・誠実性・外向性・協調性・神経症傾向の5次元。各0.0〜1.0
-2. **Social Style**: 主張性(assertiveness)と反応性(responsiveness)の2次元。Analytical, Driver, Expressive, Amiableの4スタイル
-3. **Thinking Style**: 主思考モード(analytical, creative, practical等)と副思考モード
-
-Soulは`build_context()`メソッドで自然言語テキストに変換され、LLMへのシステムプロンプトに組み込まれる。これによりLLMの応答がエージェントの個性を反映する。
+Soul はペルソナ名、性格テキスト（`personality`）、思考スタイル（主・副）と任意の追加特性（`custom_traits`）を持つ（`crates/core/src/soul.rs`）。これらは自然言語テキストとしてシステムプロンプトに組み込まれ、LLM の応答がエージェントの個性を反映する。
 
 ### 3.3 スキルシステム
 
 スキルには2種類のソースがある：
 
 - **Standard**: `skills/`ディレクトリのMarkdownファイルから読み込む定義済みスキル
-- **Acquired**: エージェントが実行時に`create_my_skill`アクションで自ら作成するスキル
+- **Acquired**: エージェントが実行時に作成するスキル（`create_my_skill` は `source_type="self_created"`、gateway アクションの `create_skill` は `"acquired"`）
 
 各スキルは使用回数(usage_count)と有効性スコア(effectiveness)を持ち、評価データが蓄積される。
 
@@ -110,12 +104,16 @@ SkillEngineはエージェントの思考と行動のサイクルを駆動する
 2. 利用可能なツール定義一覧をActionExecutorから取得
 3. LLMにfunction calling付きでリクエスト送信
 4. LLMがツール呼び出しを返した場合 → **分類に応じて inline 実行またはバックグラウンド実行**し、結果（またはバックグラウンド実行を開始した旨）をメッセージ履歴に追加 → 3に戻る（§4.4 参照）
-5. LLMがテキスト応答を返した場合 → 最終応答として返却
+5. LLMがテキスト応答を返した場合 → 最後の行が `NO_REPLY` ならターンを終える。そうでなければ続ける（`crates/core/src/continue_marker.rs`、`crates/server/src/process/prompt.rs` の `TURN_COMPLETION_RULES`）
 6. 最大イテレーション数に達した場合 → 安全停止
 
 ### 4.2 動的モデル切り替え
 
-1ターンは1つのモデルで走る（ターン開始時に会話のモデルを読む）。エージェントの`select_llm`はオーナーの`/model`と同じく「この会話のモデル」（`sessions.model`）を変え、変更は次のターンから効き、また変えるまで続く（D-1135）。
+1ターンは1つのモデルで走る（ターン開始時に会話のモデルを読む）。エージェントの`select_llm`はオーナーの`/model`と同じく「この会話のモデル」（`sessions.model`、`ModelAdministration::set_session_model`）を変え、変更は次のターンから効き、また変えるまで続く（D-1135）。ターンの途中でモデルを差し替える仕組みは無い。選べるモデルは `/model` と同じ一覧（`GET /api/llm/model-choices`）で、一覧に無い名前は何も変えずに一覧付きで拒否する（D-1131）。
+
+`get_system_info` は `current_turn_model`（このターン）、`conversation_model`（次のターン）、`selectable_models`（一覧）を返す。
+
+LLM 呼び出しが失敗してターンが終わったときは、モデルとプロバイダのエラーを `turn_failed` のシステム行として会話に記録し、次のターンの履歴に見える（`crates/server/src/process/end_event.rs`）。
 
 例：エージェントが「この問題は複雑だからより賢いモデルに切り替えよう」と判断し、`select_llm`アクションを呼ぶと、この会話の次のターンから別のモデルが使われる。
 
@@ -146,15 +144,15 @@ SkillEngine
 
 1. **配送系** — 送信・投稿・返信・UI 提示など、外部に出ていくもの。背景化すると本文と順序が入れ替わったり、二重に送られたりする。
 2. **同ターン結果依存** — 戻り値（ID や URL）を同じターンの後続処理で使うもの。
-3. **run 内の共有状態を書くもの** — 例: 実行中のモデル切り替え。背景化するとそのターンに反映されず、競合もする。
+3. **run 内の共有状態を書くもの** — 例: 以後のスキル可視性、指示文、タスク台帳の状態。背景化するとそのターンに反映されず、競合もする。
 4. **純粋な読み取りで即答すべきもの** — 背景化すると「1 つの質問が 2 ターン 2 メッセージ」になり体験が悪化する。
 5. **制御系** — バックグラウンド実行そのものを制御するもの（生成・停止・進捗報告）。
 
 分類の権威は**各ツール定義が自ら名乗る属性**（`GatewayActionDef.class.dispatch` = `Inline` / `Dispatchable`）である。この属性は必須で既定値を持たない（`ToolClass` に `Default` を実装しない）ため、**新しいゲートウェイツールを足すと分類の記述を強制される**（構築サイトで書かない限りコンパイルが通らない）。消費側（`BridgedExecutor`）は gateway／MCP の定義を舐めて名前→分類の索引を作り、`inline_tool_names()` で `Inline` の名前を集める。
 
-共通アクション群（core）だけは `GatewayActionDef` を持たない一次ツールなので、例外的に `crates/actions/src/bridge.rs` の定数（`CORE_INLINE_ACTIONS` / `CORE_DISPATCHABLE_ACTIONS` の対）で分類し、`ActionDispatcher` の全名がどちらかに属することを fail-closed 検査（`core_actions_are_classified_for_dispatch`）が守る。
+共通アクション群（core）だけは `GatewayActionDef` を持たない一次ツールなので、例外的に `crates/actions/src/bridge/policy.rs` の定数（`CORE_INLINE_ACTIONS` / `CORE_DISPATCHABLE_ACTIONS` の対）で分類し、`ActionDispatcher` の全名がどちらかに属することを fail-closed 検査（`core_actions_are_classified_for_dispatch`）が守る。
 
-制御ツール（`spawn_subtask` / `cancel_subtask` / `report_progress`）だけは 3 つ目の源として `default_non_dispatch_tools()`（`crates/actions/src/subtask.rs`）に直接ハードコードされ、常に inline に残る（それ自体が subtask ライフサイクルを操作するため）。
+制御ツール（`spawn_subtask` / `cancel_subtask` / `report_progress`）だけは 3 つ目の源として `default_non_dispatch_tools()`（`crates/actions/src/subtask/dispatcher.rs`）に直接ハードコードされ、常に inline に残る（それ自体が subtask ライフサイクルを操作するため）。
 
 **ツール名の一覧はこのドキュメントには置かない**（各定義の属性・core の 2 定数・制御ツールのハードコードが権威。ここに書くのは上の分類基準だけ。一覧を二重管理すると必ず実装と乖離するため）。
 
@@ -175,26 +173,31 @@ SkillEngine
 
 ### 5.1 マルチプロバイダールーター
 
-`LlmRouter`は6つのプロバイダーを統一的に扱う：
+`LlmRouter` は設定の `[llm.providers.<名前>]` ごとにプロバイダーを登録する。形式（`type`、省略時はセクション名）は次の 10 種（`KNOWN_PROVIDER_TYPES`）。未知の形式は起動を止める。
 
-| プロバイダー | 特徴 |
+| 形式 | 特徴 |
 |-------------|------|
-| OpenAI | GPT系モデル |
-| Anthropic | Claude系モデル |
-| Google | Gemini系モデル |
-| OpenRouter | 多プロバイダーゲートウェイ。100以上のモデルにアクセス |
-| Ollama | ローカル推論サーバー |
-| llama.cpp | ローカル推論（直接実行） |
+| `openai` | OpenAI 互換 API（`base_url` で互換サーバーも可） |
+| `anthropic` | Claude系モデル |
+| `google` | Gemini系モデル |
+| `openrouter` | 多プロバイダーゲートウェイ |
+| `ollama` | ローカル推論サーバー |
+| `llamacpp` | ローカル推論サーバー（llama.cpp） |
+| `codex` | Codex CLI を子プロセスで起動 |
+| `cursor` | Cursor CLI を子プロセスで起動 |
+| `acp` | ACP エージェント（stdio JSON-RPC） |
+| `chatgpt` | ChatGPT の codex/responses API（`~/.codex/auth.json` の OAuth） |
 
 ### 5.2 モデル解決フロー
 
 ```
-エイリアス ("fast")
-  → マッピングテーブル → "openai:gpt-4o-mini"
-    → プロバイダー名 + モデル名に分解
-      → 該当プロバイダーでリクエスト実行
-        → 失敗時はフォールバックチェーンで別プロバイダーを試行
+"provider:model"（例 "chatgpt:gpt-6.2-sol"）またはエイリアス（[llm.aliases]）
+  → プロバイダー名 + モデル名に分解（コロンが無ければ既定プロバイダー）
+    → 該当プロバイダーでリクエスト実行
+      → 失敗時は [llm.fallback] chain の別プロバイダーを試行
 ```
+
+料金・コンテキスト長・出力上限はモデルごとに `model_pricing` テーブルに持つ（ダッシュボード、`PUT /api/llm/model-pricing`）。
 
 ### 5.3 コストとメトリクス
 
@@ -212,7 +215,7 @@ SkillEngine
 
 ### 5.4 自己評価と学習
 
-エージェントは`evaluate_response`アクションで直前のLLM応答を自己評価し、品質スコアと自由記述の評価をDBに記録する。`recall_model_experiences`で過去の経験を参照し、`select_llm`で最適なモデルを選択する。
+エージェントは`evaluate_response`アクションで直前のLLM応答を自己評価し、品質スコアと自由記述の評価をDBに記録する。`recall_model_experiences`で過去の経験を参照し、`select_llm`でこの会話のモデルを選ぶ（次のターンから効く）。
 
 このサイクルにより、エージェントは使用経験に基づいてモデル選択を最適化していく。
 
@@ -231,28 +234,7 @@ SkillEngine
 
 ### 6.2 登録済みアクション一覧
 
-| カテゴリ | アクション名 | 説明 |
-|----------|-------------|------|
-| **会話** | `send_speech` | 発言を送信 |
-| | `send_noreact` | 無反応（パス） |
-| | `generate_inner_voice` | 内面の独白を生成 |
-| | `update_impression` | 他エージェントへの印象を更新 |
-| | `declare_done` | 議論完了を宣言 |
-| **ワークスペース** | `ws_read`, `ws_write`, `ws_edit` | ファイル読み書き編集 |
-| | `ws_list`, `ws_delete`, `ws_mkdir` | ファイル管理 |
-| **学習** | `learn_from_experience` | 経験からスキルや知識を獲得 |
-| | `learn_from_peer` | 他エージェントから学ぶ |
-| | `reflect_and_learn` | 自己省察して知見を導出 |
-| **検索** | `search_my_history` | 過去の会話ログをFTS検索 |
-| | `summarize_and_save` | 会話を要約してキュレーション記憶に保存 |
-| | `create_my_skill` | 新しいスキルを自ら作成 |
-| | `browse_memory_index` | 記憶インデックスのツリー構造を閲覧（タイトル+要約のコンパクト表示） |
-| | `retrieve_memory_nodes` | インデックスノードの全文テキストを取得（1-5ノード指定） |
-| **LLM管理** | `select_llm` | 用途に応じてモデルを動的切り替え |
-| | `evaluate_response` | 直前のLLM応答を自己評価 |
-| | `analyze_llm_usage` | LLM使用状況を分析 |
-| | `recall_model_experiences` | 過去のモデル体験を想起 |
-| | `save_model_insight` | モデルに関する知見を保存 |
+一覧は README の「Action System」表が正本で、`ActionDispatcher::new()` と一致することをテスト（`readme_action_table_matches_the_dispatcher`）が守る。ここには重ねて書かない。発言は応答本文、または gateway が宣言した道具（例: `reply`）で行う。
 
 ### 6.3 ActionContext（実行コンテキスト）
 
@@ -264,6 +246,8 @@ SkillEngine
 - `workspace`: サンドボックスファイルシステム
 - `last_metrics_id`: 直前のLLM呼び出しのメトリクスID（評価アクション用）
 - `current_purpose`: 現在のLLM使用目的
+- `caller`: 呼び出し元の権限（owner / co_agent / trusted_user / agent）
+- `runtime_info`: 既定モデル、このターンのモデル、構成済みプロバイダー、gateway 名
 
 ### 6.4 BridgedExecutor
 
@@ -273,41 +257,25 @@ SkillEngine
 
 ## 7. ゲートウェイレイヤー
 
-### 7.1 Current target and AS-IS label
+### 7.1 gate socket
 
-Discord and Nostr each become an independently deployed owning daemon with gateway-owned store/local admin and supervised instance children. Web and CLI remain independent generic-runtime clients and own their concrete authentication/admission/display behavior; Web also owns a durable identity/policy SQLite store and local admin UDS whenever configured or migrated Web identities exist, while CLI needs no durable store today. REST is a core API, not a gateway. All communicate with core only through the generic gate socket protocol (provision, hello, said/say; D-1098). The common target diagram and ownership vocabulary are in §2.1–2.4.
+gateway は core の gate socket（`[gate] listen_socket`、空なら listen しない）に接続する。プロトコルの正本は [design/external-gate.md](design/external-gate.md)（現行は protocol 3・operation_protocol 1、D-1099 改訂の節）。
 
-`AgentGatewayLifecycle`, `AgentGatewayRegistry`, server feature wiring, per-platform runner traits, concrete server routes, and platform-shaped timed-fire descriptors are **AS-IS/superseded intermediate architecture**, not extension points. Remove reachable violations according to #1006, while retaining generic `AgentRuntime`, session locks, schedules/heartbeat, subtasks, opaque gate rows, runtime UDS, dynamic operation declarations, inbound deduplication, and the existing single core delivery state machine. Existing Web/CLI independent clients and server dev-only QC dependencies are valid.
+- `hello`: instance id、担当エージェント、`final_delivery`、宣言する道具（`operations`）を名乗る。instance が無ければ core が作る。
+- `said`: 外部の発言を渡す。セッションキーは gateway が決める。
+- `say` / `invoke`: core から gateway への発言と、宣言された道具の呼び出し。
+- `command`: `/model` などの管理コマンド（`list_models` / `set_model` / `reset_model` / `list_session_models` / `set_session_model` / `reset_session_model` / `list_session_reasoning_efforts` / `set_session_reasoning_effort`、`crates/extgate/src/commands.rs`）。
+- `activity` / `tool_activity` / `subtask_lifecycle` / `turn_failed`: 応答を求めない通知。
 
-### 7.2 Data and lifecycle boundary
+### 7.2 gateway が宣言する道具
 
-Core receives normalized content, opaque external event/reply material, binding IDs, and generic caller roles. The gateway authenticates external identities and owns platform policy. Issue #1006 preserves the `1c3b782` admitted caller-role snapshot: core transports the gateway-classified generic role with work and does not add current co-agent relationship/revision revalidation at later model, queue, tool, continuation, schedule/heartbeat, subtask, or delivery boundaries. Immediate revocation/revision revalidation is deferred to non-gating Issue #1015. Core owns generic conversation execution and never parses platform locators/config. A gateway daemon owns storage, credentials, policy, final display/delivery behavior, child readiness/exit/backoff, and stale-child recovery. `server` neither configures nor supervises it.
-
-External delivery preserves the `1c3b782` contract. Core retains the existing `deliveries` row and `sending` / `delivered` / `failed` / `indeterminate` transitions and writes one generic frame to a live acknowledged binding, invoking the concrete gateway delivery handler once. Platform API calls are counted separately: Discord performs its historical ordered one-`create_message` call per produced chunk until all chunks succeed or the first fails, with no automatic retry; Nostr performs one current post/reply command attempt. Disconnect and startup stale sends become terminal `indeterminate` without replay. Issue #1006 adds no gateway emission ledger, prepared request/protocol digest, capability upgrade/downgrade logic, retention handshake, durable nonce retry, persisted signed-event replay, or delivery-guarantee label. The known external send-before-receipt ambiguity is not strengthened by this separation. All of those category-B enhancements are deferred to one separately designed follow-up Issue recorded in `docs/evidence/issue-1006-strict-separation-redesign.md`; it is not a #1006 completion gate.
-
-Every present schema-56 external-identity row receives the canonical source-row fingerprint disposition defined by the [S8 implementation contract](evidence/issue-1006-s8-contract.md). S8 requires the version and named columns it reads/writes, without turning full-schema equality into a #1006 gate. Derivable Discord/Nostr rows map to those stores; only exact `platform="rest"` rows map to `api_principals`; all others require explicit fingerprint-bound operator edges to existing gateway instances and cannot target core principals. Web edges require the existing Web destination. Core plus every participating gateway DB is included in one matched pre-write backup set; any failure restores that whole set rather than resuming partial progress. Guessing, silent duplication/drop, and unmapped rows are forbidden. Additional migration hardening is deferred to non-gating Issue #1016.
-
-### 7.3 Concrete paths
-
-| Path | Target owner/process | Boundary |
-|---|---|---|
-| Discord | `discord-gatewayd` + gateway-owned SQLite + one instance child per enabled instance | generic admin/runtime UDS; current placement executable is retained as child |
-| Nostr | `nostr-gatewayd` + gateway-owned SQLite + one instance child per enabled instance | generic admin/runtime UDS; direct core DB and runtime import are removed |
-| Web | independently launched Web gateway + Web-owned identity/policy SQLite when needed | runtime UDS plus distinct mode-0600 Web-local admin UDS; Web never opens core DB |
-| CLI | independently launched CLI gateway | runtime UDS; CLI owns terminal selection/input/display |
-| REST | core/server generic administration | not a concrete gateway; no platform settings/identity API |
-
-The approved evidence-backed source inventory, migration mapping, and completion criteria are authoritative in [design-gateway-process-ownership.md](design-gateway-process-ownership.md); its [§13 staged TDD plan](design-gateway-process-ownership.md#13-staged-assertion-level-tdd-execution-plan) governs implementation order and gates.
+道具の `input_schema` は JSON Schema の一部（`type` / `required` / `properties` / `enum` / `items` / `description` / `format`）と、core 用の印 `"x-opencrab-short-ref": true`（会話の短縮参照 `e12` などを実 ID に置き換える欄）・`"x-opencrab-workspace-file": true`（ワークスペースのファイルを outbox にコピーして渡す欄）だけを使える（`crates/extgate/src/operations.rs` の `ALLOWED_SCHEMA_KEYWORDS`）。`format` には JSON Schema 標準の値だけを書く。未知の `format` は LLM プロバイダーが道具ごと拒否するため、core の印は `format` に載せない（D-1134）。各道具は `authorization.allowed_callers` / `dispatch` / `sub_engine` / `sharing` / `effect` を名乗り、core はそれだけで扱いを決める。
 
 ---
 
 ## 8. サーバーとAPI
 
-`server` composes generic core administration and the agent execution pipeline. It may expose agents, subjects, sessions, history, LLM/tool settings, schedules/heartbeat, and non-gateway API principals. It must not expose or proxy concrete gateway configuration, credentials, external identities, policy, or lifecycle, and must not merge a concrete gateway router. The AS-IS `server::create_router_with_gate`/production route inventory merge of `opencrab_extgate::admin_router` into the permissive-CORS public router is removed. Public TCP has no `/api/gate*` route.
-
-D-1098: there is no gate-admin socket, credential manifest, principal or subject grant. A gateway declares its own generic instance (kind, agent, enabled, opaque config) and the complete set of its bindings with one `provision` frame on the gate socket before `hello` ([external-gate.md](design/external-gate.md)). Access to the socket file is the only gate, the same as for every other frame. Core needs no `[gate_admin]` config; public TCP still has no `/api/gate*` route.
-
-The REST conversation path continues to record a generic session message, build the agent context/history, run `SkillEngine`, and record/return the response. Old Discord/Nostr/Web feature routes, `AppState` concrete gateway fields, channel/trusted-platform routes, and server-owned gateway startup descriptions are AS-IS violations scheduled by #1006, not APIs to copy. Gateway final delivery is selected by dynamic generic hello metadata, never by server decoding opaque config.
+`server` は core の管理 API（エージェント、スキル、記憶、セッション、LLM 設定、モデル料金、定期実行、許可コマンド、MCP、ログ）とエージェントの実行パイプラインを持つ。gateway 固有の設定・資格情報・外部 ID・受付の API は持たない。公開 TCP に `/api/gate*` は無い。API の一覧は [api.md](api.md)。
 
 ---
 
@@ -315,32 +283,35 @@ The REST conversation path continues to record a generic session message, build 
 
 ### 9.1 テーブル一覧
 
+現行のスキーマは version 65（`PRAGMA user_version`）。主なテーブル:
+
 | テーブル | 用途 |
 |----------|------|
-| `agents` | エージェント基本情報。既存の正の INTEGER `subject_id` は UUID 化・採番し直しをせず byte-for-byte 保存 |
-| `subject_id_allocator` | gateway 非依存の単調 high-water/next-ID。既存最大値より上へ backfill し、減算・再利用禁止 |
-| `subject_tombstones` | hard delete で agent/subject row を消す前に同一 transaction で記録する永続 `subject_id` tombstone |
-| `soul` | 性格特性 (Big Five JSON, Social Style JSON, Thinking Style JSON) |
-| `identity` | 名前・役割・所属 |
+| `agents` | エージェント基本情報（名前・役割・ペルソナ・性格・指示・モデル・推論強度） |
+| `soul_presets` | ペルソナのプリセット |
+| `subject_id_allocator` / `subject_tombstones` | エージェントの数値 subject ID の採番と、削除済み ID の再利用防止 |
 | `memory_curated` | キュレーション記憶 (category, content) |
-| `memory_sessions` | セッションログ (session_id, speaker_id, log_type, content) |
-| `memory_sessions_fts` | 全文検索インデックス (FTS5) |
-| `skills` | スキル定義と使用統計 (source_type, usage_count, effectiveness) |
+| `memory_sessions` / `memory_sessions_fts` | 会話ログと全文検索インデックス (FTS5) |
+| `memory_index_nodes` / `memory_index_fts` / `memory_index_watermark` | 記憶インデックスの階層ノード、検索、構築の進捗 |
+| `memory_category_members` / `agent_memory_index_config` / `daily_log_index_watermark` | 記憶のカテゴリ、インデックス設定、日次ログ索引の進捗 |
+| `skills` / `skill_usage_log` | スキル定義と使用記録 |
 | `impressions` | 他エージェントへの印象 |
-| `sessions` | セッション管理 (mode, theme, phase, participants) |
-| `llm_usage_metrics` | LLM呼び出し記録 (provider, model, tokens, latency, cost, quality_score) |
-| `model_experience_notes` | モデル体験メモ (situation, observation, recommendation) |
-| `model_pricing` | モデル価格情報 |
-| `heartbeat_log` | ハートビート記録 |
-| `session_heartbeat_config` | `(agent_id, session_id)` 単位の汎用ハートビート設定 (#439/#456・永続アンカー last_fired_at) |
-| `session_heartbeat_instructions` | `session_heartbeat_config` と同じ複合主キー/FK `(agent_id, session_id)`。nullable `override_text`（NULL は current agent instructions → generic default を継承）と `updated_at` を持ち、upgrade の単一 stopped projection transaction と fresh schema の双方で作成 |
-| `agent_schedules` | per-agent 定時実行 (#455・cron/@every・last_fired_at・next は照会時算出) |
-| `memory_index_nodes` | 記憶インデックスの階層ツリーノード (node_type, title, summary, log_id range) |
-| `memory_index_watermark` | インデックス構築の進捗管理 (last_indexed_log_id) |
+| `sessions` / `agent_sessions` | セッション（会話）と参加者。`sessions.model` が会話のモデル |
+| `conversation_snapshots` / `agent_inbox` | 会話の要約スナップショット、エージェントの受信箱 |
+| `llm_logs` / `llm_usage_metrics` / `llm_provider_overrides` | LLM 呼び出しの全文ログ、メトリクス、ダッシュボードからのプロバイダー設定 |
+| `model_pricing` / `model_experience_notes` | モデル料金・コンテキスト長・出力上限、モデル体験メモ |
+| `tool_logs` / `agent_logs` | ツール実行ログ、エージェントのイベントログ |
+| `agent_schedules` / `heartbeat_log` | 定期・定時実行（cron / `@every`）とその発火記録 |
+| `task_ledger` / `task_progress` | 長い作業の台帳 |
+| `agent_allowed_commands` / `agent_mcp_config` / `agent_webhook_config` | エージェントごとの許可コマンド、MCP サーバ、webhook |
+| `gate_instances` / `gate_bindings` | gateway の instance と、(instance, セッションキー) → セッションの対応 |
+| `deliveries` / `external_origins` / `gateway_operation_calls` | 発言の配送記録、受信の重複防止、gateway の道具の呼び出し記録 |
+| `api_principals` | REST の API 主体 |
+| `import_sync_state` | OpenClaw インポートの同期状態 |
 
 ### 9.2 設計方針
 
-- 会話・記憶テーブルは`agent_id`でスコープする。gateway の instance/binding は generic な kind と opaque config だけを持ち、gateway kind/name で分岐しない
+- 会話・記憶テーブルは`agent_id`でスコープする。gateway の instance は不透明に扱い、gateway の種類で分岐しない
 - 通常状態は UPSERT パターンで冪等性を確保する
 - 外部設定/APIの時刻はUTC RFC3339、DB内部の gateway instance/binding 時刻は比較可能な UTC Unix nanoseconds とする
 - JSONフィールドでスキーマの柔軟性を確保（性格特性、メタデータ等）
@@ -351,16 +322,16 @@ The REST conversation path continues to record a generic session message, build 
 
 ## 10. ダッシュボード
 
-Dioxus (Rust製WebUIフレームワーク) + Tailwind CSSで構築。
+React + Vite + Tailwind CSS（`web/`）。i18n は英語と日本語。
 
-### ページ構成
+### ページ構成（`web/src/App.tsx`）
 
-- **Home**: エージェント数・セッション数・メトリクスの概要
-- **Agents**: エージェント一覧、作成、削除
-- **Sessions**: セッション監視、メッセージ送信
-- **Memory**: キュレーション記憶の閲覧、全文検索
-- **Analytics**: LLM使用量、コスト、品質の可視化
-- **Persona Editor**: Soul (性格) の編集UI
+- **Home**（`/`）: 概要とセットアップのチェックリスト
+- **Setup**（`/setup`）: LLM プロバイダーとエージェント作成の 2 段階
+- **Agents**（`/agents`、`/agents/new`、`/agents/:id/…`）: 概要、編集、ペルソナ、スキル、スリープ、記憶、セッション、分析、定期実行、許可コマンド、LLM ログ、ツールログ
+- **Sessions**（`/sessions`、`/sessions/:id`）: セッション一覧と詳細
+- **Workspace**（`/workspace/:agentId`）: ワークスペースのファイル
+- **System settings**（`/settings`）: LLM プロバイダー、モデル料金など
 
 サーバーのREST APIを通じてデータを取得・操作する。
 
@@ -370,11 +341,7 @@ Dioxus (Rust製WebUIフレームワーク) + Tailwind CSSで構築。
 
 ### 11.1 テスト構成
 
-| 種類 | 件数 | 対象 |
-|------|------|------|
-| ユニットテスト | ~160件 | 各クレート内のモジュール単位 |
-| 統合テスト | ~30件 | クレート間の連携 (engine_integration, api_e2e) |
-| 実LLMテスト | ~20件 (`#[ignore]`) | OpenRouter経由の実API呼び出し |
+CI（`.github/workflows/ci.yml`）は `cargo fmt --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`、上記の検査スクリプト、`web/` の build と test を実行する。件数はここに書かない（すぐ古くなる）。
 
 ### 11.2 テスト方針
 
@@ -382,12 +349,16 @@ Dioxus (Rust製WebUIフレームワーク) + Tailwind CSSで構築。
 - **E2Eテスト**: MockLlmProviderでLLM呼び出しをシミュレート。HTTP層からDB操作まで一気通貫
 - **実LLMテスト**: `#[ignore]`属性で通常ビルドから除外。環境変数でモデル名・APIキーを外部注入。評価プロンプトのみハードコード
 - **モデル評価テスト**: 複数モデルを実APIで比較。EVAL_SOUL環境変数でエージェントの個性バイアスを注入した評価も可能
-- **gateway boundary/release test**: S1 security schema の fresh/populated migration・rollback、legal/illegal seal/revoke/scope transition、core-service-EUID ownership を含む strict manifest/path、exact-idempotent bootstrap/conflict、bootstrap/rotation duplicate-bearer refusal、request の full-scan zero/one/multiple match と no-first-match/no-scope-union、operation/subject/instance/namespace/expiry/revocation/rotation、audit redaction/append-only/savepoint atomicity、stale-socket refusal/created-inode cleanup/startup ordering、public TCP 全 6 path 404 と protected core UDS-only success を検証する。加えて `1c3b782` と同じ単一 core delivery row/state、generic frame/handler 数、disconnect/startup `indeterminate`、Discord の ordered one-`create_message`-per-produced-chunk と fail-fast、Nostr single command の parity、全 `trusted_users.platform/source` fingerprint の approved disposition/zero-unmapped/Web destination/all-store rollback、gateway-owned caller classification と admitted role snapshot parity、subject ID 保存/non-reuse/grant single-use、immutable projection marker、successful-completion ordinary rerun の no-op と mismatch refusal、matched-set failure restore、read-only `verify-freeze` の DB 不変、preflight/cleanup 間 mutation abort、cleanup 中の全 destination read lock、separate atomic cleanup/freeze/manifest record、post-QC digest lineage を検証する。synthetic gateway は core/shared/server source・schema・migration・redeploy を 0 変更で追加できなければならない
+- **gateway boundary/release test（#1006 当時の記録）**: S1 security schema の fresh/populated migration・rollback、legal/illegal seal/revoke/scope transition、core-service-EUID ownership を含む strict manifest/path、exact-idempotent bootstrap/conflict、bootstrap/rotation duplicate-bearer refusal、request の full-scan zero/one/multiple match と no-first-match/no-scope-union、operation/subject/instance/namespace/expiry/revocation/rotation、audit redaction/append-only/savepoint atomicity、stale-socket refusal/created-inode cleanup/startup ordering、public TCP 全 6 path 404 と protected core UDS-only success を検証する。加えて `1c3b782` と同じ単一 core delivery row/state、generic frame/handler 数、disconnect/startup `indeterminate`、Discord の ordered one-`create_message`-per-produced-chunk と fail-fast、Nostr single command の parity、全 `trusted_users.platform/source` fingerprint の approved disposition/zero-unmapped/Web destination/all-store rollback、gateway-owned caller classification と admitted role snapshot parity、subject ID 保存/non-reuse/grant single-use、immutable projection marker、successful-completion ordinary rerun の no-op と mismatch refusal、matched-set failure restore、read-only `verify-freeze` の DB 不変、preflight/cleanup 間 mutation abort、cleanup 中の全 destination read lock、separate atomic cleanup/freeze/manifest record、post-QC digest lineage を検証する。synthetic gateway は core/shared/server source・schema・migration・redeploy を 0 変更で追加できなければならない
 
 ---
 
 ## 12. 運用
 
-The previous commands that enabled Discord/Nostr/Web as `opencrab-server` features and configured `[gateway.discord]` were instructions for the superseded in-process architecture. Do not use them as implementation guidance. The target deployment starts core/server generic services and each selected concrete gateway daemon/client independently. Each daemon receives only its gateway-owned DB/admin paths, the generic gate socket path, and separately sourced secrets; it never receives a core/legacy DB path. Operators administer platform state through the daemon-local UDS, provision core generic rows through gate-admin, and let the daemon supervise its own children.
+core と各 gateway は別々に配備する。
 
-Cutover is offline and follows [design-gateway-process-ownership.md §9–11](design-gateway-process-ownership.md#9-offline-migration-and-completeness-proof). Exactly two stopped/offline migration programs may open core directly read-write for gateway legacy state: first, the single `project-core-state` transaction before QC; second, guarded destructive cleanup after post-QC freeze/read-only `verify-freeze`. Ordinary core schema/admin work is not a third phase. S8 creates one matched core-plus-all-participating-gateway backup set, imports every approved present row while core stays read-only, and runs one atomic projection. Any failure restores the whole matched set and restarts; #1006 does not resume/adopt partial progress or reconstruct lost-response provenance. An ordinary successful-completion rerun is a no-op only when current mapped rows, marker, and retained-state digests match. The unchanged later order is protected core UDS/public isolation, provision-only QC, complete post-QC freeze, read-only `verify-freeze`, guarded cleanup, and matched rollback. The generic projection preserves the existing core `deliveries` table byte/logically and adds no delivery-guarantee classification, gateway receipt, request reconstruction, or replay. Existing disconnect/startup handling remains authoritative. Extra migration durability/hardening is non-gating Issue #1016. Production deployment remains a separate operator action.
+- **core**: このリポジトリから `opencrab-server`（`cargo build --release -p opencrab-server`）と `web/`（ダッシュボード）を作って起動する。起動確認は `GET /health`（`ok`）と `GET /api/health`（`{"status":"ok"}`）。
+- **gateway**: [opencrab-gateways](https://github.com/kojira/opencrab-gateways)（Discord / Nostr / Web / CLI）と [opencrab-bluesky-gateway](https://github.com/kojira/opencrab-bluesky-gateway) で別々に作って起動し、core の gate socket（`[gate] listen_socket`）を指す。Rust の gateway は `gate-client` を通じて core の特定のコミット（`Cargo.lock` に固定）に合わせて作られるので、動いている core と同じコミットに合わせたものを使う。
+- core を入れ替えても gateway は止めなくてよい。gateway は core につながり直す。gateway を入れ替えても core は止まらない。
+
+旧来の in-process 構成（`opencrab-server` の feature で Discord/Nostr/Web を有効にし、`[gateway.discord]` を設定する手順）と、#1006 の移行手順は [design-gateway-process-ownership.md](design-gateway-process-ownership.md) に記録として残っている。現行の手順としては使わない。

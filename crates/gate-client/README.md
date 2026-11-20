@@ -1,11 +1,10 @@
 # opencrab-gate-client
 
-Rust gateway 共用の V3 protocol=2 client / wire / json。core crate の wire DTO は依存しない。利用者は gateway リポジトリ（[opencrab-gateways](https://github.com/kojira/opencrab-gateways)）の各 gateway で、この crate を core の rev 固定の git 依存で参照する（Issue #1074）。独立実装の原則は gateway リポジトリの `samples/` にだけ適用する（POLICY-BUILTIN-GATES 裁定 3）。
+Rust gateway 共用の gate socket client / wire / json（protocol 3）。core crate の wire DTO には依存しない。利用者は gateway リポジトリ（[opencrab-gateways](https://github.com/kojira/opencrab-gateways)）の各 gateway で、この crate を core の rev 固定の git 依存で参照する（Issue #1074）。プロトコルの正本は `docs/design/external-gate.md`（D-1099 の節）。
 
 | ファイル | 役割 |
 |---|---|
-| `client.rs` | 1 instance = 1 UDS。`connect` は 1 回（rust-unit）。`spawn` は production 経路（指数 backoff 再接続 + hello replay）。`SayPolicy::RejectExternal` は say を投稿せず `external_rejected`。`post_said_with_author` は event ごとの author。turn 実行中でも別 origin の said を送る（core の session queue 32 が直列化する。`PostRefuse::Busy` はキュー満杯の応答にだけ使う）。`post_said_receipt` は Bundle member（ack までだけ `pending_turn` を残す。`CompletedNoReply` は activity started）。hello / bind / said / say / close を info |
-| `wire.rs` | frame の読写。core DTO を使わない |
+| `client.rs` / `client/` | 1 instance = 1 UDS 接続。`connect` は 1 回だけ接続する。`spawn*` は本番経路で、切れたら backoff して接続し直し `hello` を送り直す（`client/transport.rs`）。`said` と `command`（`/model` など）の送信、`say` / `invoke` の受信と応答、先行生成（`client/provisional.rs`） |
+| `wire.rs` / `wire/` | frame の読み書き。`hello`（道具の宣言と環境変数）、`partial`、`provisional`、活動通知、`ok` / `err` 応答、`model_profile` |
 | `json.rs` | duplicate member 拒否 |
-
-抽出元は `crates/web-gateway/src/v3/{client,wire,json}.rs`。機械的移動のみで、挙動は変えない。
+| `outbound.rs` | core が `"x-opencrab-workspace-file": true` の欄に入れて渡すファイル descriptor の読み取りと検証 |

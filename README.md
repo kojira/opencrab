@@ -21,33 +21,25 @@
 - **Memory that persists** — Token-budget compaction summarizes old conversations into topic nodes stored in a memory index. Agents can recall past context via Agentic RAG, not just start from scratch.
 - **Every conversation saved** — All session logs are automatically recorded to the database. You don't rely on the agent to decide what's worth keeping.
 - **Subtask delegation** — Agents spawn async subtasks that run in parallel without blocking the main conversation.
-- **Discord-native** — Each agent gets its own Discord gateway with independent lifecycle. Agents coexist naturally in channels, including Bot-to-Bot communication.
+- **Gateways outside the core** — Discord, Nostr, Web and CLI gateways are separate processes (in [kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways)) that talk to the core over one Unix socket. The core keeps running while a gateway is replaced.
 
 ## Features
 
-- **Multi-Provider LLM Support** — OpenAI, Anthropic, Google Gemini, OpenRouter, Ollama, llama.cpp, plus local CLI/agent backends (Codex CLI, Cursor CLI, ChatGPT direct API via `~/.codex/auth.json`, and ACP agents) — with per-use-case routing and automatic fallback
+- **Multi-Provider LLM Support** — OpenAI, Anthropic, Google Gemini, OpenRouter, Ollama, llama.cpp, plus local CLI/agent backends (Codex CLI, Cursor CLI, ChatGPT direct API via `~/.codex/auth.json`, and ACP agents) — with model aliases and a fallback chain
 - **Agent Personality System** — Soul/Identity model with personality text and saveable presets
 - **Memory Management** — Curated memories, session logs with FTS5 search, and hierarchical memory index with LLM-powered Agentic RAG
 - **Conversation Compaction** — Token-budget-based automatic compaction; replaces older messages with memory index topic summaries, keeping recent logs in full
 - **Skill System** — Standard and acquired skills with effectiveness tracking, usage metrics, and guidance-based execution where the LLM dynamically calls `execute_shell`
-- **Multi-Channel Communication** — REST API, CLI, WebSocket, web dashboard, Discord and Nostr gateway adapters
-- **Standalone terminal gateway** — `opencrab-cli-gateway` (in the [opencrab-gateways](https://github.com/kojira/opencrab-gateways) repository) provides a human REPL or strict JSONL stream for one exact pre-provisioned agent/session over the generic V3 Unix-socket protocol
-- **Per-Agent Discord Gateway** — DB-persisted Discord config per agent with independent start/stop lifecycle management
-- **Per-Agent Nostr Gateway** — DB-persisted key and relay config per agent; an agent can generate a key and adopt it as its own identity, which also brings the gateway up (see [Nostr](#nostr))
-- **Message Debounce** — Per (channel, sender) debounce window batches rapid messages into a single request
-- **Co-Agent Management** — Trust relationships between agents with configurable permission levels (owner/agent/co-agent)
-- **Trusted User Whitelist** — Per-agent Discord user trust management
+- **External gateways** — Gateways connect to the core's gate socket (`[gate] listen_socket`) and declare their own tools (operations) in `hello`; the core shows those tools to the agent and calls back into the gateway. See [docs/design/external-gate.md](docs/design/external-gate.md)
+- **Per-conversation model** — Each conversation has its own model, set by the owner's `/model` command in a gateway or by the agent's `select_llm`; it applies from the next turn
+- **Co-Agent / caller levels** — Every turn carries a caller level (`owner` / `co_agent` / `trusted_user` / `agent`) decided by the gateway; tool visibility depends on it
 - **Sandboxed Workspace** — Per-agent file operations with path traversal protection
 - **Time Triggers** — Interval (`@every 30m`) and time-of-day (cron) triggers are the same thing: rows in `agent_schedules`, several per session, each with its own `message` (the prompt the agent receives when it fires). One central scheduler fires every row through the same TimedFire path into the session's gateway; triggers that land on the same session run as separate, serialized turns. Changing a row's expression or re-enabling it never fires immediately — the next fire is always after now
-- **Attachment Anchors** — Discord attachments leave a trace in the stored conversation, not just in the model call: images are passed as vision content parts *and* noted in the message body as `[画像添付: name (type)]`, non-image files as `[添付ファイル: name (type), NB]`. Without the anchor an image left no record in `session_logs`, and later turns concluded the agent had made it up
 - **Self-Learning** — Experience-based learning, peer learning, reflection, and skill creation
-- **LLM Self-Selection** — Agents dynamically select LLMs per task based on past experience
 - **Response Evaluation** — Quality scoring after each interaction
-- **Cost Tracking** — Token usage, latency, and estimated cost per model
-- **Mentor Instruction (planned)** — Owner registers behavioral rules for specific scenarios; agents reference them for case-based decision-making
+- **Cost Tracking** — Token usage, latency, and estimated cost per model (`model_pricing`)
 - **Hot-Reload Configuration** — `config/` directory watched with `notify_debouncer_mini`; ToolsConfig live-updates without restart
-- **Channel Whitelist** — Per-channel readable/writable/whitelist management via `discord_channel_config` table
-- **Tool Allowed Commands** — Agents manage their own tool permission lists via gateway actions
+- **Tool Allowed Commands** — Per-agent allowed shell commands (`agent_allowed_commands`), managed from the dashboard, the REST API or the agent's own tools
 
 ## Architecture
 
@@ -57,18 +49,14 @@ opencrab/
 │   ├── core/       # Agent engine, soul, identity, memory, skills, workspace, heartbeat
 │   ├── llm/        # Multi-provider LLM abstraction, routing, metrics, pricing
 │   ├── llm-types/  # LLM type definitions only (kept separate to keep deps light)
-│   ├── gateway/    # GatewayActions trait + shared message types + DiscordGateway (serenity)
+│   ├── gateway/    # GatewayActions trait + shared message types (no platform SDK)
 │   ├── actions/    # Action dispatcher, background execution runtime, policy tables
 │   ├── db/         # SQLite persistence with FTS5 full-text search
 │   ├── mcp/        # MCP client (external tool servers as child processes)
 │   ├── server/     # Axum REST API server (hot-reload config watcher), agent response pipeline
 │   ├── cli/        # Database-management REPL CLI
-│   ├── discord/    # Discord gateway with per-agent manager and message loop
-│   ├── nostr/      # Nostr gateway: per-agent key/relay config, per-session queue,
-│   │               #   concurrency cap, and a thin `nostaro` CLI passthrough
-│   ├── extgate/    # Core side of the external-gateway V3 protocol (gate socket: provision, hello, said/say)
-│   ├── gate-client/# Client side of the V3 protocol, used by the gateway processes
-│   └── voice/      # STT/TTS provider layer (OpenAI-compatible STT, VOICEVOX/OpenAI TTS)
+│   ├── extgate/    # Core side of the gate socket protocol (hello, said, say, invoke, command)
+│   └── gate-client/# Client side of the protocol, used by the gateway processes
 ├── web/            # React frontend (Vite + Tailwind CSS + i18n EN/JA)
 ├── config/         # Configuration files (hot-reloaded)
 ├── docs/           # Design docs and assets
@@ -77,12 +65,13 @@ opencrab/
 
 The gateway processes (`discord-gateway`, `nostr-gateway`, `web-gateway`, `cli-gateway`), their
 end-to-end QC and the process conformance suite live in
-[kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways). They talk to this core only
-through `gate-client` over the V3 Unix-socket protocol, pinned to an exact core revision.
+[kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways); the Bluesky gateway lives in
+[kojira/opencrab-bluesky-gateway](https://github.com/kojira/opencrab-bluesky-gateway). They talk to this core only
+over the gate socket protocol; the Rust gateways use `gate-client`, pinned to an exact core revision.
+Platform settings (bot tokens, Nostr keys, channels, trusted users, owner IDs) belong to each
+gateway, not to the core.
 
 **Direction of travel**: the goal is a structure where the **core keeps running while the outer layers (transports, extensions) can be swapped without downtime** — ultimately so that agents can develop opencrab itself. Generic functionality must not live in transport crates, state belongs to the core, and the upper layer should not name individual gateways. See **[docs/design-plugin-architecture.md](docs/design-plugin-architecture.md)** before adding a new gateway or moving code between crates.
-
-Some of this is not yet true and is tracked as issues: a concrete Discord transport sits in `gateway/` next to the traits, and the `Gateway` trait itself has no consumers yet. These are being unwound.
 
 ## Prerequisites
 
@@ -94,7 +83,7 @@ Some of this is not yet true and is tracked as issues: a concrete Discord transp
 ### 1. Clone and build
 
 ```bash
-git clone https://github.com/yourname/opencrab.git
+git clone https://github.com/kojira/opencrab.git
 cd opencrab
 cargo build
 ```
@@ -108,20 +97,17 @@ is done entirely from the dashboard (see [First-time setup](#first-time-setup-re
 cp config/default.toml.example config/default.toml
 ```
 
-> **Security note:** the dashboard has no authentication. Since first-time setup
-> handles secrets like Discord bot tokens, only expose the dashboard on a trusted
+> **Security note:** the dashboard has no authentication. Since it handles secrets
+> like LLM provider API keys, only expose the dashboard on a trusted
 > network (e.g. localhost or behind a VPN/reverse proxy with auth).
 
-### 3. Set environment variables (required for Discord, optional otherwise)
+### 3. Set environment variables (optional)
 
 OpenCrab talks to LLMs through pluggable providers, chosen by `[llm] default_provider`
 in `config/default.toml` or from the dashboard setup wizard. Because providers and their
 API keys can be configured from the dashboard and saved to the DB, API keys are optional here.
-Discord is different: `config/default.toml` no longer holds an owner ID of its own —
-it reads `${OWNER_DISCORD_ID}` from the environment — so the Discord gateway needs a
-`.env` file (or exported variables) to know who the owner is.
 
-If you prefer environment variables for LLM providers too, set the API keys directly:
+If you prefer environment variables for LLM providers, set the API keys directly or in `.env`:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
@@ -129,61 +115,25 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 # Optional
 export GOOGLE_API_KEY="..."
 export OPENROUTER_API_KEY="..."
-export DISCORD_TOKEN="..."
 ```
 
-#### `.env` (how per-environment values are supplied)
+#### `.env`
 
-Values that differ per environment (Discord bot token, your Discord user ID) are kept
-in a `.env` file rather than in the tracked config. The server and CLI load `.env` at
-startup, and `config/default.toml` references the values as `${VAR}` — an unset variable
-expands to an empty string, so a missing `.env` silently leaves the value empty:
+The server and CLI load `.env` at startup, and `config/default.toml` references values as
+`${VAR}` — an unset variable expands to an empty string, so a missing `.env` silently
+leaves the value empty:
 
 ```bash
 cp .env.example .env
 # then edit .env
 ```
 
-`OWNER_DISCORD_ID` is your own Discord user ID and gates owner-only behavior. **Set it
-whenever you use Discord** (shared gateway or per-agent bots): when it is empty, nobody
-is recognized as owner, so owner-only features stop working, DMs from any user are
-accepted for agents that have no trusted users registered, and owner-only UI
-(forms/modals/buttons) skips its operator check. The server logs a warning whenever a
-Discord gateway starts without an owner — at boot for the shared gateway, and for
-per-agent bots both at boot (restored from the database) and when a config is saved
-from the dashboard. See
-[docs/discord.md](docs/discord.md) for details.
+`OPENCRAB_SUBTASK_AUTO_DISPATCH` (`0`/`false`/`off`/`no`) turns background tool execution
+off without editing the TOML (see [Configuration](#configuration)).
 
-`OPENCRAB_SECRET_MASTER_KEY` encrypts Nostr secret keys at rest (DB main keys and
-generated-key files) so they never sit in plaintext where an agent can read them. **It is
-required whenever any agent has Nostr configured**. If an enabled Nostr row exists and the
-key is missing, invalid, or does not decrypt existing ciphertext, startup fails loudly. If all
-configured rows are disabled, the server may start with the Nostr subsystem unavailable and a
-banner in the logs; enabling still fails until the prerequisite is supplied. Deployments that do
-not use Nostr can leave it unset and start normally.
-
-- **Generate it** (32 random bytes, base64):
-
-  ```bash
-  openssl rand -base64 32
-  # or: head -c 32 /dev/urandom | base64
-  ```
-
-  Put the result in `.env` as `OPENCRAB_SECRET_MASTER_KEY=...`. The server reads it once at
-  startup and immediately removes it from its own environment so it is not inherited by
-  agent shells.
-
-- **Back it up separately from the database.** After migration, the DB main keys and the
-  generated-key files are all ciphertext (`enc:v1:…`). The key and the ciphertext are two
-  halves: the DB alone is undecryptable, and the key alone has nothing to decrypt. Keep the
-  master key somewhere other than your DB backups (a secrets manager / password vault), or a
-  DB restore will be unrecoverable.
-
-- **If you lose it, the Nostr identities cannot be recovered** — you must generate new keys
-  and re-establish identities (rotate). Holding `data/agents` does not help; those files are
-  encrypted too.
-
-See [docs/nostaro-interface.md](docs/nostaro-interface.md) for how the key is used at runtime.
+Discord, Nostr and other platform settings (bot tokens, owner IDs, Nostr keys and the
+master key that encrypts them) are not read by the core; they belong to the gateway
+processes. See the gateway repositories for their settings.
 
 ### 4. Development (recommended)
 
@@ -198,13 +148,10 @@ See [docs/nostaro-interface.md](docs/nostaro-interface.md) for how the key is us
 ### 5. Manual startup
 
 ```bash
-# Backend (default: Discord / Nostr / Web conversation gates all enabled)
+# Backend
 cargo run -p opencrab-server
-# Listening on 0.0.0.0:8080
-#
-# To drop conversation gates you don't need, disable default features and opt in
-# to just the ones you want (the management REST API stays either way):
-#   cargo run -p opencrab-server --no-default-features --features nostr
+# REST API on 0.0.0.0:8080 ([gateway.rest] port). If [gate] listen_socket is set,
+# it also listens on that Unix socket for gateway processes.
 
 # Frontend dev server (separate terminal)
 cd web && ./dev.sh
@@ -220,13 +167,15 @@ cargo run -p opencrab-cli
 ## First-time setup (recommended)
 
 Once the server and dashboard are running, open `http://localhost:3000` and go to
-**Setup** (`/setup`). The guided wizard walks you through everything needed to get a
-working agent — no `config/default.toml` editing required:
+**Setup** (`/setup`). The guided wizard has two steps — no `config/default.toml`
+editing required:
 
 1. **LLM provider** — enable a provider and set its API key (saved to the DB, hot-reloaded)
 2. **Agent** — create an agent; the standard skills in `skills/*.skill.md` are seeded automatically
-3. **Discord** — set a per-agent bot token; the gateway starts immediately (no restart)
-4. **Channel** — whitelist the channel where the agent should respond
+
+To talk to the agent from Discord, Nostr, the web or a terminal, start the matching gateway
+process from [kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) and point it
+at the core's gate socket.
 
 The Home page also shows a **Setup checklist** card that tracks your progress and links
 back into the wizard until every step is done.
@@ -236,8 +185,8 @@ working directory). If you run the server from a different directory, point it a
 skills folder with `OPENCRAB_SKILLS_DIR=/path/to/skills` so step 2 can seed them.
 
 A few settings still require editing `config/default.toml` and restarting: the REST
-port, the database path, and the initial `[tools]` allowed-command list (agents can add
-their own commands at runtime via gateway actions).
+port, the database path, the gate socket path, and the initial `[tools]` allowed-command list
+(per-agent commands can be added at runtime).
 
 ## API Endpoints
 
@@ -271,141 +220,66 @@ by a test rather than by review — `readme_action_table_matches_the_dispatcher`
 set in both directions. Absolute counts are deliberately not written here: they went stale
 twice (#203), and the table itself is the check.
 
-In addition, **gateway actions** are invokable via natural language. Where they are
-implemented decides where they are usable: the transport-independent source
-(`SystemGatewayActions`, `crates/server/src/system_actions.rs`) is composed into **every**
-turn — Discord, web, Nostr, REST and heartbeat alike — while a transport crate's actions
-only exist on that transport's turns.
+In addition, **gateway actions** are invokable via natural language. They come from two places:
+
+1. **The core's own tools** (`SystemGatewayActions`, `crates/server/src/system_actions/`). These exist on every turn, whatever gateway the turn came from.
+2. **Tools a gateway declares** in its `hello` frame (`operations`, e.g. Discord's `reply` / `reaction`). The core shows them to the agent only on turns of that gateway's conversations and invokes them back over the gate socket (`crates/extgate/src/ops_projection.rs`). Their names, schemas and caller levels are owned by the gateway, so they are not listed here; see [docs/design/external-gate.md](docs/design/external-gate.md) for the declaration format.
 
 | Category | Actions | Available on |
 |----------|---------|--------------|
-| **Config** | `configure_llm_provider`, `configure_self`, `configure_nostr`, `configure_mcp_server` | all turns (`crates/server/src/system_actions.rs`) |
+| **Config** | `configure_llm_provider`, `configure_self`, `configure_mcp_server` | all turns (`crates/server/src/system_actions/`) |
 | **Memory** | `rebuild_memory_index`, `update_memory_index_config` | all turns (`crates/server`) |
-| **Tool Permissions** | `add_allowed_command`, `list_allowed_commands`, `remove_allowed_command`, `manage_allowed_commands` | all turns (`crates/server/src/agent_management.rs`, `system_actions.rs`) |
+| **Tool Permissions** | `add_allowed_command`, `list_allowed_commands`, `remove_allowed_command`, `manage_allowed_commands` | all turns (`crates/server/src/agent_management.rs`, `system_actions/`) |
 | **Subtask** | `spawn_subtask`, `cancel_subtask`, `steer_subtask`, `report_progress` | all turns (`crates/server`) |
-| **Schedules (#455, #477, #612)** | `get_my_schedules`, `set_my_schedule`, `update_my_schedule`, `delete_my_schedule`, `run_my_schedule` | all turns (`crates/server/src/agent_schedule.rs`) — an agent registers/reads/updates/deletes its own cron / `@every` triggers for the current session (each fires its own message into the session on the central scheduler); update/delete/run take an id from `get_my_schedules` and only touch rows that belong to the caller's own agent id and current session; `run_my_schedule` (owner/co_agent only) fires a row now without waiting, through the exact same path as a timed fire (`heartbeat_fire::run_one_heartbeat`), and does not update `last_fired_at` |
-| **Nostr identity** | `nostr_generate_key`, `nostr_list_keys`, `nostr_switch_identity` | all turns (`crates/server/src/system_actions.rs`) — bootstrap tools, exposed **before** any key exists (see [Nostr](#nostr)) |
-| **Nostr relay target** | `get_my_nostr_relay`, `set_my_nostr_relay` | all turns (`crates/server/src/agent_nostr_relay.rs`) — where the agent's inbound Nostr events get mirrored (a Discord webhook URL); also editable from the dashboard |
-| **Nostr messaging** | `nostr_post`, `nostr_reply`, `nostr_zap`, `nostr_upload` | Nostr turns only (`crates/nostr`) — the reply path used while handling an inbound Nostr event; `nostr_zap` carried a trusted-only gate until #306 dropped it. **`nostr_dm` was removed by #514** (DM is not handled at all — receive discarded, send forbidden; see [Nostr](#nostr)) |
-| **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file`, `discord_create_channel` | Discord turns only (`crates/discord`) |
-| **Delivery** | `send_ui`, `request_peer_review` | all turns whose transport can render UI (`send_ui`) or send text (`request_peer_review`) — implementations in `crates/actions/src/a2ui.rs` and `crates/server/src/peer_review.rs`; the transport only supplies the surface (`GatewayActions::a2ui_surface` / `text_delivery`) |
-| **Voice** | `join_voice_channel`, `leave_voice_channel` | Discord turns only (`crates/discord`) |
+| **Schedules (#455, #477, #612)** | `get_my_schedules`, `set_my_schedule`, `update_my_schedule`, `delete_my_schedule`, `run_my_schedule` | all turns (`crates/server/src/agent_schedule.rs`) — an agent registers/reads/updates/deletes its own cron / `@every` triggers for the current session (each fires its own message into the session on the central scheduler); update/delete/run take an id from `get_my_schedules` and only touch rows that belong to the caller's own agent id and current session; `run_my_schedule` (owner / co_agent only) fires a row now without waiting, through the exact same path as a timed fire (`heartbeat_fire::run_one_heartbeat`), and does not update `last_fired_at` |
 | **Skills** | `create_skill` | all turns (`crates/server/src/agent_management.rs`) |
 
-The rows above name every action in `SystemGatewayActions::own_definitions()` (the "all turns"
-rows) and every action in `DiscordGatewayActions::definitions()`. Each action is defined in
-exactly one place: `cancel_subtask`, `create_skill` and `request_peer_review` used to be defined
-by Discord as well, but #157 S2/S3/S5/S6/S7 removed those definitions so the
-transport-independent implementation is the only one. Notification destinations (webhooks) are
-a gateway concept and are no longer part of the core tool surface at all: the gateway owns the
-destination setting, so core resolves none of it (D-1087). The three Nostr bootstrap tools are the reverse case: they are
-defined by both `SystemGatewayActions` and `crates/nostr`, and `definitions()` de-duplicates by
-name so the transport-independent one wins — which is what makes them usable on turns where no
-Nostr gateway is running yet. Drift is caught by tests rather than by
-review — `server_gateway_action_table_matches_own_definitions`
-(`crates/server/src/system_actions.rs`) parses the "all turns" rows of this table and requires
-them to equal `own_definitions()` in both directions,
-`server_tools_are_classified_for_dispatch` requires every own definition to be classified and
-rejects dead names on the constant side, and `test_definitions_returns_expected_count` pins the
-Discord set (including that the actions relocated in #157 S1/S2/S3/S5/S6/S7 are no longer
-defined there). Note the gap: only the "all turns" rows are checked against this file. The
-`Discord turns only` / `Nostr turns only` rows are **not** — the transport-side tests pin their
-definition sets against constants, not against this table, so those rows can still go stale
-without a test failing.
+The rows above name every action in `SystemGatewayActions::own_definitions()`. The test that
+compares them with this table, `server_gateway_action_table_matches_own_definitions`
+(`crates/server/src/system_actions/tests/definitions.rs`), is currently compiled out
+(`#[cfg(any())]`), so this table is checked by review only.
 
-Visibility is not uniform. `configure_*`, `manage_allowed_commands`,
-`run_my_schedule` and the core action `update_instructions` are owner-only —
-that is `OWNER_ONLY_ACTIONS` in full. `nostr_list_keys`, `nostr_switch_identity`,
-the `*_my_nostr_relay` pair, the schedule CRUD tools,
-the voice actions and `create_skill` are trusted-only, meaning
-they are neither listed nor executable on a turn driven by an untrusted external user. That gate
-is what keeps an inbound Nostr note from talking the agent into swapping its own key:
-`nostr_switch_identity` is unreachable from a `caller=Agent` turn, and the passthrough refuses
-`init`, so neither adopting nor minting-over a key is possible from inbound. It does **not** bound
-what an inbound turn can send or spend, and it is not meant to: whether to send a zap or a post is
-the agent's own call (gating the inner `nostr_zap` / `nostr_dm` only changed which tool names got
-listed, so #306 dropped that gate rather than adding a matching one). The generic
-`nostr_run` passthrough that once carried these operations was removed as an agent tool
-(owner ruling, see [Nostr](#nostr)); what remains exposed is `nostr_post` (standalone posts),
-`nostr_zap`, `nostr_upload`, and reply through the core `say` action (`kojira/opencrab#840`).
-**DM is forbidden (#514):** `nostr_dm` was removed as a tool and `dm` is denied in the passthrough
-machinery, so the convenient encrypted-DM path is closed. An encrypted DM feels safe
-now, but the day the secret key leaks, every past DM becomes readable — that false sense of
-"it's fine to put something private here" is removed at the root, not merely restricted to
-owners (a key leak defeats owner-only too). Private conversations belong on Discord DMs or a
-dedicated channel, not on Nostr.
-`nostr_generate_key` is deliberately *not* gated: it only mints a key that nobody has
-adopted yet, and adopting one is what `nostr_switch_identity` gates. The single table is
-`crates/actions/src/bridge.rs` (`OWNER_ONLY_ACTIONS` / `TRUSTED_ONLY_ACTIONS`), consulted by both
-tool listing and execution.
+MCP servers configured per agent add tools named `mcp__<server>__<tool>`.
+
+Visibility is not uniform. The single table is `crates/actions/src/bridge/policy.rs`
+(`OWNER_ONLY_ACTIONS` / `TRUSTED_ONLY_ACTIONS`), consulted by both tool listing and execution.
+
+- **Owner only** (`OWNER_ONLY_ACTIONS`): `update_instructions`, `configure_llm_provider`,
+  `manage_allowed_commands`, `configure_self`, `configure_mcp_server`, `execute_shell`, the
+  `ws_*` file tools, `add_allowed_command`, `remove_allowed_command`, `run_my_schedule` and
+  `generate_image`. A `co_agent` caller is treated as owner (`CallerIdentity::is_owner_equivalent`).
+- **Trusted only** (`TRUSTED_ONLY_ACTIONS`): skill creation and learning, the schedule CRUD tools,
+  `update_memory_index_config`, `get_system_info`, `list_allowed_commands`, the memory tag tools
+  and the memory unit / memory core tools. These are neither listed nor executable on a turn driven
+  by an untrusted external user (`agent` caller).
+
+Tools a gateway declares carry their own `authorization.allowed_callers` in the declaration.
 
 `create_skill` (a gateway action, `source_type="acquired"`) and `create_my_skill` (a core
 action, `source_type="self_created"`, `situation_pattern` required) are deliberately kept as
 two separate tools: #157 only moves generic implementations out of the transport layer, and
 dropping a tool name would break calls recorded in past conversation logs.
 
-## Nostr
+## Model selection
 
-The Nostr gateway is per-agent, like the Discord one: each agent has its own key, its own relay
-set and its own subscription filter, persisted in the DB. Nostr protocol work is not
-reimplemented here — `crates/nostr` drives the `nostaro` CLI as a subprocess, with a config path
-pinned per agent (`data/agents/{id}/nostr/config.toml`) so one agent can never sign with
-another's key.
+Each conversation (session) has its own model (`sessions.model`); a turn reads it once at start
+and runs on that one model. It is changed in two ways, both through
+`ModelAdministration::set_session_model`:
 
-**An agent can put itself on Nostr.** `nostr_generate_key`, `nostr_list_keys` and
-`nostr_switch_identity` are defined by `SystemGatewayActions`, so they exist *before* the agent
-has a key and on turns where no Nostr gateway is running (the latter two on trusted turns only).
-The agent generates a key (optionally with a vanity npub prefix), looks up the resulting npub,
-and adopts it — and adopting is what starts the gateway: if the agent was not connected yet,
-`nostr_switch_identity` also writes a bounded filter and brings the connection up. That filter is
-`keywords = [npub]` (`crates/nostr/src/manager.rs`), which becomes
-`nostaro watch --keyword=<npub>` — a **body keyword match, not a `#p` tag subscription**. See the
-coverage note at the end of this section for what that costs.
-No dashboard step and no restart in between. The private key is
-generated and stored server-side (mode 0600) and is never returned to the model; `nsec` is
-masked out of tool results and error strings.
+- the owner's `/model` command in a gateway (the gate socket `command` frame with
+  `set_session_model`), and
+- the agent's `select_llm` tool.
 
-**`nostr_run` was removed as an agent tool (owner ruling).** The generic nostaro passthrough is no
-longer exposed to the model: replying is done through the single core `say` action (the gateway
-posts it as a `nostaro reply` to the target note, `kojira/opencrab#840`) and standalone posting
-through `nostr_post`. A name-specified `nostr_run` call fail-closes. The passthrough machinery
-itself (`NostaroCli::run_passthrough`, `GatewayNostrPassthrough`) is kept in the codebase — as a
-defence on other paths and for possible future use — but nothing wires an agent-facing tool to it.
+The change applies from the conversation's next turn and lasts until changed again. The
+running turn keeps its model. A name that is not in the `/model` list (`GET /api/llm/model-choices`)
+is rejected and the list is returned. `select_llm` works only in a conversation, not inside a
+subtask.
 
-The remainder of this note describes that passthrough machinery as it still stands. It forwarded a
-`nostaro` subcommand and its arguments straight through, so whatever nostaro could do the agent
-could do: arbitrary-kind `event`, `profile` (kind:0), NIP-28 `channel` creation and posting,
-`upload`, `react`, `repost`, `follow`, `get` / `timeline` / `search`, and so on. Only a few
-subcommands were denied — `init` (key creation/overwrite, which belongs to the bootstrap tools),
-`watch` (unbounded inbound, which belongs to the gateway), `relay` (it would edit `config.toml`
-only, desyncing from the DB that owns relay settings) and, since #514, `dm`. Everything else was
-passed through unexamined.
+`get_system_info` returns `current_turn_model` (this turn), `conversation_model` (the next
+turn) and `selectable_models` (the `/model` list).
 
-What OpenCrab guarantees about that passthrough machinery is deliberately just two things:
-
-1. **No key mix-up between agents** — the config is always the calling agent's
-   (`--config` cannot be overridden through the arguments), and the command is built as
-   structured argv, never as a shell string.
-2. **`nsec` stays hidden** — the agent never handles a private key, and both stdout and error
-   output are masked.
-
-Judgements about the Nostr protocol itself — which kind, which tags, what a valid event looks
-like — are left to nostaro. That is the point: OpenCrab does not reimplement the spec, so a
-nostaro capability does not need a matching OpenCrab tool before an agent can use it.
-`docs/nostaro-interface.md` records the subcommands and output shapes this crate relies on.
-
-Inbound events matching the agent's filter can also be mirrored into a Discord channel via
-webhook. The target is set from the dashboard, or by the agent itself with `get_my_nostr_relay`
-/ `set_my_nostr_relay`.
-
-**Inbound coverage is not complete, and the cause is on this side.** The bootstrap filter written
-by `nostr_switch_identity` matches the agent's npub as a **keyword in the note body**, so a reply
-that only references the agent through `e` / `p` tags — which is what a normal Nostr client
-produces — matches nothing and is dropped **systematically**, not occasionally. Fixing it takes
-changes in both places: the filter this repo writes (`kojira/opencrab#271`) and the subscription
-nostaro builds from it (`nostaro` issue #6, unmerged). Until then, do not assume every mention
-produces a turn. Outbound — posting, and replying to an event the agent did receive — is the part
-that is exercised today.
+When an LLM call fails and ends the turn, the core records a `turn_failed` event with the model
+and the provider error; it appears in the conversation history on the next turn.
 
 ## Skills
 
@@ -420,9 +294,10 @@ Standard skills defined in `skills/`:
 | Skill | File | Description |
 |-------|------|-------------|
 | Autonomous Mode | `autonomous.skill.md` | Self-directed participation without a facilitator |
+| OpenCrab Handbook | `opencrab-handbook.skill.md` | Map of OpenCrab itself: caller levels, how settings are changed, where to find current facts |
 | Self-Learning | `self-learning.skill.md` | Experience-based capability acquisition |
 | Workspace Management | `workspace-management.skill.md` | File and directory operations within the agent workspace |
-| LLM Selection | `llm-selection.skill.md` | Dynamic model selection based on task requirements |
+| LLM Selection | `llm-selection.skill.md` | When and how to change the conversation's model with `select_llm` |
 | LLM Meta-Analysis | `llm-meta-analysis.skill.md` | Cross-model performance analysis and insight extraction |
 | Cursor CLI | `cursor-cli-local.skill.md` | Driving the Cursor CLI (`agent`) through `execute_shell`. Requires granting the command per agent via `agent_allowed_commands`; it is intentionally not in the global allowlist |
 
@@ -431,8 +306,8 @@ Standard skills defined in `skills/`:
 Configuration is loaded from `config/default.toml` and **hot-reloaded** when files in `config/` change:
 
 - **Agent settings** — `workspace_path`, `max_workspace_size_mb`. The legacy `heartbeat_interval_secs`, `heartbeat_enabled` and `heartbeat_min_interval_secs` keys are still accepted but no longer read: time triggers live in `agent_schedules` (#612)
-- **LLM providers** — Default provider and default model (`[llm] default_provider` / `default_model`), per-use-case model selection, fallback chains, model aliases, self-selection toggle. Provider settings are also editable from the dashboard and saved to the DB, which then takes precedence over this file
-- **Gateway settings** — REST port (8080), per-agent Discord token (DB-persisted), per-agent Nostr key/relays/filter (DB-persisted), CLI toggle
+- **LLM providers** — Default provider and default model (`[llm] default_provider` / `default_model`), providers (`[llm.providers.*]`), fallback chain (`[llm.fallback]`), model aliases (`[llm.aliases]`). Provider settings are also editable from the dashboard and saved to the DB, which then takes precedence over this file
+- **REST and gate socket** — REST port (`[gateway.rest] port`, 8080) and the gate socket path for gateway processes (`[gate] listen_socket`; empty = do not listen)
 - **Database** — SQLite path
 - **Tools** — Shell commands with per-command permission levels (`agent` / `owner`)
 - **Background tool execution** — `[subtask] auto_dispatch` (default `true`). Tool calls run in the background so the response loop never blocks; results are re-injected into the conversation when they finish. Set it to `false` (or export `OPENCRAB_SUBTASK_AUTO_DISPATCH=0`, which takes precedence) to fall back to fully synchronous tool execution. See "非ブロックツール実行" in `docs/DESIGN.md` for which tools stay inline and why.
@@ -442,8 +317,7 @@ The `[tools]` section supports config-driven tool definitions with permission le
 ## Testing
 
 ```bash
-# Run all tests. Some crates gate modules behind features (e.g. discord), so
-# --all-features is what CI runs and what the counts below refer to.
+# Run all tests (this is what CI runs).
 cargo test --workspace --all-features
 
 # Run tests for a single crate (see [workspace] members in Cargo.toml for the full list)
@@ -451,7 +325,7 @@ cargo test -p opencrab-db
 cargo test -p opencrab-actions
 cargo test -p opencrab-llm
 cargo test -p opencrab-core
-cargo test -p opencrab-web-gateway
+cargo test -p opencrab-extgate
 
 # Run the in-process E2E API tests (builds the real router; no server needed)
 cargo test -p opencrab-server --test api_e2e
@@ -483,8 +357,7 @@ examples.
 | HTTP Client | reqwest |
 | Frontend | React + Vite + Tailwind CSS |
 | i18n | react-i18next (English / Japanese) |
-| Discord | serenity (per-agent gateway) |
-| Nostr | `nostaro` CLI driven as a subprocess (per-agent config/key) |
+| Gateways | separate processes over a Unix socket ([opencrab-gateways](https://github.com/kojira/opencrab-gateways)) |
 | Serialization | serde / serde_json |
 | Error Handling | anyhow / thiserror |
 | Logging | tracing / tracing-subscriber |

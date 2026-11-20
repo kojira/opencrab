@@ -1,25 +1,43 @@
 # opencrab API Reference
 
-Base URL: `http://localhost:3000`
+Base URL: `http://localhost:8080` (the core, `[gateway.rest] port`). The dashboard dev server on `:3000` proxies `/api` to it.
 
 ## Quick Reference
 
+The table below is the full route list of `crates/server/src/lib.rs` (`production_routes!`).
+Platform settings (Discord, Nostr, channels, co-agents, trusted users) are not core routes; they
+belong to the gateway processes.
+
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
+| **Health** | | |
 | GET | `/health` | Health check → `"ok"` (plain text) |
 | GET | `/api/health` | Health check → `{"status":"ok"}` (JSON) |
-| **External Intake** | | |
+| **External events** | | |
 | POST | `/api/hooks/{source}` | Receive external event (HMAC-verified) → 202 |
 | **Agents** | | |
 | POST | `/api/agents` | Create agent |
 | GET | `/api/agents` | List agents |
-| GET | `/api/agents/{id}` | Get agent (identity + soul) |
+| GET | `/api/agents/{id}` | Get agent |
+| PUT | `/api/agents/{id}` | Replace agent fields |
+| PATCH | `/api/agents/{id}` | Partial update of agent fields (e.g. model) |
 | DELETE | `/api/agents/{id}` | Delete agent |
-| **Soul & Identity** | | |
-| GET | `/api/agents/{id}/soul` | Get soul |
-| PUT | `/api/agents/{id}/soul` | Update soul |
-| GET | `/api/agents/{id}/identity` | Get identity |
-| PUT | `/api/agents/{id}/identity` | Update identity |
+| GET | `/api/agents/{id}/sleep-logs` | Sleep-time skill review history (newest first) |
+| **Setup** | | |
+| GET | `/api/setup/status` | First-time setup progress (`llm_provider`, `agent`) |
+| POST | `/api/agents/{id}/skills/seed-standard` | Seed the standard skills from `skills/*.skill.md` (idempotent) |
+| **LLM** | | |
+| GET | `/api/llm/model-choices` | Selectable models (`provider:model`), the same list as `/model` and `select_llm` |
+| GET | `/api/llm/model-pricing` | List model pricing / context window / output limit |
+| PUT | `/api/llm/model-pricing` | Upsert one model's pricing (`context_window` required) |
+| GET | `/api/llm/providers` | List providers |
+| POST | `/api/llm/providers/reload` | Rebuild providers from TOML + DB |
+| PUT | `/api/llm/providers/{name}` | Save a provider override to the DB |
+| DELETE | `/api/llm/providers/{name}/override` | Drop the DB override (back to TOML) |
+| POST | `/api/llm/providers/{name}/test` | Check the provider starts with the current settings |
+| GET | `/api/llm/codex/diagnostics` | Codex CLI diagnostics |
+| GET | `/api/llm/cursor/diagnostics` | Cursor CLI diagnostics |
+| GET | `/api/llm/acp/diagnostics` | ACP agent diagnostics |
 | **Soul Presets** | | |
 | GET | `/api/agents/{id}/soul/presets` | List presets |
 | POST | `/api/agents/{id}/soul/presets` | Save current soul as preset |
@@ -35,6 +53,7 @@ Base URL: `http://localhost:3000`
 | GET | `/api/agents/{id}/skills/unused` | List skills unused for 7+ days |
 | **Memory** | | |
 | GET | `/api/agents/{id}/memory/curated` | List curated memories |
+| DELETE | `/api/agents/{id}/memory/curated/{entry_id}` | Delete one curated memory |
 | POST | `/api/agents/{id}/memory/search` | Search memory (FTS5) |
 | GET | `/api/agents/{id}/memory/index` | Get index status |
 | POST | `/api/agents/{id}/memory/index` | Trigger incremental index build |
@@ -43,51 +62,34 @@ Base URL: `http://localhost:3000`
 | PUT | `/api/agents/{id}/memory/index/config` | Update index config |
 | POST | `/api/agents/{id}/memory/index/rebuild` | Full index rebuild |
 | POST | `/api/agents/{id}/memory/index/merge` | Merge topics |
+| GET | `/api/agents/{id}/daily-log-index/status` | Daily log index status |
+| POST | `/api/agents/{id}/daily-log-index/rebuild` | Rebuild the daily log index (background, returns `started`) |
+| POST | `/api/agents/{id}/daily-log-index/run` | Index new days (background, returns `started`) |
 | **Sessions** | | |
 | POST | `/api/sessions` | Create session |
 | GET | `/api/sessions` | List sessions |
 | GET | `/api/sessions/{id}` | Get session detail |
-| POST | `/api/sessions/{id}/messages` | Send message (triggers agent response) |
 | GET | `/api/sessions/{id}/logs` | Get session logs |
-| POST | `/api/sessions/{id}/mentor` | Insert mentor instruction |
-| POST | `/api/sessions/{id}/owner` | Owner instruction (record + turn) |
 | **Agent Messages** | | |
 | POST | `/api/agents/{id}/messages` | Send direct message to agent |
-| **Agent Schedules (#455)** | | |
+| **Schedules (#455)** | | |
 | GET | `/api/agents/{id}/schedules` | List schedules (each with computed `next_fire_at`) |
 | POST | `/api/agents/{id}/schedules` | Create schedule (cron/`@every`; validates cron/tz/session; 400 on invalid) |
 | PATCH | `/api/schedules/{sid}` | Update schedule (cron/tz change or enable resets anchor; disable preserves phase) |
 | DELETE | `/api/schedules/{sid}` | Delete schedule |
-| **Web** | | |
-| POST | `/api/agents/{id}/web/send` | Send message from web dashboard (inbound) |
-| GET | `/api/agents/{id}/web/stream` | Subscribe to agent utterances (SSE) |
 | **Analytics** | | |
 | GET | `/api/agents/{id}/analytics` | Analytics summary |
 | GET | `/api/agents/{id}/analytics/detail` | Analytics by model |
 | **Workspace** | | |
 | GET | `/api/agents/{id}/workspace` | List workspace files |
-| GET | `/api/agents/{id}/workspace/{path}` | Read file |
-| PUT | `/api/agents/{id}/workspace/{path}` | Write file |
-| **Discord** | | |
-| GET | `/api/agents/{id}/discord` | Get Discord config |
-| PUT | `/api/agents/{id}/discord` | Save Discord config (full update) |
-| PATCH | `/api/agents/{id}/discord` | Partial update Discord config |
-| DELETE | `/api/agents/{id}/discord` | Remove Discord config |
-| POST | `/api/agents/{id}/discord/start` | Start Discord gateway |
-| POST | `/api/agents/{id}/discord/stop` | Stop Discord gateway |
-| **Channel Configs** | | |
-| GET | `/api/agents/{id}/channel-configs` | List channel configs by guild |
-| PUT | `/api/agents/{id}/channel-configs` | Upsert channel config |
-| DELETE | `/api/agents/{id}/channel-configs/{channel_id}` | Delete channel config |
-| **Co-Agents** | | |
-| GET | `/api/agents/{id}/co-agents` | List co-agents |
-| POST | `/api/agents/{id}/co-agents` | Register co-agent |
-| DELETE | `/api/agents/{id}/co-agents/{co_agent_id}` | Remove co-agent |
-| **Trusted Users** | | |
-| GET | `/api/agents/{id}/trusted-users` | List trusted users |
-| POST | `/api/agents/{id}/trusted-users` | Add trusted user |
-| PATCH | `/api/agents/{id}/trusted-users/{user_id}` | Update permission |
-| DELETE | `/api/agents/{id}/trusted-users/{user_id}` | Remove trusted user |
+| GET | `/api/agents/{id}/workspace/{*path}` | Read file |
+| PUT | `/api/agents/{id}/workspace/{*path}` | Write file |
+| **MCP** | | |
+| GET | `/api/agents/{id}/mcp` | List the agent's MCP servers |
+| PUT | `/api/agents/{id}/mcp` | Add or update an MCP server |
+| DELETE | `/api/agents/{id}/mcp/{name}` | Remove an MCP server |
+| POST | `/api/agents/{id}/mcp/{name}/enabled` | Enable/disable an MCP server |
+| POST | `/api/agents/{id}/mcp/{name}/test` | Try a one-off connection (tool count or failure reason) |
 | **Allowed Commands** | | |
 | GET | `/api/agents/{id}/allowed-commands` | List allowed shell commands |
 | POST | `/api/agents/{id}/allowed-commands` | Add allowed command |
@@ -95,11 +97,20 @@ Base URL: `http://localhost:3000`
 | **LLM Logs** | | |
 | GET | `/api/agents/{id}/llm-logs` | List LLM call logs |
 | GET | `/api/agents/{id}/llm-logs/stats` | LLM log statistics (30d) |
-| **Tool Logs** | | |
+| GET | `/api/agents/{id}/llm-logs/{log_id}/tool-history` | Tool calls of the session around one LLM call |
 | GET | `/api/agents/{id}/tool-logs` | List tool execution logs |
 | **Import** | | |
 | POST | `/api/import/scan` | Scan workspace directory |
 | POST | `/api/import/execute` | Execute workspace import |
+| GET | `/api/agents/{id}/import/sync/status` | OpenClaw sync status |
+| POST | `/api/agents/{id}/import/sync` | Run OpenClaw sync |
+| GET | `/api/agents/{id}/import/sync/history` | OpenClaw sync history |
+| **System** | | |
+| GET | `/api/system/log-level` | Get the agent log level |
+| PATCH | `/api/system/log-level` | Set the agent log level |
+
+The web dashboard's conversation API (`/api/web-conversations`) is served by the Web gateway
+process, not by the core; the dashboard dev server proxies it separately (`web/vite.config.ts`).
 
 ---
 
@@ -318,6 +329,10 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 
 ### GET /api/agents/{id}/soul
 
+> **Removed.** This endpoint no longer exists in the core (`crates/server/src/lib.rs`). Soul and identity
+> fields are part of the agent: use `GET` / `PUT` / `PATCH /api/agents/{id}`. Kept below as a record.
+
+
 **目的**: エージェントの Soul を取得する
 
 **Response**: SoulRow
@@ -338,6 +353,10 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 ---
 
 ### PUT /api/agents/{id}/soul
+
+> **Removed.** This endpoint no longer exists in the core (`crates/server/src/lib.rs`). Soul and identity
+> fields are part of the agent: use `GET` / `PUT` / `PATCH /api/agents/{id}`. Kept below as a record.
+
 
 **目的**: エージェントの Soul を更新する
 
@@ -374,6 +393,10 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 
 ### GET /api/agents/{id}/identity
 
+> **Removed.** This endpoint no longer exists in the core (`crates/server/src/lib.rs`). Soul and identity
+> fields are part of the agent: use `GET` / `PUT` / `PATCH /api/agents/{id}`. Kept below as a record.
+
+
 **目的**: エージェントの Identity を取得する
 
 **Response**: IdentityRow
@@ -387,6 +410,10 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 ---
 
 ### PUT /api/agents/{id}/identity
+
+> **Removed.** This endpoint no longer exists in the core (`crates/server/src/lib.rs`). Soul and identity
+> fields are part of the agent: use `GET` / `PUT` / `PATCH /api/agents/{id}`. Kept below as a record.
+
 
 **目的**: エージェントの Identity を更新する
 
@@ -1069,6 +1096,10 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 
 ### POST /api/sessions/{id}/messages
 
+> **Removed.** This endpoint no longer exists in the core (`crates/server/src/lib.rs`). Conversations
+> come in through a gateway on the gate socket, or `POST /api/agents/{id}/messages`. Kept below as a record.
+
+
 **目的**: セッションにメッセージを送信し、他の参加エージェントの応答を得る
 
 > メッセージ送信者（`agent_id`）以外の全参加者が自動的に応答する。LLM 呼び出しが発生する。
@@ -1165,6 +1196,10 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 
 ### POST /api/sessions/{id}/mentor
 
+> **Removed.** This endpoint no longer exists in the core (`crates/server/src/lib.rs`). Conversations
+> come in through a gateway on the gate socket, or `POST /api/agents/{id}/messages`. Kept below as a record.
+
+
 **目的**: セッションにメンター指示を挿入する（`log_type: "system"` として記録）
 
 エージェントの応答は生成されない。次回ターンでエージェントがこの指示を参照する。
@@ -1196,6 +1231,10 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 ---
 
 ### POST /api/sessions/{id}/owner
+
+> **Removed.** This endpoint no longer exists in the core (`crates/server/src/lib.rs`). Conversations
+> come in through a gateway on the gate socket, or `POST /api/agents/{id}/messages`. Kept below as a record.
+
 
 **目的**: ダッシュボード SessionDetail からのオーナー指示。発言を `session_logs` に記録し、参加者のターンを起こす。
 
@@ -1407,6 +1446,10 @@ Request:
 
 ### POST /api/agents/{id}/web/send
 
+> **Removed.** This endpoint no longer exists in the core (`crates/server/src/lib.rs`). Conversations
+> come in through a gateway on the gate socket, or `POST /api/agents/{id}/messages`. Kept below as a record.
+
+
 **目的**: web UI からのメッセージを送信し、直接応答を得る（応答は同時に SSE へも配送される）
 
 **存在しないエージェントは 404**（#632）: `agents` テーブルに `{id}` の行が無ければ、**ターンを起こさず** **`404 Not Found`**（`{"error": "agent not found: {id}"}`）を返す。存在確認は web の唯一の公開ターン入口 `run_and_deliver_serialized` が担い、エージェント行の有無だけを判定する。（弾かれる前にセッション行やユーザー発話行は書かれることはあるが、ターンは走らない＝ LLM は呼ばれない。存在確認そのものが DB エラーで失敗した場合は 404 ではなく `500` を返す。）
@@ -1490,6 +1533,10 @@ Request:
 ---
 
 ### GET /api/agents/{id}/web/stream
+
+> **Removed.** This endpoint no longer exists in the core (`crates/server/src/lib.rs`). Conversations
+> come in through a gateway on the gate socket, or `POST /api/agents/{id}/messages`. Kept below as a record.
+
 
 **目的**: エージェント発話を SSE（`text/event-stream`）で購読する
 
@@ -1664,6 +1711,10 @@ data: {"kind":"subtask_resume","agent_id":"550e8400-e29b-41d4-a716-446655440000"
 
 ## Discord
 
+> **Removed.** The endpoints in this section no longer exist in the core (`crates/server/src/lib.rs`). Platform
+> settings and identities belong to the gateway processes now (D-1098/D-1099). Kept below as a record.
+
+
 ### GET /api/agents/{id}/discord
 
 **目的**: Discord Bot 設定を取得する
@@ -1832,6 +1883,10 @@ data: {"kind":"subtask_resume","agent_id":"550e8400-e29b-41d4-a716-446655440000"
 
 ## Channel Configs
 
+> **Removed.** The endpoints in this section no longer exist in the core (`crates/server/src/lib.rs`). Platform
+> settings and identities belong to the gateway processes now (D-1098/D-1099). Kept below as a record.
+
+
 Discordチャンネルごとの読み書き権限・ハートビート設定を管理する。
 
 ### ChannelConfigDto 構造
@@ -1949,6 +2004,10 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 
 ## Co-Agents
 
+> **Removed.** The endpoints in this section no longer exist in the core (`crates/server/src/lib.rs`). Platform
+> settings and identities belong to the gateway processes now (D-1098/D-1099). Kept below as a record.
+
+
 ### GET /api/agents/{id}/co-agents
 
 **目的**: 登録済みの共同エージェント一覧を取得する
@@ -2020,6 +2079,10 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 ---
 
 ## Trusted Users
+
+> **Removed.** The endpoints in this section no longer exist in the core (`crates/server/src/lib.rs`). Platform
+> settings and identities belong to the gateway processes now (D-1098/D-1099). Kept below as a record.
+
 
 > **信頼は経路（`platform`）ごとに分かれている（#214 / #159）。**
 > 行は登録された経路でしか効かない。`discord` は Discord のユーザー ID、`web` は
