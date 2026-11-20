@@ -1,5 +1,10 @@
 # nostaro ↔ OpenCrab インターフェース契約
 
+> **Historical (superseded).** The Nostr gateway (`crates/nostr`) no longer lives in the core, and
+> the core no longer reads `OPENCRAB_SECRET_MASTER_KEY` or Nostr keys. Nostr is now a separate
+> process in [kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways), which owns the
+> keys and drives `nostaro`. Kept as a record of the nostaro contract at the time.
+
 OpenCrab の Nostr sub-gateway（`crates/nostr`）は、Nostr プロトコルの実処理を自作 CLI
 **nostaro** に subprocess で委譲する。本書はその
 呼び出し契約と、そのために nostaro 側へ必要な**汎用的な**改造を定義する。

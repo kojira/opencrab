@@ -1,5 +1,9 @@
 # A2UI対応 UIコンポーネント設計書
 
+> **Historical (removed by D-1099).** A2UI (`send_ui`, `pending_interactions`) was removed from the
+> core (schema v65 drops `pending_interactions`). Gateways now declare their own tools over the gate
+> socket ([design/external-gate.md](design/external-gate.md)). Kept as a record.
+
 ## 概要
 
 エージェントがA2UI（Agent to UI）プロトコルに基づいたJSON形式でUIを記述し、

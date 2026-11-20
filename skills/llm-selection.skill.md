@@ -1,82 +1,55 @@
 ---
 name: llm-selection
-description: "LLM選択スキル - タスクに応じて最適なLLMを自分で選ぶ"
-version: 1
+description: "LLM選択スキル - この会話で使うモデルを自分で選ぶ（select_llm）"
+version: 2
 permission: agent
 actions:
   - select_llm
-  - get_available_models
-  - get_current_llm_config
+  - get_system_info
 ---
 
 # LLM選択マニュアル
 
-あなたは状況に応じて使用するLLMを自分で選択できます。
+あなたは、いま話している会話で使うモデルを自分で変えられます。
 
-## 1. いつLLMを切り替えるか
+## 1. 仕組み（ここを外すと「変えたのに変わらない」と誤解する）
 
-### 高性能モデルに切り替える場合
-- 複雑な推論が必要なとき
-- 重要な判断を下すとき
-- 創造的なアイデアが必要なとき
-- 長文の分析・要約が必要なとき
+- 1 つのターンは 1 つのモデルで走る。ターンの途中ではモデルは変わらない。
+- `select_llm` は **この会話のモデル** を変える。オーナーの `/model` コマンドと同じ設定を書き換える。
+- 変更は **次のターンから** 使われ、また変えるまで続く。いま実行中のターンは今のモデルのまま終わる。
+- 変えられるのは会話の中だけ。サブタスクの中では変えられない（エラーで返る）。
 
-### 高速モデルに切り替える場合
-- 単純な応答で十分なとき
-- 素早い反応が求められるとき
-- コストを抑えたいとき
+## 2. 今のモデルと選べるモデルを確かめる
 
-### ローカルモデルに切り替える場合
-- プライバシーが重要なとき
-- オフラインで動作させたいとき
-- APIコストを完全に避けたいとき
+`get_system_info` が次を返す:
 
-## 2. 利用可能なモデルエイリアス
+| 項目 | 意味 |
+|---|---|
+| `current_turn_model` | このターンで動いているモデル |
+| `conversation_model` | この会話のモデル（次のターンから使われる） |
+| `selectable_models` | 選べるモデルの一覧（`/model` と同じ一覧、`provider:model` 形式） |
 
-| エイリアス | 用途 | 特徴 |
-|-----------|------|------|
-| `fast` | 高速応答 | 低コスト、シンプルなタスク向け |
-| `smart` | 高性能 | 複雑な推論、高品質な出力 |
-| `reasoning` | 深い推論 | 数学、論理、複雑な問題解決 |
-| `creative` | 創造的 | アイデア生成、ライティング |
-| `local` | ローカル | プライバシー重視、オフライン |
-| `cheap` | 低コスト | 大量処理、コスト最小化 |
+「モデルは変わった？」と聞かれたら、`get_system_info` の `conversation_model` を見て答える。
 
-## 3. 選択の例
+## 3. 変え方
 
-### 例1: 複雑な分析タスク
 ```
 select_llm(
-    purpose: "thinking",
-    model_alias: "reasoning",
-    reason: "複雑な問題を分析するため、深い推論能力が必要",
-    duration: "this_turn"
+    model_alias: "chatgpt:gpt-6.2-sol",
+    reason: "複雑な分析が続くため、より推論の強いモデルにする",
+    purpose: "複雑な推論"
 )
 ```
 
-### 例2: 大量の要約タスク
-```
-select_llm(
-    purpose: "analysis",
-    model_alias: "fast",
-    reason: "多数のドキュメントを素早く要約するため",
-    duration: "this_session"
-)
-```
+- `model_alias` は `selectable_models` にある `provider:model`、または一覧の中で 1 つに決まるモデル名（例: `gpt-6.2-sol`）。
+- 一覧にない名前・複数のプロバイダにある名前は、何も変えずにエラーと選べる一覧が返る。一覧から選び直す。
+- 成功すると `conversation_model`（次のターンから使うモデル）と `current_turn_model`（このターンのモデル）が返る。
 
-### 例3: プライバシー重視
-```
-select_llm(
-    purpose: "conversation",
-    model_alias: "local",
-    reason: "機密情報を含む会話のため、ローカルで処理",
-    duration: "this_session"
-)
-```
+## 4. いつ変えるか
 
-## 4. 注意事項
+- 複雑な推論・重要な判断・長い分析が続くとき → より強いモデル
+- 単純な応答が続き、速さやコストを優先したいとき → 軽いモデル
+- オーナーに指定されたとき → 指定どおりに
+- 迷ったら変えない
 
-- 切り替えには若干のオーバーヘッドがある
-- 頻繁な切り替えは避ける
-- 不明な場合はデフォルトのまま使用
-- ツールコーリングはFunction Calling対応モデルが必須
+過去の使用感は `recall_model_experiences` で、気づいたことは `save_model_insight` で残せる。

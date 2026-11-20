@@ -1,37 +1,45 @@
 # opencrab-extgate
 
-External gate V3 最小形。契約・設計・検収は `docs/design/external-gate.md` に自己完結で置く。
+Core side of the gate socket protocol (protocol 3, operation protocol 1). The contract is
+`docs/design/external-gate.md`; its D-1099 section is the current wire.
 
 ## 境界
 
-- core が UDS を listen し、敷設・認可・会話・delivery を所有する。`gate.listen_socket` が空・欠落なら listen しない（recover は実行する）。
-- gateway は UDS に connect し、外部 I/O と wire 変換だけを持つ。
+- core が UDS（`gate.listen_socket`）を listen する。空なら listen しない（startup recover は実行する）。
+  資格情報は無く、ソケットを開けることだけが条件（D-1098）。
+- core はセッションだけを持つ（会話記録・記憶・ターン・ツール実行・定期実行・モデル設定、D-1099）。
+  接続先・Bot・オーナーと権限・受付・表示・設定画面は gateway が持つ。
+- gateway は `hello` で instance・担当エージェント・道具（operations）を名乗る。instance が無ければ core が作る。
+- セッションキーは gateway が決める不透明な文字列。core は (instance, キー) を `gate_bindings` 行に解決する。
 - 接続は process-local registry。startup は空。DB から復元しない。
 
 ## モジュール
 
 | ファイル | 役割 |
 |---|---|
-| `error.rs` | §5.4 の 25 code と HTTP / wire 写像 |
-| `ids.rs` | UUID・digest・`session_id_for_binding`・時刻 |
+| `protocol.rs` / `protocol/` | frame と message の読み書き |
 | `json.rs` | 全階層 duplicate member 拒否 |
-| `bearer.rs` | operator token の読取・定数時間比較 |
-| `registry.rs` | live 接続の process-local 表。`GateProbe` は `#[cfg]` 隔離 |
-| `admin.rs` | 6 operation |
-| `protocol.rs` | frame と message の読写 |
-| `inbound/mod.rs` | `crate::inbound` facade と said → `accept_inbound` orchestration。session は `canonical_session_id`（V3.5 reuse）。`kind_id=nostr` は record 前に `NostrSaidAdmit`（V1 アンカー・DM/自己/allow-set）。watch Immediate は `WatchAccept(privilege=Some)`、Bundle は `WatchAccept(privilege=None)`。record 後の turn は session queue 32。溢れは seq=null + 計測（履歴は残さない） |
-| `inbound/bundle_turn.rs` | `NostrBundleCoordinator` の member 決着・全receipt後のturn 0/1、trigger読取、watchと同文面のprompt、完了turnのenqueue。gatewayはackまでだけ`pending_turn`を保持し後続memberを落とさない。完了時のqueue溢れはmemberを残しturnだけ捨てる |
-| `inbound/binding.rs` | binding error/status、origin row・owner 解決、heartbeat 用 `BindingContext`。owner 読取失敗は store_error |
-| `inbound/record.rs` | seq採番、inbound session log、Nostr reply metadata、DM/channel admission query。record後にrenderer生本文を転記 |
-| `inbound/turn.rs` | session queue enqueue、`OnlySpeaker` turn、V3 `RunRequest::with_dispatch`（`ExtgateCompletionSink`）、held turn 発火 |
-| `inbound/nostr_profile.rs` | Nostr 固有の relay/render、V1・renderer kind 解釈、record 前の `sanitize_tool_result_for_log`、prompt 整形 |
-| `inbound/tests.rs` | inbound profile の unit tests |
-| `completion.rs` | V3 の `with_dispatch` 口。`v3_attach_dispatch` は常に sink を付ける。決着は `run_session_turn` + `apply_delivery_effect`（inbound フック無し）。ノブ分岐は置かない |
-| `delivery.rs` | `DeliveryEffect` → say 1 回 |
-| `turn_queue.rs` | session turn queue（cap 32）。reserve / FIFO consumer。溢れは dropped を足す |
-| `listen.rs` | UDS listenと接続状態機械。`enqueue_bind`はlock失敗・未liveをwarn（fail-quiet禁止）。binding ack/pendingはopaqueなinstance/binding/addressとして管理する |
-| `close.rs` | live close。request id 抽出済みなら err 1 回、未抽出は log のみ（wire 0） |
+| `error.rs` | error code と wire 写像 |
+| `ids.rs` | 識別子・digest・時刻 |
+| `listen/` | UDS listen と接続状態機械（PRE_HELLO / RUNNING / CLOSED）。`hello`・`provisional`・`interrupt`・活動通知・応答 |
+| `registry.rs` | live 接続の process-local 表 |
+| `close.rs` | 接続 close。未決の say を indeterminate にする |
+| `inbound/` | `said` の受け入れ。`session.rs` がセッションキー → セッション（D-1099）、`record.rs` が記録、`attachments.rs` が受信添付、`turn.rs` がターン起動 |
+| `turn_queue.rs` | 記録後のセッションごとのターン待ち行列 |
+| `completion.rs` | ターンとサブタスクの決着 |
+| `delivery.rs` | ターン結果 → `say` 1 回 |
+| `partial_stream.rs` | realtime ターンの途中経過（`partial`、D-1083） |
+| `provisional.rs` / `provisional/` | 先行生成（`provisional`、D-1085） |
+| `interrupt.rs` | 走っているターンを止める（`interrupt`、D-1096） |
+| `activity_stream.rs` | ツール実行・サブタスクの活動通知（D-1087） |
+| `commands.rs` | `command` frame（`/model` などの管理コマンド） |
+| `operations.rs` | 道具の宣言の parse・検証・digest。schema の許可キーと core 用の印（`x-opencrab-short-ref` / `x-opencrab-workspace-file`、D-1134） |
+| `ops_projection.rs` | 宣言された道具を `GatewayActions` としてエンジンに見せ、`invoke` で呼ぶ。短縮参照の解決 |
+| `operation_calls.rs` | 道具の呼び出しの記録と決着 |
+| `outbound_files.rs` / `file_copy.rs` / `secure_path.rs` | ワークスペースのファイルを outbox にコピーして渡す |
+| `fire.rs` | 定期実行のターンをセッションに流す |
+| `race.rs` | 試験用 barrier |
 
 ## 非目標
 
-`docs/design/external-gate.md` §8。別名でも作らない。
+`docs/design/external-gate.md` §8。

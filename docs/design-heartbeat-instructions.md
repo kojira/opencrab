@@ -1,5 +1,9 @@
 # design-heartbeat-instructions
 
+> **Historical (superseded by #612).** Heartbeats and `session_heartbeat_config` /
+> `set_my_heartbeat` are gone: time triggers are rows in `agent_schedules`, each with its own
+> `message` (`docs/design/issue-612-unified-triggers.md`, README "Time Triggers"). Kept as a record.
+
 ハートビート時にエージェントが「今この瞬間、何をするか」を判断するための **指示（heartbeat instructions）** を、ハードコードされた1行プロンプトから、エージェント単位・チャンネル単位で設定可能・更新可能なものへ拡張する設計。
 
 バージョン: v1（2026-06-02）

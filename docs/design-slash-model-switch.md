@@ -1,5 +1,12 @@
 # Design: Discord slash-command model switching
 
+> **Updated (D-1080, D-1131, D-1135).** The `command` frame and `list_models` / `set_model` /
+> `reset_model` (agent-wide, `agents.model`) still exist. Gateways now also use the per-conversation
+> commands `list_session_models` / `set_session_model` / `reset_session_model`
+> (`sessions.model`, `crates/extgate/src/commands.rs`), and the Discord gateway's `/model` uses
+> `set_session_model`. The agent's `select_llm` writes the same per-conversation model. The statement
+> below that this is "not a session override" describes the original #1004 design only.
+
 Issue: [#1004](https://github.com/kojira/opencrab/issues/1004)
 
 Status: implementation-ready
