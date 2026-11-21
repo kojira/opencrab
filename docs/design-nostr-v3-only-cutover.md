@@ -1,5 +1,7 @@
 # Nostr and Discord V3-only cutover (#970)
 
+> 過去の記録（2026-09 時点）。core が Nostr/Discord の instance を敷設して子プロセスを動かす形は D-1099 でなくなった。今は各 gateway が別プロセスで動き、core には `hello` でつなぐだけ。今の取り決めは [design/external-gate.md](design/external-gate.md) を見る。
+
 Status: approved by the operator in the incident thread (remove the old implementation; no fallback).
 
 ## Incident
