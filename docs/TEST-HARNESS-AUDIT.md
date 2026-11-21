@@ -1,5 +1,7 @@
 # テストハーネス棚卸し（DESIGN-TURN-CONTINUATION §13 カバレッジ監査）
 
+> 過去の記録（2026-09 時点）。今の動きは テストは各 crate の `tests/` と [kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) の conformance を見る。
+
 **判定基準**: `DESIGN-TURN-CONTINUATION.md §13`（1 生成の形 16 ケース）＋ ターン合計（QC シナリオ 5 本）
 ＋ §13.1（表から設計に戻った 10 点 a〜j）。各行が「どのテストで／どの観測点まで／最外層で assert
 されているか」を表にし、未カバー＝**穴**を列挙する。観測点の語彙は `TEMPLATE-TDD-INSTRUCTION.md §1`

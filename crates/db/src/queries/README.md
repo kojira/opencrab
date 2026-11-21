@@ -2,19 +2,16 @@
 
 ドメイン別の行型と SQL。`mod.rs` から再輸出する。
 
-## nostr instance 敷設
+## gate_session（D-1099）
 
-Nostr の instance/binding 書き込みは `crates/server/src/nostr_provision.rs`。
-`create_gate_binding_in_tx` を使い、address=既存 session_id で V3.5 reuse する。
-session 不在・membership 不一致は fail-loud。
-
-## gate_binding
+gateway の会話のキーを core の会話に解決する（`gate_session.rs`）。記録は `gate_bindings` の行で、行 id は core の中だけで使う。前もって登録するものは無い。
 
 | 関数 | 契約 |
 |---|---|
-| `create_gate_binding_in_tx` | physical session・sole membership・open bindingを1 TXで作る汎用部品。themeは呼び出し側が渡し、commitも呼び出し側が行う。addressが既存session IDとbyte一致なら再利用する。membership不一致・複数・他open bindingの占有は`CreateGateBindingError::Conflict` |
-| `canonical_session_id` | physical `extgate-{binding_id}` があればそれ、無ければ address と id が一致する再利用 session。どちらも無ければ None |
-| `lookup_canonical_gate_binding` | canonical session ID から open・未削除の generic binding を exact 解決。0件=`NotFound`、複数=`Ambiguous`。address 候補は v51 の address-first partial index を使う |
+| `resolve_gate_session_in_tx` | `(instance, key)` の記録を探し、無ければ作る（呼び出し側のトランザクション内）。新しい記録はキーそのものを session id にし、session 行と参加者が無ければ作る。`title` は新しい会話の題名（省略時はキー） |
+| `find_gate_session` | 書き込まずに `(instance, key)` の記録を返す。開いている行を優先し、無ければ最新の行 |
+| `gate_session_by_row` | 内部の行 id から記録を返す（frame から始まった処理の続き用） |
+| `gate_session_for_session_id` | core の会話につながる記録を返す（定期実行など、frame 無しで始まるターン用） |
 
 ## sessions
 
@@ -35,16 +32,6 @@ session 不在・membership 不一致は fail-loud。
 
 `memory_sessions` / `llm_logs.tool_calls` は触らない。表定義は [schema/README.md](../schema/README.md)。
 
-## session_watches（載せ替え工程 5-a）
+## session_watches
 
-セッションに紐づく Nostr 購読。1 セッション N 行。`interval_secs` は必須・正の整数。
-
-| 関数 | 契約 |
-|---|---|
-| `insert_session_watch` | 1 行追加。`id` を返す。不正な interval / filter は拒否 |
-| `get_session_watch` | `id` で 1 行。無ければ `None` |
-| `list_session_watches_for_agent` | その agent の接続で実行する watch を id 順 |
-| `update_session_watch` | 1 行更新。対象が無ければ `false` |
-| `delete_session_watch` | 1 行削除。対象が無ければ `false` |
-
-本番の読口は `list_session_watches_for_agent`（API / runner）。セッション横断の有無判定は置かない。
+表は v63 で削除した（`schema/migrations/v63.rs`）。Nostr の購読は Nostr gateway が持つ。

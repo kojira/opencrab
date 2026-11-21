@@ -1,5 +1,7 @@
 # opencrab メッセージループ再設計書 v2
 
+> 過去の記録（2026-03 時点）。今の動きは [design/external-gate.md](design/external-gate.md) と [DESIGN.md](DESIGN.md) §2 を見る。
+
 **作成日:** 2026-03-23  
 **ステータス:** レビュー待ち  
 **対象バグ:**

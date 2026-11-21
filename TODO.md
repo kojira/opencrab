@@ -51,6 +51,7 @@
     - 同期完了後にDiscordチャンネルを削除
     - ハートビートまたはタスク完了時に自動実行
     - 背景: Discordサーバーチャンネル500上限に達した（2026-03-21）
+    - → 対象外: Discord gateway は core から別プロセスに分かれ、[kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) に移った（D-1097）。core の課題ではない（2026-11 確認）
 
 13. ~~**スキルシステムの改善**~~ ✅ 完了（2026-03-22、スキルシステムv2）
     - executable タイプ廃止、`guidance` + `execute_shell` 動的実行に統一
@@ -73,6 +74,7 @@
     - 必要: ファイル（画像）をDiscordに送信するgateway action (`discord_send_file` など)
     - 用途: nano-banan-proで生成した画像をエージェントAがDiscordに投稿できるようにする
     - 関連: `serenity`のcreate_message + file_uploadまたはattachment機能
+    - → 済み（core 側）: 送信の添付は道具の宣言の `x-opencrab-workspace-file` で渡す（`crates/extgate/src/outbound_files.rs`、docs/design-generic-outbound-attachments.md）。Discord への送信は gateway の仕事（2026-11 確認）
 
 18. **OpenClaw→OpenCrabインポート機能**
     - ディレクトリ指定でOpenClawのワークスペースデータをインポート
@@ -95,6 +97,7 @@
     - 現状: cwdがサーバー起動ディレクトリ（opencrabルート）になっている
     - 修正: `cmd.current_dir(&ctx.workspace.root)` でワークスペースをcwdに設定
     - 効果: スクリプトやファイルパスが相対パスで書けるようになり可搬性が上がる
+    - → 済み: `execute_shell` は `cmd.current_dir(ctx.workspace.root())` で起動する（`crates/actions/src/tools/shell.rs`）（2026-11 確認）
 
 22. ~~**Discord添付画像のvision対応**~~ ✅
     - 現状: LLMレイヤーに`ImageUrl`/`supports_vision`実装あるが、Discord添付→LLMパイプラインが未接続
@@ -105,6 +108,7 @@
     - 現状: whitelist外チャンネルのメッセージもDBにセッションログが蓄積される
     - 修正: `message_loop.rs`でホワイトリストチェックをDBへの保存処理より前に実施
     - 影響: 不要なセッション履歴が積み上がるのを防ぐ
+    - → 対象外: Discord gateway は core から別プロセスに分かれ、[kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) に移った（D-1097）。core の課題ではない。受付の判定（ホワイトリスト）は gateway が持つ（2026-11 確認）
 
 24. **サブセッションのresume機能**
     - 現状: サブが完了するとJoinHandleが消えてDashMapから削除される。セッション履歴はDBに残っているが再利用できない
@@ -133,11 +137,13 @@
     - Phase 1: 1つのBotトークンで複数エージェントが応答（agent_idsを実質的に機能させる）
     - Phase 2: エージェントごとに異なるBotトークンを設定できるアーキテクチャ（エージェントBBot=エージェントBエージェント）
     - 関連: インポート機能でエージェントBをopencrabに移行する前提として必要
+    - → 対象外: Discord gateway は core から別プロセスに分かれ、[kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) に移った（D-1097）。core の課題ではない。Discord gateway は 1 つの daemon で複数 bot を扱う（2026-11 確認）
 
 28. **Botループ防止（同チャンネルに複数Bot共存時）**
     - 現状: 同じチャンネルに複数のBotが存在するとBot同士が反応し合って無限ループになる
     - 原因: bot=trueのメッセージは無視しているが、異なるBotアカウント（opencrab版エージェントB×OpenClaw版エージェントB×エージェントA）が互いに反応した
     - 修正案: 同じサーバーの既知Bot IDリストを管理し、それらからのメッセージは無視する
+    - → 対象外: Discord gateway は core から別プロセスに分かれ、[kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) に移った（D-1097）。core の課題ではない（2026-11 確認）
 
 29. **インポート設計: AGENTS.mdをsystemインストラクションとして扱う**
     - 現状: AGENTS.mdをmemory_curated(agent_rules)にインポートしているため、RAG検索にヒットした時のみ参照される
@@ -150,10 +156,12 @@
     - opencrabのheartbeatは一定間隔のみ対応；cron式（特定時刻・曜日指定等）がない
     - インポート時にもcron設定の移行が必要
     - 設計が必要: cronジョブの保存先・実行エンジン・インポート時のパース処理
+    - → 済み: 時刻・周期の定期実行は `agent_schedules`（#455 / #612、docs/design-agent-schedules.md）（2026-11 確認）
 
 31. **typing keepalive（入力中インジケーター持続）**
     - 現状: `start_typing()`を1回送るだけで5秒後に消える
     - 修正: LLM処理・サブタスク実行中に4秒ごとにtyping再送するkeepaliveループを追加
+    - → 対象外: Discord gateway は core から別プロセスに分かれ、[kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) に移った（D-1097）。core の課題ではない（2026-11 確認）
 
 32. **Tainted Input / プロンプトインジェクション防止**
     - 「送信者の信頼度（CallerIdentity）」とは別に「コンテンツの信頼度」を追跡する仕組み
@@ -170,6 +178,7 @@
 35. **PATCH /discord 後にGateway自動再起動**
     - 現状: PATCH でowner_discord_idやbot_tokenを変更しても起動中のGatewayループに反映されない
     - 修正: PATCH実行後にgateway stop→startを自動実行する
+    - → 対象外: core に `/discord` の API は無い。Discord gateway は core から別プロセスに分かれ、[kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) に移った（D-1097）。core の課題ではない（2026-11 確認）
 
 34. **バイナリ配布（GitHub Releases / Homebrew tap）**
     - 現状: cloneして自分でビルドする必要がある
@@ -186,5 +195,6 @@
     - 現状: エージェントがNO_REPLYを出力した場合、session_logに何も記録されない
     - 修正: NO_REPLY判定時も`log_type: "no_reply"`としてsession_logに挿入する
     - 効果: エージェントが会話履歴から「自分がそのターンで意図的に黙った」を認識できる
-    - 変更箇所: `crates/discord/src/message_loop.rs`
+    - 変更箇所（当時）: Discord のメッセージループ（今は core に無い）
     - 関連: `docs/design-tool-history.md` §5 TODO
+    - → 済み: NO_REPLY で終えたターンは `turn_terminated` のシステム行として記録され、次のターンの履歴に `[turn_terminated: NO_REPLY]` と出る（`crates/server/src/process/end_event.rs`、`crates/core/src/conversation/format.rs`）（2026-11 確認）

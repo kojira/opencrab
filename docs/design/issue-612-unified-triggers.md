@@ -1,5 +1,7 @@
 # D-612: 時刻トリガーの一本化（`agent_schedules` へ統合）
 
+> 過去の記録（2026-09 時点）。今の動きは [../design-agent-schedules.md](../design-agent-schedules.md) と `crates/server/src/scheduler.rs` を見る。
+
 - Issue: #612（関連: #585 / #586 / #588 / #605・PR #607 / #583 / #584）
 - 状態: オーナー承認済み（D1〜D8 すべて推奨案で確定）
 - 基点: origin/main 21dfff1

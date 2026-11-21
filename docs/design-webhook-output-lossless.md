@@ -1,5 +1,7 @@
 # 設計: Webhook 出力のロスレス化 / Design: Lossless Webhook Output
 
+> 過去の記録（2026-06 時点）。今の動きは [design-agent-tool-webhooks.md](design-agent-tool-webhooks.md) の冒頭（webhook は D-1087 で gateway に移った） を見る。
+
 > 作成日 / Created: 2026-06-05
 > ステータス / Status: Draft（設計のみ・実装未着手）
 > 対象 / Scope: opencrab Discord webhook 出力経路（agent / tool / session work-channel 通知）

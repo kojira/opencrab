@@ -1,5 +1,7 @@
 # Design: extgate binding-address aliases for timed fire
 
+> 過去の記録（2026-09 時点）。今の動きは 会話のキーの解決は [design/external-gate.md](design/external-gate.md) §4 と `crates/db/src/queries/gate_session.rs`（D-1099 で binding・address は会話のキーに置き換わった） を見る。
+
 Issue: [#996](https://github.com/kojira/opencrab/issues/996)
 
 Status: implementation-ready

@@ -1,5 +1,7 @@
 # Bot ループ防止プロンプト設計書
 
+> 過去の記録（2026-03 時点）。今の動きは Discord gateway は [kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) にある。core 側は [design/external-gate.md](design/external-gate.md) と [DESIGN.md](DESIGN.md) §2 を見る。
+
 **作成日:** 2026-03-23  
 **更新日:** 2026-03-23（実際のLLMログ分析に基づき大幅改訂）  
 **対象:** opencrab / エージェントA  

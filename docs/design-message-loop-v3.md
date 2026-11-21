@@ -1,5 +1,7 @@
 # opencrab メッセージループ再設計書 v3
 
+> 過去の記録（2026-03 時点）。今の動きは [design/external-gate.md](design/external-gate.md) と [DESIGN.md](DESIGN.md) §2 を見る。
+
 > **更新（2026-07, #39）:** 本書に登場する `completion_registry` /
 > `CompletionRegistry` / `SubtaskCompletionFn` は削除済み。サブタスクの完了・進捗
 > 通知は、`DiscordGatewayActions.event_tx` から `LoopEvent::SubtaskCompleted` を
