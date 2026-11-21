@@ -1,4 +1,4 @@
-//! gate wire の stable error code（21 個）。
+//! gate wire の stable error code（17 個）。
 
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -13,9 +13,6 @@ pub enum ErrorCode {
     SubjectUnknown,
     InstanceUnknown,
     InstanceConflict,
-    InstanceDisabled,
-    BindingClosed,
-    BindingConflict,
     InstanceActive,
     StoreError,
     TooLarge,
@@ -28,7 +25,6 @@ pub enum ErrorCode {
     Disconnect,
     // DI 拡張 §10.4。いずれも generic code で platform 語彙を埋め込まない。
     OperationDeclarationInvalid,
-    OperationDeclarationMismatch,
     OperationUnknown,
     OperationRejected,
 }
@@ -40,9 +36,6 @@ impl ErrorCode {
             Self::SubjectUnknown => "subject_unknown",
             Self::InstanceUnknown => "instance_unknown",
             Self::InstanceConflict => "instance_conflict",
-            Self::InstanceDisabled => "instance_disabled",
-            Self::BindingClosed => "binding_closed",
-            Self::BindingConflict => "binding_conflict",
             Self::InstanceActive => "instance_active",
             Self::StoreError => "store_error",
             Self::TooLarge => "too_large",
@@ -54,7 +47,6 @@ impl ErrorCode {
             Self::ExternalRejected => "external_rejected",
             Self::Disconnect => "disconnect",
             Self::OperationDeclarationInvalid => "operation_declaration_invalid",
-            Self::OperationDeclarationMismatch => "operation_declaration_mismatch",
             Self::OperationUnknown => "operation_unknown",
             Self::OperationRejected => "operation_rejected",
         }
@@ -66,9 +58,6 @@ impl ErrorCode {
             "subject_unknown" => Self::SubjectUnknown,
             "instance_unknown" => Self::InstanceUnknown,
             "instance_conflict" => Self::InstanceConflict,
-            "instance_disabled" => Self::InstanceDisabled,
-            "binding_closed" => Self::BindingClosed,
-            "binding_conflict" => Self::BindingConflict,
             "instance_active" => Self::InstanceActive,
             "store_error" => Self::StoreError,
             "too_large" => Self::TooLarge,
@@ -80,7 +69,6 @@ impl ErrorCode {
             "external_rejected" => Self::ExternalRejected,
             "disconnect" => Self::Disconnect,
             "operation_declaration_invalid" => Self::OperationDeclarationInvalid,
-            "operation_declaration_mismatch" => Self::OperationDeclarationMismatch,
             "operation_unknown" => Self::OperationUnknown,
             "operation_rejected" => Self::OperationRejected,
             _ => return None,
@@ -91,11 +79,7 @@ impl ErrorCode {
         Some(match self {
             Self::BadRequest => StatusCode::BAD_REQUEST,
             Self::SubjectUnknown | Self::InstanceUnknown => StatusCode::NOT_FOUND,
-            Self::InstanceConflict
-            | Self::InstanceDisabled
-            | Self::BindingClosed
-            | Self::BindingConflict
-            | Self::InstanceActive => StatusCode::CONFLICT,
+            Self::InstanceConflict | Self::InstanceActive => StatusCode::CONFLICT,
             Self::StoreError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::TooLarge
             | Self::ProtocolOrder
@@ -106,7 +90,6 @@ impl ErrorCode {
             | Self::ExternalRejected
             | Self::Disconnect
             | Self::OperationDeclarationInvalid
-            | Self::OperationDeclarationMismatch
             | Self::OperationUnknown
             | Self::OperationRejected => return None,
         })
