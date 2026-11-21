@@ -6,4 +6,3 @@
 | `verify-v47-transplant-copy.sh` | 外部DBを開かず、synthetic fixtureでv43→v47のschema、対象backfill、constraint、再適用no-opを確認する。旧`verify-v43-transplant-copy.sh`はこのscriptへ委譲する互換口。 |
 | `check-no-private-identifiers.sh` | 公開リポジトリへ実在識別子が混入していないか |
 | `check-deps.sh` | クレート依存境界 |
-| `webgate-provision` | 旧 gate-admin（operator 敷設）用。gate-admin は D-1098 で削除され、gateway は `hello` だけで instance を作るので、現行の core では使えない（記録として残置） |

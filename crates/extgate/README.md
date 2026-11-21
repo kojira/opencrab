@@ -21,7 +21,7 @@ Core side of the gate socket protocol (protocol 3, operation protocol 1). The co
 | `json.rs` | 全階層 duplicate member 拒否 |
 | `error.rs` | error code と wire 写像 |
 | `ids.rs` | 識別子・digest・時刻 |
-| `listen/` | UDS listen と接続状態機械（PRE_HELLO / RUNNING / CLOSED）。`hello`・`provisional`・`interrupt`・活動通知・応答 |
+| `listen/` | UDS listen と接続状態機械（PRE_HELLO / RUNNING）。`hello`・`provisional`・`interrupt`・活動通知・応答 |
 | `registry.rs` | live 接続の process-local 表 |
 | `close.rs` | 接続 close。未決の say を indeterminate にする |
 | `inbound/` | `said` の受け入れ。`session.rs` がセッションキー → セッション（D-1099）、`record.rs` が記録、`attachments.rs` が受信添付、`turn.rs` がターン起動 |
