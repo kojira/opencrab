@@ -1,5 +1,7 @@
 # D-1006: Gateway/Core 分離設計（全gateway共通、Nostr #1006適用）
 
+> 過去の記録（2026-09 時点）。今の動きは [external-gate.md](external-gate.md)（D-1099 で binding・敷設は無くなった） を見る。
+
 状態: draft。実装中。main merge 禁止。人間QC OKまで main へ入れない。
 
 関連正本: `docs/design/external-gate.md`。本設計は external gate V3 の「gateway は外部サービスとの I/O と wire 変換を所有する別プロセス」「core は gateway の振る舞いを警察しない」という境界を、全gateway共通の実装境界として固定し直す。Nostr #1006 は最初に露呈した具体例であり、Nostrだけの特別対応で済ませない。ただし #1006 のlive QC対象は `くらぶ` Nostr QC であり、Discord gateway のlive挙動変更はこの案件の必須QCには含めない。

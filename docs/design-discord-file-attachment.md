@@ -1,5 +1,7 @@
 # Discord ファイル添付送信サポート — 設計ドキュメント
 
+> 過去の記録（2026-03 時点）。今の動きは 送信の添付は [design-generic-outbound-attachments.md](design-generic-outbound-attachments.md)、Discord gateway は [kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) を見る。
+
 > 作成日: 2026-03-22  
 > ステータス: 設計段階 (Draft)
 

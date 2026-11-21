@@ -1,5 +1,7 @@
 # プロンプトキャッシュ最適構成 設計書 v7
 
+> 過去の記録（2026-03 時点）。今の動きは [DESIGN.md](DESIGN.md) を見る。
+
 > 作成日: 2026-03-23（v6を改訂）
 > 対象バージョン: opencrab（Claude Sonnet 4.6使用）
 > 参照: provider の公式 prompt caching 仕様

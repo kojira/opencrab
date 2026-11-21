@@ -1,7 +1,7 @@
 # opencrab-extgate
 
 Core side of the gate socket protocol (protocol 3, operation protocol 1). The contract is
-`docs/design/external-gate.md`; its D-1099 section is the current wire.
+`docs/design/external-gate.md`.
 
 ## 境界
 
@@ -40,6 +40,6 @@ Core side of the gate socket protocol (protocol 3, operation protocol 1). The co
 | `fire.rs` | 定期実行のターンをセッションに流す |
 | `race.rs` | 試験用 barrier |
 
-## 非目標
+## 役割の分け方
 
-`docs/design/external-gate.md` §8。
+`docs/design/external-gate.md` §1。

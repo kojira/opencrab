@@ -1,5 +1,7 @@
 # CLI gateway design
 
+> 過去の記録（2026-09 時点）。今の動きは cli-gateway は [kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) の `crates/cli-gateway/README.md`、取り決めは [design/external-gate.md](design/external-gate.md)。D-1099 で `create_binding`・bind・敷設は無くなった を見る。
+
 Tracking issue: [#994](https://github.com/kojira/opencrab/issues/994)
 
 ## 1. Decision

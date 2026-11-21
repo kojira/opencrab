@@ -1,5 +1,7 @@
 # 設計: webhook の長文を「プレビュー + 全文ファイル添付」で送る
 
+> 過去の記録（2026-08 時点）。今の動きは [design-agent-tool-webhooks.md](design-agent-tool-webhooks.md) の冒頭（webhook は D-1087 で gateway に移った） を見る。
+
 > 作成日 / Created: 2026-08-01
 > ステータス / Status: 実装済み（issue #293）
 > 対象 / Scope: Discord webhook へ出る全経路（subtask lifecycle / activity tool events / Nostr 受信転記）

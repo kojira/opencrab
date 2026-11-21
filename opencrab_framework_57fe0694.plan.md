@@ -1,3 +1,5 @@
+> 過去の記録（2026-02 時点）。今の動きは [README.md](README.md) と [docs/DESIGN.md](docs/DESIGN.md) を見る。
+
 ---
 name: OpenCrab Framework
 overview: 自律エージェントフレームワーク「OpenCrab」を新規作成。ゲートウェイ抽象化により様々な入出力（REST API、Discord、CLI等）に対応し、Webダッシュボードでペルソナ・スキル・記憶を管理。Rustで実装。

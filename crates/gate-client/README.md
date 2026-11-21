@@ -1,6 +1,6 @@
 # opencrab-gate-client
 
-Rust gateway 共用の gate socket client / wire / json（protocol 3）。core crate の wire DTO には依存しない。利用者は gateway リポジトリ（[opencrab-gateways](https://github.com/kojira/opencrab-gateways)）の各 gateway で、この crate を core の rev 固定の git 依存で参照する（Issue #1074）。プロトコルの正本は `docs/design/external-gate.md`（D-1099 の節）。
+Rust gateway 共用の gate socket client / wire / json（protocol 3）。core crate の wire DTO には依存しない。利用者は gateway リポジトリ（[opencrab-gateways](https://github.com/kojira/opencrab-gateways)）の各 gateway で、この crate を core の rev 固定の git 依存で参照する（Issue #1074）。プロトコルの正本は `docs/design/external-gate.md`。
 
 | ファイル | 役割 |
 |---|---|
