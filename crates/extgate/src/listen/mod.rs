@@ -1,4 +1,4 @@
-//! UDS listen と接続状態機械。PRE_HELLO / RUNNING / CLOSED のみ。
+//! UDS listen と接続状態機械。状態は PRE_HELLO / RUNNING の 2 つ（切断は接続 task の終了）。
 
 mod activity;
 mod hello;

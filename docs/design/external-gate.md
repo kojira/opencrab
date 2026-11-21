@@ -120,8 +120,6 @@ schema に使えるキーは `type`・`required`・`properties`・`enum`・`item
 | `external_rejected` | gateway が `say` に返す「外部に断られた」（core は配送を `failed` にする） |
 | `disconnect` | 接続が切れた |
 
-列挙には、削除した敷設の仕組みの code（`unauthorized`・`binding_unknown`・`bind_failed`・`revision_*`・`config_digest_mismatch` など）も残っている。今の wire では使わない。
-
 ## 8. Rust の gateway 側
 
 `crates/gate-client` が `hello` の組み立て、frame の読み書き、`say` / `invoke` への応答を持つ。接続が切れたら 200 ms から 8 秒まで間隔を延ばしながらつなぎ直し、`hello` から始め直す（`crates/gate-client/src/client/transport.rs`）。core が再起動しても gateway は止めなくてよい。
