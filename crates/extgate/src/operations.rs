@@ -2,8 +2,7 @@
 //! digest。core は operation 名や schema property の platform 意味を解釈しない（§1.7）。
 //!
 //! 検証失敗は原則 `operation_declaration_invalid`（DI-22）。ただし builtin / 既存 tool との
-//! 同名 collision だけは `bad_request`（DI-03）。digest 不一致は呼び出し側（handle_hello）で
-//! `operation_declaration_mismatch` を返す。
+//! 同名 collision だけは `bad_request`（DI-03）。
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
