@@ -125,6 +125,22 @@
         assert_eq!(result, "k = \"a\"b\"");
     }
 
+    /// D-1141: `cp config/default.toml.example config/default.toml` starts on a fresh DB: the
+    /// template's LLM router builds and its default model has the budget startup requires.
+    #[test]
+    fn template_config_passes_startup_checks_on_a_fresh_db() {
+        let _lock = env_lock();
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = repo_root.join("config/default.toml.example");
+        let cfg = load_config(path.to_str().unwrap()).expect("template parses");
+        let db = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
+
+        build_effective_llm_router(&db, &cfg.llm).expect("template router builds");
+        let conn = db.lock().unwrap();
+        crate::process::ensure_startup_budget_inputs(&conn, &default_model_spec(&cfg.llm))
+            .expect("template default model has a budget on a fresh DB");
+    }
+
     /// `owner_discord_id` は環境変数参照で与える（ローカル固有値を `.env` に寄せる）。
     #[test]
     fn shipped_configs_do_not_globally_allow_cursor_cli() {

@@ -140,6 +140,7 @@ impl CommandRegistry {
 fn list_result(snapshot: ModelSnapshot) -> Value {
     json!({
         "models": snapshot.models,
+        "unavailable_providers": opencrab_actions::unavailable_providers_json(&snapshot.unavailable_providers),
         "configured_model": snapshot.configured_model,
         "current_model": snapshot.current_model,
         "default_model": snapshot.default_model,
@@ -226,6 +227,7 @@ fn session_list_result(list: SessionModelList) -> Value {
     json!({
         "scope": "session",
         "models": snapshot.models,
+        "unavailable_providers": opencrab_actions::unavailable_providers_json(&snapshot.unavailable_providers),
         "configured_model": snapshot.configured_model,
         "current_model": snapshot.current_model,
         "default_model": snapshot.default_model,

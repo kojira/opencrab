@@ -1,9 +1,44 @@
 use async_trait::async_trait;
 
+/// A registered provider whose model list could not be read, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableProvider {
+    pub provider: String,
+    pub error: String,
+}
+
+/// The selectable models (`provider:model`, sorted, deduplicated) of the providers that listed
+/// their models, plus the providers that could not. One provider failing never hides the others.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelCatalog {
+    pub models: Vec<String>,
+    pub unavailable_providers: Vec<UnavailableProvider>,
+}
+
+impl ModelCatalog {
+    /// `[{"provider": …, "error": …}]`: the JSON form the REST API, the gate commands and the
+    /// agent tools all show.
+    pub fn unavailable_providers_json(&self) -> serde_json::Value {
+        unavailable_providers_json(&self.unavailable_providers)
+    }
+}
+
+/// See [`ModelCatalog::unavailable_providers_json`].
+pub fn unavailable_providers_json(providers: &[UnavailableProvider]) -> serde_json::Value {
+    serde_json::Value::Array(
+        providers
+            .iter()
+            .map(|p| serde_json::json!({"provider": p.provider, "error": p.error}))
+            .collect(),
+    )
+}
+
 /// Provider-neutral snapshot used by gateway commands that administer an agent's model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSnapshot {
     pub models: Vec<String>,
+    /// Providers missing from `models` because their model list could not be read.
+    pub unavailable_providers: Vec<UnavailableProvider>,
     pub configured_model: Option<String>,
     pub current_model: String,
     pub default_model: String,

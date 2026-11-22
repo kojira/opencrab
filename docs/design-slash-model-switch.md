@@ -141,6 +141,7 @@ Success:
   "id": "cmd-list-1",
   "result": {
     "models": ["anthropic:claude-sonnet-4", "openai:gpt-5"],
+    "unavailable_providers": [],
     "configured_model": "openai:gpt-5",
     "current_model": "openai:gpt-5",
     "default_model": "anthropic:claude-sonnet-4"
@@ -148,7 +149,7 @@ Success:
 }
 ```
 
-`configured_model` is nullable when `agents.model` is unset. `current_model` and `default_model` are canonical strings and are required. `models` is sorted and deduplicated by canonical string.
+`configured_model` is nullable when `agents.model` is unset. `current_model` and `default_model` are canonical strings and are required. `models` is sorted and deduplicated by canonical string. `unavailable_providers` lists the providers whose model list could not be read (`{"provider", "error"}`); their models are not in `models`, and the other providers' models stay selectable (D-1141).
 
 ### 5.2 `set_model`
 

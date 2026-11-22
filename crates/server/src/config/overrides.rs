@@ -58,11 +58,18 @@ pub fn apply_llm_overrides(
 /// one way the router is built: at startup, after a dashboard provider change and after a
 /// config file reload (D-1113).
 pub fn build_effective_llm_router(db: &opencrab_db::Db, llm: &LlmConfig) -> Result<LlmRouter> {
-    let overrides = {
-        let conn = db
-            .lock()
-            .map_err(|e| anyhow::anyhow!("db lock for llm provider overrides: {e}"))?;
-        opencrab_db::queries::list_llm_provider_overrides(&conn)?
-    };
+    let conn = db
+        .lock()
+        .map_err(|e| anyhow::anyhow!("db lock for llm provider overrides: {e}"))?;
+    build_llm_router_with_overrides(&conn, llm)
+}
+
+/// [`build_effective_llm_router`] on an open connection, so a provider change can be checked
+/// inside the transaction that saves it before it is committed (D-1141).
+pub fn build_llm_router_with_overrides(
+    conn: &rusqlite::Connection,
+    llm: &LlmConfig,
+) -> Result<LlmRouter> {
+    let overrides = opencrab_db::queries::list_llm_provider_overrides(conn)?;
     build_llm_router(&apply_llm_overrides(llm, &overrides))
 }

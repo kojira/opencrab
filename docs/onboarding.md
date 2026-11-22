@@ -66,10 +66,7 @@ cargo +1.98.0 build -p opencrab-server
 cp config/default.toml.example config/default.toml
 ```
 
-**注意:** 今のテンプレートのままでは起動しません（7 章の「起動直後に context budget で止まる」）。
-`config/default.toml` の `[llm]` から `# ===== REST API =====` の直前までを、使う LLM 1 つ分に置き換えます。
-
-ChatGPT にログイン済み（`~/.codex/auth.json` がある）なら、次のとおりです。
+テンプレートの既定は ChatGPT の `chatgpt:gpt-6-sol` です。ChatGPT にログイン済み（`~/.codex/auth.json` がある）なら、このまま起動できます。
 
 ```toml
 [llm]
@@ -78,11 +75,13 @@ default_model = "gpt-6-sol"
 
 [llm.providers.chatgpt]
 auth_file = "~/.codex/auth.json"
+default_model = "gpt-6-sol"
 reasoning_effort = "low"
 ```
 
 `default_model` には、新しい DB に予算（`context_window` と `max_output_tokens`）が最初から入っているモデルを選びます。
 今入っているのは `chatgpt:gpt-6-sol`・`chatgpt:gpt-6-luna`・`codex:gpt-5.6` です（`crates/db/src/schema/`）。
+テンプレートには、ほかの provider（openai・ollama・codex など）の設定も入っています。動いていない provider があっても起動はでき、モデル一覧（3.3）でその provider が `unavailable_providers` に出るだけです。
 
 API キーで使う場合（例: Anthropic）は、`.env` にキーを書きます。
 
@@ -96,7 +95,7 @@ cp .env.example .env
 api_key = "${ANTHROPIC_API_KEY}"
 ```
 
-このときは、上の ChatGPT の設定で一度起動し、使うモデルの予算を登録してから `default_provider` と `default_model` を切り替えます（予算は DB に残ります）。
+このときは、テンプレートのまま一度起動し、使うモデルの予算を登録してから `default_provider` と `default_model` を切り替えます（予算は DB に残ります）。
 この手順は、偽のキーで「切り替えたあと起動できる」ところまで確かめました。本物のキーでの返事は試していません。
 
 ```sh
@@ -137,6 +136,7 @@ curl -s localhost:8080/api/llm/model-choices
 ```
 
 最後のコマンドは、選べるモデルの一覧です（`/model` と `select_llm` と同じ一覧）。
+モデル一覧を取れなかった provider（例: 動いていない ollama）は `unavailable_providers` に理由と一緒に出ます。ほかの provider のモデルは選べます。
 
 ### 3.4 ダッシュボードを開く
 
@@ -147,7 +147,14 @@ corepack pnpm install --frozen-lockfile
 ```
 
 ブラウザで `http://localhost:3000/setup` を開きます。
-ダッシュボードの `/api` は `localhost:8080` へ転送されます（`web/vite.config.ts` に書いてある固定値）。core を別のポートにしたときは、ダッシュボードは使えません。
+ダッシュボードの `/api` は、環境変数 `OPENCRAB_API_URL` の core へ転送されます（無ければ `http://localhost:8080`。`web/vite.config.ts`）。
+core を別のポートにしたときは、そのポートを渡します。
+
+```sh
+OPENCRAB_API_URL=http://localhost:18080 ./dev.sh
+```
+
+リポジトリ直下の `./dev.sh start` は、core のビルドと起動、ダッシュボードの起動をまとめて行います（`./dev.sh stop` で両方止まります）。
 
 ダッシュボードには認証がありません。信頼できるネットワークの中だけで開いてください。
 
@@ -338,29 +345,25 @@ core を変えて gateway 側でも使うときは、opencrab-gateways で次を
 ### 起動直後に `context budget fail-loud at startup` で止まる
 
 既定モデルの予算（`context_window`）が DB に無いと、core は起動しません。
-今の `config/default.toml.example` は既定が `openai:claude-sonnet-4-6` で、新しい DB には予算が入っていないので、そのままでは必ずここで止まります。
-3.2 のとおり、予算のあるモデルを既定にしてください。API キーの provider は、3.2 の `PUT /api/llm/model-pricing` で先に登録します。
+テンプレートの既定（`chatgpt:gpt-6-sol`）には予算が最初から入っています。既定を別のモデルに変えたときは、3.2 の `PUT /api/llm/model-pricing` で先に登録します。
 
 ### `fallback.chain references undefined provider` / `alias '…' targets undefined provider`
 
-`[llm.fallback] chain` と `[llm.aliases]` が、無い provider を指しています。
-ダッシュボードで provider を無効にしたときにも起きます（無効にした provider が chain に残る）。
-このとき、起動もできなくなります。使わない chain と alias は消してください。
-
-### `GET /api/llm/model-choices` が `model_catalog_unavailable`
-
-登録された provider のどれか 1 つでもモデル一覧を出せないと、一覧全体が出ません。
-テンプレートのままだと、動いていない openai（ローカルの代理）・ollama・codex で起きました。使う provider だけを残してください。
+`config/default.toml` の `[llm.fallback] chain` と `[llm.aliases]` が、無い provider を指しています。使わない chain と alias は消してください。
+ダッシュボードで、chain や alias が使っている provider を無効にしようとしたときも、同じ理由で断られます（`409`。何も保存されないので、次の起動は失敗しません）。先に chain と alias から外してください。
 
 ### `Address already in use (os error 48)`
 
 ポートが使われています。`lsof -iTCP:8080 -sTCP:LISTEN -nP` で何が使っているか見て、`[gateway.rest] port` を変えるか、そのプロセスを止めます。
-**注意:** 同じ設定の core を 2 つ目に起動すると、ポートで失敗する前に gate socket を作り直してしまいます。動いている 1 つ目の core に gateway がつながらなくなるので、1 つ目も再起動してください。
+
+### `gate.listen_socket … is in use by a running process`
+
+同じ `[gate] listen_socket` の core がもう動いています。2 つ目の core はここで止まり、動いている core の socket には触りません。
+2 つ動かすときは、`listen_socket`・`[gateway.rest] port`・`[database] path` を別にします。
 
 ### gateway が `uds connect/hello failed` を繰り返し、`instance_unavailable` で終わる
 
 - core が動いているか、`core_socket` が `[gate] listen_socket` と同じか確かめます。
-- すぐ上の「2 つ目の core」も疑ってください。
 - core と gateway の rev はそろえてください（4.1）。違う rev の組み合わせで何が起きるかは、ここでは試していません。`hello` で断られたときのコード（`protocol_unsupported` など）は external-gate.md の 7 章にあります。
 
 ### 返事が来ず `{"type":"turn_failed",…}` になる
@@ -373,10 +376,6 @@ LLM の呼び出しが失敗しています。core のログに理由が出ま�
 
 一覧（`GET /api/llm/model-choices`）に無い名前です。`provider:model` の形で、一覧にある名前を使ってください。
 エージェントのモデルを REST で変えるとき（`PATCH /api/agents/{id}`）は、そのモデルの予算が登録されていないと断られます。
-
-### `./dev.sh start` が `none of the selected packages contains this feature: discord` で失敗する
-
-ルートの `dev.sh` は、もう無い `discord` feature でビルドします。3.3 と 3.4 の手順で起動してください（`web/dev.sh` は使えます）。
 
 ### `cargo run -p opencrab-cli` が `could not determine which binary to run`
 

@@ -44,7 +44,11 @@ const REAL_UNREGISTERED_MSG =
 beforeEach(() => {
   mockedPatch.mockReset();
   mockedChoices.mockReset();
-  mockedChoices.mockResolvedValue({ default_model: 'chatgpt:gpt-5.6-terra', choices: [SPEC] });
+  mockedChoices.mockResolvedValue({
+    default_model: 'chatgpt:gpt-5.6-terra',
+    choices: [SPEC],
+    unavailable_providers: [],
+  });
 });
 
 describe('LlmModelSection unregistered-model inline registration link (#482)', () => {

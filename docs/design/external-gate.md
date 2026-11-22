@@ -64,7 +64,7 @@
 
 ### command
 
-オーナー（`caller.role:"owner"`）だけが使える。それ以外は `forbidden`。名前は `list_models`・`set_model`・`reset_model`・`list_session_models`・`set_session_model`・`reset_session_model`・`list_session_reasoning_efforts`・`set_session_reasoning_effort`・`reset_session_reasoning_effort`（`crates/extgate/src/commands.rs`）。会話のモデルを変えるのは `set_session_model`（`/model`）で、エージェントの `select_llm` も同じ設定を書き換える。
+オーナー（`caller.role:"owner"`）だけが使える。それ以外は `forbidden`。名前は `list_models`・`set_model`・`reset_model`・`list_session_models`・`set_session_model`・`reset_session_model`・`list_session_reasoning_efforts`・`set_session_reasoning_effort`・`reset_session_reasoning_effort`（`crates/extgate/src/commands.rs`）。会話のモデルを変えるのは `set_session_model`（`/model`）で、エージェントの `select_llm` も同じ設定を書き換える。`list_models` と `list_session_models` の `models` は `GET /api/llm/model-choices` と同じ一覧で、モデル一覧を取れなかった provider は `unavailable_providers`（`provider` と `error`）に入る。
 
 ## 5. core → gateway
 

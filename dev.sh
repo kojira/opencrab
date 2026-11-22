@@ -12,7 +12,6 @@ cd "$SCRIPT_DIR"
 
 SERVER_PID_FILE="$SCRIPT_DIR/.server.pid"
 WEB_PID_FILE="$SCRIPT_DIR/.web.pid"
-FEATURES="discord"
 
 # #417: サーバ実行ファイルの絶対パス。start_server の argv と stop_stray_servers の
 # pgrep 照合の両方でこれを使う。
@@ -39,8 +38,8 @@ EOF
 }
 
 build_server() {
-    echo "==> Building server (features: $FEATURES)..."
-    cargo build --features "$FEATURES"
+    echo "==> Building server..."
+    cargo build -p opencrab-server
 }
 
 start_server() {
@@ -238,7 +237,9 @@ start_web() {
     echo "==> Starting frontend dev server..."
     # --host 0.0.0.0 は必須。省くと vite はループバック（[::1]）だけで listen し、
     # 127.0.0.1 からも LAN 上の別端末（スマホ等）からもダッシュボードに届かなくなる。
-    (cd "$SCRIPT_DIR/web" && npx vite --port 3000 --host 0.0.0.0) > "$SCRIPT_DIR/.web.log" 2>&1 &
+    # exec: the recorded PID is vite itself, so stop_web stops it (without exec it would be the
+    # subshell, and vite would keep running after `./dev.sh stop`).
+    (cd "$SCRIPT_DIR/web" && exec npx vite --port 3000 --host 0.0.0.0) > "$SCRIPT_DIR/.web.log" 2>&1 &
     local pid=$!
     echo "$pid" > "$WEB_PID_FILE"
     echo "    Frontend started (PID: $pid) → http://localhost:3000"

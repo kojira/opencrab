@@ -116,3 +116,46 @@ fn disabling_subprocess_provider_removes_it_from_router() {
         "disabled subprocess provider must be absent from the router"
     );
 }
+
+/// D-1141: disabling a provider that `[llm.fallback] chain` still names is refused with the
+/// startup error and nothing is saved, so the next startup still works.
+#[test]
+fn disabling_a_provider_the_fallback_chain_names_is_refused_and_not_saved() {
+    use crate::config::ProviderConfig;
+    let mut config = crate::test_config("chatgpt", "gpt-6-sol");
+    for name in ["chatgpt", "ollama"] {
+        config
+            .llm
+            .providers
+            .insert(name.to_string(), ProviderConfig::default());
+    }
+    config.llm.fallback.chain = vec!["ollama".to_string()];
+    let state = crate::AppState::new(
+        opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap()),
+        opencrab_llm::router::LlmRouter::new(),
+        config,
+    );
+    let disable = {
+        let conn = state.db.lock().unwrap();
+        build_override_row(&conn, "ollama", &body(json!({"enabled": false})))
+            .unwrap()
+            .unwrap()
+    };
+
+    let (status, message) = store_override(&state, "ollama", Some(&disable)).unwrap_err();
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        message.contains("fallback.chain references undefined provider 'ollama'"),
+        "{message}"
+    );
+    let conn = state.db.lock().unwrap();
+    assert!(
+        opencrab_db::queries::get_llm_provider_override(&conn, "ollama")
+            .unwrap()
+            .is_none()
+    );
+    drop(conn);
+    crate::config::build_effective_llm_router(&state.db, &state.config().llm)
+        .expect("startup still builds the router");
+}
