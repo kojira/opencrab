@@ -14,11 +14,17 @@ import {
   type LlmProviderInfo,
 } from '../api/providers';
 import { createAgent } from '../api/agents';
+import GatewayStep from '../components/setup/GatewayStep';
+import ConversationStep from '../components/setup/ConversationStep';
+
+/** How often the page re-reads the setup status (gateway connections, first reply). */
+const STATUS_POLL_MS = 3000;
 
 export default function Setup() {
   const { t } = useTranslation();
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [current, setCurrent] = useState(0);
+  const [agentId, setAgentId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -39,6 +45,16 @@ export default function Setup() {
       }
     });
   }, [refresh]);
+
+  // Live status while the page is open: a gateway connecting or the first reply shows up
+  // without a reload.
+  useEffect(() => {
+    const timer = setInterval(() => void refresh(), STATUS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  const agentIds = status?.steps.agent.agent_ids ?? [];
+  const selectedAgent = agentId && agentIds.includes(agentId) ? agentId : (agentIds[0] ?? null);
 
   const stepDone = (k: StepKey): boolean => status?.steps[k]?.done ?? false;
 
@@ -99,10 +115,31 @@ export default function Setup() {
         )}
         {current === 1 && (
           <AgentStep
-            onCreated={() => {
+            onCreated={(id) => {
+              setAgentId(id);
               refresh();
             }}
           />
+        )}
+        {current >= 2 && agentIds.length > 1 && (
+          <div className="mb-5">
+            <FieldLabel>{t('setup.selectAgent')}</FieldLabel>
+            <select
+              className="input-outlined"
+              value={selectedAgent ?? ''}
+              onChange={(e) => setAgentId(e.target.value)}
+            >
+              {agentIds.map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {current === 2 && <GatewayStep gateway={status?.steps.gateway} agentId={selectedAgent} />}
+        {current === 3 && (
+          <ConversationStep conversation={status?.steps.conversation} agentId={selectedAgent} />
         )}
       </div>
 

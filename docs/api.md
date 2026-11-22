@@ -24,7 +24,7 @@ belong to the gateway processes.
 | DELETE | `/api/agents/{id}` | Delete agent |
 | GET | `/api/agents/{id}/sleep-logs` | Sleep-time skill review history (newest first) |
 | **Setup** | | |
-| GET | `/api/setup/status` | First-time setup progress (`llm_provider`, `agent`) |
+| GET | `/api/setup/status` | First-time setup progress (`llm_provider`, `agent`, `gateway` — connected to the gate socket now, `conversation` — an agent has replied) |
 | POST | `/api/agents/{id}/skills/seed-standard` | Seed the standard skills from `skills/*.skill.md` (idempotent) |
 | **LLM** | | |
 | GET | `/api/llm/model-choices` | Selectable models (`provider:model`), the same list as `/model` and `select_llm`; providers that could not list their models are in `unavailable_providers` |

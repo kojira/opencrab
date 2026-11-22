@@ -3,6 +3,7 @@
 この文書は、初めて OpenCrab にさわる人のための道案内です。
 
 - **動かしてエージェントと話したい人** → 1〜4 を順に進めてください。
+  core とダッシュボードを起動したあと（3.4 まで）は、ダッシュボードの `/setup` が同じ道を順に案内します（3.5）。
 - **OpenCrab を開発する人** → 1〜4 のあと、5〜6 を読んでください。
 
 ここに書いたコマンドは、すべて macOS（arm64）で実際に実行して確かめたものです。
@@ -158,15 +159,31 @@ OPENCRAB_API_URL=http://localhost:18080 ./dev.sh
 
 ダッシュボードには認証がありません。信頼できるネットワークの中だけで開いてください。
 
-### 3.5 エージェントを作る
+### 3.5 ダッシュボードの `/setup` で進める
 
-`/setup` の 2 つ目の手順「Agent」で作れます。同じことを REST API でもできます。
+`/setup` には 4 つの手順があります。どれも、いまの状態を見て完了かどうかを出します（`GET /api/setup/status`）。
+
+| 手順 | 完了になるとき |
+|---|---|
+| LLM プロバイダ | 既定の provider が使える（キー不要の provider か、本物のキーがある） |
+| エージェント | エージェントが 1 つ以上ある |
+| gateway | gateway が 1 つ以上、いま gate socket につながっている |
+| 最初の会話 | どれかのエージェントが、どこかの会話で返事をした |
+
+gateway の手順には、この core の gate socket とエージェント ID と、それを入れた 4 章の cli-gateway のコマンドが出ます。
+gateway の手順と会話の手順は、開いている間、数秒ごとに状態を読み直します。
+web-gateway が動いていれば、会話の手順の「新しい会話」でダッシュボードから話せます。
+Home のチェックリストも同じ 4 つを出します。
+
+### 3.6 エージェントを作る（REST API）
+
+`/setup` の 2 つ目の手順「エージェント」で作れます。同じことを REST API でもできます。
 
 ```sh
 curl -s -X POST localhost:8080/api/agents -H 'content-type: application/json' \
   -d '{"id":"crab","name":"Crab","persona_name":"Crab"}'
 curl -s -X POST localhost:8080/api/agents/crab/skills/seed-standard -H 'content-type: application/json' -d '{}'
-curl -s localhost:8080/api/setup/status   # "complete":true
+curl -s localhost:8080/api/setup/status   # "next_step":"gateway"（gateway をつなぐと "conversation"）
 ```
 
 2 つ目は、標準スキル（`skills/*.skill.md`）を入れるものです。
@@ -197,7 +214,7 @@ cargo +1.98.0 build -p opencrab-cli-gateway --locked
 ### 4.2 placement を書く
 
 `cli-placement.json` を作ります。`core_socket` は core の `[gate] listen_socket` と同じ絶対パスにします。
-`agent_id` は 3.5 で作ったエージェントの ID です。`instance_id` は小文字の UUID なら何でもかまいません。
+`agent_id` は 3.5 / 3.6 で作ったエージェントの ID です。`instance_id` は小文字の UUID なら何でもかまいません。
 
 ```json
 {

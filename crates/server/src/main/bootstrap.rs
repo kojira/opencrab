@@ -128,7 +128,8 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     // NOTE: エージェント個別の許可コマンド（DB管理）はグローバル tools 設定に
     // マージしない。全エージェントの許可が混ざり、あるエージェントの許可が他へ漏れるため。
     // 個別コマンドは実行時に run_agent_response 内でそのエージェント分だけ適用する。
-    let state = AppState::new(db, llm_router, cfg.clone());
+    let mut state = AppState::new(db, llm_router, cfg.clone());
+    state.extgate = Some(extgate.clone());
 
     Ok(BootstrapContext {
         cfg,

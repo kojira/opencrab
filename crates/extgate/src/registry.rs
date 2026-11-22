@@ -144,6 +144,13 @@ impl Registry {
             .unwrap_or_default()
     }
 
+    /// The instance ids connected to the gate socket now (sorted).
+    pub fn live_instance_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.live.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
     pub fn identities(&self) -> Vec<(String, u64)> {
         self.live
             .iter()

@@ -53,7 +53,8 @@ fn new_row_id(instance_id: &str, session_key: &str) -> String {
     }
 }
 
-fn instance_agent(conn: &Connection, instance_id: &str) -> Result<Option<String>> {
+/// The agent a (not deleted) gate instance speaks for.
+pub fn gate_instance_agent(conn: &Connection, instance_id: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row(
             "SELECT a.agent_id FROM gate_instances i
@@ -71,7 +72,7 @@ pub fn find_gate_session(
     instance_id: &str,
     session_key: &str,
 ) -> Result<Option<GateSession>> {
-    let Some(agent_id) = instance_agent(conn, instance_id)? else {
+    let Some(agent_id) = gate_instance_agent(conn, instance_id)? else {
         return Ok(None);
     };
     let row: Option<(String, Option<String>)> = conn
@@ -122,7 +123,8 @@ pub fn resolve_gate_session_in_tx(
     if let Some(found) = find_gate_session(tx, instance_id, session_key)? {
         return Ok(found);
     }
-    let agent_id = instance_agent(tx, instance_id)?.ok_or(GateSessionError::UnknownInstance)?;
+    let agent_id =
+        gate_instance_agent(tx, instance_id)?.ok_or(GateSessionError::UnknownInstance)?;
     let session_id = session_key.to_string();
     let now = Utc::now().timestamp_nanos_opt().unwrap_or(0);
     if get_session(tx, &session_id)?.is_none() {
@@ -164,7 +166,7 @@ pub fn gate_session_by_row(conn: &Connection, row_id: &str) -> Result<Option<Gat
     let Some((instance_id, session_key, stored)) = row else {
         return Ok(None);
     };
-    let Some(agent_id) = instance_agent(conn, &instance_id)? else {
+    let Some(agent_id) = gate_instance_agent(conn, &instance_id)? else {
         return Ok(None);
     };
     let session_id = match stored {
