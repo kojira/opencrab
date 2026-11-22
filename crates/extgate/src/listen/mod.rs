@@ -42,7 +42,9 @@ enum ConnState {
     Running,
 }
 
-/// 空は listen しない。相対・既存の非 socket は失敗。既存 socket は unlink。
+/// 空は listen しない。相対・既存の非 socket は失敗。既存 socket は、接続を受ける
+/// プロセス（動いている core）が居れば失敗し、居ない（前のプロセスの残り）ときだけ unlink する。
+/// 2 つ目の core が動いている core の socket を奪わないため（D-1141）。
 pub fn validate_listen_socket(raw: &str) -> Result<Option<PathBuf>, anyhow::Error> {
     if raw.is_empty() {
         return Ok(None);
@@ -55,6 +57,13 @@ pub fn validate_listen_socket(raw: &str) -> Result<Option<PathBuf>, anyhow::Erro
         let meta = std::fs::metadata(path)?;
         if !meta.file_type().is_socket() {
             anyhow::bail!("gate.listen_socket exists and is not a socket");
+        }
+        if std::os::unix::net::UnixStream::connect(path).is_ok() {
+            anyhow::bail!(
+                "gate.listen_socket {} is in use by a running process (another core?); \
+                 stop it or use another listen_socket",
+                path.display()
+            );
         }
         std::fs::remove_file(path)?;
     }
@@ -673,4 +682,36 @@ async fn handle_open(
 
 pub fn recover_now(conn: &mut Connection) -> Result<(), GateError> {
     recover_stale_deliveries(conn, now_nanos())
+}
+
+#[cfg(test)]
+mod listen_socket_tests {
+    use super::validate_listen_socket;
+
+    /// D-1141: a second core must not unlink the socket a running core listens on.
+    #[test]
+    fn a_live_socket_is_refused_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gate.sock");
+        let _live = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+        let error = validate_listen_socket(path.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("in use"), "{error}");
+        assert!(path.exists(), "the running listener keeps its socket");
+        std::os::unix::net::UnixStream::connect(&path).expect("still reachable");
+    }
+
+    #[test]
+    fn a_stale_socket_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gate.sock");
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists(), "a closed listener leaves its socket file");
+
+        let validated = validate_listen_socket(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(validated.as_deref(), Some(path.as_path()));
+        assert!(!path.exists(), "the stale socket file is removed");
+    }
 }

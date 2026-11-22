@@ -27,13 +27,13 @@ belong to the gateway processes.
 | GET | `/api/setup/status` | First-time setup progress (`llm_provider`, `agent`) |
 | POST | `/api/agents/{id}/skills/seed-standard` | Seed the standard skills from `skills/*.skill.md` (idempotent) |
 | **LLM** | | |
-| GET | `/api/llm/model-choices` | Selectable models (`provider:model`), the same list as `/model` and `select_llm` |
+| GET | `/api/llm/model-choices` | Selectable models (`provider:model`), the same list as `/model` and `select_llm`; providers that could not list their models are in `unavailable_providers` |
 | GET | `/api/llm/model-pricing` | List model pricing / context window / output limit |
 | PUT | `/api/llm/model-pricing` | Upsert one model's pricing (`context_window` required) |
 | GET | `/api/llm/providers` | List providers |
 | POST | `/api/llm/providers/reload` | Rebuild providers from TOML + DB |
-| PUT | `/api/llm/providers/{name}` | Save a provider override to the DB |
-| DELETE | `/api/llm/providers/{name}/override` | Drop the DB override (back to TOML) |
+| PUT | `/api/llm/providers/{name}` | Save a provider override to the DB (`409`, nothing saved, when the server could not start with it) |
+| DELETE | `/api/llm/providers/{name}/override` | Drop the DB override (back to TOML; `409` as above) |
 | POST | `/api/llm/providers/{name}/test` | Check the provider starts with the current settings |
 | GET | `/api/llm/codex/diagnostics` | Codex CLI diagnostics |
 | GET | `/api/llm/cursor/diagnostics` | Cursor CLI diagnostics |
@@ -2290,6 +2290,47 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 ```json
 {"removed": true}
 ```
+
+---
+
+## LLM Models and Providers
+
+### GET /api/llm/model-choices
+
+**目的**: 選べるモデルの一覧。gateway の `/model`（`list_models` / `list_session_models`）、エージェントの `select_llm` と `get_system_info` と同じ一覧（同じ関数が作る）。
+
+登録された provider ごとにモデル一覧を取る。一覧を取れなかった provider は `choices` に入らず、`unavailable_providers` に理由と並ぶ。ほかの provider のモデルはそのまま選べる。
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| default_model | string | `[llm]` の既定モデル（`provider:model`） |
+| choices | string[] | 選べるモデル（`provider:model`、整列・重複なし） |
+| unavailable_providers | object[] | モデル一覧を取れなかった provider。`provider`（名前）と `error`（理由）。全部取れたら `[]` |
+
+**Example Response**
+
+```json
+{
+  "default_model": "chatgpt:gpt-6-sol",
+  "choices": ["chatgpt:gpt-6-luna", "chatgpt:gpt-6-sol"],
+  "unavailable_providers": [
+    {"provider": "ollama", "error": "failed to list Ollama models"}
+  ]
+}
+```
+
+gate の `list_models` / `list_session_models` の結果にも同じ `unavailable_providers` が入る。
+`get_system_info` は取れなかった provider があるときだけ `unavailable_providers` を返す。
+`select_llm` と `/model` は一覧にある名前だけを受け付ける（取れなかった provider のモデルは選べない）。
+
+### PUT /api/llm/providers/{name}, DELETE /api/llm/providers/{name}/override
+
+provider の設定（DB のオーバーライド）を保存・削除する。保存する前に、起動時と同じ検査（LLM router が組めるか）を通す。
+通らない変更（例: `[llm.fallback] chain` や `[llm.aliases]` が使っている provider を無効にする、`default_provider` を無効にする）は `409` で断り、何も保存しない。本文に起動時と同じ理由が入る。
+
+---
 
 ---
 

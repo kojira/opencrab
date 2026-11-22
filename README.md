@@ -92,10 +92,11 @@ cargo build
 
 ### 2. Create the config file
 
-Copy the neutral template. First-time setup is done from the dashboard (see
-[First-time setup](#first-time-setup-recommended) below), but the template's default model has no
-context budget in a fresh database, so the server stops at startup until `[llm]` points to a model
-that has one. See [docs/onboarding.md](docs/onboarding.md) (section 3.2) for a minimal `[llm]` section.
+Copy the neutral template. Its default model is `chatgpt:gpt-6-sol` (ChatGPT login in
+`~/.codex/auth.json`), which has a context budget in a fresh database, so the server starts as-is.
+Other providers are set up from the dashboard (see
+[First-time setup](#first-time-setup-recommended) below). To make another model the default,
+register its budget first (`PUT /api/llm/model-pricing`, see [docs/onboarding.md](docs/onboarding.md)).
 
 ```bash
 cp config/default.toml.example config/default.toml
@@ -159,7 +160,8 @@ cargo run -p opencrab-server
 
 # Frontend dev server (separate terminal)
 cd web && ./dev.sh
-# Proxies /api to :8080 → http://localhost:3000
+# Proxies /api to $OPENCRAB_API_URL (default http://localhost:8080) → http://localhost:3000
+# e.g. OPENCRAB_API_URL=http://localhost:18080 ./dev.sh when [gateway.rest] port = 18080
 ```
 
 ### 6. CLI

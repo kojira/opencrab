@@ -160,7 +160,8 @@ impl Action for UpdateImpressionAction {
 /// D-1135: `current_turn_model` is the model this turn runs on; `conversation_model` is this
 /// conversation's model (`/model`, `select_llm`), which the next turn uses. `selectable_models`
 /// is the gateway `/model` list ([`ModelAdministration::list_models`]), the same choices
-/// `select_llm` accepts (D-1131).
+/// `select_llm` accepts (D-1131); `unavailable_providers` names the providers whose models are
+/// missing from it because their model list could not be read.
 #[derive(Default)]
 pub struct GetSystemInfoAction {
     models: Option<Arc<dyn ModelAdministration>>,
@@ -204,7 +205,12 @@ impl Action for GetSystemInfoAction {
             Err(error) => data["conversation_model_error"] = json!(error),
         }
         match crate::llm_selection::selectable_models(self.models.as_deref(), &ctx.agent_id).await {
-            Ok(models) => data["selectable_models"] = json!(models),
+            Ok(catalog) => {
+                data["selectable_models"] = json!(catalog.models);
+                if !catalog.unavailable_providers.is_empty() {
+                    data["unavailable_providers"] = catalog.unavailable_providers_json();
+                }
+            }
             Err(error) => data["selectable_models_error"] = json!(error),
         }
         ActionResult::success(data)

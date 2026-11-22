@@ -17,9 +17,13 @@ workspace_path = "data/agents/{agent_id}/workspace"
 max_workspace_size_mb = 100
 
 # ===== LLM =====
-# 既定は hermit-shell（localhost:8765 の OpenAI 互換 Anthropic プロキシ、macOS 向け）。
-# それ以外を使う場合は、ダッシュボードの `/setup` または「システム設定」から
-# プロバイダーを有効化して API キーを設定してください（TOML 編集は不要）。
+# 既定は ChatGPT（`~/.codex/auth.json` のログインを使う）の gpt-6-sol。新しい DB に
+# 予算（context_window / max_output_tokens）が最初から入っているモデルなので、
+# このファイルをコピーしただけで起動できる。
+# ほかのプロバイダーは、ダッシュボードの `/setup` または「システム設定」から
+# 有効化して API キーを設定してください（TOML 編集は不要）。
+# 既定を別のモデルに変えるときは、そのモデルの予算を先に登録する
+# （`PUT /api/llm/model-pricing`。登録が無いと起動時に止まる）。
 
 [subtask]
 # ツール呼び出しをバックグラウンド実行に回すか（既定 true）。
@@ -31,8 +35,8 @@ max_workspace_size_mb = 100
 auto_dispatch = true
 
 [llm]
-default_provider = "openai"
-default_model = "claude-sonnet-4-6"
+default_provider = "chatgpt"
+default_model = "gpt-6-sol"
 
 [llm.fallback]
 chain = ["anthropic", "ollama"]
@@ -94,12 +98,11 @@ models = ["auto", "gpt-5.2", "claude-opus-5", "claude-sonnet-5"]
 # args = ["--experimental-acp"]
 # models = ["default"]
 
-# ChatGPT direct API（~/.codex/auth.json の OAuth トークンを使用）。
+# ChatGPT direct API（~/.codex/auth.json の OAuth トークンを使用）。既定のプロバイダー。
 # 選べるモデルは GET /api/llm/model-choices（/model と select_llm と同じ一覧）。
 [llm.providers.chatgpt]
-enabled = false
 auth_file = "~/.codex/auth.json"
-default_model = "gpt-5.5"
+default_model = "gpt-6-sol"
 reasoning_effort = "low"
 
 [llm.aliases]

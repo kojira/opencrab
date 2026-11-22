@@ -43,6 +43,7 @@ impl TestRuntime {
             realtime_configured_model,
             snapshot: ModelSnapshot {
                 models: vec!["openai:gpt-5".to_string()],
+                unavailable_providers: Vec::new(),
                 current_model,
                 configured_model,
                 default_model,
@@ -110,6 +111,7 @@ impl TestRuntime {
             TurnModelProfile::Default => list.snapshot,
             TurnModelProfile::Realtime => ModelSnapshot {
                 models: list.snapshot.models,
+                unavailable_providers: Vec::new(),
                 configured_model: list.realtime_configured_model,
                 current_model: list.realtime_current_model,
                 default_model: list.snapshot.current_model,
@@ -133,6 +135,7 @@ impl ModelAdministration for TestRuntime {
             .map_err(|_| ModelAdminError::Internal)?;
         Ok(ModelSnapshot {
             models: vec!["openai:gpt-5".to_string()],
+            unavailable_providers: Vec::new(),
             current_model: configured_model
                 .clone()
                 .unwrap_or_else(|| "mock:test".to_string()),

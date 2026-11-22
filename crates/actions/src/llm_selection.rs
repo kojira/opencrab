@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::model_admin::{
-    resolve_exact_model, ModelAdminError, ModelAdministration, ModelResolutionError,
+    resolve_exact_model, ModelAdminError, ModelAdministration, ModelCatalog, ModelResolutionError,
     TurnModelProfile,
 };
 use crate::traits::{Action, ActionContext, ActionResult};
@@ -59,19 +59,23 @@ pub fn current_turn_model(ctx: &ActionContext) -> String {
 }
 
 /// D-1131: the models the agent can select: the gateway `/model` list
-/// ([`ModelAdministration::list_models`]). `Err` carries a message for the agent.
+/// ([`ModelAdministration::list_models`]) with the providers whose models could not be read.
+/// `Err` carries a message for the agent.
 pub async fn selectable_models(
     models: Option<&dyn ModelAdministration>,
     agent_id: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<ModelCatalog, String> {
     let Some(models) = models else {
         return Err("モデル一覧を取得できない（この実行環境にはモデル一覧がない）".to_string());
     };
     models
         .list_models(agent_id)
         .await
-        .map(|snapshot| snapshot.models)
-        .map_err(|_| "モデル一覧を取得できない（プロバイダのモデル一覧の取得に失敗）".to_string())
+        .map(|snapshot| ModelCatalog {
+            models: snapshot.models,
+            unavailable_providers: snapshot.unavailable_providers,
+        })
+        .map_err(|_| "モデル一覧を取得できない".to_string())
 }
 
 /// D-1135: the conversation session `/model` addresses for this turn. A subtask runs in its own
@@ -164,13 +168,26 @@ impl Action for SelectLlmAction {
         let Some(models) = self.models.as_deref() else {
             return not_changed("この実行環境にはモデル管理がない");
         };
-        let available = match selectable_models(Some(models), &ctx.agent_id).await {
-            Ok(available) => available,
+        let catalog = match selectable_models(Some(models), &ctx.agent_id).await {
+            Ok(catalog) => catalog,
             Err(error) => return not_changed(&error),
         };
-        let unresolved =
-            |why: &str| not_changed(&format!("{why}。選べるモデル: [{}]", available.join(", ")));
-        let selected = match resolve_exact_model(&available, requested) {
+        let unresolved = |why: &str| {
+            let mut message = format!("{why}。選べるモデル: [{}]", catalog.models.join(", "));
+            if !catalog.unavailable_providers.is_empty() {
+                let missing: Vec<String> = catalog
+                    .unavailable_providers
+                    .iter()
+                    .map(|p| format!("{}（{}）", p.provider, p.error))
+                    .collect();
+                message.push_str(&format!(
+                    "。モデル一覧を取得できなかったプロバイダ: [{}]",
+                    missing.join(", ")
+                ));
+            }
+            not_changed(&message)
+        };
+        let selected = match resolve_exact_model(&catalog.models, requested) {
             Ok(selected) => selected,
             Err(ModelResolutionError::InvalidArgs) => {
                 return unresolved("指定が空か前後に空白がある")
@@ -227,6 +244,7 @@ mod tests {
     /// (`sessions.model`) that `/model` and `select_llm` write.
     struct SessionModels {
         models: Vec<String>,
+        unavailable: Vec<crate::model_admin::UnavailableProvider>,
         session_model: std::sync::Mutex<Option<String>>,
     }
 
@@ -235,6 +253,7 @@ mod tests {
             let configured_model = self.session_model.lock().unwrap().clone();
             ModelSnapshot {
                 models,
+                unavailable_providers: self.unavailable.clone(),
                 current_model: configured_model.clone().unwrap_or(TURN_MODEL.to_string()),
                 configured_model,
                 default_model: TURN_MODEL.to_string(),
@@ -247,6 +266,7 @@ mod tests {
         async fn list_models(&self, _agent_id: &str) -> Result<ModelSnapshot, ModelAdminError> {
             Ok(ModelSnapshot {
                 models: self.models.clone(),
+                unavailable_providers: self.unavailable.clone(),
                 configured_model: None,
                 current_model: TURN_MODEL.to_string(),
                 default_model: TURN_MODEL.to_string(),
@@ -325,7 +345,19 @@ mod tests {
                 "chatgpt:gpt-6-sol".to_string(),
                 "mock:test-model".to_string(),
             ],
+            unavailable: Vec::new(),
             session_model: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// The `/model` list when the `ollama` provider could not list its models.
+    fn session_models_without_ollama() -> Arc<SessionModels> {
+        Arc::new(SessionModels {
+            unavailable: vec![crate::model_admin::UnavailableProvider {
+                provider: "ollama".to_string(),
+                error: "failed to list Ollama models".to_string(),
+            }],
+            ..Arc::into_inner(session_models()).unwrap()
         })
     }
 
@@ -503,6 +535,48 @@ mod tests {
                 "chatgpt:gpt-6-sol",
                 "mock:test-model"
             ])
+        );
+    }
+
+    /// D-1141: a provider that cannot list its models does not block the others: select_llm
+    /// still switches to a listed model, and an unresolved name names the missing provider.
+    #[tokio::test]
+    async fn select_llm_uses_the_partial_list_and_names_unavailable_providers() {
+        let (_dir, ctx) = test_context("session-1");
+        let models = session_models_without_ollama();
+
+        let rejected = SelectLlmAction::new(Some(models.clone()))
+            .execute(
+                &json!({"model_alias": "ollama:llama3", "reason": "r"}),
+                &ctx,
+            )
+            .await;
+        assert!(!rejected.success);
+        let err = rejected.error.unwrap_or_default();
+        assert!(err.contains("chatgpt:gpt-6-sol"), "{err}");
+        assert!(
+            err.contains("ollama（failed to list Ollama models）"),
+            "{err}"
+        );
+
+        let switched = SelectLlmAction::new(Some(models.clone()))
+            .execute(&json!({"model_alias": "gpt-6-sol", "reason": "r"}), &ctx)
+            .await;
+        assert!(switched.success, "{:?}", switched.error);
+        assert_eq!(
+            models.session_model.lock().unwrap().as_deref(),
+            Some("chatgpt:gpt-6-sol")
+        );
+
+        let info = GetSystemInfoAction::new(Some(models))
+            .execute(&json!({}), &ctx)
+            .await
+            .data
+            .unwrap();
+        assert_eq!(info["selectable_models"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            info["unavailable_providers"],
+            json!([{"provider": "ollama", "error": "failed to list Ollama models"}])
         );
     }
 }

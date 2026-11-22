@@ -10,8 +10,8 @@
 use async_trait::async_trait;
 
 use opencrab_actions::{
-    AgentRuntime, EffortSnapshot, ModelAdminError, ModelAdministration, ModelSnapshot,
-    SessionEffortList, SessionModelList, TurnModelProfile,
+    AgentRuntime, EffortSnapshot, ModelAdminError, ModelAdministration, ModelCatalog,
+    ModelSnapshot, SessionEffortList, SessionModelList, TurnModelProfile,
 };
 
 mod session_effort;
@@ -47,9 +47,7 @@ fn resolve_runtime_envelope(
 #[async_trait]
 impl ModelAdministration for AppState {
     async fn list_models(&self, agent_id: &str) -> Result<ModelSnapshot, ModelAdminError> {
-        let models = crate::api::llm::available_models(self)
-            .await
-            .map_err(|_| ModelAdminError::Internal)?;
+        let catalog = crate::api::llm::available_models(self).await;
         let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
         let agent = opencrab_db::queries::get_agent(&conn, agent_id)
             .map_err(|_| ModelAdminError::Internal)?
@@ -60,7 +58,8 @@ impl ModelAdministration for AppState {
             .filter(|model| !model.is_empty())
             .unwrap_or_else(|| self.default_model());
         Ok(ModelSnapshot {
-            models,
+            models: catalog.models,
+            unavailable_providers: catalog.unavailable_providers,
             configured_model,
             current_model,
             default_model: self.default_model(),
@@ -86,16 +85,15 @@ impl ModelAdministration for AppState {
         if exact_canonical_request && configured_model.as_deref() == Some(model) {
             return Ok(ModelSnapshot {
                 models: Vec::new(),
+                unavailable_providers: Vec::new(),
                 configured_model,
                 current_model: model.to_string(),
                 default_model: self.default_model(),
             });
         }
 
-        let models = crate::api::llm::available_models(self)
-            .await
-            .map_err(|_| ModelAdminError::Internal)?;
-        let canonical = opencrab_actions::resolve_exact_model(&models, model)?;
+        let catalog = crate::api::llm::available_models(self).await;
+        let canonical = opencrab_actions::resolve_exact_model(&catalog.models, model)?;
 
         let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
         let existing = opencrab_db::queries::get_agent(&conn, agent_id)
@@ -122,7 +120,8 @@ impl ModelAdministration for AppState {
         }
 
         Ok(ModelSnapshot {
-            models,
+            models: catalog.models,
+            unavailable_providers: catalog.unavailable_providers,
             configured_model: Some(canonical.clone()),
             current_model: canonical,
             default_model: self.default_model(),
@@ -141,15 +140,14 @@ impl ModelAdministration for AppState {
         if already_reset {
             return Ok(ModelSnapshot {
                 models: Vec::new(),
+                unavailable_providers: Vec::new(),
                 configured_model: None,
                 current_model: self.default_model(),
                 default_model: self.default_model(),
             });
         }
 
-        let models = crate::api::llm::available_models(self)
-            .await
-            .map_err(|_| ModelAdminError::Internal)?;
+        let catalog = crate::api::llm::available_models(self).await;
         let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
         let existing = opencrab_db::queries::get_agent(&conn, agent_id)
             .map_err(|_| ModelAdminError::Internal)?
@@ -168,7 +166,8 @@ impl ModelAdministration for AppState {
             }
         }
         Ok(ModelSnapshot {
-            models,
+            models: catalog.models,
+            unavailable_providers: catalog.unavailable_providers,
             configured_model: None,
             current_model: self.default_model(),
             default_model: self.default_model(),
@@ -180,13 +179,11 @@ impl ModelAdministration for AppState {
         agent_id: &str,
         session_id: &str,
     ) -> Result<SessionModelList, ModelAdminError> {
-        let models = crate::api::llm::available_models(self)
-            .await
-            .map_err(|_| ModelAdminError::Internal)?;
+        let catalog = crate::api::llm::available_models(self).await;
         let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
         let configured_model = session_model_target(&conn, agent_id, session_id)?;
         let agent_model = self.agent_model(&conn, agent_id)?;
-        let snapshot = session_snapshot(models, configured_model, agent_model);
+        let snapshot = session_snapshot(catalog, configured_model, agent_model);
         let realtime_configured_model =
             opencrab_db::queries::get_session_realtime_model(&conn, session_id)
                 .map_err(|_| ModelAdminError::Internal)?;
@@ -218,18 +215,25 @@ impl ModelAdministration for AppState {
                     opencrab_db::queries::get_session_realtime_model(&conn, session_id)
                         .map_err(|_| ModelAdminError::Internal)?;
                 if exact_canonical_request && realtime_model.as_deref() == Some(model) {
-                    return self.realtime_snapshot(&conn, agent_id, session_id, Vec::new());
+                    return self.realtime_snapshot(
+                        &conn,
+                        agent_id,
+                        session_id,
+                        ModelCatalog::default(),
+                    );
                 }
             } else if exact_canonical_request && configured_model.as_deref() == Some(model) {
                 let agent_model = self.agent_model(&conn, agent_id)?;
-                return Ok(session_snapshot(Vec::new(), configured_model, agent_model));
+                return Ok(session_snapshot(
+                    ModelCatalog::default(),
+                    configured_model,
+                    agent_model,
+                ));
             }
         }
 
-        let models = crate::api::llm::available_models(self)
-            .await
-            .map_err(|_| ModelAdminError::Internal)?;
-        let canonical = opencrab_actions::resolve_exact_model(&models, model)?;
+        let catalog = crate::api::llm::available_models(self).await;
+        let canonical = opencrab_actions::resolve_exact_model(&catalog.models, model)?;
 
         // Membership re-check, validation and write share this one DB lock. The session lock is
         // never taken: a running turn keeps its pinned model; the change applies next turn.
@@ -253,7 +257,7 @@ impl ModelAdministration for AppState {
                     return Err(ModelAdminError::TargetUnavailable);
                 }
             }
-            return self.realtime_snapshot(&conn, agent_id, session_id, models);
+            return self.realtime_snapshot(&conn, agent_id, session_id, catalog);
         }
         if configured_model.as_deref() != Some(canonical.as_str()) {
             crate::process::check_agent_model_change(&conn, None, Some(&canonical), true)
@@ -265,7 +269,7 @@ impl ModelAdministration for AppState {
             }
         }
         let agent_model = self.agent_model(&conn, agent_id)?;
-        Ok(session_snapshot(models, Some(canonical), agent_model))
+        Ok(session_snapshot(catalog, Some(canonical), agent_model))
     }
 
     async fn reset_session_model(
@@ -286,7 +290,7 @@ impl ModelAdministration for AppState {
             {
                 return Err(ModelAdminError::TargetUnavailable);
             }
-            return self.realtime_snapshot(&conn, agent_id, session_id, Vec::new());
+            return self.realtime_snapshot(&conn, agent_id, session_id, ModelCatalog::default());
         }
         let agent_model = self.agent_model(&conn, agent_id)?;
         if configured_model.is_some() {
@@ -308,7 +312,7 @@ impl ModelAdministration for AppState {
                 return Err(ModelAdminError::TargetUnavailable);
             }
         }
-        Ok(session_snapshot(Vec::new(), None, agent_model))
+        Ok(session_snapshot(ModelCatalog::default(), None, agent_model))
     }
 
     async fn list_session_reasoning_efforts(
@@ -357,7 +361,7 @@ impl AppState {
         conn: &rusqlite::Connection,
         agent_id: &str,
         session_id: &str,
-        models: Vec<String>,
+        catalog: ModelCatalog,
     ) -> Result<ModelSnapshot, ModelAdminError> {
         let configured_model = opencrab_db::queries::get_session_realtime_model(conn, session_id)
             .map_err(|_| ModelAdminError::Internal)?;
@@ -368,7 +372,7 @@ impl AppState {
             &self.default_model(),
         )
         .map_err(|_| ModelAdminError::Internal)?;
-        Ok(session_snapshot(models, configured_model, default_model))
+        Ok(session_snapshot(catalog, configured_model, default_model))
     }
 
     /// Rejects a realtime model whose `input_high` under the live context-budget policy is lower
@@ -429,12 +433,13 @@ fn session_model_target(
 }
 
 fn session_snapshot(
-    models: Vec<String>,
+    catalog: ModelCatalog,
     configured_model: Option<String>,
     agent_model: String,
 ) -> ModelSnapshot {
     ModelSnapshot {
-        models,
+        models: catalog.models,
+        unavailable_providers: catalog.unavailable_providers,
         current_model: configured_model
             .clone()
             .unwrap_or_else(|| agent_model.clone()),

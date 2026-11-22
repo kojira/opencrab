@@ -38,9 +38,9 @@ pub use bridge::{
 pub use continue_marker::visible_speech_after_markers;
 pub use dispatcher::ActionDispatcher;
 pub use model_admin::{
-    resolve_exact_model, EffortSnapshot, ModelAdminError, ModelAdministration,
-    ModelResolutionError, ModelSnapshot, SessionEffortList, SessionModelList, TurnModelProfile,
-    REASONING_EFFORTS,
+    resolve_exact_model, unavailable_providers_json, EffortSnapshot, ModelAdminError,
+    ModelAdministration, ModelCatalog, ModelResolutionError, ModelSnapshot, SessionEffortList,
+    SessionModelList, TurnModelProfile, UnavailableProvider, REASONING_EFFORTS,
 };
 pub use no_reply::{
     terminate_at_no_reply, DeliveryContext, NoReplyTermination, NO_REPLY_LOG_TARGET,

@@ -291,18 +291,11 @@ pub async fn update_provider(
         return Err((StatusCode::BAD_REQUEST, "invalid provider name".into()));
     }
 
-    {
+    let desired = {
         let conn = state.db.lock().unwrap();
-        match build_override_row(&conn, &name, &body)? {
-            None => opencrab_db::queries::delete_llm_provider_override(&conn, &name)
-                .map_err(internal)?,
-            Some(row) => {
-                opencrab_db::queries::upsert_llm_provider_override(&conn, &row).map_err(internal)?
-            }
-        }
-    }
-
-    reload_router(&state)?;
+        build_override_row(&conn, &name, &body)?
+    };
+    store_override(&state, &name, desired.as_ref())?;
 
     // 保存後に起動確認（health_check）して結果を返す（ダッシュボードは自動差し戻しせず、
     // 繋がったか可視化するだけ。自動ロールバックはエージェント経由の変更で行う）。
@@ -334,11 +327,7 @@ pub async fn delete_provider_override(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    {
-        let conn = state.db.lock().unwrap();
-        opencrab_db::queries::delete_llm_provider_override(&conn, &name).map_err(internal)?;
-    }
-    reload_router(&state)?;
+    store_override(&state, &name, None)?;
     Ok(Json(json!({"deleted": true, "reloaded": true})))
 }
 
@@ -558,6 +547,44 @@ pub async fn test_provider_endpoint(
     Json(json!({ "provider": name, "ok": ok }))
 }
 
+/// Saves the override of `name` (`None` = delete it) only if the LLM router builds with it, then
+/// makes that router live. The check is the one startup and config reload use
+/// (`build_effective_llm_router`): a change startup would refuse — e.g. disabling a provider
+/// that `[llm.fallback] chain` or `[llm.aliases]` still names — is refused here with the same
+/// message and nothing is saved (D-1141).
+pub(crate) fn store_override(
+    state: &AppState,
+    name: &str,
+    desired: Option<&opencrab_db::queries::LlmProviderOverrideRow>,
+) -> Result<(), (StatusCode, String)> {
+    let router = {
+        let conn = state.db.lock().unwrap();
+        let tx = conn.unchecked_transaction().map_err(internal)?;
+        match desired {
+            Some(row) => opencrab_db::queries::upsert_llm_provider_override(&tx, row),
+            None => opencrab_db::queries::delete_llm_provider_override(&tx, name),
+        }
+        .map_err(internal)?;
+        let router = crate::config::build_llm_router_with_overrides(&tx, &state.config().llm)
+            .map_err(|e| {
+                (
+                    StatusCode::CONFLICT,
+                    format!("not saved: the server could not start with this change: {e:#}"),
+                )
+            })?;
+        tx.commit().map_err(internal)?;
+        router
+    };
+    let names: Vec<String> = router
+        .provider_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    state.llm_router.swap(router);
+    tracing::info!(provider = %name, providers = ?names, "LLM provider override saved; router rebuilt");
+    Ok(())
+}
+
 pub(crate) fn reload_router(state: &AppState) -> Result<(), (StatusCode, String)> {
     let router = crate::config::build_effective_llm_router(&state.db, &state.config().llm)
         .map_err(internal)?;
@@ -601,43 +628,18 @@ pub(crate) async fn apply_provider_override_with_rollback(
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::get_llm_provider_override(&conn, name).map_err(internal)?
     };
-    // オーバーライド行を `desired`（Some=upsert / None=削除）へ書き込むヘルパ。
-    let write_override = |desired: Option<&opencrab_db::queries::LlmProviderOverrideRow>| {
-        let conn = state.db.lock().unwrap();
-        match desired {
-            Some(row) => opencrab_db::queries::upsert_llm_provider_override(&conn, row),
-            None => opencrab_db::queries::delete_llm_provider_override(&conn, name),
-        }
-    };
     // previous の状態へ戻すヘルパ（ロールバック）。
-    let restore_previous = || write_override(previous.as_ref());
+    let restore_previous = || store_override(state, name, previous.as_ref());
 
-    // 2. 新しい行を構築して書き込む（全 None なら削除）。
+    // 2. 新しい行を構築し、起動時と同じ検査（router が組めるか）を通ったときだけ保存する。
+    //    通らない設定（例: chain / alias が参照する provider の無効化）は保存せず、理由を返す。
     let desired = {
         let conn = state.db.lock().unwrap();
         build_override_row(&conn, name, body)?
     };
-    write_override(desired.as_ref()).map_err(internal)?;
+    store_override(state, name, desired.as_ref())?;
 
-    // 3. ルーター再構築。build 自体が失敗する壊れた設定（例: 不正な引数）も「起動失敗」
-    //    として扱い、DB を previous へ戻してから通知する（壊れた行を残さない）。
-    if reload_router(state).is_err() {
-        restore_previous().map_err(internal)?;
-        // 復元後の再構築は previous（元は正常だった設定）なので成功するはず。失敗しても
-        // best-effort でログのみ（router は swap 前で旧状態が生きている）。
-        let _ = reload_router(state);
-        tracing::warn!(
-            provider = %name,
-            "provider configuration failed to build router; rolled back to previous settings"
-        );
-        return Ok(ApplyOutcome {
-            applied: false,
-            test_ok: Some(false),
-            rolled_back: true,
-        });
-    }
-
-    // 4. 自動起動確認・自動ロールバックの対象は health_check が高速・確定的な codex/cursor のみ。
+    // 3. 自動起動確認・自動ロールバックの対象は health_check が高速・確定的な codex/cursor のみ。
     //    API キー型や acp（ネットワーク依存の本物ハンドシェイク。npx/uvx のコールドスタートや
     //    一過性のネットワーク失敗で誤判定しうる）は対象外とし、正常な設定を誤って差し戻さない。
     //    acp の起動確認は明示的な /test（ダッシュボードのボタン）で行う（#127 レビュー指摘）。
@@ -649,7 +651,7 @@ pub(crate) async fn apply_provider_override_with_rollback(
         });
     }
 
-    // 5. 対象でも、再構築後にルーターへ登録されていない場合（enabled=false での
+    // 4. 対象でも、再構築後にルーターへ登録されていない場合（enabled=false での
     //    無効化やオーバーライド削除で TOML でも無効等）は、起動確認の対象が存在しない。
     //    これを health_check 失敗と混同するとロールバックが暴発し「無効化できない」
     //    バグになるため、意図した非登録は適用成功として扱う。
@@ -661,7 +663,7 @@ pub(crate) async fn apply_provider_override_with_rollback(
         });
     }
 
-    // 6. 登録済み subprocess は起動確認。成功ならそのまま。
+    // 5. 登録済み subprocess は起動確認。成功ならそのまま。
     if test_provider(state, name).await {
         return Ok(ApplyOutcome {
             applied: true,
@@ -670,14 +672,12 @@ pub(crate) async fn apply_provider_override_with_rollback(
         });
     }
 
-    // 7. 失敗 → 元の状態へロールバックして再構築。DB は previous に戻す（永続状態は正）。
-    //    復元後の再構築は元は正常だった設定なので成功するはずだが、失敗しても best-effort
-    //    でログのみ（ここで Err を返すと DB=previous と実行中 router が食い違う報告になる）。
-    restore_previous().map_err(internal)?;
-    if reload_router(state).is_err() {
+    // 6. 失敗 → 元の状態（元は正常に組めていた設定）へ戻す。戻せなかったらログに残す。
+    if let Err((_, error)) = restore_previous() {
         tracing::error!(
             provider = %name,
-            "rolled back DB to previous settings but router rebuild failed; restart may be needed"
+            error = %error,
+            "could not roll back to the previous provider settings"
         );
     }
     tracing::warn!(

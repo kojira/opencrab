@@ -77,6 +77,10 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     // Load config from TOML (with env var expansion)
     let cfg = config::load_config("config/default.toml")?;
 
+    // Before touching the DB: a core already running with this config is refused here, so it
+    // keeps its gate socket and its in-flight deliveries (D-1141).
+    let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
+
     // DB初期化（本番はコネクションプール）
     let db = opencrab_db::Db::open(&cfg.database.path)?;
 
@@ -92,7 +96,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
             anyhow::anyhow!("extgate operation-call recover failed: {}", e.code.as_str())
         })?;
     }
-    let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
     let extgate = Arc::new(opencrab_extgate::ExtgateState::new(db.clone()));
     configure_attachment_inbox(&extgate, Path::new(&cfg.database.path))?;
     configure_attachment_outbox(
