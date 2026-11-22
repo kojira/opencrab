@@ -1,7 +1,8 @@
 //! オンボーディング（運営者の初回セットアップ）用 API。
 //!
-//! - `GET  /api/setup/status` — server所有の2ステップ（LLMプロバイダ / エージェント）の
-//!   進捗を集約して返す。外部gatewayの設定状態は各gateway自身の管理口が所有する。
+//! - `GET  /api/setup/status` — 4 ステップ（LLMプロバイダ / エージェント / gateway の接続 /
+//!   最初の会話）の進捗を集約して返す。gateway は gate socket への今の接続だけを見る
+//!   （gateway 自身の設定は各 gateway の管理口が所有する）。
 //! - `POST /api/agents/{id}/skills/seed-standard` — `skills/*.skill.md` を読み、
 //!   frontmatter をパースして標準スキルをそのエージェントにシードする。新規
 //!   エージェントを作った直後に呼ぶことで「作ってすぐ使える」状態にする。
@@ -78,24 +79,49 @@ fn llm_provider_ready(
     !is_placeholder_key(&key)
 }
 
+/// The setup steps in order. `next_step` is the first one not done.
+const STEP_ORDER: [&str; 4] = ["llm_provider", "agent", "gateway", "conversation"];
+
 /// GET /api/setup/status — オンボーディング進捗の集約。
 ///
 /// 各ステップは `done`（完了したか）と補助情報（件数など）を持つ。`complete` は
 /// 全ステップ完了、`next_step` は未完の最初のステップ（全完了なら null）。
 pub async fn get_setup_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(setup_status(&state))
+}
+
+/// The setup status from the current state (the one place that decides what is done).
+fn setup_status(state: &AppState) -> serde_json::Value {
     let router = state.llm_router.get();
     let active_providers = router.provider_names();
     let llm_detail = active_providers.join(", ");
 
+    // gateway: the instances connected to the gate socket now (process-local live registry).
+    let live_instance_ids: Vec<String> = state
+        .extgate
+        .as_ref()
+        .and_then(|gate| gate.lock_registry().ok().map(|reg| reg.live_instance_ids()))
+        .unwrap_or_default();
+
     // 以降は DB 参照。ロックは 1 度だけ取ってまとめて読む。
-    let (agent_count, overrides) = {
+    let (agent_ids, overrides, connected, reply) = {
         let conn = state.db.lock().unwrap();
         let overrides =
             opencrab_db::queries::list_llm_provider_overrides(&conn).unwrap_or_default();
-        let agent_count = opencrab_db::queries::list_agent_ids(&conn)
-            .map(|ids| ids.len())
-            .unwrap_or(0);
-        (agent_count, overrides)
+        let agent_ids = opencrab_db::queries::list_agent_ids(&conn).unwrap_or_default();
+        let connected: Vec<serde_json::Value> = live_instance_ids
+            .iter()
+            .map(|instance_id| {
+                let agent_id = opencrab_db::queries::gate_instance_agent(&conn, instance_id)
+                    .ok()
+                    .flatten();
+                json!({ "instance_id": instance_id, "agent_id": agent_id })
+            })
+            .collect();
+        let reply = opencrab_db::queries::latest_agent_reply_session(&conn)
+            .ok()
+            .flatten();
+        (agent_ids, overrides, connected, reply)
     };
 
     // --- LLM プロバイダ: 「既定プロバイダが実際に使える状態か」で判定する ---
@@ -109,19 +135,26 @@ pub async fn get_setup_status(State(state): State<AppState>) -> Json<serde_json:
     let default_provider = config.llm.default_provider.as_str();
     let llm_done = llm_provider_ready(default_provider, &config.llm, &overrides);
 
-    let agent_done = agent_count > 0;
+    let agent_done = !agent_ids.is_empty();
+    // gateway: at least one gateway instance is connected to the gate socket now.
+    let gateway_done = !connected.is_empty();
+    // conversation: an agent has replied in some session (its own speech row exists).
+    let conversation_done = reply.is_some();
 
-    // 未完の最初のserver所有ステップ（ウィザードの初期フォーカス先）。
-    let next_step = if !llm_done {
-        Some("llm_provider")
-    } else if !agent_done {
-        Some("agent")
-    } else {
-        None
-    };
+    let done = [llm_done, agent_done, gateway_done, conversation_done];
+    let next_step = STEP_ORDER
+        .iter()
+        .zip(done)
+        .find(|(_, d)| !d)
+        .map(|(k, _)| *k);
     let complete = next_step.is_none();
 
-    Json(json!({
+    let (reply_agent_id, reply_session_id) = match reply {
+        Some((agent_id, session_id)) => (Some(agent_id), Some(session_id)),
+        None => (None, None),
+    };
+
+    json!({
         "steps": {
             "llm_provider": {
                 "done": llm_done,
@@ -129,11 +162,22 @@ pub async fn get_setup_status(State(state): State<AppState>) -> Json<serde_json:
                 "count": active_providers.len(),
                 "default_provider": default_provider,
             },
-            "agent": { "done": agent_done, "count": agent_count },
+            "agent": { "done": agent_done, "count": agent_ids.len(), "agent_ids": agent_ids },
+            "gateway": {
+                "done": gateway_done,
+                "count": connected.len(),
+                "gate_socket": config.gate.listen_socket,
+                "connected": connected,
+            },
+            "conversation": {
+                "done": conversation_done,
+                "agent_id": reply_agent_id,
+                "session_id": reply_session_id,
+            },
         },
         "complete": complete,
         "next_step": next_step,
-    }))
+    })
 }
 
 /// frontmatter からパースした標準スキル。
@@ -357,6 +401,10 @@ pub async fn seed_standard_skills(
 fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
+
+#[cfg(test)]
+#[path = "setup/status_tests.rs"]
+mod status_tests;
 
 #[cfg(test)]
 mod tests {

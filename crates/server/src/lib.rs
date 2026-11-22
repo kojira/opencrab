@@ -69,6 +69,9 @@ pub struct AppState {
     /// メンテナンスループの二重 LLM 支出防止）。
     pub index_build_inflight: memory_maintenance::IndexBuildInflight,
     pub mcp_manager: Option<SharedMcpManager>,
+    /// The gate socket's live state (set at startup when the gate socket is configured). Read
+    /// by the setup status to show which gateway instances are connected now.
+    pub extgate: Option<Arc<opencrab_extgate::ExtgateState>>,
     /// 非ブロック dispatch（#152 S3a）の subtask registry 置き場（#169）。
     /// REST は session_id キー、heartbeat は agent_id キーで貸し借りし、
     /// dispatcher と `cancel_subtask`（#161）が同一 registry を見るようにする。
@@ -118,6 +121,7 @@ impl AppState {
             config: LiveConfig::new(config),
             index_build_inflight: Arc::new(dashmap::DashMap::new()),
             mcp_manager: None,
+            extgate: None,
             subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
             session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
             timed_fire_router: Arc::new(opencrab_actions::TimedFireRouter::new()),

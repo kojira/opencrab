@@ -173,15 +173,18 @@ cargo run -p opencrab-cli --bin opencrab-cli
 ## First-time setup (recommended)
 
 Once the server and dashboard are running, open `http://localhost:3000` and go to
-**Setup** (`/setup`). The guided wizard has two steps — no `config/default.toml`
-editing required:
+**Setup** (`/setup`). The guided wizard has four steps, each checked from the current state:
 
 1. **LLM provider** — enable a provider and set its API key (saved to the DB, hot-reloaded)
 2. **Agent** — create an agent; the standard skills in `skills/*.skill.md` are seeded automatically
+3. **Gateway** — start a gateway process from
+   [kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) (Discord, Nostr, web,
+   terminal) or [kojira/opencrab-bluesky-gateway](https://github.com/kojira/opencrab-bluesky-gateway)
+   and point it at the core's gate socket. The page shows the socket path, the agent id and the
+   terminal gateway commands filled with them; it is done while a gateway is connected.
+4. **First conversation** — send a message from the gateway; it is done once the agent replies.
 
-To talk to the agent from Discord, Nostr, the web or a terminal, start the matching gateway
-process from [kojira/opencrab-gateways](https://github.com/kojira/opencrab-gateways) and point it
-at the core's gate socket.
+[docs/onboarding.md](docs/onboarding.md) walks the same path in text.
 
 The Home page also shows a **Setup checklist** card that tracks your progress and links
 back into the wizard until every step is done.

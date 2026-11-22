@@ -400,3 +400,19 @@ pub fn list_recent_evaluations_by_agent(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+
+/// The latest session where an agent has spoken (`log_type='speech'` by the agent itself):
+/// `(agent_id, session_id)`, or `None` when no agent has replied anywhere yet. The setup
+/// status uses it as "the first conversation happened".
+pub fn latest_agent_reply_session(conn: &Connection) -> Result<Option<(String, String)>> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT agent_id, session_id FROM memory_sessions
+             WHERE log_type = 'speech' AND speaker_id = agent_id
+             ORDER BY id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
+}
