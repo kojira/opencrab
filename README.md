@@ -14,6 +14,8 @@
   </a>
 </p>
 
+> **初めての人はここから / New here?** Start with [docs/onboarding.md](docs/onboarding.md).
+
 ---
 
 **OpenCrab** lets you create, manage, and run AI agents that actually remember what happened. Most agent frameworks discard conversation history once the context window fills up — OpenCrab doesn't.
@@ -75,7 +77,7 @@ gateway, not to the core.
 
 ## Prerequisites
 
-- [Rust](https://rustup.rs/) (edition 2021)
+- [Rust](https://rustup.rs/) 1.98.0 (the version CI pins; edition 2021)
 - SQLite (bundled via `rusqlite`)
 
 ## Getting Started
@@ -90,8 +92,10 @@ cargo build
 
 ### 2. Create the config file
 
-Copy the neutral template. You do **not** need to hand-edit it — first-time setup
-is done entirely from the dashboard (see [First-time setup](#first-time-setup-recommended) below).
+Copy the neutral template. First-time setup is done from the dashboard (see
+[First-time setup](#first-time-setup-recommended) below), but the template's default model has no
+context budget in a fresh database, so the server stops at startup until `[llm]` points to a model
+that has one. See [docs/onboarding.md](docs/onboarding.md) (section 3.2) for a minimal `[llm]` section.
 
 ```bash
 cp config/default.toml.example config/default.toml
@@ -161,7 +165,7 @@ cd web && ./dev.sh
 ### 6. CLI
 
 ```bash
-cargo run -p opencrab-cli
+cargo run -p opencrab-cli --bin opencrab-cli
 ```
 
 ## First-time setup (recommended)
