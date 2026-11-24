@@ -51,6 +51,18 @@ use opencrab_gateway::{GatewayActionResult, GatewayCallContext, GatewayCaller};
 
 use crate::AppState;
 
+/// 既存スキルの書き換えでオーナーの「誰でも使える」指定が外れたら、結果にそれを書く（D-1143）。
+fn with_designation_note(
+    mut data: serde_json::Value,
+    designation_cleared: bool,
+) -> serde_json::Value {
+    if designation_cleared {
+        data["owner_designation_cleared"] =
+            json!(opencrab_db::queries::OWNER_DESIGNATION_CLEARED_NOTE);
+    }
+    data
+}
+
 /// スキルの新規作成（同名は更新 / アーカイブ済みは復活）。owner / co_agent / trusted_user 限定。
 ///
 /// 旧 `DiscordGatewayActions::execute_create_skill` の移設（#157 S6）。DB のみに依存する。
@@ -95,6 +107,8 @@ pub(crate) fn create_skill(
     };
     let guidance = args.get("guidance").and_then(|v| v.as_str()).unwrap_or("");
 
+    let writer_is_owner_equivalent =
+        opencrab_core::caller::CallerIdentity::from(&ctx.caller).is_owner_equivalent();
     let conn = state.db.lock().unwrap();
 
     // Deduplication: check if skill with same name exists (non-archived)
@@ -103,6 +117,7 @@ pub(crate) fn create_skill(
         let mut updated = existing;
         updated.description = description.to_string();
         updated.guidance = guidance.to_string();
+        let designation_cleared = updated.record_rewrite(writer_is_owner_equivalent);
         if let Err(e) = opencrab_db::queries::update_skill(&conn, &updated) {
             return GatewayActionResult {
                 success: false,
@@ -112,11 +127,14 @@ pub(crate) fn create_skill(
         }
         return GatewayActionResult {
             success: true,
-            data: Some(json!({
-                "id": updated.id,
-                "name": name,
-                "action": "updated"
-            })),
+            data: Some(with_designation_note(
+                json!({
+                    "id": updated.id,
+                    "name": name,
+                    "action": "updated"
+                }),
+                designation_cleared,
+            )),
             error: None,
         };
     }
@@ -130,6 +148,7 @@ pub(crate) fn create_skill(
         updated.is_active = true;
         updated.description = description.to_string();
         updated.guidance = guidance.to_string();
+        let designation_cleared = updated.record_rewrite(writer_is_owner_equivalent);
         if let Err(e) = opencrab_db::queries::update_skill(&conn, &updated) {
             return GatewayActionResult {
                 success: false,
@@ -139,11 +158,14 @@ pub(crate) fn create_skill(
         }
         return GatewayActionResult {
             success: true,
-            data: Some(json!({
-                "id": updated.id,
-                "name": name,
-                "action": "restored"
-            })),
+            data: Some(with_designation_note(
+                json!({
+                    "id": updated.id,
+                    "name": name,
+                    "action": "restored"
+                }),
+                designation_cleared,
+            )),
             error: None,
         };
     }
@@ -169,6 +191,7 @@ pub(crate) fn create_skill(
         created_caller: None,
         // #352: Agent 露出は既定 false（オーナーが REST で切り替える）。
         agent_visible: false,
+        tools: Vec::new(),
     };
 
     if let Err(e) = opencrab_db::queries::insert_skill(&conn, &row) {

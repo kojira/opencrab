@@ -446,6 +446,7 @@ fn apply_decisions(
                         created_caller: None,
                         // #352: Agent 露出は既定 false（オーナーが REST で切り替える）。
                         agent_visible: false,
+                        tools: Vec::new(),
                     };
                     if opencrab_db::queries::insert_skill(&conn, &row).is_ok() {
                         effective = "created";

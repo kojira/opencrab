@@ -73,6 +73,7 @@ impl Action for LearnFromExperienceAction {
             created_caller: Some(ctx.caller.skill_origin_tag().to_string()),
             // #352: Agent が作った skill を Agent 自身へ露出しない（fail-closed）。
             agent_visible: false,
+            tools: Vec::new(),
         };
 
         if let Ok(conn) = ctx.db.lock() {
@@ -161,6 +162,7 @@ impl Action for LearnFromPeerAction {
             created_caller: Some(ctx.caller.skill_origin_tag().to_string()),
             // #352: Agent が作った skill を Agent 自身へ露出しない（fail-closed）。
             agent_visible: false,
+            tools: Vec::new(),
         };
 
         if let Ok(conn) = ctx.db.lock() {

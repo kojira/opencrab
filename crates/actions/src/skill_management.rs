@@ -70,14 +70,14 @@ impl Action for CreateMySkillAction {
             None => return ActionResult::error("name is required"),
         };
 
-        let actions: Vec<String> = args["actions"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // `actions` は DB の `tools` 列にも入れる（D-1143）。許可として効くのはオーナーが
+        // 「誰でも使える」に指定したときだけで、指定はこのツールからは立てられない。
+        let actions_arg: Option<Vec<String>> = args["actions"].as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
+        let actions: Vec<String> = actions_arg.clone().unwrap_or_default();
 
         let skill_content = format!(
             "---\nname: {name}\ndescription: \"{desc}\"\nversion: 1\nactions:\n{actions_yaml}\n---\n\n# {name}\n\n## 状況パターン\n{pattern}\n\n## 行動指針\n{guidance}\n",
@@ -120,6 +120,11 @@ impl Action for CreateMySkillAction {
             // 仕込んで後で Owner ターンに実行させる経路を、記録側で塞ぐ。
             updated.created_caller =
                 downgraded_created_caller(updated.created_caller.as_deref(), &ctx.caller);
+            if let Some(tools) = actions_arg {
+                updated.tools = tools;
+            }
+            // D-1143: オーナー等価でない書き手が書き換えたら「誰でも使える」指定を外す。
+            let designation_cleared = updated.record_rewrite(ctx.caller.is_owner_equivalent());
 
             if let Ok(conn) = ctx.db.lock() {
                 let _ = opencrab_db::queries::update_skill(&conn, &updated);
@@ -129,12 +134,17 @@ impl Action for CreateMySkillAction {
             match ctx.workspace.write(&file_path, &skill_content).await {
                 Ok(_) => {
                     let result_key = if was_archived { "restored" } else { "updated" };
-                    ActionResult::success(json!({
+                    let mut data = json!({
                         result_key: true,
                         "skill_id": skill_id,
                         "file_path": file_path,
-                    }))
-                    .with_side_effect(SideEffect::FileWritten { path: file_path })
+                    });
+                    if designation_cleared {
+                        data["owner_designation_cleared"] =
+                            json!(opencrab_db::queries::OWNER_DESIGNATION_CLEARED_NOTE);
+                    }
+                    ActionResult::success(data)
+                        .with_side_effect(SideEffect::FileWritten { path: file_path })
                 }
                 Err(e) => ActionResult::error(&e.to_string()),
             }
@@ -165,6 +175,7 @@ impl Action for CreateMySkillAction {
                         // #352: Agent が作った skill を Agent 自身へ露出しない（fail-closed）。
                         // オーナーが REST で許可するまで false。
                         agent_visible: false,
+                        tools: actions,
                     };
 
                     if let Ok(conn) = ctx.db.lock() {
@@ -332,7 +343,7 @@ impl Action for ReadSkillAction {
                          （このスキルは作成した caller の権限で走らせる。#335 confused deputy 対策）"
                     ));
                 }
-                ActionResult::success(json!({
+                let mut data = json!({
                     "name": s.name,
                     "description": s.description,
                     "situation_pattern": s.situation_pattern,
@@ -341,7 +352,21 @@ impl Action for ReadSkillAction {
                     "is_active": s.is_active,
                     "archived": s.archived,
                     "usage_count": s.usage_count,
-                }))
+                });
+                // D-1143: オーナーが「誰でも使える」に指定したスキルは、挙げたツールをこのターンの
+                // 残りで誰の会話でも使えるようにする（実行前ゲートは bridge が持つ）。
+                let granted = s.granted_tools().to_vec();
+                if granted.is_empty() {
+                    return ActionResult::success(data);
+                }
+                data["unlocked_tools"] = json!(granted);
+                data["unlocked_tools_note"] = json!(format!(
+                    "The owner designated this skill as usable by anyone. For the rest of this \
+                     turn you may call these tools in this conversation: {}",
+                    granted.join(", ")
+                ));
+                ActionResult::success(data)
+                    .with_side_effect(SideEffect::ToolsGranted { tools: granted })
             }
             Ok(None) => ActionResult::error(&format!("skill not found: {name}")),
             Err(e) => ActionResult::error(&e.to_string()),

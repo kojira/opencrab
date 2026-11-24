@@ -20,6 +20,7 @@ fn insert_skill(conn: &rusqlite::Connection, name: &str, agent_visible: bool) {
         archived: false,
         created_caller: None,
         agent_visible,
+        tools: Vec::new(),
     };
     opencrab_db::queries::insert_skill(conn, &row).unwrap();
 }

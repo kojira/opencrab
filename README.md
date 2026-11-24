@@ -310,6 +310,26 @@ Standard skills defined in `skills/`:
 | LLM Meta-Analysis | `llm-meta-analysis.skill.md` | Cross-model performance analysis and insight extraction |
 | Cursor CLI | `cursor-cli-local.skill.md` | Driving the Cursor CLI (`agent`) through `execute_shell`. Requires granting the command per agent via `agent_allowed_commands`; it is intentionally not in the global allowlist |
 
+### Skills usable by anyone (owner designation)
+
+Some tools are owner-only or trusted-only (see above). A skill can carry a list of tools
+(`skills.tools`). When the owner turns on **Usable by anyone (owner designation)** for a skill
+(`skills.agent_visible`, set only from the dashboard or `PUT /api/agents/{id}/skills/{skill_id}`),
+a turn that opens that skill with `read_skill` may use the listed tools for the rest of the run,
+whoever the caller is. The `read_skill` result names those tools (`unlocked_tools`), and they appear
+in the tool list from then on. Nothing else is narrowed or widened: depth, sub-engine and run
+allowlist rules still apply, and a skill that is not designated, or a tool that the skill does not
+list, grants nothing. The one rule lives in `crates/actions/src/bridge/gate.rs`
+(`SkillRow::granted_tools` decides what a skill grants).
+
+- The agent cannot set the designation: `create_my_skill` stores its `actions` as the skill's tools
+  but always creates the skill undesignated.
+- If a non-owner turn rewrites a designated skill (`create_my_skill` / `create_skill` on an existing
+  name), the designation is removed and the tool result says so; the owner designates it again.
+- Skills that existed before schema v66 start with no tools, so they grant nothing until the owner
+  sets the tools.
+
+
 ## Configuration
 
 Configuration is loaded from `config/default.toml` and **hot-reloaded** when files in `config/` change:

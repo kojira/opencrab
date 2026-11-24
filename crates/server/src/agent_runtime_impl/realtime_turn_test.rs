@@ -154,6 +154,7 @@ fn fixture() -> Fixture {
                 archived: false,
                 created_caller: None,
                 agent_visible: true,
+                tools: Vec::new(),
             },
         )
         .unwrap();

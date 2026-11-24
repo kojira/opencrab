@@ -66,6 +66,15 @@ export interface SkillDto {
   usage_count: number;
   is_active: boolean;
   archived: boolean;
+  /** Owner's "usable by anyone" designation (D-1143). */
+  agent_visible: boolean;
+  /** Tools a turn may use once it opens this skill, when the skill is designated. */
+  tools: string[];
+}
+
+export interface SkillUpdate {
+  agent_visible?: boolean;
+  tools?: string[];
 }
 
 // Memory

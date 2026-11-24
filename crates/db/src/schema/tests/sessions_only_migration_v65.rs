@@ -62,7 +62,7 @@ fn v65_renames_the_session_key_column_and_drops_pending_interactions() {
     initialize(&conn).expect("upgrade 64 -> 65");
     initialize(&conn).expect("re-run is a no-op");
 
-    assert_eq!(schema_version(&conn).unwrap(), 65);
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
     assert!(!table_exists(&conn, "pending_interactions").unwrap());
     assert!(!column_exists(&conn, "gate_bindings", "address").unwrap());
     assert_eq!(snapshot(&conn, "session_key"), before);
@@ -105,7 +105,7 @@ fn v65_renames_the_session_key_column_and_drops_pending_interactions() {
 #[test]
 fn v65_fresh_database_has_session_key_only() {
     let conn = crate::init_memory().expect("fresh");
-    assert_eq!(schema_version(&conn).unwrap(), 65);
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
     assert!(!table_exists(&conn, "pending_interactions").unwrap());
     assert!(column_exists(&conn, "gate_bindings", "session_key").unwrap());
     assert!(!column_exists(&conn, "gate_bindings", "address").unwrap());

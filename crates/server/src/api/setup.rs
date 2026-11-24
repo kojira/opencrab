@@ -383,6 +383,7 @@ pub async fn seed_standard_skills(
             created_caller: None,
             // #352: Agent 露出は既定 false（オーナーが REST で切り替える）。
             agent_visible: false,
+            tools: Vec::new(),
         };
         match opencrab_db::queries::insert_skill(&conn, &row) {
             Ok(()) => seeded.push(parsed.name),
