@@ -132,11 +132,15 @@ pub(crate) async fn handle_response(
             binding_id,
             reply_target,
             staged_files,
+            agent_id,
+            session_id,
+            operation,
         } => {
             // Any response is terminal for the outbox copies: the gateway has
             // finished reading them (ok/err) or the connection is closing.
             remove_staged_files(&staged_files);
-            handle_utterance_response(
+            let rejected = !resp.ok && resp.code == Some(ErrorCode::OperationRejected);
+            let result = handle_utterance_response(
                 state,
                 writer,
                 instance_id,
@@ -146,7 +150,11 @@ pub(crate) async fn handle_response(
                 &binding_id,
                 reply_target.as_deref(),
             )
-            .await
+            .await;
+            if rejected && result.is_ok() {
+                record_delivery_failed(state, &agent_id, &session_id, &operation);
+            }
+            result
         }
         Pending::Invoke {
             call_id,
@@ -158,6 +166,25 @@ pub(crate) async fn handle_response(
             handle_invoke_response(state, writer, instance_id, identity, &resp, &call_id, reply)
                 .await
         }
+    }
+}
+
+/// D-1148: the gateway refused an utterance (nothing was published). Recorded as a system note in
+/// the session so the agent sees in its next turn that what it said did not go out; before this
+/// the agent only saw its own speech row and believed it had posted (a week of refused posts).
+fn record_delivery_failed(state: &ExtgateState, agent_id: &str, session_id: &str, operation: &str) {
+    let note = opencrab_core::history::Event::System {
+        content: serde_json::json!({"type": "delivery_failed", "operation": operation}).to_string(),
+        speaker_id: None,
+        metadata: None,
+    };
+    match state.db.lock() {
+        Ok(conn) => {
+            if let Err(e) = opencrab_core::history::record(&conn, agent_id, session_id, &note) {
+                tracing::error!(%session_id, "delivery_failed note failed: {e}");
+            }
+        }
+        Err(_) => tracing::error!(%session_id, "delivery_failed note: db lock failed"),
     }
 }
 

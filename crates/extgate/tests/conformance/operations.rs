@@ -528,6 +528,19 @@ async fn di_projection_reply_utterance_rejection_emits_turn_failed_and_keeps_spe
         )
         .unwrap();
     assert_eq!(state_str, "failed", "拒否された発話 delivery は failed");
+
+    // D-1148: the refusal is recorded in the session, so the agent sees next turn that it was
+    // not published (before, only its own speech row was left and it believed it had posted).
+    let logs = {
+        let conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
+    };
+    let note = logs
+        .iter()
+        .find(|l| l.log_type == "system" && l.content.contains("delivery_failed"))
+        .expect("delivery_failed note");
+    let rendered = opencrab_core::conversation::format_single_log_with_echo(note, None, None);
+    assert!(rendered.contains("届かなかった"), "{rendered}");
 }
 
 /// item4: 宣言 schema が `"x-opencrab-short-ref": true` を付けた field だけ、core が実 ID へ解決してから
@@ -556,7 +569,8 @@ async fn di_short_ref_resolution_targets_declared_fields() {
         "name": "reply", "description": "d",
         "input_schema": {"type": "object", "required": ["event", "text"], "properties": {
             "event": {"type": "string", "x-opencrab-short-ref": true},
-            "text": {"type": "string"}
+            "text": {"type": "string"},
+            "user": {"type": "string", "x-opencrab-short-ref": true}
         }},
         "output_schema": null, "callback_schema": null,
         "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
@@ -589,7 +603,7 @@ async fn di_short_ref_resolution_targets_declared_fields() {
     assert!(reply.parameters["properties"]["event"].get("format").is_none());
     let ctx = GatewayCallContext::for_agent("agent-1");
     let exec = tokio::spawn(async move {
-        proj.execute("reply", &json!({"event": "e1", "text": "本文"}), &ctx)
+        proj.execute("reply", &json!({"event": "e1", "text": "本文", "user": ""}), &ctx)
             .await
     });
     let invoke = read_until(&mut s, |v| v["m"] == "invoke").await;
@@ -600,6 +614,8 @@ async fn di_short_ref_resolution_targets_declared_fields() {
         "e1→origin へ解決"
     );
     assert_eq!(invoke["payload"]["text"], json!("本文"), "非参照は素通り");
+    // D-1148: an optional field sent as "" means "not given" and does not reach the gateway.
+    assert!(invoke["payload"].get("user").is_none(), "{}", invoke["payload"]);
     let call_id = invoke["id"].as_str().unwrap().to_string();
     write_frame(&mut s, &json!({"id": call_id, "m": "ok", "result": null})).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), exec).await;

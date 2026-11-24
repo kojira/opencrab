@@ -412,6 +412,9 @@ async fn invoke_utterance_checked(
                 binding_id: binding_id.to_string(),
                 reply_target: reply_target_origin.map(str::to_string),
                 staged_files: staged.release(),
+                agent_id: agent_id.to_string(),
+                session_id: session_id.to_string(),
+                operation: utterance_kind.to_string(),
             },
         );
     }

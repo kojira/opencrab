@@ -264,6 +264,16 @@ pub fn format_single_log_with_echo(
                         );
                     }
                     // D-1131: the turn ended because an LLM call failed (model + provider error).
+                    // D-1148: the gateway refused what the agent said; it was not published.
+                    if kind == "delivery_failed" {
+                        let operation = value
+                            .get("operation")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        return format!(
+                            "[delivery_failed]{ts}:\n直前の発言（{operation}）は相手に届かなかった（gateway が受け付けなかった）。投稿されていない"
+                        );
+                    }
                     if kind == "turn_failed" {
                         let model = value.get("model").and_then(|v| v.as_str()).unwrap_or("?");
                         let detail = value.get("detail").and_then(|v| v.as_str()).unwrap_or("");
