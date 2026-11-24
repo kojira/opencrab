@@ -268,3 +268,29 @@ async fn subtask_can_list_and_update_parent_agents_schedules() {
     assert!(updated.success, "subtask update: {:?}", updated.error);
     assert!(!row(&state, id).unwrap().enabled);
 }
+
+/// D-1147b: LLM は「指定しない」を `""` で送る（本番 gpt-6.1-terra で確認）。一覧も id 指定の
+/// 操作も、空の session_id を未指定として扱う。
+#[test]
+fn empty_session_id_means_not_specified() {
+    let state = two_agent_state();
+    let id = create(&state, &trusted("sess-public"), "patrol public");
+
+    let listed = get_my_schedules(&state, &json!({"session_id": ""}), &trusted("sess-dm"));
+    assert!(listed.success, "list: {:?}", listed.error);
+    assert_eq!(listed.data.unwrap()["count"], 1, "全セッション分が返る");
+
+    let updated = update_my_schedule(
+        &state,
+        &json!({"id": id, "message": "patrol updated", "session_id": ""}),
+        &trusted("sess-dm"),
+    );
+    assert!(updated.success, "update: {:?}", updated.error);
+
+    let refused = update_my_schedule(
+        &state,
+        &json!({"id": id, "message": "x", "session_id": "sess-public"}),
+        &trusted("sess-dm"),
+    );
+    assert!(!refused.success, "値の入った session_id は今までどおり断る");
+}
