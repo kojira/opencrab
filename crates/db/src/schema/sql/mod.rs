@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS agent_mcp_config (
 ";
 
 /// スキル利用のセッション単位記録（スリープ棚卸しの弱い利用ヒント用）。
-/// 注入時ではなく「利用が検出された時」に記録する（名前一致ベース, ノイズあり）。
+/// 注入時ではなく、`read_skill` で本文が開かれた時に記録する（D-1146）。
 pub(super) const SKILL_USAGE_LOG_SQL: &str = "
 CREATE TABLE IF NOT EXISTS skill_usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -695,3 +695,26 @@ async fn turn_requests_carry_the_session_effort_of_their_profile_slot() {
         "realtime without a slot follows the provider"
     );
 }
+
+/// D-1146: a skill is used when read_skill opens it; its name in the reply is not a use.
+#[tokio::test]
+async fn skill_name_in_the_reply_is_not_a_use() {
+    let f = fixture();
+    *f.reply.lock().unwrap() = "visible-skill の手順で答えるね。".to_string();
+    profile_turn(&f, TurnModelProfile::Default).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let conn = f.state.db.lock().unwrap();
+    let (usage, last_used): (i64, Option<String>) = conn
+        .query_row(
+            "SELECT usage_count, last_used_at FROM skills WHERE id = 's1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((usage, last_used), (0, None));
+    let logged: i64 = conn
+        .query_row("SELECT COUNT(*) FROM skill_usage_log", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(logged, 0);
+}

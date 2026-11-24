@@ -2,50 +2,6 @@ use super::*;
 
 /// 未インデックスのログが閾値を超えていたら、バックグラウンドでメモリインデックスを
 /// 構築する（#33: 段の分解。run の応答は待たせない）。
-/// スキル名が応答本文で言及される最低文字数。短い名前は他語の部分一致で
-/// 誤カウントしやすいので閾値でノイズを抑える。
-const MIN_SKILL_NAME_LEN_FOR_MATCH: usize = 4;
-
-/// 応答本文に skill 名が現れているか（大文字小文字無視の部分一致）。
-/// `response_lower` は呼び出し側で小文字化済みを渡す。ツール名ベースの
-/// 確実な信号が server 経路に無いため、これが「実際に使った」の実用的な検出。
-pub(super) fn skill_mentioned(response_lower: &str, skill_name: &str) -> bool {
-    let name = skill_name.trim().to_lowercase();
-    name.chars().count() >= MIN_SKILL_NAME_LEN_FOR_MATCH && response_lower.contains(&name)
-}
-
-/// depth 0 の run 完了時、応答で言及された有効スキルの利用回数を +1 する。
-/// 「実際に使った時だけ」カウントするための best-effort（名前言及ベース）。
-pub(super) fn record_used_skills(
-    state: &AppState,
-    agent_id: &str,
-    session_id: &str,
-    response: &str,
-) {
-    if response.trim().is_empty() {
-        return;
-    }
-    let response_lower = response.to_lowercase();
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let skills = opencrab_db::queries::list_skills(&conn, agent_id, true).unwrap_or_default();
-    for s in &skills {
-        if skill_mentioned(&response_lower, &s.name) {
-            if let Err(e) = opencrab_db::queries::increment_skill_usage(&conn, &s.id) {
-                tracing::warn!(skill = %s.name, error = %e, "failed to increment skill usage");
-            }
-            // スリープ棚卸しの弱い利用ヒント: セッション単位でも記録する（名前一致ベース）。
-            if let Err(e) =
-                opencrab_db::queries::insert_skill_usage(&conn, agent_id, &s.id, session_id)
-            {
-                tracing::warn!(skill = %s.name, error = %e, "failed to log skill usage session");
-            }
-        }
-    }
-}
-
 pub(super) fn spawn_background_index_build(
     state: &AppState,
     agent_id: &str,

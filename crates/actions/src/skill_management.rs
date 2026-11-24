@@ -360,6 +360,16 @@ impl Action for ReadSkillAction {
                          （このスキルは作成した caller の権限で走らせる。#335 confused deputy 対策）"
                     ));
                 }
+                // D-1146: 本文を渡す＝スキルを使った。ここ（成功時）だけで数える。拒否・not found・
+                // `owner-skills` の一覧は数えない。記録の失敗で本文の受け渡しは止めない。
+                if let Err(e) = opencrab_db::queries::record_skill_use(
+                    &conn,
+                    &ctx.agent_id,
+                    &s.id,
+                    ctx.session_id.as_deref(),
+                ) {
+                    tracing::warn!(skill = %s.name, error = %e, "failed to record skill use");
+                }
                 let mut data = json!({
                     "name": s.name,
                     "description": s.description,
