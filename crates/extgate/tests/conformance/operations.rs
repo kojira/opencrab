@@ -528,6 +528,19 @@ async fn di_projection_reply_utterance_rejection_emits_turn_failed_and_keeps_spe
         )
         .unwrap();
     assert_eq!(state_str, "failed", "拒否された発話 delivery は failed");
+
+    // D-1148: the refusal is recorded in the session, so the agent sees next turn that it was
+    // not published (before, only its own speech row was left and it believed it had posted).
+    let logs = {
+        let conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
+    };
+    let note = logs
+        .iter()
+        .find(|l| l.log_type == "system" && l.content.contains("delivery_failed"))
+        .expect("delivery_failed note");
+    let rendered = opencrab_core::conversation::format_single_log_with_echo(note, None, None);
+    assert!(rendered.contains("届かなかった"), "{rendered}");
 }
 
 /// item4: 宣言 schema が `"x-opencrab-short-ref": true` を付けた field だけ、core が実 ID へ解決してから

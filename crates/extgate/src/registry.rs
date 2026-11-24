@@ -69,6 +69,10 @@ pub enum Pending {
         reply_target: Option<String>,
         /// Outbox copies of declared workspace files; deleted at terminal state.
         staged_files: Vec<StagedFile>,
+        /// D-1148: where a rejection is recorded so the agent sees it next turn.
+        agent_id: String,
+        session_id: String,
+        operation: String,
     },
 }
 
