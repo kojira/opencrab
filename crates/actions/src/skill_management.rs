@@ -31,7 +31,8 @@ impl Action for CreateMySkillAction {
     }
 
     fn description(&self) -> &str {
-        "学んだことを正式なスキルファイルとして保存する"
+        "学んだことを正式なスキルファイルとして保存する（同名があれば更新）。オーナーが「誰でも使える\
+         ように」と頼んだときだけ anyone_can_use を true にする"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -58,7 +59,14 @@ impl Action for CreateMySkillAction {
                 "actions": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "関連するアクション名のリスト"
+                    "description": "このスキルで使うツール名のリスト。anyone_can_use のスキルでは、\
+                                    このスキルを read_skill で開いた会話でこれらが誰とでも使える"
+                },
+                "anyone_can_use": {
+                    "type": "boolean",
+                    "description": "オーナーが「このスキルは誰でも使えるように」と頼んだときだけ true に\
+                                    する。true のスキルを read_skill で開いた会話では、相手が誰でも \
+                                    actions のツールを使える。オーナーのターンでしか設定できない"
                 }
             }
         })
@@ -70,14 +78,16 @@ impl Action for CreateMySkillAction {
             None => return ActionResult::error("name is required"),
         };
 
-        // `actions` は DB の `tools` 列にも入れる（D-1143）。許可として効くのはオーナーが
-        // 「誰でも使える」に指定したときだけで、指定はこのツールからは立てられない。
+        // `actions` は DB の `tools` 列にも入れる（D-1143）。許可として効くのは「誰でも使える」
+        // 指定（`anyone_can_use`）のスキルだけで、その指定はオーナー等価のターンだけが立てられる。
         let actions_arg: Option<Vec<String>> = args["actions"].as_array().map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect()
         });
         let actions: Vec<String> = actions_arg.clone().unwrap_or_default();
+        let anyone_can_use = args["anyone_can_use"].as_bool();
+        let writer_is_owner = ctx.caller.is_owner_equivalent();
 
         let skill_content = format!(
             "---\nname: {name}\ndescription: \"{desc}\"\nversion: 1\nactions:\n{actions_yaml}\n---\n\n# {name}\n\n## 状況パターン\n{pattern}\n\n## 行動指針\n{guidance}\n",
@@ -109,6 +119,11 @@ impl Action for CreateMySkillAction {
             let skill_id = existing.id.clone();
 
             let mut updated = existing;
+            // D-1143: 指定とツールの変更は 1 つの規則（`SkillRow::set_access`）で判定し、
+            // 断るときは何も書かずに返す。
+            if let Err(reason) = updated.set_access(anyone_can_use, actions_arg, writer_is_owner) {
+                return ActionResult::error(reason);
+            }
             updated.description = description;
             updated.situation_pattern = situation_pattern;
             updated.guidance = guidance;
@@ -120,11 +135,8 @@ impl Action for CreateMySkillAction {
             // 仕込んで後で Owner ターンに実行させる経路を、記録側で塞ぐ。
             updated.created_caller =
                 downgraded_created_caller(updated.created_caller.as_deref(), &ctx.caller);
-            if let Some(tools) = actions_arg {
-                updated.tools = tools;
-            }
             // D-1143: オーナー等価でない書き手が書き換えたら「誰でも使える」指定を外す。
-            let designation_cleared = updated.record_rewrite(ctx.caller.is_owner_equivalent());
+            let designation_cleared = updated.record_rewrite(writer_is_owner);
 
             if let Ok(conn) = ctx.db.lock() {
                 let _ = opencrab_db::queries::update_skill(&conn, &updated);
@@ -138,6 +150,8 @@ impl Action for CreateMySkillAction {
                         result_key: true,
                         "skill_id": skill_id,
                         "file_path": file_path,
+                        "anyone_can_use": updated.agent_visible,
+                        "tools": updated.tools,
                     });
                     if designation_cleared {
                         data["owner_designation_cleared"] =
@@ -149,35 +163,36 @@ impl Action for CreateMySkillAction {
                 Err(e) => ActionResult::error(&e.to_string()),
             }
         } else {
+            let skill_id = uuid::Uuid::new_v4().to_string();
+            let mut skill = opencrab_db::queries::SkillRow {
+                id: skill_id.clone(),
+                agent_id: ctx.agent_id.clone(),
+                name: name.to_string(),
+                description,
+                situation_pattern,
+                guidance,
+                source_type: "self_created".to_string(),
+                source_context: None,
+                file_path: Some(file_path.clone()),
+                effectiveness: None,
+                usage_count: 0,
+                is_active: true,
+                permission: "\"agent\"".to_string(),
+                archived: false,
+                // #335: 作成時 caller の trust class を記録する。外部 Nostr の
+                // caller=Agent が仕込んだスキルは "agent" になり、後で Owner の
+                // heartbeat が read_skill しても本文を渡さず（塞がる）。
+                created_caller: Some(ctx.caller.skill_origin_tag().to_string()),
+                // #352 / D-1143: 既定は指定なし。オーナーのターンで anyone_can_use を
+                // 頼まれたときだけ下の set_access で立てる。
+                agent_visible: false,
+                tools: actions,
+            };
+            if let Err(reason) = skill.set_access(anyone_can_use, None, writer_is_owner) {
+                return ActionResult::error(reason);
+            }
             match ctx.workspace.write(&file_path, &skill_content).await {
                 Ok(_) => {
-                    // DBにも登録
-                    let skill_id = uuid::Uuid::new_v4().to_string();
-                    let skill = opencrab_db::queries::SkillRow {
-                        id: skill_id.clone(),
-                        agent_id: ctx.agent_id.clone(),
-                        name: name.to_string(),
-                        description,
-                        situation_pattern,
-                        guidance,
-                        source_type: "self_created".to_string(),
-                        source_context: None,
-                        file_path: Some(file_path.clone()),
-                        effectiveness: None,
-                        usage_count: 0,
-                        is_active: true,
-                        permission: "\"agent\"".to_string(),
-                        archived: false,
-                        // #335: 作成時 caller の trust class を記録する。外部 Nostr の
-                        // caller=Agent が仕込んだスキルは "agent" になり、後で Owner の
-                        // heartbeat が read_skill しても本文を渡さず（塞がる）。
-                        created_caller: Some(ctx.caller.skill_origin_tag().to_string()),
-                        // #352: Agent が作った skill を Agent 自身へ露出しない（fail-closed）。
-                        // オーナーが REST で許可するまで false。
-                        agent_visible: false,
-                        tools: actions,
-                    };
-
                     if let Ok(conn) = ctx.db.lock() {
                         let _ = opencrab_db::queries::insert_skill(&conn, &skill);
                     }
@@ -186,6 +201,8 @@ impl Action for CreateMySkillAction {
                         "created": true,
                         "skill_id": skill_id,
                         "file_path": file_path,
+                        "anyone_can_use": skill.agent_visible,
+                        "tools": skill.tools,
                     }))
                     .with_side_effect(SideEffect::SkillAcquired { skill_id })
                     .with_side_effect(SideEffect::FileWritten { path: file_path })
