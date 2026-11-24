@@ -90,19 +90,22 @@ DB から読み直し、永続アンカーから正確な次回発火時刻を�
 HB と同一）。CRUD と検証・登録ロジックを共有する（`create_schedule_core` / `list_session_schedules_core`）。
 
 - **`set_my_schedule`**: `cron_expr`(必須) / `message`(必須) / `enabled`(既定 true) / `timezone`(既定 Asia/Tokyo)。
-  対象は常に **`ctx.session_id`**（スコープ引数なし・#456）。発火経路の無いセッションは fail-closed + remedy。
+  登録先は既定で **`ctx.session_id`**。`session_id` を渡すと自分の別のセッションに登録できる（D-1147）。
+  どちらも自分の・発火経路のあるセッションに限り（`resolve_persisted_target`）、それ以外は fail-closed + remedy。
   cron 不正はその場でエラー。成功後 `scheduler_wake`。
-- **`get_my_schedules`**: `ctx.session_id` の schedule を `next_fire_at`（照会時算出）・`gated`/`gated_reason`
-  付きで列挙。
+- **`get_my_schedules`**: 自分の**全セッション**の schedule を `next_fire_at`（照会時算出）・`gated`/`gated_reason`・
+  `session_id`・`session_title`・`is_current_session` 付きで列挙し、応答に `current_session_id` を載せる（D-1147）。
+  `session_id` で絞り込める。
 - **`update_my_schedule`**（#477）: `id`(必須) + 変更する項目だけ（`cron_expr` / `message` / `timezone` /
   `enabled`。省略は現状維持）。`enabled=false` で「止める」（行は残り履歴が追える）、cron/message の変更で
   「間隔・内容を変える」。**`session_id` は変えられない**（別セッションへ付け替えさせない）。変更項目ゼロの
   呼び出しは拒否（暗黙の no-op を作らない）。cron 不正・アンカーの向き（§4.4）は dashboard PATCH と共有。
 - **`delete_my_schedule`**（#477）: `id`(必須) で行ごと削除。「止めるだけ」は `update_my_schedule` の
   `enabled=false`（履歴を残す）と役割を分ける。
-- **id の所属チェック（#477）**: update/delete は id を取るが、対象は **`ctx.agent_id`＋現在のセッション**の
-  両方に一致する行だけ（`load_owned_schedule`）。一致しない／存在しない id は**存在を明かさず**同じ文言で
-  拒否する（id を推測して他エージェント・他セッションの schedule を触れない）。`set` は
+- **id の所属チェック（#477 / D-1147）**: update/delete/run は id を取るが、対象は **`ctx.agent_id`** に一致する
+  行だけ（`load_owned_schedule`）。自分のどのセッションの行でもよく、変更はその行のセッションに効く（発火先は
+  変わらない）。一致しない／存在しない id は**存在を明かさず**同じ文言で拒否する（id を推測して他エージェントの
+  schedule を触れない）。`set` は
   `(session, cron, message)` キーの冪等作成なので既存行の cron/message を「変える」経路が無い——update が
   それを id 指定で埋める。
 - 分類: 4 つとも定義で `class.dispatch == Inline` を名乗る（同ターンで cron 不正・id 不在を返し、直して

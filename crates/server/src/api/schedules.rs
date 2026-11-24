@@ -5,7 +5,7 @@
 //! に置く（新しい認可ゲートは足さない・設計 §10.2）。この CRUD（owner/dashboard 用）と、
 //! **エージェント自身が触るツール**（`crate::agent_schedule` の `set_my_schedule` /
 //! `get_my_schedules`・オーナー裁定 2026-08-09 で §7.4 の「ツールを追加しない」を撤回）は
-//! **検証・登録ロジックを共有する**（[`create_schedule_core`] / [`list_session_schedules_core`]）。
+//! **検証・登録ロジックを共有する**（[`create_schedule_core`] / [`list_agent_schedules_core`]）。
 //!
 //! # 語彙・持ち方（統括裁定・v38）
 //! 応答の**次回発火は `next_fire_at`**（heartbeat と同名）で、**列に持たず照会時に算出**する
@@ -232,20 +232,16 @@ pub(crate) fn create_schedule_core(
     Ok(ScheduleDto::from_row(saved))
 }
 
-/// あるセッションに属するスケジュールを DTO で列挙する共有コア（ツール `get_my_schedules` 用）。
-pub(crate) fn list_session_schedules_core(
+/// あるエージェントの全スケジュール（全セッション分）を DTO で列挙する共有コア
+/// （ツール `get_my_schedules` と `GET /api/agents/{id}/schedules` が共用）。
+pub(crate) fn list_agent_schedules_core(
     state: &AppState,
     agent_id: &str,
-    session_id: &str,
 ) -> Result<Vec<ScheduleDto>, ScheduleOpError> {
     let conn = state.db.lock().unwrap();
     let rows = opencrab_db::queries::list_agent_schedules(&conn, agent_id)
         .map_err(|e| ScheduleOpError::Internal(e.to_string()))?;
-    Ok(rows
-        .into_iter()
-        .filter(|r| r.session_id == session_id)
-        .map(ScheduleDto::from_row)
-        .collect())
+    Ok(rows.into_iter().map(ScheduleDto::from_row).collect())
 }
 
 /// 更新時のアンカーの向き（I3・#612）を計算する共通ロジック。設定変更で動かすのは `anchor_at` だけ。
@@ -272,14 +268,12 @@ fn next_anchor(
 
 /// **所属チェック付き**で id からスケジュール行を取り出す（エージェント向けツール専用）。
 ///
-/// 行が存在し、かつ **`agent_id` と `session_id` の両方が一致**するときだけ `Ok`。一致しない
-/// （他エージェント・他セッションのもの）や、そもそも存在しない id は、**存在を明かさず**一律の
-/// `BadRequest` にする。`get_my_schedules` が返した id をそのまま渡す想定で、**id を推測して
-/// 他人・他セッションのスケジュールを覗いたり消したりできない**ことを保証する（#477 の決定事項 1）。
+/// 行が存在し、かつ **`agent_id` が一致**するときだけ `Ok`（D-1147: エージェントは自分の全セッションの
+/// スケジュールを扱える。行の `session_id` は発火先としてそのまま保つ）。他エージェントのものや、
+/// そもそも存在しない id は、**存在を明かさず**一律の `BadRequest` にする（#477 の決定事項 1）。
 pub(crate) fn load_owned_schedule(
     state: &AppState,
     agent_id: &str,
-    session_id: &str,
     id: i64,
 ) -> Result<AgentScheduleRow, ScheduleOpError> {
     let row = {
@@ -288,10 +282,10 @@ pub(crate) fn load_owned_schedule(
             .map_err(|e| ScheduleOpError::Internal(e.to_string()))?
     };
     match row {
-        Some(r) if r.agent_id == agent_id && r.session_id == session_id => Ok(r),
-        // 存在しない／他人のもの／他セッションのもの、を区別せず同じ文言にする（存在秘匿）。
+        Some(r) if r.agent_id == agent_id => Ok(r),
+        // 存在しない／他人のもの、を区別せず同じ文言にする（存在秘匿）。
         _ => Err(ScheduleOpError::BadRequest(
-            "指定した id のスケジュールが見つかりません（このセッションのあなたのスケジュールではありません）。get_my_schedules で id を確認してください。".to_string(),
+            "指定した id のスケジュールが見つかりません（あなたのスケジュールではありません）。get_my_schedules で id を確認してください。".to_string(),
         )),
     }
 }
@@ -309,17 +303,16 @@ pub(crate) struct SchedulePatch<'a> {
 
 /// 自分のスケジュールを **id 指定で**部分更新する共有コア（ツール `update_my_schedule` 用）。
 ///
-/// `agent_id`＋`session_id` の所属チェック（[`load_owned_schedule`]）を通った行だけを更新する。
-/// **`session_id` は変更しない**（別セッションへ付け替えさせない）。cron/tz を検証し、アンカーの
+/// `agent_id` の所属チェック（[`load_owned_schedule`]）を通った行だけを更新する。
+/// **`session_id` は変更しない**（その行のセッションが発火先のまま）。cron/tz を検証し、アンカーの
 /// 向きは dashboard PATCH と同じ（[`next_anchor`]）。成功後 `scheduler_wake`（#437）。
 pub(crate) fn update_schedule_core(
     state: &AppState,
     agent_id: &str,
-    session_id: &str,
     id: i64,
     patch: SchedulePatch<'_>,
 ) -> Result<ScheduleDto, ScheduleOpError> {
-    let existing = load_owned_schedule(state, agent_id, session_id, id)?;
+    let existing = load_owned_schedule(state, agent_id, id)?;
 
     let new_cron = patch.cron_expr.unwrap_or(&existing.cron_expr).to_string();
     let new_tz = patch.timezone.unwrap_or(&existing.timezone).to_string();
@@ -370,15 +363,14 @@ pub(crate) fn update_schedule_core(
 
 /// 自分のスケジュールを **id 指定で**削除する共有コア（ツール `delete_my_schedule` 用）。
 ///
-/// `agent_id`＋`session_id` の所属チェックを通った行だけを削除する。成功後 `scheduler_wake`（#437）。
+/// `agent_id` の所属チェックを通った行だけを削除する。成功後 `scheduler_wake`（#437）。
 pub(crate) fn delete_schedule_core(
     state: &AppState,
     agent_id: &str,
-    session_id: &str,
     id: i64,
 ) -> Result<(), ScheduleOpError> {
-    // 所属チェック（存在しない／他人のものは同じ文言で拒否）。削除できるのは自分のこのセッションの行だけ。
-    let _ = load_owned_schedule(state, agent_id, session_id, id)?;
+    // 所属チェック（存在しない／他人のものは同じ文言で拒否）。削除できるのは自分の行だけ。
+    let _ = load_owned_schedule(state, agent_id, id)?;
     {
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::delete_agent_schedule(&conn, id)
@@ -400,10 +392,8 @@ pub async fn list_schedules(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<ListResponse>, StatusCode> {
-    let conn = state.db.lock().unwrap();
-    let rows = opencrab_db::queries::list_agent_schedules(&conn, &agent_id)
+    let schedules = list_agent_schedules_core(&state, &agent_id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let schedules: Vec<ScheduleDto> = rows.into_iter().map(ScheduleDto::from_row).collect();
     let count = schedules.len();
     Ok(Json(ListResponse {
         agent_id,
