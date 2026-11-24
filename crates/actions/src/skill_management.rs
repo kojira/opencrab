@@ -270,9 +270,9 @@ impl Action for RestoreMySkillAction {
     }
 }
 
-/// オーナー向けスキルの index を引く予約名（D-1058）。system の skill 一覧には露出許可
-/// （`agent_visible`）の無い skill の名前を出さず、この名前の 1 行だけを置く。オーナー等価の
-/// ターンが `read_skill` でこの名前を引くと、その skill 群の名前と説明の一覧が返る。
+/// オーナー向けスキルの index を引く予約名（D-1058）。system の skill 一覧には、誰にでも
+/// 見せてよい（`SkillRow::visible_to_any_caller`）のでない skill の名前を出さず、この名前の
+/// 1 行だけを置く。オーナー等価のターンが `read_skill` でこの名前を引くと、その skill 群の名前と説明の一覧が返る。
 pub const OWNER_SKILLS_INDEX_NAME: &str = "owner-skills";
 
 /// オーナー等価でない caller が、露出許可の無い skill（とその index）を引いたときの拒否文。
@@ -328,7 +328,7 @@ impl Action for ReadSkillAction {
                 Ok(skills) => skills,
                 Err(e) => return ActionResult::error(&e.to_string()),
             };
-            skills.retain(|s| !s.agent_visible);
+            skills.retain(|s| !s.visible_to_any_caller());
             skills.sort_by(|a, b| a.name.cmp(&b.name));
             let list: Vec<serde_json::Value> = skills
                 .iter()
@@ -338,13 +338,13 @@ impl Action for ReadSkillAction {
         }
         match opencrab_db::queries::find_skill_by_name_any(&conn, &ctx.agent_id, name) {
             Ok(Some(s)) => {
-                // D-1058（#352 の露出制限を権限ゲートへ置き換え）: オーナーが露出を許可
-                // （`agent_visible`）していない skill の本文は、オーナー等価（Owner / CoAgent）の
+                // D-1058（#352 の露出制限を権限ゲートへ置き換え）: 誰にでも見せてよい skill
+                // （`visible_to_any_caller`: オーナー指定か、学んだ skill。D-1144）でない skill の本文は、オーナー等価（Owner / CoAgent）の
                 // ターンだけに渡す。それ以外はツールの owner_only と同じく「owner が要る」と
                 // 返す。system の一覧はこの skill の名前を出さないので、名前を知る手段は
                 // オーナー等価ターンの `owner-skills` だけ。#335 の may_exercise_skill ゲート
                 // （向きが逆）はこの後に残し、両方を満たすときだけ本文を返す。
-                if !s.agent_visible && !ctx.caller.is_owner_equivalent() {
+                if !s.visible_to_any_caller() && !ctx.caller.is_owner_equivalent() {
                     return owner_required(name);
                 }
                 // #335: confused deputy 対策。read_skill は本文（行動指針）を渡す＝スキルの

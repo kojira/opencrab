@@ -3,6 +3,15 @@ use opencrab_actions::CallerIdentity;
 use opencrab_db::queries::SkillRow;
 
 fn insert_skill(conn: &rusqlite::Connection, name: &str, agent_visible: bool) {
+    insert_skill_with_source(conn, name, "manual", agent_visible);
+}
+
+fn insert_skill_with_source(
+    conn: &rusqlite::Connection,
+    name: &str,
+    source_type: &str,
+    agent_visible: bool,
+) {
     let row = SkillRow {
         id: uuid::Uuid::new_v4().to_string(),
         agent_id: "a1".to_string(),
@@ -10,7 +19,7 @@ fn insert_skill(conn: &rusqlite::Connection, name: &str, agent_visible: bool) {
         description: format!("{name} desc"),
         situation_pattern: "sp".to_string(),
         guidance: "g".to_string(),
-        source_type: "experience".to_string(),
+        source_type: source_type.to_string(),
         source_context: None,
         file_path: None,
         effectiveness: None,
@@ -129,4 +138,33 @@ fn skill_index_is_name_sorted_in_stable_segment_after_curated() {
         pos("Alpha") < pos("Mid") && pos("Mid") < pos("Zeta") && pos("Zeta") < pos("owner-skills"),
         "{skills}"
     );
+}
+
+/// D-1144: エージェントが学んだスキル（experience / sleep_curated / peer）は、オーナーの指定が
+/// 無くても全 caller 共通の一覧に名前が出る。手で入れたスキルは従来どおり `owner-skills` に畳む。
+#[test]
+fn skill_index_lists_learned_skills_for_every_caller() {
+    let conn = opencrab_db::init_memory().unwrap();
+    insert_skill_with_source(&conn, "FromExperience", "experience", false);
+    insert_skill_with_source(&conn, "FromSleep", "sleep_curated", false);
+    insert_skill_with_source(&conn, "FromPeer", "peer", false);
+    insert_skill_with_source(&conn, "SelfMade", "self_created", false);
+    insert_skill(&conn, "Designated", true);
+
+    let (agent_prompt, _) = build_agent_context(&conn, "a1", &CallerIdentity::Agent);
+    for name in ["FromExperience", "FromSleep", "FromPeer", "Designated"] {
+        assert!(
+            agent_prompt.contains(&format!("- {name}: {name} desc")),
+            "{name} must be listed:\n{agent_prompt}"
+        );
+    }
+    assert!(!agent_prompt.contains("SelfMade"), "{agent_prompt}");
+    assert!(agent_prompt.contains("- owner-skills:"), "{agent_prompt}");
+    for caller in all_callers() {
+        let (p, _) = build_agent_context(&conn, "a1", &caller);
+        assert_eq!(
+            p, agent_prompt,
+            "caller {caller:?} must get the same prompt"
+        );
+    }
 }

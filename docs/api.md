@@ -534,7 +534,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 | description | string | スキルの説明 |
 | situation_pattern | string | このスキルを使う状況パターン |
 | guidance | string | スキル実行時の指示内容 |
-| source_type | string | スキルの出自（`"manual"` など） |
+| source_type | string | スキルの出自（`"manual"` など）。エージェントが学んだスキル（`"experience"` = `learn_from_experience`、`"sleep_curated"` = スリープ時の棚卸し、`"peer"` = `learn_from_peer`）は、指定が無くても caller を問わず一覧に出て `read_skill` で読める（ツールは許さない） |
 | source_context | string \| null | 出自コンテキスト |
 | file_path | string \| null | スクリプトファイルパス |
 | is_active | bool | 有効/無効 |
@@ -542,7 +542,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 | archived | bool | アーカイブ済みか |
 | usage_count | number | 使用回数 |
 | effectiveness | number \| null | 効果スコア |
-| agent_visible | bool | オーナーの「誰でも使える」指定。オンのスキルは caller=Agent のターンの一覧にも出て、`read_skill` で開いたターンは `tools` を caller を問わず使える |
+| agent_visible | bool | オーナーの「誰でも使える」指定。オンのスキルは caller=Agent のターンの一覧にも出て、`read_skill` で開いたターンは `tools` を caller を問わず使える。ツールを許すのはこの指定だけ（学んだスキルは指定が無ければ見えるだけで、`tools` があっても許さない） |
 | tools | string[] | このスキルが挙げるツール名（schema v66。既存スキルは `[]`） |
 
 ---
