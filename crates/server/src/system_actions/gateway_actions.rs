@@ -73,14 +73,14 @@ impl GatewayActions for SystemGatewayActions {
             // （委譲パターンにすると二重定義を招く）。core の `create_my_skill` とは別ツール
             // として**両方**残す（統廃合は #157 の範囲外）。
             "create_skill" => crate::agent_management::create_skill(&self.state, args, ctx),
-            // エージェント自身の定時実行スケジュール（#455）。対象は常に ctx.session_id。
+            // エージェント自身の定時実行スケジュール（#455）。自分の全セッション分を扱う（D-1147）。
             "get_my_schedules" => {
                 crate::agent_schedule::get_my_schedules(&self.state, args, &self.conversation_ctx(ctx))
             }
             "set_my_schedule" => {
                 crate::agent_schedule::set_my_schedule(&self.state, args, &self.conversation_ctx(ctx))
             }
-            // 更新・削除（#477）。id 指定で、ctx.agent_id＋現在セッションの所属チェックを通った行だけ。
+            // 更新・削除（#477）。id 指定で、ctx.agent_id の所属チェックを通った行だけ。
             "update_my_schedule" => crate::agent_schedule::update_my_schedule(
                 &self.state,
                 args,

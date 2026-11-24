@@ -3,20 +3,23 @@
 //! 間隔実行（`@every 30m`）も定時実行（cron）も同じ `agent_schedules` の 1 行で、同じセッションに
 //! 複数登録でき、行ごとに `message`（発火時に自分へ渡されるプロンプト）を持つ（#612）。
 //!
-//! - `set_my_schedule`: いま話しているセッションに対して cron / `@every` のスケジュールを登録する。
-//! - `get_my_schedules`: いま話しているセッションのスケジュールを、次回発火時刻付きで列挙する。
+//! - `set_my_schedule`: cron / `@every` のスケジュールを登録する。既定はいま話しているセッション、
+//!   `session_id` を渡すと自分の別のセッションに登録する（D-1147）。
+//! - `get_my_schedules`: 自分の全セッションのスケジュールを、次回発火時刻・セッション名付きで列挙する
+//!   （D-1147。`session_id` で絞り込める）。
 //! - `update_my_schedule`: `get_my_schedules` が返した id のスケジュールを部分更新する
 //!   （`enabled=false` で「止める」・cron/message/timezone の変更で「間隔を変える」）。
 //! - `delete_my_schedule`: `get_my_schedules` が返した id のスケジュールを消す（履歴も残さない）。
 //! - `run_my_schedule`: `get_my_schedules` が返した id のスケジュールを今すぐ手動発火する
 //!   （**オーナー / co_agent 限定**・定時発火と同じ経路・`last_fired_at` は更新しない）。
 //!
-//! # id の所属チェック（#477）
+//! # id の所属チェック（#477 / D-1147）
 //!
 //! `update_my_schedule` / `delete_my_schedule` / `run_my_schedule` は id を取る。**id を推測して
-//! 他エージェント・他セッションのスケジュールを触れてはいけない**ので、対象行は `ctx.agent_id`＋
-//! 現在のセッションの両方に一致する場合だけ操作できる（`api::schedules` 側の `load_owned_schedule`
-//! が所属チェックを握る）。一致しない／存在しない id は**存在を明かさず**同じ文言で拒否する。
+//! 他エージェントのスケジュールを触れてはいけない**ので、対象行は `ctx.agent_id` に一致する場合だけ
+//! 操作できる（`api::schedules` 側の `load_owned_schedule` が所属チェックを握る）。どのセッションの行
+//! でもよく、変更はその行のセッションに対して効く（発火先は行のセッションのまま）。一致しない／
+//! 存在しない id は**存在を明かさず**同じ文言で拒否する。
 //!
 //! # なぜエージェント自身に開くか（設計 §7.4 の制約撤回・オーナー裁定 2026-08-09）
 //!
@@ -24,24 +27,25 @@
 //! 作れないと、毎回オーナーが dashboard から登録することになる）。**増えるのは「何ができるか」では
 //! なく「いつ動くかを自分で決められるか」だけ**。
 //!
-//! # セッション単位（#456）
+//! # 発火経路（#628）
 //!
-//! **スコープは無い。** 対象は常に `ctx.session_id`（いま話しているセッション）。発火経路を持つのは
-//! 登録済み transport のセッションだけ（#628）なので、それ以外で呼ばれたら **fail-closed で拒否し
-//! remedy（どこで実行すればよいか）を返す**。「設定できたのに永遠に発火しない行」を作らせない。
+//! 登録先は自分の、発火経路を持つセッション（登録済み transport のセッション）だけ。判定は scheduler と
+//! 同じ `resolve_persisted_target` 1 か所。それ以外を指したら **fail-closed で拒否し remedy を返す**
+//! （「設定できたのに永遠に発火しない行」を作らせない）。
 //!
 //! # 権限
 //!
 //! get/set/update/delete は **owner 限定にはしない**（自分の定時実行を自分で決めるのが目的）が、
 //! 素の `Agent`（未信頼の外部ユーザー由来ターン）からは見えないよう `TRUSTED_ONLY_ACTIONS` に入れ、
 //! ハンドラ内でも同じ検査をする（多層防御）。`run_my_schedule` は `OWNER_ONLY_ACTIONS`。
+//! サブタスクは親ターンの呼び出し元を継承するので、親と同じ範囲で扱える。
 
 use serde_json::json;
 
 use opencrab_gateway::{GatewayActionResult, GatewayCallContext, GatewayCaller};
 
 use crate::api::schedules::{
-    create_schedule_core, delete_schedule_core, list_session_schedules_core, load_owned_schedule,
+    create_schedule_core, delete_schedule_core, list_agent_schedules_core, load_owned_schedule,
     update_schedule_core, ScheduleOpError, SchedulePatch,
 };
 use crate::AppState;
@@ -83,16 +87,32 @@ fn reject_foreign_target(args: &serde_json::Value) -> Option<GatewayActionResult
     None
 }
 
-/// 廃止したスコープ引数（`scope` / `session_id`）を拒否する（#456 と同じ語彙統一）。
-fn reject_removed_scope_args(args: &serde_json::Value) -> Option<GatewayActionResult> {
-    for key in ["scope", "session_id"] {
-        if args.get(key).is_some() {
-            return Some(err(format!(
-                "{key}は指定できません。スケジュールは常に「いま話しているセッション」に対して登録・照会されます。"
-            )));
-        }
+/// 廃止したスコープ引数（`scope`）を拒否する（#456 と同じ語彙統一）。
+fn reject_scope_arg(args: &serde_json::Value) -> Option<GatewayActionResult> {
+    args.get("scope").map(|_| {
+        err("scopeは指定できません。対象のセッションは session_id（set_my_schedule / get_my_schedules）か id で指定してください。")
+    })
+}
+
+/// id で対象を決めるツール（update/delete/run）に `session_id` が来たら拒否する。対象のセッションは
+/// id の行が持っているので、別の値を受けると「どちらが効いたか」が曖昧になる。
+fn reject_session_id_with_id(args: &serde_json::Value) -> Option<GatewayActionResult> {
+    args.get("session_id").map(|_| {
+        err("session_idは指定できません。id のスケジュールはそれぞれ自分のセッションを持っているので、id だけを渡してください。")
+    })
+}
+
+/// 任意の文字列引数を取り出す（省略・null は `None`、空文字・型違いは remedy 付きエラー）。
+fn optional_str(
+    args: &serde_json::Value,
+    key: &str,
+    remedy: &str,
+) -> Result<Option<String>, GatewayActionResult> {
+    match args.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Ok(Some(s.clone())),
+        _ => Err(err(format!("{key}は文字列で指定してください。{remedy}"))),
     }
-    None
 }
 
 /// `error` だけを持つ失敗レスポンスを組む短縮子。
@@ -104,48 +124,66 @@ fn err(msg: impl Into<String>) -> GatewayActionResult {
     }
 }
 
-/// 現在のセッションを発火先へ解決する（scheduler と**同じ登録簿を引く**・#628）。
+/// このエージェントの `session_id` を発火先へ解決する（scheduler と**同じ登録簿を引く**・#628）。
 ///
-/// セッション文脈が無い / 発火経路の無い種別（登録済み descriptor がどれも名乗らない）→
-/// fail-closed で **remedy 付き**エラー。
-fn current_session_target(
+/// 自分のセッションでない / 発火経路の無いセッション → fail-closed で **remedy 付き**エラー。
+fn session_target(
     state: &AppState,
-    ctx: &GatewayCallContext,
-) -> Result<(String, opencrab_actions::FireTarget), GatewayActionResult> {
-    let session_id = match ctx.session_id.as_deref() {
-        Some(s) if !s.is_empty() => s,
-        _ => {
-            // remedy は登録済み transport から生成する（#628・手書きしない）。
-            return Err(err(format!(
-                "このセッションからは定時実行を設定・照会できません（セッション文脈がありません）。設定したい対象のセッション——{}——で実行してください。",
-                state.timed_fire_router.fire_target_hint()
-            )));
-        }
-    };
+    agent_id: &str,
+    session_id: &str,
+) -> Result<opencrab_actions::FireTarget, GatewayActionResult> {
     let target = {
         let conn = state.db.lock().map_err(|error| {
-            tracing::error!(%error, agent_id = %ctx.agent_id, "schedule: persisted target DB lock failed");
+            tracing::error!(%error, agent_id, "schedule: persisted target DB lock failed");
             err("定時実行の発火先を確認できませんでした。しばらくしてから再試行してください")
         })?;
         state
             .timed_fire_router
-            .resolve_persisted_target(&conn, session_id, &ctx.agent_id)
+            .resolve_persisted_target(&conn, session_id, agent_id)
     };
-    match target {
-        Some(target) => Ok((session_id.to_string(), target)),
-        None => Err(err(format!(
-            "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——{}——で実行してください。",
+    target.ok_or_else(|| {
+        err(format!(
+            "セッション {session_id} には定時実行を設定できません（あなたのセッションでないか、このセッション種別には発火経路がありません）。対象にできるのは、あなたの——{}——のセッションです（get_my_schedules で各スケジュールの session_id を確認できます）。",
             state.timed_fire_router.fire_target_hint()
-        ))),
-    }
+        ))
+    })
 }
 
-/// 現在のセッションが発火経路を持つかを確認し、session_id を返す（[`current_session_target`]）。
-fn current_session(
+/// 登録先セッションを決める: `session_id` 引数があればそれ、無ければ現在のセッション。
+/// どちらも [`session_target`] で「自分の・発火経路のあるセッション」かを確かめる。
+fn registration_session(
     state: &AppState,
+    args: &serde_json::Value,
     ctx: &GatewayCallContext,
 ) -> Result<String, GatewayActionResult> {
-    current_session_target(state, ctx).map(|(session_id, _)| session_id)
+    let requested = optional_str(
+        args,
+        "session_id",
+        "省略するといま話しているセッションに登録します。",
+    )?;
+    let session_id = match requested {
+        Some(s) => s,
+        None => match ctx.session_id.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return Err(err(format!(
+                    "このセッションからは登録先が決まりません（セッション文脈がありません）。session_id に、あなたの——{}——のセッションを指定してください。",
+                    state.timed_fire_router.fire_target_hint()
+                )))
+            }
+        },
+    };
+    session_target(state, &ctx.agent_id, &session_id)?;
+    Ok(session_id)
+}
+
+/// セッションの人が読める名前（`sessions.theme`）。名前が無い（空・id と同じ）ときは `None`。
+fn session_title(conn: &rusqlite::Connection, session_id: &str) -> Option<String> {
+    opencrab_db::queries::get_session(conn, session_id)
+        .ok()
+        .flatten()
+        .map(|s| s.theme)
+        .filter(|theme| !theme.trim().is_empty() && theme != session_id)
 }
 
 /// 必須の整数 id 引数を取り出す（数値、または数値へ解釈できる文字列を許す）。
@@ -182,7 +220,7 @@ fn required_str(
     }
 }
 
-/// 自分の定時実行スケジュールを登録する（常に現在のセッションが対象）。
+/// 自分の定時実行スケジュールを登録する（既定は現在のセッション、`session_id` で自分の別セッション）。
 ///
 /// cron 式が不正ならその場でエラー（実行時に黙って発火しないのが最悪なので、同じターンで直せる）。
 /// 成功後は中央スケジューラを起こして再起動なしで即時反映する（#437・共有コアが担う）。
@@ -197,11 +235,11 @@ pub(crate) fn set_my_schedule(
     if let Some(denied) = reject_foreign_target(args) {
         return denied;
     }
-    if let Some(denied) = reject_removed_scope_args(args) {
+    if let Some(denied) = reject_scope_arg(args) {
         return denied;
     }
 
-    let session_id = match current_session(state, ctx) {
+    let session_id = match registration_session(state, args, ctx) {
         Ok(s) => s,
         Err(e) => return e,
     };
@@ -267,7 +305,10 @@ pub(crate) fn set_my_schedule(
     }
 }
 
-/// 自分の定時実行スケジュールを列挙する（常に現在のセッションが対象）。
+/// 自分の定時実行スケジュールを、自分の全セッション分列挙する（`session_id` で絞り込める）。
+///
+/// 各要素に `session_title`（セッション名・無ければ null）と `is_current_session` を足し、
+/// 応答に `current_session_id` を載せる。発火経路の無いセッション（サブタスク等）からでも読める。
 pub(crate) fn get_my_schedules(
     state: &AppState,
     args: &serde_json::Value,
@@ -279,33 +320,68 @@ pub(crate) fn get_my_schedules(
     if let Some(denied) = reject_foreign_target(args) {
         return denied;
     }
-
-    let session_id = match current_session(state, ctx) {
-        Ok(s) => s,
+    if let Some(denied) = reject_scope_arg(args) {
+        return denied;
+    }
+    let filter = match optional_str(
+        args,
+        "session_id",
+        "省略すると全セッションのスケジュールを返します。",
+    ) {
+        Ok(v) => v,
         Err(e) => return e,
     };
 
-    match list_session_schedules_core(state, &ctx.agent_id, &session_id) {
-        Ok(schedules) => {
-            let count = schedules.len();
-            GatewayActionResult {
-                success: true,
-                data: Some(json!({
-                    "session_id": session_id,
-                    "schedules": schedules,
-                    "count": count,
-                })),
-                error: None,
+    let schedules = match list_agent_schedules_core(state, &ctx.agent_id) {
+        Ok(v) => v,
+        Err(ScheduleOpError::BadRequest(m)) | Err(ScheduleOpError::Internal(m)) => return err(m),
+    };
+    let current_session_id = ctx.session_id.clone().filter(|s| !s.is_empty());
+    let mut titles: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    let items: Vec<serde_json::Value> = {
+        let conn = match state.db.lock() {
+            Ok(conn) => conn,
+            Err(_) => {
+                return err(
+                    "スケジュールを読み出せませんでした。しばらくしてから再試行してください",
+                )
             }
-        }
-        Err(ScheduleOpError::BadRequest(m)) | Err(ScheduleOpError::Internal(m)) => err(m),
+        };
+        schedules
+            .into_iter()
+            .filter(|dto| filter.as_deref().is_none_or(|f| dto.session_id == f))
+            .map(|dto| {
+                let title = titles
+                    .entry(dto.session_id.clone())
+                    .or_insert_with(|| session_title(&conn, &dto.session_id))
+                    .clone();
+                let is_current = current_session_id.as_deref() == Some(dto.session_id.as_str());
+                let mut item = serde_json::to_value(&dto).unwrap_or_else(|_| json!({}));
+                if let Some(obj) = item.as_object_mut() {
+                    obj.insert("session_title".to_string(), json!(title));
+                    obj.insert("is_current_session".to_string(), json!(is_current));
+                }
+                item
+            })
+            .collect()
+    };
+    let count = items.len();
+    GatewayActionResult {
+        success: true,
+        data: Some(json!({
+            "current_session_id": current_session_id,
+            "schedules": items,
+            "count": count,
+        })),
+        error: None,
     }
 }
 
-/// 自分の定時実行スケジュールを **id 指定で**部分更新する（常に現在のセッションが対象）。
+/// 自分の定時実行スケジュールを **id 指定で**部分更新する（どのセッションの行でもよい）。
 ///
-/// `id` は `get_my_schedules` が返したもの。所属チェック（`ctx.agent_id`＋現在のセッション）を
-/// 通った行だけを更新できる。`enabled=false` で「止める」（行は残り履歴が追える）、cron/message/
+/// `id` は `get_my_schedules` が返したもの。所属チェック（`ctx.agent_id`）を通った行だけを更新でき、
+/// 行のセッション（発火先）は変わらない。`enabled=false` で「止める」（行は残り履歴が追える）、cron/message/
 /// timezone の変更で「間隔を変える」。cron 式が不正ならその場でエラー（同ターンで直せる）。
 pub(crate) fn update_my_schedule(
     state: &AppState,
@@ -318,15 +394,13 @@ pub(crate) fn update_my_schedule(
     if let Some(denied) = reject_foreign_target(args) {
         return denied;
     }
-    // session_id 等のスコープ引数は禁止（対象は常に現在のセッション・付け替えさせない）。
-    if let Some(denied) = reject_removed_scope_args(args) {
+    if let Some(denied) = reject_scope_arg(args) {
         return denied;
     }
-
-    let session_id = match current_session(state, ctx) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
+    // 行のセッションは付け替えない（session_id は id の行が持つ）。
+    if let Some(denied) = reject_session_id_with_id(args) {
+        return denied;
+    }
 
     let id = match required_i64(args, "id") {
         Ok(v) => v,
@@ -367,7 +441,6 @@ pub(crate) fn update_my_schedule(
     match update_schedule_core(
         state,
         &ctx.agent_id,
-        &session_id,
         id,
         SchedulePatch {
             cron_expr: cron_expr.as_deref(),
@@ -379,7 +452,7 @@ pub(crate) fn update_my_schedule(
         Ok(dto) => {
             tracing::info!(
                 agent_id = %ctx.agent_id,
-                session_id = %session_id,
+                session_id = %dto.session_id,
                 schedule_id = id,
                 enabled = dto.enabled,
                 caller = %ctx.caller.label(),
@@ -399,7 +472,7 @@ pub(crate) fn update_my_schedule(
     }
 }
 
-/// 自分の定時実行スケジュールを **id 指定で**削除する（常に現在のセッションが対象）。
+/// 自分の定時実行スケジュールを **id 指定で**削除する（どのセッションの行でもよい）。
 ///
 /// `id` は `get_my_schedules` が返したもの。所属チェックを通った行だけを消せる。「止めるだけ」で
 /// 履歴を残したいなら `update_my_schedule` に `enabled=false` を渡す（削除は行ごと消す）。
@@ -414,25 +487,22 @@ pub(crate) fn delete_my_schedule(
     if let Some(denied) = reject_foreign_target(args) {
         return denied;
     }
-    if let Some(denied) = reject_removed_scope_args(args) {
+    if let Some(denied) = reject_scope_arg(args) {
         return denied;
     }
-
-    let session_id = match current_session(state, ctx) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
+    if let Some(denied) = reject_session_id_with_id(args) {
+        return denied;
+    }
 
     let id = match required_i64(args, "id") {
         Ok(v) => v,
         Err(e) => return e,
     };
 
-    match delete_schedule_core(state, &ctx.agent_id, &session_id, id) {
+    match delete_schedule_core(state, &ctx.agent_id, id) {
         Ok(()) => {
             tracing::info!(
                 agent_id = %ctx.agent_id,
-                session_id = %session_id,
                 schedule_id = id,
                 caller = %ctx.caller.label(),
                 "エージェントが自分の定時実行スケジュールを削除した"
@@ -457,7 +527,8 @@ pub(crate) fn delete_my_schedule(
 /// # 定時発火とまったく同じ経路
 ///
 /// scheduler の定時発火と**同じ関数**（[`crate::heartbeat_fire::run_one_heartbeat`]）を呼ぶ。
-/// 対象は所属チェック（[`load_owned_schedule`]・`ctx.agent_id`＋現在のセッション）を通った行だけ。
+/// 対象は所属チェック（[`load_owned_schedule`]・`ctx.agent_id`）を通った行だけで、発火先はその行の
+/// セッション（[`session_target`] で解決）。
 ///
 /// # `last_fired_at` は更新しない
 ///
@@ -466,8 +537,8 @@ pub(crate) fn delete_my_schedule(
 ///
 /// # 自己デッドロックを避ける（#599）
 ///
-/// このツールは呼び出しターンの中で走り、そのターンは既に現在セッションの直列化ロックを保持して
-/// いる。発火は `spawn` して**即座に「投げた」を返し**、実際のターンは今のターンが終わってから走る。
+/// このツールは呼び出しターンの中で走り、行のセッションが現在のセッションなら、そのターンは既に
+/// 直列化ロックを保持している。発火は `spawn` して**即座に「投げた」を返し**、実際のターンは今のターンが終わってから走る。
 pub(crate) fn run_my_schedule(
     state: &AppState,
     args: &serde_json::Value,
@@ -480,23 +551,26 @@ pub(crate) fn run_my_schedule(
     if let Some(denied) = reject_foreign_target(args) {
         return denied;
     }
-    if let Some(denied) = reject_removed_scope_args(args) {
+    if let Some(denied) = reject_scope_arg(args) {
         return denied;
     }
-
-    let (session_id, target) = match current_session_target(state, ctx) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
+    if let Some(denied) = reject_session_id_with_id(args) {
+        return denied;
+    }
 
     let id = match required_i64(args, "id") {
         Ok(v) => v,
         Err(e) => return e,
     };
 
-    let row = match load_owned_schedule(state, &ctx.agent_id, &session_id, id) {
+    let row = match load_owned_schedule(state, &ctx.agent_id, id) {
         Ok(row) => row,
         Err(ScheduleOpError::BadRequest(m)) | Err(ScheduleOpError::Internal(m)) => return err(m),
+    };
+    let session_id = row.session_id.clone();
+    let target = match session_target(state, &ctx.agent_id, &session_id) {
+        Ok(target) => target,
+        Err(e) => return e,
     };
 
     if !state.timed_fire_router.has_live_sink() {
@@ -530,7 +604,7 @@ pub(crate) fn run_my_schedule(
             "fired": true,
             "id": id,
             "session_id": session_id,
-            "note": "スケジュールを発火しました。実際のターンは今のターンが終わってから同じセッションで走ります（last_fired_at は更新しません）。",
+            "note": "スケジュールを発火しました。実際のターンはそのスケジュールのセッション（session_id）で走ります。いまのセッションなら今のターンが終わってから走ります（last_fired_at は更新しません）。",
         })),
         error: None,
     }
@@ -539,6 +613,10 @@ pub(crate) fn run_my_schedule(
 #[cfg(test)]
 #[path = "agent_schedule/review_tests.rs"]
 mod review_tests;
+
+#[cfg(test)]
+#[path = "agent_schedule/cross_session_tests.rs"]
+mod cross_session_tests;
 
 #[cfg(test)]
 mod tests;

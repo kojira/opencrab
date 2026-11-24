@@ -59,7 +59,7 @@ async fn set_rejects_non_firing_session_with_remedy() {
     assert!(!res.success);
     let e = res.error.unwrap();
     assert!(e.contains("発火経路"), "理由: {e}");
-    assert!(e.contains("実行してください"), "remedy: {e}");
+    assert!(e.contains("対象にできるのは"), "remedy: {e}");
 }
 
 /// cron 式が不正ならその場でエラー（remedy 付き）。
@@ -82,17 +82,32 @@ async fn set_rejects_invalid_cron_in_the_same_turn() {
     );
 }
 
-/// スコープ引数（session_id 等）は明示拒否（#456 の語彙統一）。
+/// 廃止したスコープ引数 `scope` は明示拒否（#456 の語彙統一）。
 #[tokio::test]
 async fn set_rejects_scope_style_args() {
     let state = crate::test_app_state();
     let res = set_my_schedule(
         &state,
-        &json!({"session_id": "nostr-other", "cron_expr": "@every 3h", "message": "x"}),
+        &json!({"scope": "agent", "cron_expr": "@every 3h", "message": "x"}),
         &ctx("nostr-agent-x"),
     );
     assert!(!res.success);
-    assert!(res.error.unwrap().contains("session_id"));
+    assert!(res.error.unwrap().contains("scope"));
+}
+
+/// id で対象を決める update/delete/run は `session_id` を受けない（行が自分のセッションを持つ）。
+#[tokio::test]
+async fn id_tools_reject_session_id() {
+    let state = crate::test_app_state();
+    let c = ctx("nostr-agent-x");
+    let args = json!({"id": 1, "enabled": false, "session_id": "nostr-other"});
+    for res in [
+        update_my_schedule(&state, &args, &c),
+        delete_my_schedule(&state, &args, &c),
+    ] {
+        assert!(!res.success);
+        assert!(res.error.unwrap().contains("session_id"));
+    }
 }
 
 /// 必須引数（cron_expr / message）欠落は remedy 付きエラー。
@@ -255,29 +270,6 @@ async fn foreign_agent_cannot_touch_others_schedule() {
         gd["schedules"][0]["enabled"], true,
         "victim の行は更新されていない"
     );
-}
-
-/// **セッション所属チェック**: 同じ agent でも別セッション（この agent の Discord チャンネル）
-/// からは、Nostr セッションの id を触れない。`load_owned_schedule` の session_id 一致条件を
-/// 外すとこのテストが赤くなる。
-// #654: nostr セッションで作成し、別セッションからの操作を弾く。作成・照会に NostrFire
-// （nostr feature）が要る（#651）。攻撃側の別セッション拒否は理由を問わないので nostr 単独で足りる。
-#[cfg(any())]
-#[tokio::test]
-async fn other_session_of_same_agent_cannot_touch() {
-    let state = crate::test_app_state();
-    let nostr = ctx("nostr-agent-x");
-    let id = create_one(&state, &nostr);
-
-    // 同じ agent-x だが別セッション（Discord）。発火経路はあるが所属が違う。
-    let discord = ctx("discord-agent-x-111-222");
-
-    let del = delete_my_schedule(&state, &json!({"id": id}), &discord);
-    assert!(!del.success, "別セッションからは削除できない");
-
-    // Nostr 側の行は残る。
-    let got = get_my_schedules(&state, &json!({}), &nostr);
-    assert_eq!(got.data.unwrap()["count"], 1);
 }
 
 /// id を文字列で渡しても受け付ける（LLM が数値を文字列化する実測に対応）。
