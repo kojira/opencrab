@@ -97,12 +97,16 @@ fn reject_scope_arg(args: &serde_json::Value) -> Option<GatewayActionResult> {
 /// id で対象を決めるツール（update/delete/run）に `session_id` が来たら拒否する。対象のセッションは
 /// id の行が持っているので、別の値を受けると「どちらが効いたか」が曖昧になる。
 fn reject_session_id_with_id(args: &serde_json::Value) -> Option<GatewayActionResult> {
-    args.get("session_id").map(|_| {
-        err("session_idは指定できません。id のスケジュールはそれぞれ自分のセッションを持っているので、id だけを渡してください。")
-    })
+    // 未指定（省略・null・空文字）は拒否しない。値が入っているときだけ曖昧なので断る。
+    match args.get("session_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) if s.trim().is_empty() => None,
+        Some(_) => Some(err("session_idは指定できません。id のスケジュールはそれぞれ自分のセッションを持っているので、id だけを渡してください。")),
+    }
 }
 
-/// 任意の文字列引数を取り出す（省略・null は `None`、空文字・型違いは remedy 付きエラー）。
+/// 任意の文字列引数を取り出す。省略・null・空文字は `None`（LLM は「指定しない」を `""` で
+/// 送ることが多く、ほかのツールも `""` を未指定として扱う）。文字列以外は remedy 付きエラー。
 fn optional_str(
     args: &serde_json::Value,
     key: &str,
@@ -110,7 +114,8 @@ fn optional_str(
 ) -> Result<Option<String>, GatewayActionResult> {
     match args.get(key) {
         None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Ok(Some(s.clone())),
+        Some(serde_json::Value::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
         _ => Err(err(format!("{key}は文字列で指定してください。{remedy}"))),
     }
 }
