@@ -39,8 +39,10 @@ pub struct AddSkillRequest {
     pub situation_pattern: String,
     pub guidance: String,
     pub permission: Option<String>,
-    /// caller=Agent のターンへ露出してよいか（#352）。省略時は false（fail-closed）。
+    /// オーナーの「誰でも使える」指定（#352 / D-1143）。省略時は false（fail-closed）。
     pub agent_visible: Option<bool>,
+    /// このスキルが挙げるツール名（D-1143）。指定があるスキルを開いたターンで使える。
+    pub tools: Option<Vec<String>>,
 }
 
 pub async fn add_skill(
@@ -69,6 +71,7 @@ pub async fn add_skill(
         created_caller: None,
         // #352: 新規追加は Agent 非露出が既定（fail-closed）。露出は update_skill で切り替える。
         agent_visible: req.agent_visible.unwrap_or(false),
+        tools: req.tools.unwrap_or_default(),
     };
 
     let conn = state.db.lock().unwrap();
@@ -105,7 +108,12 @@ pub struct UpdateSkillRequest {
     /// この REST 経路はダッシュボード（オーナー操作）専用。エージェントのアクションは
     /// HTTP ではなく action dispatch を通るため、ここには到達できない
     /// （＝caller=Agent から自分でこのフラグを立てられない）。
+    ///
+    /// D-1143: これがオーナーの「誰でも使える」指定。指定したスキルを `read_skill` で開いた
+    /// ターンは、caller を問わず `tools` のツールを使える。
     pub agent_visible: Option<bool>,
+    /// このスキルが挙げるツール名（D-1143）。
+    pub tools: Option<Vec<String>>,
 }
 
 pub async fn update_skill(
@@ -133,6 +141,9 @@ pub async fn update_skill(
         }
         if let Some(agent_visible) = req.agent_visible {
             skill.agent_visible = agent_visible;
+        }
+        if let Some(tools) = req.tools {
+            skill.tools = tools;
         }
 
         opencrab_db::queries::update_skill(&conn, &skill).unwrap();

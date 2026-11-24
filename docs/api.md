@@ -542,6 +542,8 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 | archived | bool | アーカイブ済みか |
 | usage_count | number | 使用回数 |
 | effectiveness | number \| null | 効果スコア |
+| agent_visible | bool | オーナーの「誰でも使える」指定。オンのスキルは caller=Agent のターンの一覧にも出て、`read_skill` で開いたターンは `tools` を caller を問わず使える |
+| tools | string[] | このスキルが挙げるツール名（schema v66。既存スキルは `[]`） |
 
 ---
 
@@ -593,6 +595,8 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 | situation_pattern | string | ✅ | このスキルを使う状況パターン |
 | guidance | string | ✅ | スキル実行時の指示内容 |
 | permission | string | ❌ | `"agent"` \| `"owner"` \| `"trusted"` (default: `"agent"`) |
+| agent_visible | bool | ❌ | 「誰でも使える（オーナー指定）」(default: `false`) |
+| tools | string[] | ❌ | このスキルが挙げるツール名 (default: `[]`) |
 
 **Example Request**
 
@@ -631,6 +635,14 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 | description | string | ❌ | スキルの説明 |
 | guidance | string | ❌ | スキル実行時の指示内容 |
 | situation_pattern | string | ❌ | このスキルを使う状況パターン |
+| agent_visible | bool | ❌ | 「誰でも使える（オーナー指定）」。オンのスキルを `read_skill` で開いたターンは、caller を問わず `tools` を使える |
+| tools | string[] | ❌ | このスキルが挙げるツール名 |
+
+指定の例（巡回リストを誰との会話でも更新できるようにする）:
+
+```json
+{"agent_visible": true, "tools": ["ws_read", "ws_edit"]}
+```
 
 **Example Request**
 

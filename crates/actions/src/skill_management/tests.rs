@@ -380,6 +380,7 @@ async fn legacy_skill_without_created_caller_is_readable_by_owner() {
             archived: false,
             created_caller: None,
             agent_visible: false,
+            tools: Vec::new(),
         };
         opencrab_db::queries::insert_skill(&conn, &row).unwrap();
     }
@@ -563,4 +564,81 @@ async fn test_create_my_skill_file_content() {
     assert!(content.contains("File Check"));
     assert!(content.contains("guide"));
     assert!(content.contains("pattern"));
+}
+
+fn designate(ctx: &ActionContext, name: &str) {
+    let conn = ctx.db.lock().unwrap();
+    let mut row = opencrab_db::queries::find_skill_by_name_any(&conn, &ctx.agent_id, name)
+        .unwrap()
+        .unwrap();
+    row.agent_visible = true;
+    opencrab_db::queries::update_skill(&conn, &row).unwrap();
+}
+
+fn stored(ctx: &ActionContext, name: &str) -> opencrab_db::queries::SkillRow {
+    let conn = ctx.db.lock().unwrap();
+    opencrab_db::queries::find_skill_by_name_any(&conn, &ctx.agent_id, name)
+        .unwrap()
+        .unwrap()
+}
+
+// D-1143: create_my_skill は `actions` を DB の tools へ入れるが、「誰でも使える」指定は
+// 立てられない（引数に何を入れても false）。
+#[tokio::test]
+async fn create_my_skill_stores_tools_but_cannot_designate() {
+    let (_dir, ctx) = test_context();
+    let r = CreateMySkillAction
+        .execute(
+            &json!({
+                "name": "Patrol",
+                "description": "d",
+                "situation_pattern": "s",
+                "guidance": "g",
+                "actions": ["ws_edit"],
+                "agent_visible": true
+            }),
+            &ctx,
+        )
+        .await;
+    assert!(r.success);
+    let row = stored(&ctx, "Patrol");
+    assert_eq!(row.tools, vec!["ws_edit".to_string()]);
+    assert!(!row.agent_visible);
+    assert!(row.granted_tools().is_empty());
+}
+
+// D-1143: 非オーナー等価の書き手が指定済みスキルを書き換えると指定が外れ、結果にそう書く。
+// オーナー等価の書き換えでは外れない。
+#[tokio::test]
+async fn non_owner_rewrite_clears_owner_designation() {
+    let (_dir, owner_ctx) = test_context();
+    let trusted_ctx = ctx_with_caller(&owner_ctx, CallerIdentity::TrustedUser);
+    let args = |guidance: &str, tools: &[&str]| {
+        json!({
+            "name": "Patrol",
+            "description": "d",
+            "situation_pattern": "s",
+            "guidance": guidance,
+            "actions": tools
+        })
+    };
+    CreateMySkillAction
+        .execute(&args("g", &["ws_edit"]), &owner_ctx)
+        .await;
+    designate(&owner_ctx, "Patrol");
+
+    let r = CreateMySkillAction
+        .execute(&args("g2", &["ws_edit"]), &owner_ctx)
+        .await;
+    assert!(r.data.unwrap().get("owner_designation_cleared").is_none());
+    assert!(stored(&owner_ctx, "Patrol").agent_visible);
+
+    let r = CreateMySkillAction
+        .execute(&args("g3", &["ws_edit", "execute_shell"]), &trusted_ctx)
+        .await;
+    assert!(r.success);
+    assert!(r.data.unwrap().get("owner_designation_cleared").is_some());
+    let row = stored(&owner_ctx, "Patrol");
+    assert!(!row.agent_visible);
+    assert!(row.granted_tools().is_empty());
 }

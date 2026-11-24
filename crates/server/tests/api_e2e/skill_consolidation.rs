@@ -92,6 +92,7 @@ async fn test_skill_consolidation_curates_and_audits() {
                 archived: false,
                 created_caller: None,
                 agent_visible: false,
+                tools: Vec::new(),
             },
         )
         .unwrap();

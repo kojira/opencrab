@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { getSkills, toggleSkill } from '../api/skills';
-import type { SkillDto } from '../api/types';
+import { getSkills, toggleSkill, updateSkill } from '../api/skills';
+import type { SkillDto, SkillUpdate } from '../api/types';
 import SkillEditor from '../components/ui/SkillEditor';
 import { useAgentContext } from '../hooks/useAgentContext';
 
@@ -25,6 +25,11 @@ export default function AgentSkills() {
 
   const handleToggle = async (skillId: string, active: boolean) => {
     await toggleSkill(agentId, skillId, active);
+    loadSkills();
+  };
+
+  const handleUpdate = async (skillId: string, update: SkillUpdate) => {
+    await updateSkill(agentId, skillId, update);
     loadSkills();
   };
 
@@ -63,7 +68,12 @@ export default function AgentSkills() {
   return (
     <div className="space-y-3">
       {skills.map((skill) => (
-        <SkillEditor key={skill.id} skill={skill} onToggle={handleToggle} />
+        <SkillEditor
+          key={skill.id}
+          skill={skill}
+          onToggle={handleToggle}
+          onUpdate={handleUpdate}
+        />
       ))}
     </div>
   );

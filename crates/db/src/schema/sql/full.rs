@@ -109,6 +109,9 @@ CREATE TABLE IF NOT EXISTS skills (
     -- （fail-closed）。オーナーがダッシュボード（REST）で少数だけ 1 に切り替える。
     -- Owner / CoAgent / TrustedUser の見え方には影響しない（従来どおり全部見える）。issue #352。
     agent_visible INTEGER NOT NULL DEFAULT 0,
+    -- このスキルが挙げるツール名（JSON 配列）。agent_visible（オーナーの「誰でも使える」指定）
+    -- のスキルを read_skill で開いたターンは、caller を問わずこれらを使える（D-1143）。
+    tools TEXT NOT NULL DEFAULT '[]',
     last_used_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

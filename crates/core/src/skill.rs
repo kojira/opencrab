@@ -135,6 +135,7 @@ impl SkillManager {
             created_caller: None,
             // #352: 汎用取得経路。Agent 露出は既定 false（オーナーが REST で切り替える）。
             agent_visible: false,
+            tools: Vec::new(),
         };
 
         queries::insert_skill(&conn, &row)?;

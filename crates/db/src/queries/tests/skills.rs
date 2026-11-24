@@ -20,6 +20,7 @@ fn test_skills_crud() {
         archived: false,
         created_caller: None,
         agent_visible: false,
+        tools: Vec::new(),
     };
 
     insert_skill(&conn, &skill).unwrap();
@@ -55,6 +56,7 @@ fn test_skill_created_caller_roundtrip() {
         archived: false,
         created_caller: Some("agent".to_string()),
         agent_visible: false,
+        tools: Vec::new(),
     };
     insert_skill(&conn, &skill).unwrap();
 
@@ -105,6 +107,7 @@ fn test_skill_usage_increment() {
         archived: false,
         created_caller: None,
         agent_visible: false,
+        tools: Vec::new(),
     };
 
     insert_skill(&conn, &skill).unwrap();
@@ -137,6 +140,7 @@ fn test_find_skill_by_name_any_includes_archived() {
         archived: true,
         created_caller: None,
         agent_visible: false,
+        tools: Vec::new(),
     };
     insert_skill(&conn, &skill).unwrap();
 
@@ -178,6 +182,7 @@ fn test_update_skill_full_fields() {
         archived: true,
         created_caller: None,
         agent_visible: false,
+        tools: Vec::new(),
     };
     insert_skill(&conn, &skill).unwrap();
 

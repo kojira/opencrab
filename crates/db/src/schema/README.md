@@ -1,9 +1,13 @@
 # schema（`PRAGMA user_version` + 番号付き MIGRATIONS）
 
 新規 DB は `sql/` の `SCHEMA_SQL` ほか、既存 DB は `migrations/`（`mod.rs` の `MIGRATIONS`）。
-両方に同じ差分を書く（新規 DB は最新番号を通らず SCHEMA だけ、が本体の罠）。現行は v65。
+両方に同じ差分を書く（新規 DB は最新番号を通らず SCHEMA だけ、が本体の罠）。現行は v66。
 
 以下は一部の版の記録。その後の版で消えた表（`session_watches`、`nostr_bundle_state`、gate-admin の表、`pending_interactions` など）を含む。各版の正本は `migrations/vNN.rs`。
+
+## v66（skills.tools / D-1143）
+
+`skills.tools TEXT NOT NULL DEFAULT '[]'` を足す。オーナーが「誰でも使える」に指定した（`agent_visible`）スキルを `read_skill` で開いたターンは、caller を問わずここに挙がるツールを使える。既存行は全部 `[]` のまま（`situation_pattern` やスキルファイルからは写さない）なので、オーナーがツールを設定するまで既存スキルは何も許さない。
 
 ## v51（generic open binding address lookup）
 

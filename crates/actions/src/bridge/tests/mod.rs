@@ -13,3 +13,4 @@ include!("dispatch.rs");
 include!("instrumentation.rs");
 include!("policy_gates.rs");
 include!("visibility.rs");
+include!("skill_grants.rs");

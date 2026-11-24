@@ -34,10 +34,50 @@ pub struct SkillRow {
     /// だが判定軸は transport ではなく caller=Agent）へ index / read_skill 本文を露出して
     /// よいか。既定 false（fail-closed）。オーナーが REST で少数だけ true にする（#352）。
     pub agent_visible: bool,
+    /// このスキルを開いた（`read_skill`）ターンで使えるようになるツール名（D-1143）。
+    /// 効くのは `agent_visible`（オーナーが「誰でも使える」に指定）のスキルだけ。判定は
+    /// [`SkillRow::granted_tools`] の 1 か所。
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+impl SkillRow {
+    /// このスキルを開いたターンへ、caller を問わず許すツール（D-1143）。オーナーが
+    /// 「誰でも使える」に指定した（`agent_visible`）スキルの `tools` だけ。指定が無ければ空。
+    pub fn granted_tools(&self) -> &[String] {
+        if self.agent_visible {
+            &self.tools
+        } else {
+            &[]
+        }
+    }
+
+    /// 既存スキルの本文やツールを書き換えたときに呼ぶ（D-1143）。オーナー等価でない書き手が
+    /// 書き換えたら、それはもうオーナーが指定した中身ではないので「誰でも使える」指定
+    /// （`agent_visible`）を外す（オーナーが指定し直す）。外したら `true` を返す。
+    pub fn record_rewrite(&mut self, writer_is_owner_equivalent: bool) -> bool {
+        if writer_is_owner_equivalent || !self.agent_visible {
+            return false;
+        }
+        self.agent_visible = false;
+        true
+    }
+}
+
+/// [`SkillRow::record_rewrite`] が指定を外したとき、書き換えたツールの結果に添える文。
+pub const OWNER_DESIGNATION_CLEARED_NOTE: &str = "This skill was designated by the owner as usable by anyone. Because it was rewritten from a non-owner turn, that designation was removed; the owner must designate it again.";
+
+/// `tools` 列（JSON 配列の文字列）を読む。壊れた値は空として扱う。
+fn tools_from_column(raw: String) -> Vec<String> {
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn tools_to_column(tools: &[String]) -> String {
+    serde_json::to_string(tools).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// 全 skills SELECT が共有する列並び。順序は [`skill_row_from_row`] の `row.get` と一致させる。
-const SKILL_COLUMNS: &str = "id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, created_caller, agent_visible";
+const SKILL_COLUMNS: &str = "id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, created_caller, agent_visible, tools";
 
 /// [`SKILL_COLUMNS`] の並びで 1 行を [`SkillRow`] へ写す。全 SELECT の重複を 1 箇所に集約する。
 fn skill_row_from_row(row: &rusqlite::Row) -> rusqlite::Result<SkillRow> {
@@ -58,6 +98,7 @@ fn skill_row_from_row(row: &rusqlite::Row) -> rusqlite::Result<SkillRow> {
         archived: row.get(13)?,
         created_caller: row.get(14)?,
         agent_visible: row.get(15)?,
+        tools: tools_from_column(row.get(16)?),
     })
 }
 
@@ -91,8 +132,8 @@ pub fn list_skills_filtered(
 
 pub fn insert_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO skills (id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, created_caller, agent_visible, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        "INSERT INTO skills (id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, created_caller, agent_visible, tools, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             skill.id,
             skill.agent_id,
@@ -110,6 +151,7 @@ pub fn insert_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
             skill.archived,
             skill.created_caller,
             skill.agent_visible,
+            tools_to_column(&skill.tools),
             Utc::now().to_rfc3339(),
             Utc::now().to_rfc3339(),
         ],
@@ -194,9 +236,10 @@ pub fn update_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
     // agent_visible も書き戻す。オーナーの REST 更新経路（`api::skills::update_skill`）が
     // この列を切り替える口になる（#352）。エージェント側の経路（create_my_skill の dedup）は
     // 既存行を load-then-mutate して渡すため、この列は既存値がそのまま保存されるだけで
-    // **agent が自分で true へ上げることはできない**（新規作成は false 既定）。
+    // **agent が自分で true へ上げることはできない**（新規作成は false 既定）。オーナー等価で
+    // ない caller が書き換えたら指定を外す（D-1143 `record_skill_rewrite`）。
     conn.execute(
-        "UPDATE skills SET name = ?1, description = ?2, situation_pattern = ?3, guidance = ?4, is_active = ?5, archived = ?6, file_path = ?7, created_caller = ?8, agent_visible = ?9, updated_at = ?10 WHERE id = ?11",
+        "UPDATE skills SET name = ?1, description = ?2, situation_pattern = ?3, guidance = ?4, is_active = ?5, archived = ?6, file_path = ?7, created_caller = ?8, agent_visible = ?9, tools = ?10, updated_at = ?11 WHERE id = ?12",
         params![
             skill.name,
             skill.description,
@@ -207,6 +250,7 @@ pub fn update_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
             skill.file_path,
             skill.created_caller,
             skill.agent_visible,
+            tools_to_column(&skill.tools),
             Utc::now().to_rfc3339(),
             skill.id,
         ],

@@ -52,6 +52,10 @@ pub struct BridgedExecutor {
     /// depth 0 の list_tools で常時集合に union して投影する。新しい登録簿は作らず、既存の
     /// effective_tool_definitions（policy 済み）に retain で効かせる。
     activated_tools: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// D-1143（run ローカル）: この run で `read_skill` により開いた、オーナーが「誰でも使える」
+    /// に指定したスキルが挙げるツール名。caller の owner_only / trusted_only ゲートを、この名前に
+    /// 限って外す（[`Self::skill_grants`]）。depth / sub-engine / run 許可リストには効かない。
+    granted_tools: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl BridgedExecutor {
@@ -67,6 +71,7 @@ impl BridgedExecutor {
             tool_allowlist: None,
             tool_class_index: std::collections::HashMap::new(),
             activated_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            granted_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         };
         this.rebuild_tool_class_index();
         this
@@ -305,6 +310,25 @@ impl BridgedExecutor {
         }
     }
 
+    /// この run で開いたオーナー指定スキルが `name` を許しているか（D-1143）。
+    pub(super) fn skill_grants(&self, name: &str) -> bool {
+        self.granted_tools
+            .lock()
+            .map(|set| set.contains(name))
+            .unwrap_or(false)
+    }
+
+    /// 実行結果が運んだスキルのツール許可（`SideEffect::ToolsGranted`）をこの run へ記録する。
+    fn record_tool_grants(&self, result: &ActionsActionResult) {
+        for effect in &result.side_effects {
+            if let crate::traits::SideEffect::ToolsGranted { tools } = effect {
+                if let Ok(mut set) = self.granted_tools.lock() {
+                    set.extend(tools.iter().cloned());
+                }
+            }
+        }
+    }
+
     pub(super) fn caller_is_owner(&self) -> bool {
         // #485: co_agent は owner 等価（オーナー指示 2026-08-10。#330 を覆す）。owner 判定の
         // 唯一の源は `CallerIdentity::is_owner_equivalent`。OWNER_ONLY_ACTIONS（execute_shell /
@@ -326,8 +350,9 @@ impl BridgedExecutor {
     #[cfg(test)]
     pub(super) fn policy_allows(&self, name: &str) -> bool {
         let policy = tool_policy(name);
-        (!policy.owner_only || self.caller_is_owner())
-            && (!policy.trusted_only || self.caller_is_trusted())
+        let granted = self.skill_grants(name);
+        (!policy.owner_only || self.caller_is_owner() || granted)
+            && (!policy.trusted_only || self.caller_is_trusted() || granted)
             && self.visibility_allows(name)
     }
 
@@ -438,11 +463,9 @@ impl BridgedExecutor {
         // （"Unknown action" エラー文言の文字列比較は、実アクションが同文を
         // 返した場合に gateway へ誤ルートするため廃止 — #36）。
         if self.dispatcher.has_action(name) {
-            return self
-                .dispatcher
-                .execute(name, args, &self.context)
-                .await
-                .into();
+            let result = self.dispatcher.execute(name, args, &self.context).await;
+            self.record_tool_grants(&result);
+            return result.into();
         }
 
         // Fallback to gateway actions.
@@ -699,6 +722,12 @@ impl ActionExecutor for BridgedExecutor {
                 .lock()
                 .map(|s| s.clone())
                 .unwrap_or_default();
+            // D-1143: 開いたオーナー指定スキルが許すツールも、この run の残りで見せる。
+            let granted = self
+                .granted_tools
+                .lock()
+                .map(|s| s.clone())
+                .unwrap_or_default();
             let is_utterance = |name: &str| {
                 self.tool_class_index
                     .get(name)
@@ -707,6 +736,7 @@ impl ActionExecutor for BridgedExecutor {
             tools.retain(|t| {
                 ALWAYS_FIXED.contains(&t.name.as_str())
                     || activated.contains(&t.name)
+                    || granted.contains(&t.name)
                     || is_utterance(&t.name)
             });
             // describe_tools 自体を常時投影（合成定義・新登録簿なし）。

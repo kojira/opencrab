@@ -43,8 +43,18 @@ impl ActionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SideEffect {
-    SkillAcquired { skill_id: String },
-    FileWritten { path: String },
+    SkillAcquired {
+        skill_id: String,
+    },
+    FileWritten {
+        path: String,
+    },
+    /// `read_skill` で開いたスキルが、このターンに caller を問わず許すツール（D-1143。
+    /// [`opencrab_db::queries::SkillRow::granted_tools`]）。`BridgedExecutor` が受け取って
+    /// 実行前ゲートと一覧に効かせる。
+    ToolsGranted {
+        tools: Vec<String>,
+    },
 }
 
 /// 呼び出し元の識別子。
