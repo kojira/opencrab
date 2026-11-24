@@ -556,7 +556,8 @@ async fn di_short_ref_resolution_targets_declared_fields() {
         "name": "reply", "description": "d",
         "input_schema": {"type": "object", "required": ["event", "text"], "properties": {
             "event": {"type": "string", "x-opencrab-short-ref": true},
-            "text": {"type": "string"}
+            "text": {"type": "string"},
+            "user": {"type": "string", "x-opencrab-short-ref": true}
         }},
         "output_schema": null, "callback_schema": null,
         "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
@@ -589,7 +590,7 @@ async fn di_short_ref_resolution_targets_declared_fields() {
     assert!(reply.parameters["properties"]["event"].get("format").is_none());
     let ctx = GatewayCallContext::for_agent("agent-1");
     let exec = tokio::spawn(async move {
-        proj.execute("reply", &json!({"event": "e1", "text": "本文"}), &ctx)
+        proj.execute("reply", &json!({"event": "e1", "text": "本文", "user": ""}), &ctx)
             .await
     });
     let invoke = read_until(&mut s, |v| v["m"] == "invoke").await;
@@ -600,6 +601,8 @@ async fn di_short_ref_resolution_targets_declared_fields() {
         "e1→origin へ解決"
     );
     assert_eq!(invoke["payload"]["text"], json!("本文"), "非参照は素通り");
+    // D-1148: an optional field sent as "" means "not given" and does not reach the gateway.
+    assert!(invoke["payload"].get("user").is_none(), "{}", invoke["payload"]);
     let call_id = invoke["id"].as_str().unwrap().to_string();
     write_frame(&mut s, &json!({"id": call_id, "m": "ok", "result": null})).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), exec).await;
