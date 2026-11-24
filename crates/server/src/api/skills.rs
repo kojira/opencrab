@@ -139,12 +139,10 @@ pub async fn update_skill(
         if let Some(pattern) = req.situation_pattern {
             skill.situation_pattern = pattern;
         }
-        if let Some(agent_visible) = req.agent_visible {
-            skill.agent_visible = agent_visible;
-        }
-        if let Some(tools) = req.tools {
-            skill.tools = tools;
-        }
+        // ダッシュボード（オーナー操作）なのでオーナー等価として指定を変える（D-1143）。
+        skill
+            .set_access(req.agent_visible, req.tools, true)
+            .expect("owner may always set access");
 
         opencrab_db::queries::update_skill(&conn, &skill).unwrap();
         Json(serde_json::json!({"updated": true}))

@@ -634,11 +634,86 @@ async fn non_owner_rewrite_clears_owner_designation() {
     assert!(stored(&owner_ctx, "Patrol").agent_visible);
 
     let r = CreateMySkillAction
-        .execute(&args("g3", &["ws_edit", "execute_shell"]), &trusted_ctx)
+        .execute(&args("g3", &["ws_edit"]), &trusted_ctx)
         .await;
     assert!(r.success);
     assert!(r.data.unwrap().get("owner_designation_cleared").is_some());
     let row = stored(&owner_ctx, "Patrol");
     assert!(!row.agent_visible);
     assert!(row.granted_tools().is_empty());
+}
+
+fn patrol_args(anyone_can_use: bool, tools: &[&str]) -> serde_json::Value {
+    json!({
+        "name": "Patrol",
+        "description": "d",
+        "situation_pattern": "s",
+        "guidance": "g",
+        "actions": tools,
+        "anyone_can_use": anyone_can_use
+    })
+}
+
+// D-1143: オーナーが会話で頼んだとき（オーナー等価のターン）、エージェントは create_my_skill で
+// 「誰でも使える」指定とツールを設定できる（新規も既存の更新も）。
+#[tokio::test]
+async fn owner_turn_can_designate_through_create_my_skill() {
+    let (_dir, owner_ctx) = test_context();
+    let r = CreateMySkillAction
+        .execute(&patrol_args(true, &["ws_edit"]), &owner_ctx)
+        .await;
+    assert!(r.success, "{r:?}");
+    let row = stored(&owner_ctx, "Patrol");
+    assert!(row.agent_visible);
+    assert_eq!(row.granted_tools(), ["ws_edit".to_string()]);
+
+    // co_agent もオーナー等価。既存スキルのツールを変えられる。
+    let co_ctx = ctx_with_caller(
+        &owner_ctx,
+        CallerIdentity::CoAgent {
+            agent_id: "peer".into(),
+        },
+    );
+    let r = CreateMySkillAction
+        .execute(&patrol_args(true, &["ws_edit", "ws_read"]), &co_ctx)
+        .await;
+    assert!(r.success, "{r:?}");
+    assert_eq!(stored(&owner_ctx, "Patrol").tools.len(), 2);
+}
+
+// D-1143: オーナー等価でないターンは、指定を立てることも、指定済みスキルのツールを変えることも
+// できない。断ったときは何も書かない。
+#[tokio::test]
+async fn non_owner_turn_cannot_designate_or_change_designated_tools() {
+    let (_dir, owner_ctx) = test_context();
+    let agent_ctx = ctx_with_caller(&owner_ctx, CallerIdentity::Agent);
+
+    let r = CreateMySkillAction
+        .execute(&patrol_args(true, &["ws_edit"]), &agent_ctx)
+        .await;
+    assert!(!r.success);
+    assert!(r.error.unwrap().contains("Only the owner"));
+    {
+        let conn = owner_ctx.db.lock().unwrap();
+        assert!(
+            opencrab_db::queries::find_skill_by_name_any(&conn, "agent-1", "Patrol")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    CreateMySkillAction
+        .execute(&patrol_args(true, &["ws_edit"]), &owner_ctx)
+        .await;
+    let r = CreateMySkillAction
+        .execute(
+            &patrol_args(true, &["ws_edit", "execute_shell"]),
+            &agent_ctx,
+        )
+        .await;
+    assert!(!r.success);
+    assert!(r.error.unwrap().contains("Only the owner"));
+    let row = stored(&owner_ctx, "Patrol");
+    assert!(row.agent_visible);
+    assert_eq!(row.tools, vec!["ws_edit".to_string()]);
 }

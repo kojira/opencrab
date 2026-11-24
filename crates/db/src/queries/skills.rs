@@ -52,6 +52,33 @@ impl SkillRow {
         }
     }
 
+    /// 「誰でも使える」指定（`anyone_can_use` = `agent_visible`）とツール一覧を変える（D-1143）。
+    /// 変えてよいかの規則はここだけ: 指定を立てるのと、指定済みスキルのツールを変えるのは
+    /// オーナー等価の書き手だけ（会話でオーナーが頼んだときのエージェント、またはダッシュボード）。
+    /// それ以外は何も変えずに理由を返す。`None` は変えない。
+    pub fn set_access(
+        &mut self,
+        anyone_can_use: Option<bool>,
+        tools: Option<Vec<String>>,
+        writer_is_owner_equivalent: bool,
+    ) -> std::result::Result<(), &'static str> {
+        if !writer_is_owner_equivalent {
+            if anyone_can_use == Some(true) && !self.agent_visible {
+                return Err(OWNER_REQUIRED_FOR_DESIGNATION);
+            }
+            if self.agent_visible && tools.as_ref().is_some_and(|t| *t != self.tools) {
+                return Err(OWNER_REQUIRED_FOR_DESIGNATION);
+            }
+        }
+        if let Some(anyone_can_use) = anyone_can_use {
+            self.agent_visible = anyone_can_use;
+        }
+        if let Some(tools) = tools {
+            self.tools = tools;
+        }
+        Ok(())
+    }
+
     /// 既存スキルの本文やツールを書き換えたときに呼ぶ（D-1143）。オーナー等価でない書き手が
     /// 書き換えたら、それはもうオーナーが指定した中身ではないので「誰でも使える」指定
     /// （`agent_visible`）を外す（オーナーが指定し直す）。外したら `true` を返す。
@@ -63,6 +90,9 @@ impl SkillRow {
         true
     }
 }
+
+/// [`SkillRow::set_access`] が非オーナーの指定変更を断るときの文。
+pub const OWNER_REQUIRED_FOR_DESIGNATION: &str = "Only the owner can make a skill usable by anyone or change the tools of such a skill. Do it in a turn where the owner asks for it (or the owner uses the dashboard).";
 
 /// [`SkillRow::record_rewrite`] が指定を外したとき、書き換えたツールの結果に添える文。
 pub const OWNER_DESIGNATION_CLEARED_NOTE: &str = "This skill was designated by the owner as usable by anyone. Because it was rewritten from a non-owner turn, that designation was removed; the owner must designate it again.";

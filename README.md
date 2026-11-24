@@ -322,8 +322,11 @@ allowlist rules still apply, and a skill that is not designated, or a tool that 
 list, grants nothing. The one rule lives in `crates/actions/src/bridge/gate.rs`
 (`SkillRow::granted_tools` decides what a skill grants).
 
-- The agent cannot set the designation: `create_my_skill` stores its `actions` as the skill's tools
-  but always creates the skill undesignated.
+- The owner can also designate by asking the agent in conversation: in an owner-equivalent turn
+  (owner / co_agent), `create_my_skill` takes `anyone_can_use: true` and `actions` (the tools) for a
+  new or existing skill. In any other turn, setting `anyone_can_use`, or changing the tools of a
+  designated skill, is refused with a message that the owner must ask for it
+  (`SkillRow::set_access` is the one rule, also used by the REST update).
 - If a non-owner turn rewrites a designated skill (`create_my_skill` / `create_skill` on an existing
   name), the designation is removed and the tool result says so; the owner designates it again.
 - Skills that existed before schema v66 start with no tools, so they grant nothing until the owner
