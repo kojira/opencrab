@@ -21,12 +21,12 @@ pub fn build_agent_context(
         .flatten();
     let mut skills = opencrab_db::queries::list_skills(conn, agent_id, true).unwrap_or_default();
     // D-1058: skill index は caller に依らず同じ内容にする（プロンプトキャッシュの prefix 安定）。
-    // 一覧に名前を出すのは、オーナーが露出を許可（`agent_visible`）した skill だけ（#352: 名前
-    // からも内部の事情が分かるため、許可の無い skill は誰のターンでも一覧に出さない）。許可の
-    // 無い skill は `owner-skills` の 1 行に畳み、オーナー等価のターンだけが read_skill で中身を
+    // 一覧に名前を出すのは、誰のターンでも見えてよい skill だけ（`visible_to_any_caller`:
+    // オーナーが指定した skill と、エージェントが学んだ skill。D-1144）。それ以外は #352 のとおり
+    // 名前も出さず `owner-skills` の 1 行に畳み、オーナー等価のターンだけが read_skill で中身を
     // 引ける（権限は read_skill 側で判定する）。
-    let has_owner_only_skills = skills.iter().any(|s| !s.agent_visible);
-    skills.retain(|s| s.agent_visible);
+    let has_owner_only_skills = skills.iter().any(|s| !s.visible_to_any_caller());
+    skills.retain(|s| s.visible_to_any_caller());
     // curated 記憶は取り込みが **1 見出し 1 行**（`long_term/<見出し>`）で入れるため、
     // 完全一致で引くと `long_term/*` が 1 件も載らなかった（#428）。前方一致で素の
     // `long_term` と `long_term/<見出し>` の両方を拾い、見出しごとに束ねて注入する。

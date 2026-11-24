@@ -1,6 +1,16 @@
 /// D-1143: オーナーが「誰でも使える」に指定した（`agent_visible`）スキルを `read_skill` で
 /// 開いた run は、caller を問わずそのスキルの `tools` を使える。それ以外は従来どおり拒否。
 fn insert_grant_skill(ctx: &ActionContext, name: &str, agent_visible: bool, tools: &[&str]) {
+    insert_skill_with_source(ctx, name, "manual", agent_visible, tools);
+}
+
+fn insert_skill_with_source(
+    ctx: &ActionContext,
+    name: &str,
+    source_type: &str,
+    agent_visible: bool,
+    tools: &[&str],
+) {
     let conn = ctx.db.lock().unwrap();
     opencrab_db::queries::insert_skill(
         &conn,
@@ -11,7 +21,7 @@ fn insert_grant_skill(ctx: &ActionContext, name: &str, agent_visible: bool, tool
             description: "d".to_string(),
             situation_pattern: String::new(),
             guidance: "g".to_string(),
-            source_type: "manual".to_string(),
+            source_type: source_type.to_string(),
             source_context: None,
             file_path: None,
             effectiveness: None,
@@ -126,4 +136,25 @@ async fn skill_grant_does_not_bypass_run_allowlist() {
         r.error.as_deref().is_some_and(|e| e.contains("tool allowlist")),
         "{r:?}"
     );
+}
+
+/// D-1144: エージェントが学んだスキルは誰の会話でも開けるが、`tools` が入っていても
+/// （オーナーが指定していなければ）ツールは何も許さない。
+#[tokio::test]
+async fn learned_skill_is_readable_by_agent_but_grants_nothing() {
+    for source_type in opencrab_db::queries::LEARNED_SKILL_SOURCE_TYPES {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::Agent);
+        insert_skill_with_source(&ctx, "learned", source_type, false, &["ws_edit"]);
+        let exec = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+        let read = exec.execute("read_skill", &json!({"name": "learned"})).await;
+        assert!(read.success, "{source_type}: {read:?}");
+        assert!(
+            read.data.get("unlocked_tools").is_none(),
+            "{source_type}: {read:?}"
+        );
+        let r = exec.execute("ws_edit", &ws_edit_args()).await;
+        assert!(is_owner_rejection(&r), "{source_type}: {r:?}");
+        assert!(exec.rejects_before_run("ws_edit"));
+        assert!(!projected(&exec).contains(&"ws_edit".to_string()));
+    }
 }

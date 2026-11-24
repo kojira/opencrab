@@ -717,3 +717,6 @@ async fn non_owner_turn_cannot_designate_or_change_designated_tools() {
     assert!(row.agent_visible);
     assert_eq!(row.tools, vec!["ws_edit".to_string()]);
 }
+
+#[path = "tests/learned_skills.rs"]
+mod learned_skills;

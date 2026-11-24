@@ -41,7 +41,22 @@ pub struct SkillRow {
     pub tools: Vec<String>,
 }
 
+/// エージェントが自分で学んだスキルの `source_type`（D-1144）。学んだ振る舞いはどの会話でも効かせるので、
+/// caller を問わず一覧に出し `read_skill` で読める（ツールは許さない）。作るもの:
+/// - `"experience"`: `learn_from_experience`
+/// - `"sleep_curated"`: スリープ時スキル棚卸しの create
+/// - `"peer"`: `learn_from_peer`
+pub const LEARNED_SKILL_SOURCE_TYPES: &[&str] = &["experience", "sleep_curated", "peer"];
+
 impl SkillRow {
+    /// このスキルを caller を問わず一覧に出し、`read_skill` で本文を渡してよいか（D-1144）。
+    /// オーナーが「誰でも使える」に指定したスキルと、エージェントが学んだスキル
+    /// （[`LEARNED_SKILL_SOURCE_TYPES`]）。見えることとツールを許すことは別で、ツールは
+    /// [`SkillRow::granted_tools`]（指定されたスキルだけ）が決める。
+    pub fn visible_to_any_caller(&self) -> bool {
+        self.agent_visible || LEARNED_SKILL_SOURCE_TYPES.contains(&self.source_type.as_str())
+    }
+
     /// このスキルを開いたターンへ、caller を問わず許すツール（D-1143）。オーナーが
     /// 「誰でも使える」に指定した（`agent_visible`）スキルの `tools` だけ。指定が無ければ空。
     pub fn granted_tools(&self) -> &[String] {
