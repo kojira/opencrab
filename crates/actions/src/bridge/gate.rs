@@ -40,4 +40,23 @@ impl BridgedExecutor {
         }
         None
     }
+
+    /// この run で開いたオーナー指定スキルが `name` を許しているか（D-1143）。
+    pub(super) fn skill_grants(&self, name: &str) -> bool {
+        self.granted_tools
+            .lock()
+            .map(|set| set.contains(name))
+            .unwrap_or(false)
+    }
+
+    /// 実行結果が運んだスキルのツール許可（`SideEffect::ToolsGranted`）をこの run へ記録する。
+    pub(super) fn record_tool_grants(&self, result: &crate::traits::ActionResult) {
+        for effect in &result.side_effects {
+            if let crate::traits::SideEffect::ToolsGranted { tools } = effect {
+                if let Ok(mut set) = self.granted_tools.lock() {
+                    set.extend(tools.iter().cloned());
+                }
+            }
+        }
+    }
 }

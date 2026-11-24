@@ -55,7 +55,7 @@ pub struct BridgedExecutor {
     /// D-1143（run ローカル）: この run で `read_skill` により開いた、オーナーが「誰でも使える」
     /// に指定したスキルが挙げるツール名。caller の owner_only / trusted_only ゲートを、この名前に
     /// 限って外す（[`Self::skill_grants`]）。depth / sub-engine / run 許可リストには効かない。
-    granted_tools: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    pub(super) granted_tools: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl BridgedExecutor {
@@ -307,25 +307,6 @@ impl BridgedExecutor {
             reply_target: self.reply_target.clone(),
             // #915: engine の tool_call.id を発話 op invoke の call_id へ伝播する。
             tool_call_id: tool_call_id.filter(|s| !s.is_empty()).map(str::to_string),
-        }
-    }
-
-    /// この run で開いたオーナー指定スキルが `name` を許しているか（D-1143）。
-    pub(super) fn skill_grants(&self, name: &str) -> bool {
-        self.granted_tools
-            .lock()
-            .map(|set| set.contains(name))
-            .unwrap_or(false)
-    }
-
-    /// 実行結果が運んだスキルのツール許可（`SideEffect::ToolsGranted`）をこの run へ記録する。
-    fn record_tool_grants(&self, result: &ActionsActionResult) {
-        for effect in &result.side_effects {
-            if let crate::traits::SideEffect::ToolsGranted { tools } = effect {
-                if let Ok(mut set) = self.granted_tools.lock() {
-                    set.extend(tools.iter().cloned());
-                }
-            }
         }
     }
 
