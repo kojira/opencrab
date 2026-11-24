@@ -204,6 +204,22 @@ pub fn insert_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
     Ok(())
 }
 
+/// スキルを 1 回使ったと記録する（D-1146）。使った＝`read_skill` で本文を開いた、とする。
+/// `usage_count` を +1、`last_used_at` を今にし、session があれば `skill_usage_log` に 1 行足す。
+/// 同じターンで同じスキルを何度開いても、開いた回数だけ数える（実際に起きたことをそのまま数える）。
+pub fn record_skill_use(
+    conn: &Connection,
+    agent_id: &str,
+    skill_id: &str,
+    session_id: Option<&str>,
+) -> Result<()> {
+    increment_skill_usage(conn, skill_id)?;
+    if let Some(session_id) = session_id {
+        insert_skill_usage(conn, agent_id, skill_id, session_id)?;
+    }
+    Ok(())
+}
+
 pub fn increment_skill_usage(conn: &Connection, skill_id: &str) -> Result<()> {
     conn.execute(
         "UPDATE skills SET usage_count = usage_count + 1, last_used_at = ?1 WHERE id = ?2",
@@ -315,8 +331,8 @@ pub fn archive_skill(conn: &Connection, skill_id: &str, archived: bool) -> Resul
 // Skill usage log (スリープ棚卸しの弱い利用ヒント)
 // ============================================
 
-/// スキルが使われた（応答に名前が出た）ことをセッション単位で記録する。
-/// 名前一致ベースなのでノイズがあり、棚卸しでは弱いヒントとしてのみ使う。
+/// スキルが使われた（`read_skill` で本文が開かれた）ことをセッション単位で記録する。
+/// 呼ぶのは `record_skill_use` だけ。
 pub fn insert_skill_usage(
     conn: &Connection,
     agent_id: &str,

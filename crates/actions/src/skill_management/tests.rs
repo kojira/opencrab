@@ -720,3 +720,6 @@ async fn non_owner_turn_cannot_designate_or_change_designated_tools() {
 
 #[path = "tests/learned_skills.rs"]
 mod learned_skills;
+
+#[path = "tests/skill_use.rs"]
+mod skill_use;

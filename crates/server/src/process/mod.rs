@@ -46,7 +46,7 @@ use callbacks::{
 };
 use live_inbound::SubtaskSteerInbound;
 use loop_restart::prepare_loop_restart;
-use skills::{record_used_skills, spawn_background_index_build};
+use skills::spawn_background_index_build;
 
 #[cfg(test)]
 #[path = "tests/agent_visible_skill_index.rs"]
@@ -78,9 +78,6 @@ mod recent_user_speech_guarantee_tests;
 #[cfg(test)]
 #[path = "tests/shared_prompt_is_transport_neutral.rs"]
 mod shared_prompt_is_transport_neutral_tests;
-#[cfg(test)]
-#[path = "tests/skill_mentioned.rs"]
-mod skill_mentioned_tests;
 #[cfg(test)]
 #[path = "tests/steer_inbound.rs"]
 mod steer_inbound_tests;
@@ -678,9 +675,6 @@ pub async fn run_agent_response(
                 error = %e,
                 "memory index build skipped: agent model lookup failed"
             ),
-        }
-        if let Ok(ref engine_result) = result {
-            record_used_skills(state, agent_id, session_id, &engine_result.response);
         }
     }
 
