@@ -101,6 +101,8 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
         let agent_id = row.agent_id.clone();
         let author_id = inputs.author_id.clone();
         let gate = gate.clone();
+        let env_state = Arc::clone(state);
+        let env_instance = instance_id.to_string();
         tokio::spawn(async move {
             let registry = runtime.subtask_registry_for(&session_id);
             run_provisional_turn(
@@ -126,7 +128,15 @@ pub(crate) async fn start_provisional<R: AgentRuntime>(
                     if let Some(ga) = ops_actions {
                         req = req.with_gateway_actions(ga);
                     }
-                    v3_attach_dispatch(req, false, author_id, registry, sink)
+                    v3_attach_dispatch(
+                        req,
+                        &env_state,
+                        &env_instance,
+                        false,
+                        author_id,
+                        registry,
+                        sink,
+                    )
                 },
             )
             .await
