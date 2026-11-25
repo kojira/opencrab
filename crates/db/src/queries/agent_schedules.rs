@@ -157,6 +157,26 @@ pub fn set_agent_schedule_last_fired(
     Ok(())
 }
 
+/// 一回だけの予定（D-1150）の発火成功を記録し、同じ UPDATE で無効にする（二度と発火しない）。
+///
+/// 無効にするのは `cron_expr` が発火した式のままのときだけ。発火中に時刻を変えられた行は、
+/// 新しい時刻の予定として有効なまま残る。`last_fired_at` を書くのは
+/// [`set_agent_schedule_last_fired`] と同じくスケジューラの発火成功時だけ。
+pub fn set_one_shot_agent_schedule_fired(
+    conn: &Connection,
+    id: i64,
+    fired_expr: &str,
+    last_fired_at: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE agent_schedules SET last_fired_at = ?2, updated_at = ?3,
+            enabled = CASE WHEN cron_expr = ?4 THEN 0 ELSE enabled END
+         WHERE id = ?1",
+        params![id, last_fired_at, Utc::now().to_rfc3339(), fired_expr],
+    )?;
+    Ok(())
+}
+
 /// スケジュールを削除する。
 pub fn delete_agent_schedule(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("DELETE FROM agent_schedules WHERE id = ?1", params![id])?;
@@ -234,6 +254,24 @@ mod tests {
             Some("2026-08-09T07:00:00+09:00"),
             "None を渡しても消えない"
         );
+    }
+
+    #[test]
+    fn one_shot_fired_disables_only_the_fired_expression() {
+        let conn = crate::init_memory().unwrap();
+        let mut row = sample("a1", true);
+        row.cron_expr = "@at 2026-11-26T09:00:00+09:00".to_string();
+        let id = insert_agent_schedule(&conn, &row).unwrap();
+        set_one_shot_agent_schedule_fired(&conn, id, "@at 2026-11-27T09:00:00+09:00", "t1")
+            .unwrap();
+        let got = get_agent_schedule(&conn, id).unwrap().unwrap();
+        assert!(got.enabled, "moved meanwhile: stays enabled");
+        assert_eq!(got.last_fired_at.as_deref(), Some("t1"));
+        set_one_shot_agent_schedule_fired(&conn, id, &row.cron_expr, "t2").unwrap();
+        let got = get_agent_schedule(&conn, id).unwrap().unwrap();
+        assert!(!got.enabled);
+        assert_eq!(got.last_fired_at.as_deref(), Some("t2"));
+        assert!(list_enabled_agent_schedules(&conn).unwrap().is_empty());
     }
 
     #[test]

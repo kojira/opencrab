@@ -9,6 +9,10 @@
 //! - **`@every <dur>`**（例 `@every 3h` / `@every 1h30m`）は cron ライブラリに寄せず
 //!   **自前パーサ**でアンカー方式に解決する（`base + dur`。heartbeat の §4.3 と同型）。
 //!
+//! - **`@at <RFC3339>`**（例 `@at 2026-11-26T09:00:00+09:00`）は一回だけの予定（D-1150）。
+//!   その時刻に 1 回発火し、発火を記録するときに scheduler が同じ UPDATE で無効にする
+//!   （[`is_one_shot`]）。ツールの `at` 引数は [`one_shot_expr`] でこの形にそろえて保存する。
+//!
 //! # 持ち方（統括裁定）
 //! next 時刻は**列に持たず照会時算出**（stale フリー）。base は `last_fired_at.or(anchor_at)`。
 //!
@@ -32,6 +36,10 @@ pub enum ScheduleParseError {
     BadCron(String),
     /// `@every <dur>` の期間が解釈できない（空・単位不正・ゼロ以下）。
     BadEvery(String),
+    /// 一回だけの予定（`@at` / `at`）の時刻が解釈できない。
+    BadAt(String),
+    /// 一回だけの予定の時刻が既に過ぎている（登録しても発火しない）。
+    PastAt(String),
 }
 
 impl std::fmt::Display for ScheduleParseError {
@@ -40,6 +48,8 @@ impl std::fmt::Display for ScheduleParseError {
             ScheduleParseError::BadTimezone(s) => write!(f, "不正なタイムゾーン: {s}"),
             ScheduleParseError::BadCron(s) => write!(f, "不正な cron 式: {s}"),
             ScheduleParseError::BadEvery(s) => write!(f, "不正な @every 期間: {s}"),
+            ScheduleParseError::BadAt(s) => write!(f, "不正な時刻: {s}"),
+            ScheduleParseError::PastAt(s) => write!(f, "時刻が既に過ぎています: {s}"),
         }
     }
 }
@@ -92,6 +102,74 @@ pub fn parse_every(expr: &str) -> Result<Option<Duration>, ScheduleParseError> {
     Ok(Some(Duration::seconds(total_secs)))
 }
 
+/// 一回だけの予定が失敗した（受け口が無い）ときに再試行するまでの間隔。cron は 1 周期で
+/// backoff するが、一回だけの予定には周期が無いので、この間隔で再試行する。
+const ONE_SHOT_RETRY_AFTER_FAILED_FIRE: Duration = Duration::minutes(5);
+
+/// `@at <時刻>` の時刻を UTC へ解釈する。`@at` で始まらなければ `Ok(None)`。
+fn parse_at_expr(expr: &str, timezone: &str) -> Result<Option<DateTime<Utc>>, ScheduleParseError> {
+    let Some(rest) = expr.trim().strip_prefix("@at") else {
+        return Ok(None);
+    };
+    parse_at_time(rest.trim(), timezone).map(Some)
+}
+
+/// 時刻を UTC へ解釈する。RFC3339（オフセット付き）か、`timezone` で読む
+/// `YYYY-MM-DD HH:MM[:SS]`（`T` 区切りも可）。
+fn parse_at_time(at: &str, timezone: &str) -> Result<DateTime<Utc>, ScheduleParseError> {
+    if let Ok(t) = DateTime::parse_from_rfc3339(at) {
+        return Ok(t.with_timezone(&Utc));
+    }
+    let tz = Tz::from_str(timezone)
+        .map_err(|_| ScheduleParseError::BadTimezone(timezone.to_string()))?;
+    let naive = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+    ]
+    .iter()
+    .find_map(|f| chrono::NaiveDateTime::parse_from_str(at, f).ok())
+    .ok_or_else(|| ScheduleParseError::BadAt(at.to_string()))?;
+    use chrono::TimeZone;
+    tz.from_local_datetime(&naive)
+        .earliest()
+        .map(|t| t.with_timezone(&Utc))
+        .ok_or_else(|| ScheduleParseError::BadAt(at.to_string()))
+}
+
+/// 一回だけの予定（`@at`）か。
+pub fn is_one_shot(cron_expr: &str) -> bool {
+    cron_expr.trim().starts_with("@at")
+}
+
+/// 一回だけの予定の発火時刻（`@at` でなければ・解釈できなければ `None`）。
+pub fn one_shot_fire_at(cron_expr: &str, timezone: &str) -> Option<DateTime<Utc>> {
+    parse_at_expr(cron_expr, timezone).ok().flatten()
+}
+
+/// ツールの `at`（RFC3339 か `timezone` での `YYYY-MM-DD HH:MM`）を保存形 `@at <RFC3339>` にする。
+/// 時刻は `timezone` のオフセットで書く（読みやすさのため。発火時刻は絶対時刻で決まる）。
+pub fn one_shot_expr(at: &str, timezone: &str) -> Result<String, ScheduleParseError> {
+    let t = parse_at_time(at.trim(), timezone)?;
+    let tz = Tz::from_str(timezone)
+        .map_err(|_| ScheduleParseError::BadTimezone(timezone.to_string()))?;
+    Ok(format!("@at {}", t.with_timezone(&tz).to_rfc3339()))
+}
+
+/// 一回だけの予定の時刻が `now` より後かを確かめる（過ぎた時刻は登録しても発火しないので断る）。
+/// 一回だけの予定でなければ何もしない。
+pub fn refuse_past_one_shot(
+    cron_expr: &str,
+    timezone: &str,
+    now: DateTime<Utc>,
+) -> Result<(), ScheduleParseError> {
+    match parse_at_expr(cron_expr, timezone)? {
+        Some(t) if t <= now => Err(ScheduleParseError::PastAt(t.to_rfc3339())),
+        _ => Ok(()),
+    }
+}
+
 /// cron 式 + timezone が解釈可能かを検証する（CRUD 入力検証用）。
 ///
 /// `@every` はアンカー方式なので timezone を使わないが、CRUD では一律に timezone も
@@ -99,7 +177,7 @@ pub fn parse_every(expr: &str) -> Result<Option<Duration>, ScheduleParseError> {
 pub fn validate_schedule(cron_expr: &str, timezone: &str) -> Result<(), ScheduleParseError> {
     // timezone は常に検証（保存前に弾く）。
     Tz::from_str(timezone).map_err(|_| ScheduleParseError::BadTimezone(timezone.to_string()))?;
-    if parse_every(cron_expr)?.is_some() {
+    if parse_every(cron_expr)?.is_some() || parse_at_expr(cron_expr, timezone)?.is_some() {
         return Ok(());
     }
     // 標準 cron。
@@ -127,6 +205,17 @@ pub fn schedule_next_fire_at(
 ) -> Result<Option<DateTime<Utc>>, ScheduleParseError> {
     // `Option` の順序は `None < Some` なので、`max` が「遅い方（片方だけならそれ）」になる。
     let base = last_fired_at.max(anchor_at);
+
+    // `@at`: その時刻。発火済み・失敗した試行（`last_fired_at` がその時刻以降）からは
+    // [`ONE_SHOT_RETRY_AFTER_FAILED_FIRE`] 後（発火に成功した行は scheduler が無効にするので、
+    // ここに来るのは受け口が無くて発火できなかった試行）。過ぎた時刻は即 due（停止中に過ぎた
+    // ものは復帰後に 1 回発火する。cron の missed-run と同じ）。
+    if let Some(at) = parse_at_expr(cron_expr, timezone)? {
+        return Ok(Some(match last_fired_at {
+            Some(last) if last >= at => last + ONE_SHOT_RETRY_AFTER_FAILED_FIRE,
+            _ => at,
+        }));
+    }
 
     if let Some(dur) = parse_every(cron_expr)? {
         // `@every`: 起点 + 周期。起点が無ければ即発火可（None）。
@@ -303,6 +392,52 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(every, now + Duration::hours(3), "@every: anchor 起点");
+    }
+
+    // ---- D-1150: 一回だけの予定（@at） ----
+
+    #[test]
+    fn one_shot_expr_reads_local_time_in_timezone_and_rfc3339() {
+        let expr = one_shot_expr("2026-11-26 09:00", "Asia/Tokyo").unwrap();
+        assert_eq!(expr, "@at 2026-11-26T09:00:00+09:00");
+        assert!(is_one_shot(&expr));
+        assert_eq!(
+            one_shot_fire_at(&expr, "Asia/Tokyo"),
+            Some(utc("2026-11-26T00:00:00Z"))
+        );
+        assert_eq!(
+            one_shot_expr("2026-11-26T00:00:00Z", "Asia/Tokyo").unwrap(),
+            "@at 2026-11-26T09:00:00+09:00"
+        );
+        assert!(matches!(
+            one_shot_expr("tomorrow", "Asia/Tokyo"),
+            Err(ScheduleParseError::BadAt(_))
+        ));
+        assert!(validate_schedule(&expr, "Asia/Tokyo").is_ok());
+        assert!(!is_one_shot("@every 3h"));
+    }
+
+    #[test]
+    fn one_shot_next_fire_is_its_time_and_past_time_is_refused() {
+        let at = utc("2026-11-26T00:00:00Z");
+        let expr = "@at 2026-11-26T09:00:00+09:00";
+        let anchor = Some(at - Duration::days(1));
+        assert_eq!(
+            schedule_next_fire_at(expr, "Asia/Tokyo", anchor, None).unwrap(),
+            Some(at)
+        );
+        // 失敗した試行の後は再試行の間隔だけ後ろへ（busy loop にしない）。
+        let tried = at + Duration::seconds(1);
+        assert_eq!(
+            schedule_next_fire_at(expr, "Asia/Tokyo", anchor, Some(tried)).unwrap(),
+            Some(tried + ONE_SHOT_RETRY_AFTER_FAILED_FIRE)
+        );
+        assert!(refuse_past_one_shot(expr, "Asia/Tokyo", at - Duration::seconds(1)).is_ok());
+        assert!(matches!(
+            refuse_past_one_shot(expr, "Asia/Tokyo", at),
+            Err(ScheduleParseError::PastAt(_))
+        ));
+        assert!(refuse_past_one_shot("0 7 * * *", "Asia/Tokyo", at).is_ok());
     }
 
     #[test]

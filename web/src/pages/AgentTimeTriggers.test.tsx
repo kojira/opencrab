@@ -48,6 +48,7 @@ function schedule(overrides: Partial<ScheduleDto> = {}): ScheduleDto {
     anchor_at: '2026-01-01T00:00:00+00:00',
     last_fired_at: null,
     next_fire_at: '2026-01-01T00:30:00+00:00',
+    one_shot: false,
     gated: false,
     gated_reason: null,
     ...overrides,
@@ -213,6 +214,20 @@ describe('TimeTriggersSection', () => {
     await waitFor(() =>
       expect(mockedUpdate).toHaveBeenCalledWith(10, { cron_expr: '@every 3600s' }),
     );
+  });
+
+  it('shows a one-shot timer as once with its time instead of the expression', async () => {
+    const at = '2026-11-26T09:00:00+09:00';
+    mockedList.mockResolvedValue({
+      agent_id: 'a1',
+      schedules: [schedule({ cron_expr: `@at ${at}`, one_shot: true, next_fire_at: at })],
+      count: 1,
+    });
+
+    render(<TimeTriggersSection agentId="a1" />);
+    expect(await screen.findByText('channels.triggers.oneShot')).toBeInTheDocument();
+    expect(screen.getAllByText(new Date(at).toLocaleString())).toHaveLength(2);
+    expect(screen.queryByText(`@at ${at}`)).not.toBeInTheDocument();
   });
 
   it('deletes only after confirming the dialog', async () => {

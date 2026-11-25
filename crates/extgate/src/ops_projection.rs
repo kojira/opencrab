@@ -154,31 +154,6 @@ fn map_sharing(s: Sharing) -> ToolSharing {
     }
 }
 
-/// D-1148: LLMs often send an optional argument they mean to omit as `""` (production:
-/// `say {"user": ""}` was rejected by the Nostr gateway for a week). A top-level field that the
-/// declared schema does not list in `required` and whose value is an empty or blank string is
-/// treated as not given and removed before the gateway sees it. Required fields are passed as is
-/// (an empty required value stays the gateway's to judge).
-fn drop_empty_optional_fields(schema: &Value, args: &Value) -> Value {
-    let Value::Object(map) = args else {
-        return args.clone();
-    };
-    let required: Vec<&str> = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|r| r.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    Value::Object(
-        map.iter()
-            .filter(|(key, value)| {
-                required.contains(&key.as_str())
-                    || !matches!(value, Value::String(s) if s.trim().is_empty())
-            })
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-    )
-}
-
 #[async_trait]
 impl GatewayActions for ExtgateOpsGatewayActions {
     fn definitions(&self) -> Vec<GatewayActionDef> {
@@ -222,8 +197,7 @@ impl GatewayActions for ExtgateOpsGatewayActions {
                 error: Some("operation_unauthorized".to_string()),
             };
         }
-        let payload = drop_empty_optional_fields(&declaration.input_schema, args);
-        let payload = self.resolve_payload(name, &payload);
+        let payload = self.resolve_payload(name, args);
         // Declared `"x-opencrab-workspace-file": true` fields become outbox descriptors before any
         // delivery/speech row or invoke frame exists; a rejection writes nothing.
         let (payload, staged_files) = match stage_workspace_files(

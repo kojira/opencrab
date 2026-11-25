@@ -13,7 +13,7 @@
 | `id` | AUTOINCREMENT |
 | `agent_id` | 対象エージェント |
 | `session_id` | 注入先の**一本化されたセッション**（`nostr-{agent}` / `discord-{agent}-{guild}-{channel}`） |
-| `cron_expr` | 標準 5 フィールド cron（例 `0 7 * * *`）、または `@every 3h` |
+| `cron_expr` | 標準 5 フィールド cron（例 `0 7 * * *`）、`@every 3h`、または一回だけの予定 `@at <RFC3339>`（D-1150） |
 | `timezone` | cron 評価に使う tz（既定 `Asia/Tokyo`） |
 | `message` | 発火時にエージェントへ注入する指示文 |
 | `enabled` | 既定 **0（無効・fail-closed / #240）** |
@@ -35,6 +35,23 @@
 - 次回発火 `next_fire_at = schedule_next_fire_at(cron, tz, anchor, last_fired)`:
   `base = last_fired_at.or(anchor_at)`。`@every` は `base + dur`、cron は `base` 以降の最初のスロット。
 - 解釈不能な式は **CRUD で 400**、実行時も**発火対象外（fail-closed）**。
+- **`@at <RFC3339>`**（一回だけの予定・D-1150）: 次回発火はその時刻。列は足さず、同じ `cron_expr` に持つ
+  （get/update/delete/run・dashboard・scheduler がそのまま扱える）。ツールの `at` は
+  `YYYY-MM-DD HH:MM`（`timezone` の時刻）か RFC3339 で受け、`one_shot_expr` で保存形にそろえる。
+  有効で登録・時刻変更・再有効化するとき、時刻が既に過ぎていれば断る（登録しても発火しないため）。
+
+## 一回だけの予定（D-1150）
+
+- **発火で無効になる**: scheduler が発火成功を記録する UPDATE（`set_one_shot_agent_schedule_fired`）で、
+  `last_fired_at` と同時に `enabled=0` にする。二度と発火せず、エージェントが自分で止める必要はない。
+  発火中に時刻を変えられた行（式が発火時と違う）は、新しい時刻の予定として有効のまま残る。
+- **停止中に過ぎた場合**: cron の missed-run と同じく、復帰後に 1 回だけ発火する（過ぎた時刻は due）。
+- **発火できなかった場合**（受け口が無い）: `last_fired_at` を刻まず（cron と同じ）、メモリの
+  last_attempt から 5 分後に再試行する（一回だけの予定には周期が無いので、周期の代わりにこの間隔で backoff）。
+- **`run_my_schedule`**: 今までどおり `last_fired_at` を触らず、一回だけの予定を**消費しない**（無効に
+  しない）。予定の時刻にはまた発火する。
+- **別のセッション**: `session_id` で自分の別セッションを指せる（D-1147 と同じ `resolve_persisted_target`）。
+- 応答（`ScheduleDto`）の `one_shot=true` で区別する。無効になった一回だけの予定の `next_fire_at` は `null`。
 
 ## 発火機構（中央スケジューラ・`crates/server/src/scheduler.rs`）
 
@@ -89,14 +106,15 @@ DB から読み直し、永続アンカーから正確な次回発火時刻を�
 する理由が実測に無い。**増えるのは「何ができるか」ではなく「いつ動くかを自分で決められるか」だけ**（作用面は
 HB と同一）。CRUD と検証・登録ロジックを共有する（`create_schedule_core` / `list_session_schedules_core`）。
 
-- **`set_my_schedule`**: `cron_expr`(必須) / `message`(必須) / `enabled`(既定 true) / `timezone`(既定 Asia/Tokyo)。
+- **`set_my_schedule`**: `cron_expr`（繰り返し）か `at`（一回だけ・D-1150）のどちらか 1 つ / `message`(必須) /
+  `enabled`(既定 true) / `timezone`(既定 Asia/Tokyo)。
   登録先は既定で **`ctx.session_id`**。`session_id` を渡すと自分の別のセッションに登録できる（D-1147）。
   どちらも自分の・発火経路のあるセッションに限り（`resolve_persisted_target`）、それ以外は fail-closed + remedy。
   cron 不正はその場でエラー。成功後 `scheduler_wake`。
 - **`get_my_schedules`**: 自分の**全セッション**の schedule を `next_fire_at`（照会時算出）・`gated`/`gated_reason`・
   `session_id`・`session_title`・`is_current_session` 付きで列挙し、応答に `current_session_id` を載せる（D-1147）。
   `session_id` で絞り込める。
-- **`update_my_schedule`**（#477）: `id`(必須) + 変更する項目だけ（`cron_expr` / `message` / `timezone` /
+- **`update_my_schedule`**（#477）: `id`(必須) + 変更する項目だけ（`cron_expr` / `at` / `message` / `timezone` /
   `enabled`。省略は現状維持）。`enabled=false` で「止める」（行は残り履歴が追える）、cron/message の変更で
   「間隔・内容を変える」。**`session_id` は変えられない**（別セッションへ付け替えさせない）。変更項目ゼロの
   呼び出しは拒否（暗黙の no-op を作らない）。cron 不正・アンカーの向き（§4.4）は dashboard PATCH と共有。
@@ -111,6 +129,14 @@ HB と同一）。CRUD と検証・登録ロジックを共有する（`create_s
 - 分類: 4 つとも定義で `class.dispatch == Inline` を名乗る（同ターンで cron 不正・id 不在を返し、直して
   呼び直せる）+ `TRUSTED_ONLY_ACTIONS`（未信頼 Agent 会話ターンから自律実行を仕込ませない・止めさせない）。dashboard
   CRUD（PATCH/DELETE・owner 認証）とは検証・アンカー・所属の各ロジックを共有する。
+
+## 空の任意引数は「指定なし」（D-1150）
+
+LLM は省略したい任意引数を `""` で送ることが多い。全ツール呼び出しが通る `BridgedExecutor::dispatch_inner`
+（`crates/actions/src/bridge/omitted_args.rs`）が、LLM に見せている定義の `required` に無い top-level の
+空文字・空白だけの引数を取り除いてからツールへ渡す。schedule ツールもこれを受けるので、
+`update_my_schedule {"id": 5, "cron_expr": "", "timezone": "", "enabled": false}` は enabled だけを変える。
+必須引数の空文字はそのまま届き、各ツールが自分で検査する。
 
 ## jitter — 採用しない
 

@@ -29,7 +29,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::schedule_cron::{schedule_next_fire_at, validate_schedule};
+use crate::schedule_cron::{
+    is_one_shot, refuse_past_one_shot, schedule_next_fire_at, validate_schedule,
+};
 use crate::AppState;
 use chrono::{DateTime, Utc};
 use opencrab_db::queries::AgentScheduleRow;
@@ -50,8 +52,11 @@ pub struct ScheduleDto {
     pub enabled: bool,
     pub anchor_at: Option<String>,
     pub last_fired_at: Option<String>,
-    /// 次回発火時刻（rfc3339 UTC）。cron/`@every` から算出。解釈不能なら `null`。
+    /// 次回発火時刻（rfc3339 UTC）。cron/`@every`/`@at` から算出。解釈不能・発火済みの一回だけの
+    /// 予定なら `null`。
     pub next_fire_at: Option<String>,
+    /// 一回だけの予定（`cron_expr` が `@at <時刻>`・D-1150）。発火すると scheduler が無効にする。
+    pub one_shot: bool,
     /// enabled なのに発火しない状態か（heartbeat の `gated` と同じ扱い）。
     pub gated: bool,
     /// `gated=true` のときの理由。**schedule は G ゲートの対象外**なので理由は「式を解釈
@@ -82,6 +87,28 @@ fn resolve_persisted_schedule_target(
         .resolve_persisted_target(&conn, session_id, agent_id))
 }
 
+/// 保存前の検証（作成・更新の全経路で共有）: 式と timezone、そして有効にする一回だけの予定の時刻が
+/// まだ来ていないこと（過ぎた時刻は登録しても発火しない・D-1150）。
+fn validate_schedule_input(
+    cron_expr: &str,
+    timezone: &str,
+    enabled_one_shot_check: bool,
+) -> Result<(), ScheduleOpError> {
+    validate_schedule(cron_expr, timezone).map_err(|e| {
+        ScheduleOpError::BadRequest(format!(
+            "スケジュール式または timezone が不正です（{e}）。cron は 5 フィールド（例: 0 7 * * *）、周期は @every 3h の形式、一回だけの予定は at に時刻（例: 2026-11-26 09:00）、timezone は Asia/Tokyo のような IANA 名で指定してください。"
+        ))
+    })?;
+    if enabled_one_shot_check {
+        refuse_past_one_shot(cron_expr, timezone, Utc::now()).map_err(|e| {
+            ScheduleOpError::BadRequest(format!(
+                "一回だけの予定の時刻が既に過ぎているので登録できません（{e}）。これから先の時刻を指定してください。"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn parse_wall_clock(s: &Option<String>) -> Option<DateTime<Utc>> {
     let s = s.as_ref()?;
     DateTime::parse_from_rfc3339(s)
@@ -91,16 +118,21 @@ fn parse_wall_clock(s: &Option<String>) -> Option<DateTime<Utc>> {
 
 impl ScheduleDto {
     pub(crate) fn from_row(row: AgentScheduleRow) -> Self {
-        // 照会時算出（真実は再計算・キャッシュしない）。
-        let next_fire_at = schedule_next_fire_at(
-            &row.cron_expr,
-            &row.timezone,
-            parse_wall_clock(&row.anchor_at),
-            parse_wall_clock(&row.last_fired_at),
-        )
-        .ok()
-        .flatten()
-        .map(|t| t.to_rfc3339());
+        let one_shot = is_one_shot(&row.cron_expr);
+        // 照会時算出（真実は再計算・キャッシュしない）。無効の一回だけの予定はもう発火しない。
+        let next_fire_at = (!one_shot || row.enabled)
+            .then(|| {
+                schedule_next_fire_at(
+                    &row.cron_expr,
+                    &row.timezone,
+                    parse_wall_clock(&row.anchor_at),
+                    parse_wall_clock(&row.last_fired_at),
+                )
+                .ok()
+                .flatten()
+            })
+            .flatten()
+            .map(|t| t.to_rfc3339());
         // enabled なのに next を算出できない = 発火しない（式が解釈不能など）。schedule は G ゲート
         // 対象外なので、gated の理由はこれに限られる（heartbeat の G 沈黙は起きない）。
         let gated_reason = if row.enabled && next_fire_at.is_none() {
@@ -122,6 +154,7 @@ impl ScheduleDto {
             anchor_at: row.anchor_at,
             last_fired_at: row.last_fired_at,
             next_fire_at,
+            one_shot,
             gated: gated_reason.is_some(),
             gated_reason,
         }
@@ -148,11 +181,7 @@ pub(crate) fn create_schedule_core(
     message: &str,
     enabled: bool,
 ) -> Result<ScheduleDto, ScheduleOpError> {
-    validate_schedule(cron_expr, timezone).map_err(|e| {
-        ScheduleOpError::BadRequest(format!(
-            "スケジュール式または timezone が不正です（{e}）。cron は 5 フィールド（例: 0 7 * * *）、周期は @every 3h の形式、timezone は Asia/Tokyo のような IANA 名で指定してください。"
-        ))
-    })?;
+    validate_schedule_input(cron_expr, timezone, enabled)?;
     let target = resolve_persisted_schedule_target(state, session_id, agent_id)?;
     if target.is_none() {
         // remedy は登録済み transport から生成する（#628・手書きしない）。
@@ -266,6 +295,14 @@ fn next_anchor(
     }
 }
 
+/// 更新が予定を有効なまま「時刻を決め直す」か（式・timezone の変更、または無効→有効化）。
+/// [`next_anchor`] が `anchor_at=now` を打つ条件と同じで、一回だけの予定ではこのとき時刻が
+/// まだ来ていないことを確かめる（message だけの変更や無効化では確かめない）。
+fn rearms(existing: &AgentScheduleRow, new_cron: &str, new_tz: &str, new_enabled: bool) -> bool {
+    new_enabled
+        && (new_cron != existing.cron_expr || new_tz != existing.timezone || !existing.enabled)
+}
+
 /// **所属チェック付き**で id からスケジュール行を取り出す（エージェント向けツール専用）。
 ///
 /// 行が存在し、かつ **`agent_id` が一致**するときだけ `Ok`（D-1147: エージェントは自分の全セッションの
@@ -319,11 +356,11 @@ pub(crate) fn update_schedule_core(
     let new_message = patch.message.unwrap_or(&existing.message).to_string();
     let new_enabled = patch.enabled.unwrap_or(existing.enabled);
 
-    validate_schedule(&new_cron, &new_tz).map_err(|e| {
-        ScheduleOpError::BadRequest(format!(
-            "スケジュール式または timezone が不正です（{e}）。cron は 5 フィールド（例: 0 7 * * *）、周期は @every 3h の形式、timezone は Asia/Tokyo のような IANA 名で指定してください。"
-        ))
-    })?;
+    validate_schedule_input(
+        &new_cron,
+        &new_tz,
+        rearms(&existing, &new_cron, &new_tz, new_enabled),
+    )?;
     if new_message.trim().is_empty() {
         return Err(ScheduleOpError::BadRequest(
             "message は空にできません（発火時にエージェントへ渡す指示文を書いてください）。"
@@ -481,7 +518,12 @@ pub async fn update_schedule(
     let new_enabled = req.enabled.unwrap_or(existing.enabled);
 
     // 検証（不正は 400）。
-    validate_schedule(&new_cron, &new_tz).map_err(|_| StatusCode::BAD_REQUEST)?;
+    validate_schedule_input(
+        &new_cron,
+        &new_tz,
+        rearms(&existing, &new_cron, &new_tz, new_enabled),
+    )
+    .map_err(|_| StatusCode::BAD_REQUEST)?;
     let target = resolve_persisted_schedule_target(&state, &new_session_id, &existing.agent_id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if target.is_none() {

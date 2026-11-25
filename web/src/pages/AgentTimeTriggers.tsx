@@ -83,6 +83,12 @@ function cronExprFromForm(form: TriggerForm): string {
   return form.kind === 'interval' ? `@every ${form.intervalSecs.trim()}s` : form.cronExpr.trim();
 }
 
+/** 一回だけの予定（`one_shot`・cron_expr は `@at <RFC3339>`）の発火時刻。 */
+function oneShotTime(cronExpr: string): string | null {
+  const rest = cronExpr.trim();
+  return rest.startsWith('@at') ? rest.replace(/^@at/, '').trim() : null;
+}
+
 function formatTime(value: string | null, none: string): string {
   return value ? new Date(value).toLocaleString() : none;
 }
@@ -377,11 +383,20 @@ export function TimeTriggersSection({ agentId }: { agentId: string }) {
               <tbody>
                 {rows.map((s) => {
                   const interval = isIntervalExpr(s.cron_expr);
+                  const at = oneShotTime(s.cron_expr);
                   return (
                     <tr key={s.id} className="border-b border-outline-variant/50 align-top">
                       <td className="p-3">
-                        <div>{interval ? t('channels.triggers.interval') : t('channels.triggers.fixedTime')}</div>
-                        <div className="text-body-sm text-on-surface-variant font-mono">{s.cron_expr}</div>
+                        <div>
+                          {s.one_shot
+                            ? t('channels.triggers.oneShot')
+                            : interval
+                              ? t('channels.triggers.interval')
+                              : t('channels.triggers.fixedTime')}
+                        </div>
+                        <div className="text-body-sm text-on-surface-variant font-mono">
+                          {s.one_shot && at ? formatTime(at, at) : s.cron_expr}
+                        </div>
                         {!interval && <div className="text-body-sm text-on-surface-variant">{s.timezone}</div>}
                       </td>
                       <td className="p-3 max-w-xs">

@@ -1,6 +1,7 @@
 use super::*;
 
 mod alias_resolution;
+mod one_shot;
 
 const AGENT_UUID: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -129,6 +130,7 @@ fn entry_at(id: i64, next: Option<DateTime<Utc>>) -> Entry {
             session_id: "session".into(),
         },
         message: "m".into(),
+        one_shot_expr: None,
     }
 }
 

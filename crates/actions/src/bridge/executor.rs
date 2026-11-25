@@ -424,6 +424,7 @@ impl BridgedExecutor {
         if let Some(msg) = self.gate_rejection(name) {
             return reject(msg);
         }
+        let args = &self.without_omitted_args(name, args); // D-1150: "" optional = not given.
 
         // MCP ツール（mcp__ プレフィックス）は MCP プロバイダへ振り分ける。gateway が
         // unknown を返す前に処理する（名前空間は dispatcher/gateway と重ならない）。
@@ -462,7 +463,6 @@ impl BridgedExecutor {
             };
         }
 
-        // dispatcher にも gateway にも無い。
         CoreActionResult {
             success: false,
             data: serde_json::Value::Null,

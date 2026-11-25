@@ -24,6 +24,10 @@
 //! **キーは行の id**（[`EntryKey::Schedule`]）: 同一セッションに複数行がぶら下がるので、
 //! in-flight / attempts を session_id で持つと別の行を誤ブロックする。
 //!
+//! **一回だけの予定**（`@at`・D-1150）も同じ行・同じ経路で、発火成功を記録する UPDATE で
+//! 無効にする（二度と発火しない）。停止中に時刻が過ぎたものは、cron の missed-run と同じく
+//! 復帰後に 1 回だけ発火する。
+//!
 //! # ビジーループを作らない（設計 §3.2 A1 / §6）
 //!
 //! 走行中（in-flight）エントリは (1) sleep の `min` 候補から除外し、(2) 完了で wake する。
@@ -74,6 +78,8 @@ struct Entry {
     target: FireTarget,
     /// この行のプロンプト本文。
     message: String,
+    /// 一回だけの予定（D-1150）なら発火した式。発火成功の記録と同時に行を無効にする。
+    one_shot_expr: Option<String>,
 }
 
 /// rfc3339 文字列を壁時計へ。壊れていれば `None`（起点なし扱い＝安全側では即発火だが、
@@ -150,6 +156,8 @@ fn rebuild_entries(
                 continue;
             }
         };
+        let one_shot_expr =
+            opencrab_server::schedule_cron::is_one_shot(&row.cron_expr).then_some(row.cron_expr);
         entries.push(Entry {
             key,
             agent_id: row.agent_id,
@@ -157,6 +165,7 @@ fn rebuild_entries(
             next_fire_at,
             target,
             message: row.message,
+            one_shot_expr,
         });
     }
     entries
@@ -263,11 +272,21 @@ pub(crate) async fn run_scheduler(state: AppState) {
                 if outcome.is_some() {
                     let fired_at = Utc::now().to_rfc3339();
                     if let Ok(conn) = db.lock() {
-                        if let Err(e) = opencrab_db::queries::set_agent_schedule_last_fired(
-                            &conn,
-                            schedule_id,
-                            &fired_at,
-                        ) {
+                        // 一回だけの予定は、発火の記録と同じ UPDATE で無効にする（D-1150）。
+                        let marked = match entry.one_shot_expr.as_deref() {
+                            Some(expr) => opencrab_db::queries::set_one_shot_agent_schedule_fired(
+                                &conn,
+                                schedule_id,
+                                expr,
+                                &fired_at,
+                            ),
+                            None => opencrab_db::queries::set_agent_schedule_last_fired(
+                                &conn,
+                                schedule_id,
+                                &fired_at,
+                            ),
+                        };
+                        if let Err(e) = marked {
                             tracing::error!(
                                 schedule_id,
                                 "scheduler: schedule last_fired_at の更新に失敗: {e}"
