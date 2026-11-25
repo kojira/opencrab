@@ -13,6 +13,13 @@
 //! - `run_my_schedule`: `get_my_schedules` が返した id のスケジュールを今すぐ手動発火する
 //!   （**オーナー / co_agent 限定**・定時発火と同じ経路・`last_fired_at` は更新しない）。
 //!
+//! # 一回だけの予定（D-1150）
+//!
+//! `set_my_schedule` / `update_my_schedule` に `cron_expr` の代わりに `at`（時刻）を渡すと、同じ行に
+//! `cron_expr = "@at <RFC3339>"` として保存する（[`crate::schedule_cron`]）。発火すると scheduler が
+//! 発火の記録と同じ UPDATE で無効にする。過ぎた時刻は登録を断る。`run_my_schedule` の手動発火は
+//! 今までどおり `last_fired_at` を触らず、一回だけの予定を消費しない（予定の時刻にまた発火する）。
+//!
 //! # id の所属チェック（#477 / D-1147）
 //!
 //! `update_my_schedule` / `delete_my_schedule` / `run_my_schedule` は id を取る。**id を推測して
@@ -96,17 +103,17 @@ fn reject_scope_arg(args: &serde_json::Value) -> Option<GatewayActionResult> {
 
 /// id で対象を決めるツール（update/delete/run）に `session_id` が来たら拒否する。対象のセッションは
 /// id の行が持っているので、別の値を受けると「どちらが効いたか」が曖昧になる。
+///
+/// 空文字の `session_id` は、ツールの入口（bridge の `omitted_args`・D-1150）で「指定なし」として
+/// 取り除かれてからここへ来る。
 fn reject_session_id_with_id(args: &serde_json::Value) -> Option<GatewayActionResult> {
-    // 未指定（省略・null・空文字）は拒否しない。値が入っているときだけ曖昧なので断る。
     match args.get("session_id") {
         None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(s)) if s.trim().is_empty() => None,
         Some(_) => Some(err("session_idは指定できません。id のスケジュールはそれぞれ自分のセッションを持っているので、id だけを渡してください。")),
     }
 }
 
-/// 任意の文字列引数を取り出す。省略・null・空文字は `None`（LLM は「指定しない」を `""` で
-/// 送ることが多く、ほかのツールも `""` を未指定として扱う）。文字列以外は remedy 付きエラー。
+/// 任意の文字列引数を取り出す（省略・null は `None`、文字列以外は remedy 付きエラー）。
 fn optional_str(
     args: &serde_json::Value,
     key: &str,
@@ -114,7 +121,6 @@ fn optional_str(
 ) -> Result<Option<String>, GatewayActionResult> {
     match args.get(key) {
         None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(s)) if s.trim().is_empty() => Ok(None),
         Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
         _ => Err(err(format!("{key}は文字列で指定してください。{remedy}"))),
     }
@@ -225,6 +231,39 @@ fn required_str(
     }
 }
 
+/// いつ発火するかの式を引数から決める: `cron_expr`（繰り返し）か `at`（一回だけ・D-1150）の
+/// どちらか 1 つ。`at` は `timezone` で読み、保存形 `@at <RFC3339>` にする
+/// （[`crate::schedule_cron::one_shot_expr`]）。どちらも無ければ `Ok(None)`、両方は拒否。
+fn timing_expr(
+    args: &serde_json::Value,
+    timezone: &str,
+) -> Result<Option<String>, GatewayActionResult> {
+    let cron_expr = optional_str(
+        args,
+        "cron_expr",
+        "繰り返すなら cron_expr、一回だけなら at を指定してください。",
+    )?;
+    let at = optional_str(
+        args,
+        "at",
+        "一回だけ発火する時刻を 2026-11-26 09:00 か RFC3339 で指定してください。",
+    )?;
+    match (cron_expr, at) {
+        (Some(_), Some(_)) => Err(err(
+            "cron_expr と at は同時に指定できません。繰り返すなら cron_expr、一回だけなら at のどちらか 1 つにしてください。",
+        )),
+        (Some(expr), None) => Ok(Some(expr)),
+        (None, Some(at)) => crate::schedule_cron::one_shot_expr(&at, timezone)
+            .map(Some)
+            .map_err(|e| {
+                err(format!(
+                    "at を解釈できません（{e}）。2026-11-26 09:00（timezone の時刻）か 2026-11-26T09:00:00+09:00 の形で指定してください。"
+                ))
+            }),
+        (None, None) => Ok(None),
+    }
+}
+
 /// 自分の定時実行スケジュールを登録する（既定は現在のセッション、`session_id` で自分の別セッション）。
 ///
 /// cron 式が不正ならその場でエラー（実行時に黙って発火しないのが最悪なので、同じターンで直せる）。
@@ -249,12 +288,17 @@ pub(crate) fn set_my_schedule(
         Err(e) => return e,
     };
 
-    let cron_expr = match required_str(
-        args,
-        "cron_expr",
-        "cron 5 フィールド（例: 0 7 * * * = 毎朝 7 時）か @every 形式（例: @every 3h）で指定してください。",
-    ) {
-        Ok(s) => s,
+    // timezone は省略時 Asia/Tokyo。
+    let timezone = match args.get("timezone") {
+        None | Some(serde_json::Value::Null) => "Asia/Tokyo".to_string(),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(_) => return err("timezoneは文字列（IANA 名・例 Asia/Tokyo）で指定してください"),
+    };
+    let cron_expr = match timing_expr(args, &timezone) {
+        Ok(Some(expr)) => expr,
+        Ok(None) => {
+            return err("cron_expr か at のどちらかが必須です。繰り返すなら cron_expr（cron 5 フィールド・例: 0 7 * * * = 毎朝 7 時、または @every 3h）、一回だけなら at（例: 2026-11-26 09:00）を指定してください。")
+        }
         Err(e) => return e,
     };
     let message = match required_str(
@@ -270,12 +314,6 @@ pub(crate) fn set_my_schedule(
         None | Some(serde_json::Value::Null) => true,
         Some(serde_json::Value::Bool(b)) => *b,
         Some(_) => return err("enabledは真偽値で指定してください"),
-    };
-    // timezone は省略時 Asia/Tokyo。
-    let timezone = match args.get("timezone") {
-        None | Some(serde_json::Value::Null) => "Asia/Tokyo".to_string(),
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(_) => return err("timezoneは文字列（IANA 名・例 Asia/Tokyo）で指定してください"),
     };
 
     match create_schedule_core(
@@ -413,13 +451,6 @@ pub(crate) fn update_my_schedule(
     };
 
     // 変更フィールドは任意（省略時は現状維持）。型違いは拒否。
-    let cron_expr = match args.get("cron_expr") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(s)) => Some(s.clone()),
-        Some(_) => {
-            return err("cron_exprは文字列で指定してください（省略すると現在の値を保ちます）")
-        }
-    };
     let message = match args.get("message") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(s)) => Some(s.clone()),
@@ -435,11 +466,26 @@ pub(crate) fn update_my_schedule(
         Some(serde_json::Value::Bool(b)) => Some(*b),
         Some(_) => return err("enabledは真偽値で指定してください"),
     };
+    // `at` は渡された timezone、無ければ行の timezone で読む。
+    let at_timezone = match timezone.clone() {
+        Some(tz) => tz,
+        None if args.get("at").is_none() => String::new(),
+        None => match load_owned_schedule(state, &ctx.agent_id, id) {
+            Ok(row) => row.timezone,
+            Err(ScheduleOpError::BadRequest(m)) | Err(ScheduleOpError::Internal(m)) => {
+                return err(m)
+            }
+        },
+    };
+    let cron_expr = match timing_expr(args, &at_timezone) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     // 変更項目が 1 つも無い呼び出しは、何も起きないのに成功に見えるので拒否する（暗黙の no-op を作らない）。
     if cron_expr.is_none() && message.is_none() && timezone.is_none() && enabled.is_none() {
         return err(
-            "変更する項目を 1 つ以上指定してください（cron_expr / message / timezone / enabled）。止めたいだけなら enabled=false、消すなら delete_my_schedule を使ってください。",
+            "変更する項目を 1 つ以上指定してください（cron_expr / at / message / timezone / enabled）。止めたいだけなら enabled=false、消すなら delete_my_schedule を使ってください。",
         );
     }
 
@@ -625,3 +671,7 @@ mod cross_session_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent_schedule/one_shot_tests.rs"]
+mod one_shot_tests;

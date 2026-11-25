@@ -209,6 +209,7 @@
   "channels.triggers.kind": "種別",
   "channels.triggers.interval": "間隔",
   "channels.triggers.fixedTime": "定時",
+  "channels.triggers.oneShot": "一回だけ",
   "channels.triggers.intervalSecs": "間隔（秒）",
   "channels.triggers.cronExpr": "cron 式（例: 0 7 * * *）",
   "channels.triggers.timezone": "タイムゾーン",

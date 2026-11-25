@@ -1409,7 +1409,8 @@ per-agent の定時実行（cron / `@every`）。中央スケジューラ（#439
       "message": "毎朝のまとめを書いてください", "enabled": true,
       "anchor_at": "2026-08-09T00:00:00+09:00",
       "last_fired_at": null,
-      "next_fire_at": "2026-08-09T22:00:00+00:00"
+      "next_fire_at": "2026-08-09T22:00:00+00:00",
+      "one_shot": false
     }
   ],
   "count": 1
@@ -1423,14 +1424,15 @@ Request:
 ```json
 {
   "session_id": "nostr-…",            // そのエージェントの発火経路を持つセッションに限る
-  "cron_expr": "0 7 * * *",           // 標準 5 フィールド cron、または "@every 3h"
+  "cron_expr": "0 7 * * *",           // 標準 5 フィールド cron、"@every 3h"、または一回だけ "@at 2026-11-26T09:00:00+09:00"
   "timezone": "Asia/Tokyo",           // 省略時 Asia/Tokyo
   "message": "毎朝のまとめを書いてください",
   "enabled": true                      // 省略時 false（fail-closed）
 }
 ```
 
-- 不正な cron/`@every`/timezone は **400**。
+- 不正な cron/`@every`/`@at`/timezone は **400**。有効にする `@at` の時刻が既に過ぎていても **400**。
+- `@at <RFC3339>` は一回だけの予定（応答の `one_shot=true`）。発火するとスケジューラが `enabled=false` にする（D-1150）。
 - `session_id` がそのエージェントの `nostr-`/`discord-` セッションでなければ **400**。
 - `enabled=true` で作ると `anchor_at=now`（初回発火は「now 以降の最初のスロット / now+周期」）。
 - 応答は作成された行（`next_fire_at` は照会時算出）。

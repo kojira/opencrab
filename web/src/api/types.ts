@@ -168,7 +168,8 @@ export interface LlmMetricsDetailDto {
   avg_latency: number;
 }
 
-// Time triggers (agent_schedules). cron_expr is a 5-field cron or `@every <dur>`.
+// Time triggers (agent_schedules). cron_expr is a 5-field cron, `@every <dur>`, or `@at <RFC3339>`
+// for a one-shot (one_shot = true; the scheduler disables it after it fires).
 export interface ScheduleDto {
   id: number;
   agent_id: string;
@@ -180,6 +181,7 @@ export interface ScheduleDto {
   anchor_at: string | null;
   last_fired_at: string | null;
   next_fire_at: string | null;
+  one_shot: boolean;
   gated: boolean;
   gated_reason: string | null;
 }

@@ -7,7 +7,7 @@ const NOT_FOUND: &str = "指定した id のスケジュールが見つかりま
 
 /// `agent_id` のエージェントとゲートインスタンスを作り、`session_ids` をそのゲートの会話として登録する
 /// （`resolve_persisted_target` が発火経路ありと判定する状態）。
-fn bind_sessions(state: &AppState, agent_id: &str, session_ids: &[(&str, &str)]) {
+pub(super) fn bind_sessions(state: &AppState, agent_id: &str, session_ids: &[(&str, &str)]) {
     let mut conn = state.db.lock().unwrap();
     opencrab_db::queries::upsert_agent(
         &conn,
@@ -57,15 +57,19 @@ fn bind_sessions(state: &AppState, agent_id: &str, session_ids: &[(&str, &str)])
     tx.commit().unwrap();
 }
 
-fn context(caller: GatewayCaller, agent_id: &str, session_id: &str) -> GatewayCallContext {
+pub(super) fn context(
+    caller: GatewayCaller,
+    agent_id: &str,
+    session_id: &str,
+) -> GatewayCallContext {
     GatewayCallContext::new(caller, agent_id).with_session_id(session_id.to_string())
 }
 
-fn trusted(session_id: &str) -> GatewayCallContext {
+pub(super) fn trusted(session_id: &str) -> GatewayCallContext {
     context(GatewayCaller::TrustedUser, "agent-x", session_id)
 }
 
-fn create(state: &AppState, ctx: &GatewayCallContext, message: &str) -> i64 {
+pub(super) fn create(state: &AppState, ctx: &GatewayCallContext, message: &str) -> i64 {
     let res = set_my_schedule(
         state,
         &json!({"cron_expr": "@every 3h", "message": message}),
@@ -76,7 +80,7 @@ fn create(state: &AppState, ctx: &GatewayCallContext, message: &str) -> i64 {
 }
 
 /// agent-x: 公開会話 `sess-public`（名前あり）と DM `sess-dm`（名前なし）。agent-y: `sess-other`。
-fn two_agent_state() -> AppState {
+pub(super) fn two_agent_state() -> AppState {
     let state = crate::test_app_state();
     bind_sessions(
         &state,
@@ -87,7 +91,7 @@ fn two_agent_state() -> AppState {
     state
 }
 
-fn row(state: &AppState, id: i64) -> Option<opencrab_db::queries::AgentScheduleRow> {
+pub(super) fn row(state: &AppState, id: i64) -> Option<opencrab_db::queries::AgentScheduleRow> {
     opencrab_db::queries::get_agent_schedule(&state.db.lock().unwrap(), id).unwrap()
 }
 
@@ -269,28 +273,86 @@ async fn subtask_can_list_and_update_parent_agents_schedules() {
     assert!(!row(&state, id).unwrap().enabled);
 }
 
-/// D-1147b: LLM は「指定しない」を `""` で送る（本番 gpt-6.1-terra で確認）。一覧も id 指定の
-/// 操作も、空の session_id を未指定として扱う。
-#[test]
-fn empty_session_id_means_not_specified() {
+/// D-1150: LLM は「指定しない」を `""` で送る（本番 gpt-6.1-terra / gpt-6.2-astra）。ツールの入口
+/// （`BridgedExecutor`）が定義の `required` に無い空文字を取り除くので、ハンドラは省略として受ける。
+pub(super) fn turn_executor(
+    state: &AppState,
+    session_id: &str,
+) -> (tempfile::TempDir, opencrab_actions::BridgedExecutor) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let ctx = opencrab_actions::ActionContext {
+        caller: opencrab_actions::CallerIdentity::TrustedUser,
+        agent_id: "agent-x".to_string(),
+        agent_name: "agent".to_string(),
+        session_id: Some(session_id.to_string()),
+        db: state.db.clone(),
+        workspace: std::sync::Arc::new(
+            opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap(),
+        ),
+        last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        current_purpose: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+        runtime_info: std::sync::Arc::new(std::sync::Mutex::new(opencrab_actions::RuntimeInfo {
+            default_model: "mock".to_string(),
+            active_model: None,
+            available_providers: vec![],
+            gateway: "test".to_string(),
+        })),
+    };
+    let actions = crate::system_actions::SystemGatewayActions::new(state.clone(), None, None, None);
+    let executor =
+        opencrab_actions::BridgedExecutor::new(opencrab_actions::ActionDispatcher::new(), ctx)
+            .with_gateway_actions(std::sync::Arc::new(actions));
+    (dir, executor)
+}
+
+/// 本番の形: `update_my_schedule {"cron_expr":"","timezone":"","message":"","enabled":false}` は
+/// 「不正なタイムゾーン: 」で失敗していた。空の任意引数は省略として扱われ、enabled だけが変わる。
+#[tokio::test]
+async fn empty_optional_args_through_the_tool_entry_mean_not_given() {
+    use opencrab_core::ActionExecutor;
     let state = two_agent_state();
     let id = create(&state, &trusted("sess-public"), "patrol public");
+    let before = row(&state, id).unwrap();
+    let (_dir, executor) = turn_executor(&state, "sess-dm");
 
-    let listed = get_my_schedules(&state, &json!({"session_id": ""}), &trusted("sess-dm"));
-    assert!(listed.success, "list: {:?}", listed.error);
-    assert_eq!(listed.data.unwrap()["count"], 1, "全セッション分が返る");
-
-    let updated = update_my_schedule(
-        &state,
-        &json!({"id": id, "message": "patrol updated", "session_id": ""}),
-        &trusted("sess-dm"),
-    );
+    let updated = executor
+        .execute(
+            "update_my_schedule",
+            &json!({"id": id, "cron_expr": "", "timezone": "", "message": "", "enabled": false, "session_id": ""}),
+        )
+        .await;
     assert!(updated.success, "update: {:?}", updated.error);
+    let after = row(&state, id).unwrap();
+    assert!(!after.enabled);
+    assert_eq!(after.cron_expr, before.cron_expr);
+    assert_eq!(after.timezone, before.timezone);
+    assert_eq!(after.message, before.message);
 
-    let refused = update_my_schedule(
-        &state,
-        &json!({"id": id, "message": "x", "session_id": "sess-public"}),
-        &trusted("sess-dm"),
+    let listed = executor
+        .execute("get_my_schedules", &json!({"session_id": ""}))
+        .await;
+    assert!(listed.success, "list: {:?}", listed.error);
+    assert_eq!(listed.data["count"], 1, "全セッション分が返る");
+
+    // 必須の message は空でも取り除かれず、ハンドラが自分の検査で断る。
+    let refused = executor
+        .execute(
+            "set_my_schedule",
+            &json!({"cron_expr": "@every 3h", "message": ""}),
+        )
+        .await;
+    assert!(!refused.success);
+    assert!(
+        refused.error.unwrap().contains("message"),
+        "required empty reaches the handler"
     );
-    assert!(!refused.success, "値の入った session_id は今までどおり断る");
+
+    // 値の入った session_id は今までどおり断る。
+    let refused = executor
+        .execute(
+            "update_my_schedule",
+            &json!({"id": id, "message": "x", "session_id": "sess-public"}),
+        )
+        .await;
+    assert!(!refused.success);
 }

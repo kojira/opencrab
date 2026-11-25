@@ -601,10 +601,34 @@ async fn di_short_ref_resolution_targets_declared_fields() {
         json!({"type": "string", "x-opencrab-short-ref": true})
     );
     assert!(reply.parameters["properties"]["event"].get("format").is_none());
-    let ctx = GatewayCallContext::for_agent("agent-1");
+    // D-1150: through the single tool entry (BridgedExecutor), as an engine turn calls it.
+    let ws_dir = tempfile::tempdir().unwrap();
+    let action_ctx = opencrab_actions::ActionContext {
+        caller: CallerIdentity::Agent,
+        agent_id: "agent-1".to_string(),
+        agent_name: "agent".to_string(),
+        session_id: Some(session_id.clone()),
+        db: opencrab_db::Db::memory().unwrap(),
+        workspace: Arc::new(opencrab_core::workspace::Workspace::from_root(ws_dir.path()).unwrap()),
+        last_metrics_id: Arc::new(Mutex::new(None)),
+        current_purpose: Arc::new(Mutex::new(String::new())),
+        runtime_info: Arc::new(Mutex::new(opencrab_actions::RuntimeInfo {
+            default_model: "mock".to_string(),
+            active_model: None,
+            available_providers: vec![],
+            gateway: "test".to_string(),
+        })),
+    };
+    let executor =
+        opencrab_actions::BridgedExecutor::new(opencrab_actions::ActionDispatcher::new(), action_ctx)
+            .with_gateway_actions(Arc::new(proj));
     let exec = tokio::spawn(async move {
-        proj.execute("reply", &json!({"event": "e1", "text": "本文", "user": ""}), &ctx)
-            .await
+        opencrab_core::ActionExecutor::execute(
+            &executor,
+            "reply",
+            &json!({"event": "e1", "text": "本文", "user": ""}),
+        )
+        .await
     });
     let invoke = read_until(&mut s, |v| v["m"] == "invoke").await;
     // event は解決済み origin、text は素通り、非宣言 short-ref は解決しない。
@@ -614,7 +638,7 @@ async fn di_short_ref_resolution_targets_declared_fields() {
         "e1→origin へ解決"
     );
     assert_eq!(invoke["payload"]["text"], json!("本文"), "非参照は素通り");
-    // D-1148: an optional field sent as "" means "not given" and does not reach the gateway.
+    // D-1150: an optional field sent as "" means "not given" and does not reach the gateway.
     assert!(invoke["payload"].get("user").is_none(), "{}", invoke["payload"]);
     let call_id = invoke["id"].as_str().unwrap().to_string();
     write_frame(&mut s, &json!({"id": call_id, "m": "ok", "result": null})).await;

@@ -209,6 +209,7 @@
   "channels.triggers.kind": "Type",
   "channels.triggers.interval": "Interval",
   "channels.triggers.fixedTime": "Scheduled",
+  "channels.triggers.oneShot": "Once",
   "channels.triggers.intervalSecs": "Interval (sec)",
   "channels.triggers.cronExpr": "Cron expression (e.g. 0 7 * * *)",
   "channels.triggers.timezone": "Time zone",
