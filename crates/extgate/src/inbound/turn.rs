@@ -160,13 +160,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                 .await;
                 let (system, name) = runtime.build_agent_context(&agent_id, &caller);
                 let system = crate::completion::with_system_context(system, &system_context);
-                // D-1091: この binding の gateway が hello で宣言した環境（名前→値）。core は
-                // 解釈せず `execute_shell` の子へ渡すだけ。宣言が無ければ空で従来と同じ。
-                let run_env = state
-                    .lock_registry()
-                    .ok()
-                    .and_then(|reg| reg.get(&instance_id).map(|live| live.run_env.clone()))
-                    .unwrap_or_default();
                 let last_continuation_say = Arc::new(std::sync::Mutex::new(None::<String>));
                 // D-1085: decided before delivery; `provisional_result` is written either way.
                 let promoted = match (&provisional_id, provisional_inputs) {
@@ -434,12 +427,11 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 if let Some(ga) = ops_actions.clone() {
                                     req = req.with_gateway_actions(ga);
                                 }
-                                // D-1091: gateway が宣言した binding の環境をシェル子へ渡す。
-                                if !run_env.is_empty() {
-                                    req = req.with_run_env(run_env.clone());
-                                }
+                                // D-1091: binding の環境は `v3_attach_dispatch` が付ける。
                                 v3_attach_dispatch(
                                     req,
+                                    &hook_state,
+                                    &hook_instance,
                                     only_speaker,
                                     author_id.clone(),
                                     registry.clone(),

@@ -54,6 +54,8 @@ struct TestRuntime {
     provisional_runs: Arc<Mutex<Vec<(bool, bool)>>>,
     /// D-1085 §12: [`ToolSources`] of every run, in run order.
     tool_sources: Arc<Mutex<Vec<ToolSources>>>,
+    /// D-1091/D-1149: `RunRequest::run_env` of every run, in run order.
+    run_envs: Arc<Mutex<Vec<std::collections::BTreeMap<String, String>>>>,
     last_sink: Arc<Mutex<Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>>>,
     partial_script: PartialScript,
     /// D-1087: the faked engine's tool/lifecycle steps for the turn.
@@ -83,6 +85,7 @@ impl TestRuntime {
             lightweight_runs: Arc::new(Mutex::new(Vec::new())),
             provisional_runs: Arc::new(Mutex::new(Vec::new())),
             tool_sources: Arc::new(Mutex::new(Vec::new())),
+            run_envs: Arc::new(Mutex::new(Vec::new())),
             last_sink: Arc::new(Mutex::new(None)),
             partial_script: PartialScript::default(),
             activity_script: ActivityScript::default(),
@@ -110,6 +113,7 @@ impl AgentRuntime for TestRuntime {
             .unwrap()
             .push((req.provisional, req.promotion_gate.is_some()));
         self.tool_sources.lock().unwrap().push(tool_sources(&req));
+        self.run_envs.lock().unwrap().push(req.run_env.clone());
         self.reply_targets
             .lock()
             .unwrap()

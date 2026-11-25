@@ -68,14 +68,24 @@ pub(crate) fn select_completed_target(
 ///
 /// `process.rs` の `auto_dispatch` は触らない（撤去は別 PR）。sink が無いと
 /// dispatcher が刺さらず、SkillEngine が全ツールを同期実行する。
+///
+/// D-1149: この binding の gateway が hello で宣言した環境（D-1091）もここで付ける。said の
+/// 通常ターン・定時実行・subtask 決着後の resume・先行生成は全てこの関数で request を仕上げる
+/// ので、どの経路の `execute_shell`（dispatch された subtask を含む）も同じ binding の環境で動く。
 pub fn v3_attach_dispatch(
     mut req: RunRequest,
+    state: &ExtgateState,
+    instance_id: &str,
     only_speaker: bool,
     speaker_id: impl Into<String>,
     registry: SubtaskRegistry,
     sink: Arc<dyn SubtaskCompletionSink>,
 ) -> RunRequest {
     req = req.with_dispatch(Some(registry), sink);
+    let run_env = state.live_run_env(instance_id);
+    if !run_env.is_empty() {
+        req = req.with_run_env(run_env);
+    }
     if only_speaker {
         req = req.with_live_inbound_scope(LiveInboundScope::OnlySpeaker(speaker_id.into()));
     }
@@ -354,6 +364,8 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                     }
                     v3_attach_dispatch(
                         req,
+                        &sink.state,
+                        &sink.instance_id,
                         only_speaker,
                         speaker_id.clone(),
                         registry.clone(),
@@ -514,6 +526,7 @@ mod tests {
     fn v3_run_request_always_attaches_dispatch() {
         let session_id = session_id_for_binding("bind-1");
         let registry = SubtaskRegistries::new().registry_for(&session_id);
+        let state = ExtgateState::new(opencrab_db::Db::memory().unwrap());
         let req = v3_attach_dispatch(
             RunRequest::new(
                 "agent-1",
@@ -524,6 +537,8 @@ mod tests {
                 "extgate",
                 CallerIdentity::Owner,
             ),
+            &state,
+            "instance-1",
             false,
             "author",
             registry,

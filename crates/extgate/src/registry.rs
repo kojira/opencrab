@@ -373,6 +373,16 @@ impl ExtgateState {
         }
     }
 
+    /// D-1091: the environment the live gateway of `instance_id` declared in its hello (see
+    /// [`LiveEntry::run_env`]). Empty when the instance is not live or declared nothing.
+    pub fn live_run_env(&self, instance_id: &str) -> std::collections::BTreeMap<String, String> {
+        self.registry
+            .lock()
+            .ok()
+            .and_then(|reg| reg.get(instance_id).map(|live| live.run_env.clone()))
+            .unwrap_or_default()
+    }
+
     pub fn alloc_identity(&self) -> u64 {
         self.next_identity
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)

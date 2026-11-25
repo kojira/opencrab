@@ -144,3 +144,143 @@ fn formatting_a_hello_never_prints_a_declared_value() {
         );
     }
 }
+
+// D-1149: every turn this binding runs carries the declaration, not only the said turn. A timed
+// fire, the resume after a dispatched `execute_shell` settles and a provisional run reach
+// `execute_shell` too; without the declaration their shell ran on the host user's account.
+
+const BINDING_ENV_NAME: &str = "OPENCRAB_TEST_BINDING_ACCOUNT";
+const BINDING_ENV_VALUE: &str = "binding-account-1";
+
+/// Connects `instance_id` with a hello that declares [`BINDING_ENV_NAME`].
+async fn hello_declaring_binding_env(h: &Harness, instance_id: &str) -> UnixStream {
+    let mut s = h.connect().await;
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "h1",
+            "m": "hello",
+            "protocol": 3,
+            "operation_protocol": 1,
+            "final_delivery": "automatic",
+            "operations": [],
+            "instance_id": instance_id,
+            "agent_id": "agent-1",
+            "run_env": {BINDING_ENV_NAME: BINDING_ENV_VALUE},
+        }),
+    )
+    .await;
+    assert_eq!(read_frame(&mut s).await["m"], "ok");
+    s
+}
+
+/// The declared value seen by every run so far, in run order.
+fn run_binding_envs(h: &Harness) -> Vec<Option<String>> {
+    h.runtime
+        .run_envs
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|env| env.get(BINDING_ENV_NAME).cloned())
+        .collect()
+}
+
+fn assert_every_run_declares_binding_env(h: &Harness, path: &str) {
+    let seen = run_binding_envs(h);
+    assert!(!seen.is_empty(), "{path}: no run happened");
+    assert!(
+        seen.iter().all(|v| v.as_deref() == Some(BINDING_ENV_VALUE)),
+        "{path}: every run must carry the binding's declared env, got {seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn said_turn_carries_the_binding_env() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    let mut s = hello_declaring_binding_env(&h, &instance_id).await;
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "c1", "m": "said", "session": "chan-1", "origin": "o-1",
+            "author_id": "u1", "text": "hi", "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "c1").await["m"], "ok");
+    wait_turns(&h, 1).await;
+    assert_every_run_declares_binding_env(&h, "said turn");
+}
+
+#[tokio::test]
+async fn timed_fire_turn_carries_the_binding_env() {
+    let h = Harness::start().await;
+    let session_id = "opaque-timed-fire-env";
+    let instance_id = uuid();
+    insert_named_session(&h, session_id);
+    put_instance(&h, &instance_id, true).await;
+    let binding_id = session_row(&h, &instance_id, session_id).row_id;
+    let _s = hello_declaring_binding_env(&h, &instance_id).await;
+    ExtgateTimedFireSink::new(Arc::clone(&h.state), h.runtime.clone()).fire_timed_turn(
+        timed_fire_request(&binding_id, session_id, "agent-1"),
+    );
+    wait_turns(&h, 1).await;
+    assert_every_run_declares_binding_env(&h, "timed fire");
+}
+
+#[tokio::test]
+async fn resume_after_a_dispatched_tool_settles_carries_the_binding_env() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    let _s = hello_declaring_binding_env(&h, &instance_id).await;
+    let key = "chan-1";
+    let binding_id = session_row(&h, &instance_id, key).row_id;
+    let session_id = key.to_string();
+    let sink = ExtgateCompletionSink {
+        state: Arc::clone(&h.state),
+        runtime: h.runtime.clone(),
+        instance_id,
+        binding_id,
+        agent_id: "agent-1".into(),
+        session_id: session_id.clone(),
+        only_speaker: false,
+        speaker_id: "u1".into(),
+        system_context: String::new(),
+        model_profile: TurnModelProfile::Default,
+        activity: None,
+    };
+    settle_completed(
+        &h.runtime.subtask_registry_for(&session_id),
+        &h.state.db,
+        &sink,
+        SettleContext {
+            parent_session_id: session_id.clone(),
+            agent_id: "agent-1".into(),
+            subtask_id: "st-shell".into(),
+            sub_session_id: String::new(),
+            exit_reason: "completed".into(),
+            lifecycle: SubtaskLifecycle::new(),
+        },
+        r#"{"exit_code":0}"#,
+    );
+    wait_turns(&h, 1).await;
+    assert_every_run_declares_binding_env(&h, "resume");
+}
+
+#[tokio::test]
+async fn provisional_run_carries_the_binding_env() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    let mut s = hello_declaring_binding_env(&h, &instance_id).await;
+    write_frame(
+        &mut s,
+        &provisional_frame("p1", "chan-1", PROVISIONAL_ID, "（音声）今日は"),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "p1").await["m"], "ok");
+    wait_turns(&h, 1).await;
+    assert_every_run_declares_binding_env(&h, "provisional");
+}
